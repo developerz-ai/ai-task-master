@@ -175,6 +175,61 @@ test('Logger writes to logFile, creating parent dir lazily', async () => {
   }
 });
 
+test('Logger emits cyclic fields without throwing (cycle protection)', () => {
+  const err = captureStream(process.stderr);
+  type Cyclic = { name: string; self?: unknown };
+  const cyclic: Cyclic = { name: 'root' };
+  cyclic.self = cyclic;
+  try {
+    const log = new Logger('info', 'run-cycle');
+    log.info('cyclic', { cyclic });
+  } finally {
+    err.restore();
+  }
+  const [record] = parseLines(err.lines);
+  assert.ok(record);
+  assert.equal(record.level, 'info');
+  assert.equal(record.msg, 'cyclic');
+  const c = record.cyclic as Record<string, unknown>;
+  assert.equal(c.name, 'root');
+  assert.equal(c.self, '[CYCLE]');
+});
+
+test('Logger emits BigInt fields by stringifying via replacer', () => {
+  const err = captureStream(process.stderr);
+  try {
+    const log = new Logger('info', 'run-bigint');
+    log.info('big', { count: 9007199254740993n });
+  } finally {
+    err.restore();
+  }
+  const [record] = parseLines(err.lines);
+  assert.ok(record);
+  assert.equal(record.count, '9007199254740993');
+});
+
+test('Logger falls back to safe record on serialization failure', () => {
+  const err = captureStream(process.stderr);
+  const bad: Record<string, unknown> = {
+    get exploder(): unknown {
+      throw new Error('boom');
+    },
+  };
+  try {
+    const log = new Logger('info', 'run-fail');
+    log.info('attempt', bad);
+  } finally {
+    err.restore();
+  }
+  const [record] = parseLines(err.lines);
+  assert.ok(record);
+  assert.equal(record.level, 'error');
+  assert.equal(record.msg, 'logger serialization failed');
+  assert.equal(record.originalMsg, 'attempt');
+  assert.equal(record.runId, 'run-fail');
+  assert.match(String(record.serializationError), /boom/);
+});
+
 test('Logger does not collide level/msg/runId when fields supply same keys', () => {
   const err = captureStream(process.stderr);
   try {

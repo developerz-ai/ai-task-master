@@ -74,20 +74,30 @@ export class Logger {
   private emit(level: LogLevel, msg: string, fields?: Record<string, unknown>): void {
     if (LEVEL_RANK[level] < LEVEL_RANK[this.level]) return;
 
-    const safeFields = fields ? Logger.redact(fields) : {};
-    const record: LogRecord = {
-      ...safeFields,
-      level,
-      msg,
-      ts: new Date().toISOString(),
-      runId: this.runId,
-    };
-
-    const line = `${JSON.stringify(record)}\n`;
+    const line = this.serialize(level, msg, fields);
     process.stderr.write(line);
 
     if (this.logFile !== undefined) {
       this.appendToFile(this.logFile, line);
+    }
+  }
+
+  private serialize(level: LogLevel, msg: string, fields?: Record<string, unknown>): string {
+    const ts = new Date().toISOString();
+    try {
+      const safeFields = fields ? Logger.redact(fields) : {};
+      const record: LogRecord = { ...safeFields, level, msg, ts, runId: this.runId };
+      return `${JSON.stringify(record, bigintReplacer)}\n`;
+    } catch (err) {
+      const fallback: LogRecord = {
+        level: 'error',
+        msg: 'logger serialization failed',
+        ts,
+        runId: this.runId,
+        originalMsg: msg,
+        serializationError: err instanceof Error ? err.message : String(err),
+      };
+      return `${JSON.stringify(fallback)}\n`;
     }
   }
 
@@ -110,14 +120,24 @@ export class Logger {
   }
 }
 
-function redactValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactValue);
+function redactValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return '[CYCLE]';
+    seen.add(value);
+    return value.map((v) => redactValue(v, seen));
+  }
   if (value !== null && typeof value === 'object') {
+    if (seen.has(value)) return '[CYCLE]';
+    seen.add(value);
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      out[k] = REDACT_KEY.test(k) ? REDACTED : redactValue(v);
+      out[k] = REDACT_KEY.test(k) ? REDACTED : redactValue(v, seen);
     }
     return out;
   }
   return value;
+}
+
+function bigintReplacer(_key: string, value: unknown): unknown {
+  return typeof value === 'bigint' ? value.toString() : value;
 }

@@ -2,7 +2,7 @@
 // Style signal only — never selects a provider. Prefer CLAUDE.md over AGENTS.md when both exist.
 
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 
 export type AgentConfigFlavor = 'claude' | 'agents' | 'custom';
 
@@ -24,7 +24,13 @@ export class AgentConfigDetector {
     if (options.stylePath) {
       const path = isAbsolute(options.stylePath)
         ? options.stylePath
-        : join(this.repoRoot, options.stylePath);
+        : resolve(this.repoRoot, options.stylePath);
+      if (!isAbsolute(options.stylePath)) {
+        const rel = relative(this.repoRoot, path);
+        if (rel.startsWith('..') || isAbsolute(rel)) {
+          throw new Error(`stylePath must remain within repoRoot: ${options.stylePath}`);
+        }
+      }
       const contents = await readFile(path, 'utf8');
       return { flavor: 'custom', path, contents };
     }

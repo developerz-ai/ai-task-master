@@ -56,6 +56,19 @@ test('detect: --style path that does not exist → throws', async () => {
   }
 });
 
+test('detect: relative --style path escaping repoRoot → throws', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const d = new AgentConfigDetector(repo.path);
+    await assert.rejects(
+      () => d.detect({ stylePath: '../outside.md' }),
+      /must remain within repoRoot/,
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('detect: only CLAUDE.md → flavor claude', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   try {

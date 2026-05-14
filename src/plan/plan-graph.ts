@@ -42,7 +42,13 @@ export class PlanGraph {
   // Static: detect cycles + dangling deps at plan-acceptance time.
   // DFS coloring — white=unvisited, gray=on stack, black=fully explored.
   static validate(groups: ReadonlyArray<PrGroup>): void {
-    const ids = new Set(groups.map((g) => g.id));
+    const ids = new Set<string>();
+    for (const g of groups) {
+      if (ids.has(g.id)) {
+        throw new Error(`PlanGraph: duplicate group id '${g.id}'`);
+      }
+      ids.add(g.id);
+    }
     for (const g of groups) {
       for (const dep of g.dependsOn) {
         if (!ids.has(dep)) {

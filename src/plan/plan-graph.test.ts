@@ -126,6 +126,13 @@ test('PlanGraph constructor runs validation', () => {
   assert.throws(() => new PlanGraph([group('a', 'pending', ['nope'])]), /unknown group 'nope'/);
 });
 
+test('PlanGraph.validate throws on duplicate group id', () => {
+  assert.throws(
+    () => PlanGraph.validate([group('a', 'pending'), group('a', 'pending')]),
+    /duplicate group id 'a'/,
+  );
+});
+
 test('PlanGraph.validate accepts a valid DAG with diamond shape', () => {
   assert.doesNotThrow(() =>
     PlanGraph.validate([

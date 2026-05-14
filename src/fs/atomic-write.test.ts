@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -39,6 +39,33 @@ test('atomicWrite overwrites an existing file', async () => {
     await writeFile(path, 'old');
     await atomicWrite(path, 'new');
     assert.equal(await readFile(path, 'utf8'), 'new');
+  } finally {
+    await d.cleanup();
+  }
+});
+
+test('atomicWrite concurrent writes to same path do not collide', async () => {
+  const d = await temp();
+  try {
+    const path = join(d.path, 'race');
+    const writes = Array.from({ length: 10 }, (_, i) => atomicWrite(path, `v${i}\n`));
+    await Promise.all(writes);
+    const entries = await readdir(d.path);
+    assert.deepEqual(entries.sort(), ['race']);
+    assert.match(await readFile(path, 'utf8'), /^v\d\n$/);
+  } finally {
+    await d.cleanup();
+  }
+});
+
+test('atomicWrite creates files with 0o600 perms on POSIX', async () => {
+  if (process.platform === 'win32') return;
+  const d = await temp();
+  try {
+    const path = join(d.path, 'secret');
+    await atomicWrite(path, 'sk-secret');
+    const st = await stat(path);
+    assert.equal(st.mode & 0o777, 0o600);
   } finally {
     await d.cleanup();
   }

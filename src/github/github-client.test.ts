@@ -366,42 +366,66 @@ test('waitForChecks throws on unparseable stdout', async () => {
   await assert.rejects(() => g.waitForChecks(1), /gh pr checks failed/);
 });
 
+type GqlThread = {
+  id: string;
+  isResolved: boolean;
+  path: string | null;
+  comments: {
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    nodes: Array<{ id: string; body: string; author: { login: string } | null }>;
+  };
+};
+
+function threadsResponse(
+  nodes: GqlThread[],
+  pageInfo: { hasNextPage: boolean; endCursor: string | null } = {
+    hasNextPage: false,
+    endCursor: null,
+  },
+): string {
+  return JSON.stringify({
+    data: { repository: { pullRequest: { reviewThreads: { pageInfo, nodes } } } },
+  });
+}
+
+function commentsResponse(
+  nodes: Array<{ id: string; body: string; author: { login: string } | null }>,
+  pageInfo: { hasNextPage: boolean; endCursor: string | null } = {
+    hasNextPage: false,
+    endCursor: null,
+  },
+): string {
+  return JSON.stringify({ data: { node: { comments: { pageInfo, nodes } } } });
+}
+
 test('listUnresolvedThreads fetches repo meta then GraphQL with owner/repo/pr variables', async () => {
   const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
-  const gql = JSON.stringify({
-    data: {
-      repository: {
-        pullRequest: {
-          reviewThreads: {
-            nodes: [
-              {
-                id: 'PRRT_1',
-                isResolved: false,
-                path: 'src/foo.ts',
-                comments: {
-                  nodes: [{ id: 'IC_1', body: 'please fix', author: { login: 'reviewer' } }],
-                },
-              },
-              {
-                id: 'PRRT_2',
-                isResolved: true,
-                path: 'src/bar.ts',
-                comments: { nodes: [] },
-              },
-              {
-                id: 'PRRT_3',
-                isResolved: false,
-                path: null,
-                comments: {
-                  nodes: [{ id: 'IC_2', body: 'general', author: null }],
-                },
-              },
-            ],
-          },
-        },
+  const gql = threadsResponse([
+    {
+      id: 'PRRT_1',
+      isResolved: false,
+      path: 'src/foo.ts',
+      comments: {
+        pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: [{ id: 'IC_1', body: 'please fix', author: { login: 'reviewer' } }],
       },
     },
-  });
+    {
+      id: 'PRRT_2',
+      isResolved: true,
+      path: 'src/bar.ts',
+      comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+    },
+    {
+      id: 'PRRT_3',
+      isResolved: false,
+      path: null,
+      comments: {
+        pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: [{ id: 'IC_2', body: 'general', author: null }],
+      },
+    },
+  ]);
   const { run, calls } = makeRun([{ stdout: meta }, { stdout: gql }]);
   const g = new GitHubClient('/tmp/repo', run);
   const threads = await g.listUnresolvedThreads(42);
@@ -423,10 +447,105 @@ test('listUnresolvedThreads fetches repo meta then GraphQL with owner/repo/pr va
   assert.equal(findFieldValue(gqlArgs, '-f', 'owner'), 'org');
   assert.equal(findFieldValue(gqlArgs, '-f', 'repo'), 'repo');
   assert.equal(findFieldValue(gqlArgs, '-F', 'pr'), '42');
+  // No cursor on the first page.
+  assert.equal(findFieldValue(gqlArgs, '-f', 'threadsCursor'), null);
   const query = findFieldValue(gqlArgs, '-f', 'query');
-  assert.ok(query?.includes('reviewThreads(first: 100)'));
+  assert.ok(query?.includes('reviewThreads(first: 100, after: $threadsCursor)'));
+  assert.ok(query?.includes('pageInfo { hasNextPage endCursor }'));
   assert.ok(query?.includes('pullRequest(number: $pr)'));
   assert.ok(query?.includes('repository(owner: $owner, name: $repo)'));
+});
+
+test('listUnresolvedThreads pages through reviewThreads with endCursor', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  const page1 = threadsResponse(
+    [
+      {
+        id: 'PRRT_1',
+        isResolved: false,
+        path: 'a.ts',
+        comments: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [{ id: 'IC_1', body: 'x', author: { login: 'r' } }],
+        },
+      },
+    ],
+    { hasNextPage: true, endCursor: 'cursor-1' },
+  );
+  const page2 = threadsResponse([
+    {
+      id: 'PRRT_2',
+      isResolved: false,
+      path: 'b.ts',
+      comments: {
+        pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: [{ id: 'IC_2', body: 'y', author: { login: 'r' } }],
+      },
+    },
+  ]);
+  const { run, calls } = makeRun([{ stdout: meta }, { stdout: page1 }, { stdout: page2 }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  const threads = await g.listUnresolvedThreads(7);
+
+  assert.equal(threads.length, 2);
+  assert.equal(threads[0]?.id, 'PRRT_1');
+  assert.equal(threads[1]?.id, 'PRRT_2');
+  // Second page sends the cursor returned by the first page.
+  assert.equal(findFieldValue(calls[2]?.args ?? [], '-f', 'threadsCursor'), 'cursor-1');
+});
+
+test('listUnresolvedThreads pages through nested comments for unresolved threads only', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  const gql = threadsResponse([
+    {
+      id: 'PRRT_long',
+      isResolved: false,
+      path: 'big.ts',
+      comments: {
+        pageInfo: { hasNextPage: true, endCursor: 'c-1' },
+        nodes: [{ id: 'IC_a', body: 'first', author: { login: 'r' } }],
+      },
+    },
+    {
+      // Resolved threads must NOT trigger extra paginated fetches.
+      id: 'PRRT_resolved',
+      isResolved: true,
+      path: 'x.ts',
+      comments: {
+        pageInfo: { hasNextPage: true, endCursor: 'should-not-fetch' },
+        nodes: [{ id: 'IC_z', body: 'old', author: { login: 'r' } }],
+      },
+    },
+  ]);
+  const morePage1 = commentsResponse([{ id: 'IC_b', body: 'second', author: { login: 'r' } }], {
+    hasNextPage: true,
+    endCursor: 'c-2',
+  });
+  const morePage2 = commentsResponse([{ id: 'IC_c', body: 'third', author: null }]);
+  const { run, calls } = makeRun([
+    { stdout: meta },
+    { stdout: gql },
+    { stdout: morePage1 },
+    { stdout: morePage2 },
+  ]);
+  const g = new GitHubClient('/tmp/repo', run);
+  const threads = await g.listUnresolvedThreads(3);
+
+  assert.equal(threads.length, 1);
+  assert.deepEqual(
+    threads[0]?.comments.map((c) => c.id),
+    ['IC_a', 'IC_b', 'IC_c'],
+  );
+  // Two follow-up calls, both for the unresolved thread, with cursors c-1 then c-2.
+  assert.equal(calls.length, 4);
+  assert.equal(findFieldValue(calls[2]?.args ?? [], '-f', 'threadId'), 'PRRT_long');
+  assert.equal(findFieldValue(calls[2]?.args ?? [], '-f', 'commentsCursor'), 'c-1');
+  assert.equal(findFieldValue(calls[3]?.args ?? [], '-f', 'commentsCursor'), 'c-2');
+  const commentsQuery = findFieldValue(calls[2]?.args ?? [], '-f', 'query');
+  assert.ok(commentsQuery?.includes('PullRequestReviewThread'));
+  assert.ok(commentsQuery?.includes('comments(first: 100, after: $commentsCursor)'));
+  // The third comment had `author: null` → maps to 'ghost'.
+  assert.equal(threads[0]?.comments[2]?.author, 'ghost');
 });
 
 test('listUnresolvedThreads throws when GraphQL call fails', async () => {
@@ -434,6 +553,31 @@ test('listUnresolvedThreads throws when GraphQL call fails', async () => {
   const { run } = makeRun([{ stdout: meta }, { exitCode: 1, stderr: 'GraphQL: not found' }]);
   const g = new GitHubClient('/tmp/repo', run);
   await assert.rejects(() => g.listUnresolvedThreads(1), /gh api graphql \(reviewThreads\) failed/);
+});
+
+test('listUnresolvedThreads surfaces threadComments failures distinctly', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  const gql = threadsResponse([
+    {
+      id: 'PRRT_1',
+      isResolved: false,
+      path: 'a.ts',
+      comments: {
+        pageInfo: { hasNextPage: true, endCursor: 'c-1' },
+        nodes: [{ id: 'IC_1', body: 'x', author: { login: 'r' } }],
+      },
+    },
+  ]);
+  const { run } = makeRun([
+    { stdout: meta },
+    { stdout: gql },
+    { exitCode: 1, stderr: 'GraphQL: rate limited' },
+  ]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(
+    () => g.listUnresolvedThreads(1),
+    /gh api graphql \(threadComments\) failed/,
+  );
 });
 
 test('replyToThread sends mutation with threadId + body variables', async () => {

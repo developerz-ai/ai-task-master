@@ -177,40 +177,99 @@ export class GitHubClient {
 
   async listUnresolvedThreads(pr: number): Promise<ReviewThread[]> {
     const { owner, name } = await this.repoMeta();
-    const r = await this.runCmd(
-      'gh',
-      [
+    // GitHub caps connections at 100 nodes per page — page through threads and
+    // their comments to avoid silently dropping data on large PRs.
+    const threads = await this.paginateReviewThreads(owner, name, pr);
+    const unresolved = threads.filter((t) => !t.isResolved);
+    for (const thread of unresolved) {
+      if (thread.comments.pageInfo.hasNextPage && thread.comments.pageInfo.endCursor) {
+        const rest = await this.paginateThreadComments(
+          thread.id,
+          thread.comments.pageInfo.endCursor,
+        );
+        thread.comments.nodes.push(...rest);
+      }
+    }
+    return unresolved.map((node) => ({
+      id: node.id,
+      isResolved: node.isResolved,
+      path: node.path,
+      comments: node.comments.nodes.map((c) => ({
+        id: c.id,
+        body: c.body,
+        author: c.author?.login ?? 'ghost',
+      })),
+    }));
+  }
+
+  private async paginateReviewThreads(
+    owner: string,
+    repo: string,
+    pr: number,
+  ): Promise<RawReviewThread[]> {
+    const collected: RawReviewThread[] = [];
+    let cursor: string | null = null;
+    while (true) {
+      const args: string[] = [
         'api',
         'graphql',
         '-f',
         `owner=${owner}`,
         '-f',
-        `repo=${name}`,
+        `repo=${repo}`,
         '-F',
         `pr=${pr}`,
         '-f',
         `query=${REVIEW_THREADS_QUERY}`,
-      ],
-      { cwd: this.cwd },
-    );
-    if (r.exitCode !== 0) {
-      throw new Error(
-        `gh api graphql (reviewThreads) failed: ${r.stderr.trim() || r.stdout.trim()}`,
-      );
+      ];
+      if (cursor) args.push('-f', `threadsCursor=${cursor}`);
+      const r = await this.runCmd('gh', args, { cwd: this.cwd });
+      if (r.exitCode !== 0) {
+        throw new Error(
+          `gh api graphql (reviewThreads) failed: ${r.stderr.trim() || r.stdout.trim()}`,
+        );
+      }
+      const parsed = GqlReviewThreadsResponseSchema.parse(JSON.parse(r.stdout));
+      const conn = parsed.data.repository.pullRequest.reviewThreads;
+      collected.push(...conn.nodes);
+      if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) return collected;
+      cursor = conn.pageInfo.endCursor;
     }
-    const parsed = GqlReviewThreadsResponseSchema.parse(JSON.parse(r.stdout));
-    return parsed.data.repository.pullRequest.reviewThreads.nodes
-      .filter((node) => !node.isResolved)
-      .map((node) => ({
-        id: node.id,
-        isResolved: node.isResolved,
-        path: node.path,
-        comments: node.comments.nodes.map((c) => ({
-          id: c.id,
-          body: c.body,
-          author: c.author?.login ?? 'ghost',
-        })),
-      }));
+  }
+
+  private async paginateThreadComments(
+    threadId: string,
+    startCursor: string,
+  ): Promise<RawReviewComment[]> {
+    const collected: RawReviewComment[] = [];
+    let cursor: string | null = startCursor;
+    while (cursor) {
+      const r = await this.runCmd(
+        'gh',
+        [
+          'api',
+          'graphql',
+          '-f',
+          `threadId=${threadId}`,
+          '-f',
+          `commentsCursor=${cursor}`,
+          '-f',
+          `query=${THREAD_COMMENTS_QUERY}`,
+        ],
+        { cwd: this.cwd },
+      );
+      if (r.exitCode !== 0) {
+        throw new Error(
+          `gh api graphql (threadComments) failed: ${r.stderr.trim() || r.stdout.trim()}`,
+        );
+      }
+      const parsed = GqlThreadCommentsResponseSchema.parse(JSON.parse(r.stdout));
+      const conn = parsed.data.node.comments;
+      collected.push(...conn.nodes);
+      cursor =
+        conn.pageInfo.hasNextPage && conn.pageInfo.endCursor ? conn.pageInfo.endCursor : null;
+    }
+    return collected;
   }
 
   async replyToThread(threadId: string, body: string): Promise<void> {
@@ -359,18 +418,31 @@ const RepoOwnerNameSchema = z.object({
   name: z.string(),
 });
 
-const REVIEW_THREADS_QUERY = `query($owner: String!, $repo: String!, $pr: Int!) {
+const REVIEW_THREADS_QUERY = `query($owner: String!, $repo: String!, $pr: Int!, $threadsCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $pr) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $threadsCursor) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           isResolved
           path
           comments(first: 100) {
+            pageInfo { hasNextPage endCursor }
             nodes { id body author { login } }
           }
         }
+      }
+    }
+  }
+}`;
+
+const THREAD_COMMENTS_QUERY = `query($threadId: ID!, $commentsCursor: String) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $commentsCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id body author { login } }
       }
     }
   }
@@ -388,28 +460,48 @@ const RESOLVE_THREAD_MUTATION = `mutation($threadId: ID!) {
   }
 }`;
 
+const GqlPageInfoSchema = z.object({
+  hasNextPage: z.boolean(),
+  endCursor: z.string().nullable(),
+});
+
+const GqlReviewCommentSchema = z.object({
+  id: z.string(),
+  body: z.string(),
+  author: z.object({ login: z.string() }).nullable(),
+});
+type RawReviewComment = z.infer<typeof GqlReviewCommentSchema>;
+
+const GqlReviewThreadSchema = z.object({
+  id: z.string(),
+  isResolved: z.boolean(),
+  path: z.string().nullable(),
+  comments: z.object({
+    pageInfo: GqlPageInfoSchema,
+    nodes: z.array(GqlReviewCommentSchema),
+  }),
+});
+type RawReviewThread = z.infer<typeof GqlReviewThreadSchema>;
+
 const GqlReviewThreadsResponseSchema = z.object({
   data: z.object({
     repository: z.object({
       pullRequest: z.object({
         reviewThreads: z.object({
-          nodes: z.array(
-            z.object({
-              id: z.string(),
-              isResolved: z.boolean(),
-              path: z.string().nullable(),
-              comments: z.object({
-                nodes: z.array(
-                  z.object({
-                    id: z.string(),
-                    body: z.string(),
-                    author: z.object({ login: z.string() }).nullable(),
-                  }),
-                ),
-              }),
-            }),
-          ),
+          pageInfo: GqlPageInfoSchema,
+          nodes: z.array(GqlReviewThreadSchema),
         }),
+      }),
+    }),
+  }),
+});
+
+const GqlThreadCommentsResponseSchema = z.object({
+  data: z.object({
+    node: z.object({
+      comments: z.object({
+        pageInfo: GqlPageInfoSchema,
+        nodes: z.array(GqlReviewCommentSchema),
       }),
     }),
   }),

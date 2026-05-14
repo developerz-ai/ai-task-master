@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.ai-task-master/
+*.log
+.DS_Store

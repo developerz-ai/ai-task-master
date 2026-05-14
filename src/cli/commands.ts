@@ -112,7 +112,12 @@ export async function runStart(
   }
 
   const authStatus = ctx.authStatus ?? defaultAuthStatus;
-  const auth = await authStatus(cwd);
+  let auth: { ok: boolean; scopes: string[] };
+  try {
+    auth = await authStatus(cwd);
+  } catch (err) {
+    return { code: 1, message: errMsg(err) };
+  }
   if (!auth.ok) {
     return { code: 1, message: 'gh CLI is not authenticated. Run `gh auth login`.' };
   }
@@ -210,7 +215,12 @@ export async function runMergePr(
   }
 
   const authStatus = ctx.authStatus ?? defaultAuthStatus;
-  const auth = await authStatus(cwd);
+  let auth: { ok: boolean; scopes: string[] };
+  try {
+    auth = await authStatus(cwd);
+  } catch (err) {
+    return { code: 1, message: errMsg(err) };
+  }
   if (!auth.ok) {
     return { code: 1, message: 'gh CLI is not authenticated. Run `gh auth login`.' };
   }

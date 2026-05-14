@@ -75,7 +75,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
       maxSessions = n;
       i += 2;
     } else if (arg === '--concurrency') {
-      const n = parseNonNegativeInt(args[i + 1]);
+      const n = parsePositiveInt(args[i + 1]);
       if (n === null) return HELP;
       concurrency = n;
       i += 2;
@@ -122,7 +122,7 @@ function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {
     const arg = args[i];
     if (arg === undefined) break;
     if (arg === '--pr') {
-      const n = parseNonNegativeInt(args[i + 1]);
+      const n = parsePositiveInt(args[i + 1]);
       if (n === null) return HELP;
       pr = n;
       i += 2;
@@ -186,4 +186,9 @@ function parseNonNegativeInt(s: string | undefined): number | null {
   if (!/^\d+$/.test(s)) return null;
   const n = Number(s);
   return Number.isSafeInteger(n) ? n : null;
+}
+
+function parsePositiveInt(s: string | undefined): number | null {
+  const n = parseNonNegativeInt(s);
+  return n !== null && n > 0 ? n : null;
 }

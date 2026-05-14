@@ -133,6 +133,32 @@ test('runStart: gh not authenticated → exit 1', async () => {
   }
 });
 
+test('runStart: authStatus throws → exit 1 carrying error message', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const result = await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: async () => {
+          throw new Error('gh binary missing');
+        },
+        runLoop: async () => {
+          assert.fail('runLoop must not run when auth check throws');
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /gh binary missing/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('runStart: WorkLoopResult.blocked → exit 1 carrying reason', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();
@@ -370,6 +396,33 @@ test('runMergePr: missing API key → exit 1, flow not invoked', async () => {
     assert.equal(result.code, 1);
     assert.equal(called, false);
     assert.match(result.message ?? '', /OPENROUTER_API_KEY|API key/i);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: authStatus throws → exit 1 carrying error message', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: async () => {
+          throw new Error('gh binary missing');
+        },
+        runMergeFlow: async () => {
+          assert.fail('flow must not run when auth check throws');
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /gh binary missing/);
   } finally {
     await repo.cleanup();
     await home.cleanup();

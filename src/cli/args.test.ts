@@ -167,6 +167,11 @@ const helpCases: Case[] = [
     expected: { kind: 'help' },
   },
   {
+    name: 'start: --concurrency zero rejected',
+    argv: ['start', 'g', '--concurrency', '0'],
+    expected: { kind: 'help' },
+  },
+  {
     name: 'start: --criteria without value',
     argv: ['start', 'g', '--criteria'],
     expected: { kind: 'help' },
@@ -189,6 +194,11 @@ const helpCases: Case[] = [
   {
     name: 'merge-pr: bad --pr',
     argv: ['merge-pr', '--pr', 'abc'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'merge-pr: --pr zero rejected',
+    argv: ['merge-pr', '--pr', '0'],
     expected: { kind: 'help' },
   },
   {

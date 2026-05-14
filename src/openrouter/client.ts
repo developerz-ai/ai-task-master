@@ -30,6 +30,14 @@ export class OpenRouterClient {
   ) {}
 
   async listModels(): Promise<OpenRouterModel[]> {
-    throw new Error('not implemented');
+    const res = await fetch(`${this.baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+    });
+    if (!res.ok) {
+      const excerpt = (await res.text()).slice(0, 500);
+      throw new Error(`OpenRouter /models failed: ${res.status} ${res.statusText} — ${excerpt}`);
+    }
+    const json: unknown = await res.json();
+    return OpenRouterModelsResponseSchema.parse(json).data;
   }
 }

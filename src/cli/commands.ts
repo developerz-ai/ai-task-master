@@ -125,14 +125,26 @@ export async function runStart(
 
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
-  const initial = buildInitialRunState({ resolved, agentConfig });
 
+  // Resume detection: if a previous run left a valid state.json, skip re-init so
+  // runId and prGroups are preserved. Fresh start on any read failure (ENOENT / schema mismatch).
+  let resuming = false;
   try {
-    await state.init(initial);
-    await state.writeGoal(args.goal, args.criteria);
-    await loader.writeSnapshot(resolved, stateDir);
-  } catch (err) {
-    return { code: 1, message: errMsg(err) };
+    await state.read();
+    resuming = true;
+  } catch {
+    // No valid state.json — proceed with fresh init.
+  }
+
+  if (!resuming) {
+    const initial = buildInitialRunState({ resolved, agentConfig });
+    try {
+      await state.init(initial);
+      await state.writeGoal(args.goal, args.criteria);
+      await loader.writeSnapshot(resolved, stateDir);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
   }
 
   const runLoop = ctx.runLoop ?? defaultRunLoop;

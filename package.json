@@ -10,7 +10,11 @@
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -24,15 +28,15 @@
     "format": "biome format --write ."
   },
   "dependencies": {
-    "@openrouter/ai-sdk-provider": "^1.2.0",
-    "ai": "^6.0.0",
-    "execa": "^9.5.0",
-    "zod": "^3.23.0"
+    "@openrouter/ai-sdk-provider": "^2.9.0",
+    "ai": "^6.0.182",
+    "execa": "^9.6.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "^1.9.4",
-    "@types/node": "^20.14.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.8.0"
+    "@biomejs/biome": "^2.4.15",
+    "@types/node": "^25.7.0",
+    "tsx": "^4.22.0",
+    "typescript": "^6.0.3"
   }
 }

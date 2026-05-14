@@ -18,7 +18,7 @@ export const McpStdioServerSchema = z.object({
   type: z.literal('stdio').optional(),
   command: z.string(),
   args: z.array(z.string()).optional(),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   // Working directory for the spawned process. Defaults to repo root.
   cwd: z.string().optional(),
 });
@@ -27,14 +27,14 @@ export type McpStdioServer = z.infer<typeof McpStdioServerSchema>;
 export const McpSseServerSchema = z.object({
   type: z.literal('sse'),
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
 });
 export type McpSseServer = z.infer<typeof McpSseServerSchema>;
 
 export const McpHttpServerSchema = z.object({
   type: z.literal('http'),
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
 });
 export type McpHttpServer = z.infer<typeof McpHttpServerSchema>;
 

@@ -1,10 +1,14 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.4.15/schema.json",
   "files": {
-    "ignore": ["dist", "node_modules", "docs/vendor", "*.tsbuildinfo", "coverage"]
+    "ignoreUnknown": true,
+    "includes": ["**", "!dist", "!node_modules", "!docs/vendor", "!**/*.tsbuildinfo", "!coverage"]
   },
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
-  "organizeImports": { "enabled": true },
+  "assist": {
+    "enabled": true,
+    "actions": { "source": { "organizeImports": "on" } }
+  },
   "linter": {
     "enabled": true,
     "rules": {
@@ -15,7 +19,6 @@
       },
       "style": {
         "noNonNullAssertion": "error",
-        "useNamingConvention": "off",
         "useImportType": "error",
         "noDefaultExport": "error"
       },
@@ -24,7 +27,9 @@
       },
       "correctness": {
         "noUnusedImports": "error",
-        "noUnusedVariables": "off"
+        "noUnusedVariables": "off",
+        "noUnusedPrivateClassMembers": "off",
+        "noUnusedFunctionParameters": "off"
       }
     }
   },

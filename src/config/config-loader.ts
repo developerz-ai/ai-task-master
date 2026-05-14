@@ -8,7 +8,7 @@ export class ConfigLoader {
   constructor(
     private readonly cwd: string,
     private readonly homeDir: string,
-    private readonly env: NodeJS.ProcessEnv,
+    private readonly env: Record<string, string | undefined>,
   ) {}
 
   async resolve(_cliOverrides: CliOverrides): Promise<ResolvedConfig> {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PlanSchema, PlannedGroupSchema } from './schema.ts';
+import { PlannedGroupSchema, PlanSchema } from './schema.ts';
 
 test('PlannedGroupSchema defaults dependsOn to []', () => {
   const parsed = PlannedGroupSchema.parse({

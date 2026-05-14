@@ -1,6 +1,6 @@
 # aitm
 
-Autonomous task orchestrator. Give it a goal, it drives an LLM in a loop until a PR is merged.
+Autonomous task orchestrator. Give it a goal, it drives an LLM in a loop until one or more PRs are merged.
 
 ## Why
 

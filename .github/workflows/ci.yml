@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bun:
+    name: bun (test + lint)
+    # Blacksmith 2 vCPU runner — fast on small CI matrices, plenty for our test suite.
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: install
+        run: bun install
+
+      - name: lint
+        run: bun run lint
+
+      - name: typecheck
+        run: bun run typecheck
+
+      # bun test runs files in parallel by default; matches the parallelism in node --test.
+      - name: test
+        run: bun test
+
+  node:
+    name: node (test + lint)
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: install
+        run: npm install
+
+      - name: lint
+        run: npm run lint
+
+      - name: typecheck
+        run: npm run typecheck
+
+      # node --test parallelizes per-file by default (one worker per CPU). On a 2 vCPU box
+      # that pins concurrency to 2 — explicit so the behavior is the same on any runner size.
+      - name: test
+        run: npm run test:node -- --test-concurrency=2

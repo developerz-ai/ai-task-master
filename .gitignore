@@ -3,3 +3,5 @@ dist/
 .ai-task-master/
 *.log
 .DS_Store
+*.tsbuildinfo
+coverage/

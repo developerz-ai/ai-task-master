@@ -64,7 +64,8 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 Do not add, do not stub, do not leave TODOs for:
 
 - Mailbox / inbox features
-- MCP server
+- Exposing `aitm` itself as an MCP server — never. `aitm` is **only an MCP client**: it
+  can connect to external MCP servers and consume their tools (`mcpServers` in config).
 - Webhooks or any inbound HTTP
 - Docker, devcontainers, or any containerization
 

@@ -1,0 +1,223 @@
+# CodeRabbit configuration — adapted from ../claude-task-master for a TypeScript project.
+# Docs: https://docs.coderabbit.ai/reference/configuration
+
+language: en-US
+tone_instructions: >
+  Be friendly and constructive. Focus on significant issues rather than nitpicking.
+  Respect SOLID / SRP, the AI SDK subagents pattern, and runtime portability rules
+  in CLAUDE.md. Acknowledge good patterns when you see them.
+early_access: false
+enable_free_tier: true
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_placeholder: '@coderabbitai summary'
+  review_status: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: true
+  poem: false
+
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  suggested_reviewers: true
+
+  auto_apply_labels: false
+  auto_assign_reviewers: false
+
+  # Vendored AI SDK chunks are not our code — never review them.
+  path_filters:
+    - '!docs/vendor/**'
+    - '!dist/**'
+    - '!node_modules/**'
+    - '!**/*.lockb'
+
+  path_instructions:
+    - path: 'src/**/*.ts'
+      instructions: >
+        This is an autonomous task orchestrator (TypeScript) on the Vercel AI SDK
+        subagents pattern (ToolLoopAgent + subagent-as-tool). Provider is OpenRouter
+        only — flag any Anthropic / OpenAI SDK leakage.
+        Enforce: SOLID/SRP per module, strict TS (no `any`, no `as unknown as`),
+        named exports only, kebab-case file names, no Bun-only APIs in src/
+        (use node:fs/promises, execa, fetch — never Bun.$, Bun.file, Bun.spawn).
+        Subagents must remain pure factories: (model, tools, systemPrompt) -> Agent.
+    - path: 'src/**/*.test.ts'
+      instructions: >
+        Tests use `node:test` syntax so the same file runs under `bun test` and
+        `node --test`. Flag jest/vitest API leakage. Tests must be deterministic
+        and not require network unless explicitly marked integration.
+    - path: 'test/integration/**/*.ts'
+      instructions: >
+        Integration tests run against a real temp git repo and a sandbox `gh` token.
+        No mocking of `gh` or the AI SDK at this layer.
+    - path: 'docs/**/*.md'
+      instructions: >
+        Check for clarity and accuracy. Don't nitpick formatting. House style:
+        lead with the rule, fragments over sentences, tables for structured data,
+        no meta-framing, no trailing summaries.
+    - path: '**/CLAUDE.md'
+      instructions: >
+        CLAUDE.md is the project's source of truth for house style and runtime
+        rules. Changes here ripple through every subagent's behavior — flag
+        scope creep (v1 out-of-scope items: MCP server, webhooks, Docker).
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    ignore_title_keywords:
+      - WIP
+      - DO NOT MERGE
+      - DRAFT
+    drafts: false
+    base_branches: []
+
+  finishing_touches:
+    docstrings:
+      enabled: false # House style is "no comments unless WHY is non-obvious".
+    unit_tests:
+      enabled: true
+
+  pre_merge_checks:
+    docstrings:
+      mode: warning
+      threshold: 30
+    title:
+      mode: warning
+    description:
+      mode: warning
+    issue_assessment:
+      mode: warning
+    custom_checks: []
+
+  tools:
+    # TypeScript / formatter — biome is our single lint+format tool.
+    biome:
+      enabled: true
+    eslint:
+      enabled: false
+    oxc:
+      enabled: false
+
+    # Security
+    semgrep:
+      enabled: true
+    gitleaks:
+      enabled: true
+
+    # YAML / Markdown / Shell / Actions
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    actionlint:
+      enabled: true
+
+    # GitHub integration
+    github-checks:
+      enabled: true
+      timeout_ms: 90000
+
+    # Disable everything irrelevant
+    ast-grep:
+      essential_rules: false
+    ruff:
+      enabled: false
+    pylint:
+      enabled: false
+    flake8:
+      enabled: false
+    hadolint:
+      enabled: false
+    swiftlint:
+      enabled: false
+    phpstan:
+      enabled: false
+    phpmd:
+      enabled: false
+    phpcs:
+      enabled: false
+    golangci-lint:
+      enabled: false
+    checkov:
+      enabled: false
+    detekt:
+      enabled: false
+    fortitudeLint:
+      enabled: false
+    rubocop:
+      enabled: false
+    buf:
+      enabled: false
+    regal:
+      enabled: false
+    pmd:
+      enabled: false
+    clang:
+      enabled: false
+    cppcheck:
+      enabled: false
+    circleci:
+      enabled: false
+    clippy:
+      enabled: false
+    sqlfluff:
+      enabled: false
+    prismaLint:
+      enabled: false
+    shopifyThemeCheck:
+      enabled: false
+    luacheck:
+      enabled: false
+    brakeman:
+      enabled: false
+    dotenvLint:
+      enabled: false
+    htmlhint:
+      enabled: false
+    checkmake:
+      enabled: false
+    osvScanner:
+      enabled: false
+    languagetool:
+      enabled: false
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - 'CLAUDE.md'
+      - 'CONTRIBUTING.md'
+      - 'docs/**/*.md'
+  learnings:
+    scope: auto
+  issues:
+    scope: auto
+  pull_requests:
+    scope: auto
+
+code_generation:
+  docstrings:
+    language: en-US
+  unit_tests:
+    path_instructions: []
+
+issue_enrichment:
+  auto_enrich:
+    enabled: false
+  planning:
+    enabled: true
+    auto_planning:
+      enabled: false

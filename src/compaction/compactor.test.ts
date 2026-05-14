@@ -84,6 +84,16 @@ test('shouldCompact skips when contextLength is zero, negative, or non-finite', 
   }
 });
 
+test('shouldCompact skips when liveInputTokens is negative or non-finite', async () => {
+  const c = new Compactor({
+    summarizer: new MockLanguageModelV3(),
+    limits: stubLimits(100_000),
+  });
+  for (const tokens of [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.deepEqual(await c.shouldCompact('openai/gpt-5', tokens), { kind: 'skip' });
+  }
+});
+
 test('shouldCompact honors a custom threshold', async () => {
   const c = new Compactor({
     summarizer: new MockLanguageModelV3(),

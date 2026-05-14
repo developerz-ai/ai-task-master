@@ -53,6 +53,9 @@ export class Compactor {
     if (!Number.isFinite(contextLength) || contextLength <= 0) {
       return { kind: 'skip' };
     }
+    if (!Number.isFinite(liveInputTokens) || liveInputTokens < 0) {
+      return { kind: 'skip' };
+    }
     const ratio = liveInputTokens / contextLength;
     const threshold = this.init.threshold ?? DEFAULT_THRESHOLD;
     if (ratio >= threshold) {

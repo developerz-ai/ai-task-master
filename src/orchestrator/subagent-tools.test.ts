@@ -474,6 +474,92 @@ test('reviewer tool: toModelOutput collapses ok result to "reviewer [ok]: …"',
   }
 });
 
+test('planner tool: toModelOutput truncates long IDs to a preview + "+N more"', async () => {
+  const { provider } = recordingProvider(new MockLanguageModelV3());
+  const t = makePlannerTool({
+    credentials: provider,
+    styleContents: '',
+    rollingContext: '',
+    plannerTools: {},
+  });
+  const toModelOutput = t.toModelOutput;
+  if (typeof toModelOutput !== 'function') throw new Error('no toModelOutput');
+  const groups = Array.from({ length: 12 }, (_, i) => ({
+    id: `g${i + 1}`,
+    title: 't',
+    tasks: [{ description: 'x' }],
+    dependsOn: [],
+  }));
+  const out = await toModelOutput({
+    toolCallId: 'tc',
+    input: { goal: 'g', maxPrs: 12 },
+    output: { kind: 'ok', plan: { goal: 'g', groups } },
+  });
+  if (out.type === 'text') {
+    assert.match(
+      out.value,
+      /^planner \[ok\]: 12 group\(s\) — g1, g2, g3, g4, g5, g6, g7, g8, \+4 more$/,
+    );
+  }
+});
+
+test('planner tool: toModelOutput collapses multiline / long error payloads to one bounded line', async () => {
+  const { provider } = recordingProvider(new MockLanguageModelV3());
+  const t = makePlannerTool({
+    credentials: provider,
+    styleContents: '',
+    rollingContext: '',
+    plannerTools: {},
+  });
+  const toModelOutput = t.toModelOutput;
+  if (typeof toModelOutput !== 'function') throw new Error('no toModelOutput');
+  const longError = `line1\nline2\n${'x'.repeat(500)}`;
+  const out = await toModelOutput({
+    toolCallId: 'tc',
+    input: { goal: 'g', maxPrs: 3 },
+    output: { kind: 'error', error: longError },
+  });
+  if (out.type === 'text') {
+    assert.ok(out.value.length <= 220, `summary length ${out.value.length} should be ≤ 220`);
+    assert.ok(!out.value.includes('\n'), 'summary must be single line');
+    assert.match(out.value, /^planner \[error\]: line1 line2 x+$/);
+  }
+});
+
+test('worker tool: toModelOutput bounds a verbose draft commit message and strips newlines', async () => {
+  const { provider } = recordingProvider(new MockLanguageModelV3());
+  const { tools } = makeWorkerTools();
+  const t = makeWorkerTool({
+    credentials: provider,
+    styleContents: '',
+    rollingContext: '',
+    workerTools: tools,
+    worktreePath: '/tmp/wt',
+    baseBranch: 'main',
+    group: baseGroup(),
+  });
+  const toModelOutput = t.toModelOutput;
+  if (typeof toModelOutput !== 'function') throw new Error('no toModelOutput');
+  const summary = await toModelOutput({
+    toolCallId: 'tc',
+    input: {},
+    output: {
+      kind: 'ok',
+      delivery: {
+        branch: 'aitm/core',
+        draftCommitMessage: `feat: x\n\n${'a'.repeat(400)}`,
+        changes: [{ path: 'src/a.ts', kind: 'create', summary: 'created a' }],
+        progressEntries: [],
+      },
+    },
+  });
+  if (summary.type === 'text') {
+    assert.ok(summary.value.length <= 220);
+    assert.ok(!summary.value.includes('\n'));
+    assert.ok(summary.value.startsWith('worker [ok]: aitm/core — feat: x '));
+  }
+});
+
 test('reviewer tool: toModelOutput collapses zero-resolution ok, blocked + error results', async () => {
   const { provider } = recordingProvider(new MockLanguageModelV3());
   const { tools } = makeReviewerTools();

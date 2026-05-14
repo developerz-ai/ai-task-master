@@ -126,6 +126,15 @@ const PrCompositionSchema = z.object({
 });
 type PrComposition = z.infer<typeof PrCompositionSchema>;
 
+// Fallback session cap when caller passes null / 0 / negative `maxSessions`.
+export const DEFAULT_MAX_STEPS = 50;
+
+// Resolve the agent step cap from caller-provided `maxSessions`. Falls back to the
+// default when the value is null, zero, or negative. Exported for unit testing.
+export function resolveMaxSteps(maxSessions: number | null): number {
+  return typeof maxSessions === 'number' && maxSessions > 0 ? maxSessions : DEFAULT_MAX_STEPS;
+}
+
 export class Orchestrator {
   constructor(private readonly init: OrchestratorInit) {}
 
@@ -156,7 +165,7 @@ export class Orchestrator {
       model: this.init.credentials.modelFor('orchestrator'),
       instructions: this.buildSystemPrompt(),
       tools,
-      stopWhen: [stepCountIs(50), hasToolCall('done')],
+      stopWhen: [stepCountIs(resolveMaxSteps(this.init.maxSessions)), hasToolCall('done')],
     });
   }
 

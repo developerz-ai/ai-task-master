@@ -19,11 +19,13 @@ import type {
   WriteFileOutput,
 } from '../subagents/worker.ts';
 import {
+  DEFAULT_MAX_STEPS,
   type GhClient,
   ORCHESTRATOR_ROLE_PREFIX,
   Orchestrator,
   type OrchestratorBuildContext,
   type RunCmd,
+  resolveMaxSteps,
 } from './orchestrator.ts';
 import type { ModelProvider } from './subagent-tools.ts';
 
@@ -143,6 +145,17 @@ function baseContext(): OrchestratorBuildContext {
     threads: [],
   };
 }
+
+test('resolveMaxSteps: positive caller value overrides the default', () => {
+  assert.equal(resolveMaxSteps(7), 7);
+  assert.equal(resolveMaxSteps(1), 1);
+});
+
+test('resolveMaxSteps: null / 0 / negative fall back to DEFAULT_MAX_STEPS', () => {
+  assert.equal(resolveMaxSteps(null), DEFAULT_MAX_STEPS);
+  assert.equal(resolveMaxSteps(0), DEFAULT_MAX_STEPS);
+  assert.equal(resolveMaxSteps(-3), DEFAULT_MAX_STEPS);
+});
 
 test('Orchestrator is constructible', () => {
   const o = new Orchestrator({

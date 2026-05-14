@@ -153,22 +153,39 @@ export function makeReviewerTool(deps: ReviewerToolDeps): Tool<EmptyInput, Revie
   });
 }
 
+// Cap per-line summary length so a verbose subagent reply (long IDs, multiline draft
+// commit messages, error payloads) can't bloat the orchestrator's context. 220 chars
+// is enough for a status line + a few tens of chars of free text.
+const MAX_SUMMARY_CHARS = 220;
+// Show only the first N planner group IDs, then `+M more` — the count alone is what
+// matters to the orchestrator; the orchestrator can re-read the plan if it needs the
+// full ID list.
+const MAX_PREVIEW_IDS = 8;
+
+function compactOneLine(text: string, max = MAX_SUMMARY_CHARS): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
 function summarizePlannerResult(r: PlannerResult): string {
   if (r.kind === 'ok') {
-    const ids = r.plan.groups.map((g) => g.id).join(', ');
-    return `planner [ok]: ${r.plan.groups.length} group(s) — ${ids}`;
+    const ids = r.plan.groups.map((g) => g.id);
+    const preview = ids.slice(0, MAX_PREVIEW_IDS).join(', ');
+    const suffix = ids.length > MAX_PREVIEW_IDS ? `, +${ids.length - MAX_PREVIEW_IDS} more` : '';
+    return compactOneLine(`planner [ok]: ${r.plan.groups.length} group(s) — ${preview}${suffix}`);
   }
-  if (r.kind === 'blocked') return `planner [blocked]: ${r.reason}`;
-  return `planner [error]: ${r.error}`;
+  if (r.kind === 'blocked') return compactOneLine(`planner [blocked]: ${r.reason}`);
+  return compactOneLine(`planner [error]: ${r.error}`);
 }
 
 function summarizeWorkerResult(r: WorkerResult): string {
   if (r.kind === 'ok') {
     const d = r.delivery;
-    return `worker [ok]: ${d.branch} — ${d.draftCommitMessage} (${d.changes.length} file(s))`;
+    return compactOneLine(
+      `worker [ok]: ${d.branch} — ${d.draftCommitMessage} (${d.changes.length} file(s))`,
+    );
   }
-  if (r.kind === 'blocked') return `worker [blocked]: ${r.reason}`;
-  return `worker [error]: ${r.error}`;
+  if (r.kind === 'blocked') return compactOneLine(`worker [blocked]: ${r.reason}`);
+  return compactOneLine(`worker [error]: ${r.error}`);
 }
 
 function summarizeReviewerResult(r: ReviewerResult): string {
@@ -179,8 +196,8 @@ function summarizeReviewerResult(r: ReviewerResult): string {
     }, {});
     const parts = Object.entries(counts).map(([k, v]) => `${k}=${v}`);
     const tail = parts.length > 0 ? ` — ${parts.join(', ')}` : '';
-    return `reviewer [ok]: ${r.resolutions.length} resolution(s)${tail}`;
+    return compactOneLine(`reviewer [ok]: ${r.resolutions.length} resolution(s)${tail}`);
   }
-  if (r.kind === 'blocked') return `reviewer [blocked]: ${r.reason}`;
-  return `reviewer [error]: ${r.error}`;
+  if (r.kind === 'blocked') return compactOneLine(`reviewer [blocked]: ${r.reason}`);
+  return compactOneLine(`reviewer [error]: ${r.error}`);
 }

@@ -254,6 +254,9 @@ function makeDeps(
     autoMerge: overrides.autoMerge ?? true,
     maxSessions: overrides.maxSessions ?? null,
     ...(overrides.mergeMethod !== undefined ? { mergeMethod: overrides.mergeMethod } : {}),
+    ...(overrides.initialSessionCount !== undefined
+      ? { initialSessionCount: overrides.initialSessionCount }
+      : {}),
   };
 }
 
@@ -549,4 +552,112 @@ test('run breaks out when ready is empty but graph not complete (stuck)', async 
   const loop = new WorkLoop(makeDeps({ graph }));
   const result = await loop.run();
   assert.equal(result.kind, 'success');
+});
+
+test('markStatus does not increment persisted sessionCount (status transitions are not sessions)', async () => {
+  const { orchestrator } = makeOrchestrator({ prNumber: 1 });
+  const { state, updates } = makeState();
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(group('m'));
+  // Three update calls in this path: in-progress, awaiting-pr — none should touch sessionCount.
+  for (const s of updates) {
+    assert.equal(s.sessionCount, 0, 'markStatus must not bump sessionCount');
+  }
+});
+
+test('run() bumps persisted sessionCount once per batch, by batch.length', async () => {
+  const groups = [group('a'), group('b'), group('c')];
+  let pass = 0;
+  const graph: WorkLoopGraph = {
+    ready: () => {
+      pass++;
+      if (pass === 1) return groups.slice();
+      return [];
+    },
+    isComplete: () => pass >= 2,
+  };
+  const { orchestrator } = makeOrchestrator();
+  const { state, updates } = makeState();
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, state, graph, concurrency: 3, autoMerge: true }),
+  );
+  await loop.run();
+  // First state update is the session-count bump (+3), preceding any group's in-progress write.
+  const sessionBumps = updates.filter(
+    (s, i) => i === 0 || s.sessionCount !== updates[i - 1]?.sessionCount,
+  );
+  assert.equal(sessionBumps.length, 1, 'sessionCount mutated exactly once');
+  const last = updates[updates.length - 1];
+  assert.equal(last?.sessionCount, 3, 'final persisted sessionCount equals batch size');
+});
+
+test('initialSessionCount seeds the in-memory counter so resume respects maxSessions', async () => {
+  // maxSessions=2, initialSessionCount=2 → cap is already reached, no work done.
+  const ready = makeGraph([group('x'), group('y')], { completeAfter: 5 });
+  const { orchestrator, calls } = makeOrchestrator();
+  const loop = new WorkLoop(
+    makeDeps({
+      orchestrator,
+      graph: ready.graph,
+      concurrency: 2,
+      maxSessions: 2,
+      initialSessionCount: 2,
+    }),
+  );
+  const result = await loop.run();
+  assert.equal(result.kind, 'session-cap');
+  assert.equal(calls.runWorker.length, 0, 'no worker invoked when seeded counter already hit cap');
+});
+
+test('state write failure after openPr → loop yields awaiting-pr outcome, not blocked', async () => {
+  const { orchestrator } = makeOrchestrator({ prNumber: 77 });
+  let callCount = 0;
+  const state: WorkLoopState = {
+    update: async (mutator) => {
+      callCount++;
+      // call 1: incrementSessionCount, call 2: in-progress, call 3: awaiting-pr (fail here)
+      if (callCount === 3) throw new Error('disk full');
+      return mutator(baseState());
+    },
+  };
+  const ready = makeGraph([group('nu')], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, state, graph: ready.graph, autoMerge: false }),
+  );
+  const result = await loop.run();
+
+  assert.equal(result.outcomes.length, 1);
+  assert.equal(
+    result.outcomes[0]?.status,
+    'awaiting-pr',
+    'external success preserved despite state write failure',
+  );
+  if (result.outcomes[0]?.status === 'awaiting-pr') {
+    assert.equal(result.outcomes[0].pr, 77);
+  }
+  assert.notEqual(result.kind, 'blocked', 'result must not flip to blocked');
+});
+
+test('state write failure after mergePr → outcome stays merged', async () => {
+  const { orchestrator } = makeOrchestrator({ prNumber: 88 });
+  let callCount = 0;
+  const state: WorkLoopState = {
+    update: async (mutator) => {
+      callCount++;
+      // calls: 1 sessionCount, 2 in-progress, 3 awaiting-pr, 4 merged (fail here)
+      if (callCount === 4) throw new Error('disk full');
+      return mutator(baseState());
+    },
+  };
+  const ready = makeGraph([group('xi')], { completeAfter: 1 });
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, graph: ready.graph, autoMerge: true }));
+  const result = await loop.run();
+
+  assert.equal(result.outcomes.length, 1);
+  assert.equal(
+    result.outcomes[0]?.status,
+    'merged',
+    'merge outcome preserved despite state write failure',
+  );
+  assert.notEqual(result.kind, 'blocked');
 });

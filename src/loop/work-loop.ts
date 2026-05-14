@@ -70,6 +70,9 @@ export type WorkLoopDeps = {
   autoMerge: boolean;
   maxSessions: number | null;
   mergeMethod?: MergeMethod;
+  // Seed for resume: when WorkLoop is constructed after a previous run, pass
+  // RunState.sessionCount so the in-memory counter and the persisted counter agree.
+  initialSessionCount?: number;
 };
 
 export type GroupOutcome =
@@ -85,11 +88,27 @@ export type WorkLoopResult =
 
 const DEFAULT_MERGE_METHOD: MergeMethod = 'squash';
 
+// Thrown when a state-write fails *after* an external side effect (openPr/mergePr) already
+// succeeded. Carries the real outcome so runGroup doesn't roll the group back to 'blocked'
+// and cause a retry to reopen/re-merge work that already landed.
+class StateWriteAfterSuccess extends Error {
+  constructor(
+    readonly outcome: GroupOutcome,
+    override readonly cause: unknown,
+  ) {
+    super(
+      `state write failed after external success: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+}
+
 export class WorkLoop {
   private readonly outcomes: GroupOutcome[] = [];
-  private sessionCount = 0;
+  private sessionCount: number;
 
-  constructor(private readonly deps: WorkLoopDeps) {}
+  constructor(private readonly deps: WorkLoopDeps) {
+    this.sessionCount = deps.initialSessionCount ?? 0;
+  }
 
   async run(): Promise<WorkLoopResult> {
     const { graph, maxSessions, concurrency } = this.deps;
@@ -105,7 +124,7 @@ export class WorkLoop {
         return { kind: 'session-cap', outcomes: this.outcomes.slice() };
       }
       const batch = ready.slice(0, batchSize);
-      this.sessionCount += batch.length;
+      await this.incrementSessionCount(batch.length);
       await Promise.all(batch.map((g) => this.runGroup(g)));
     }
 
@@ -137,6 +156,12 @@ export class WorkLoop {
           /* swallow */
         }
       }
+      if (err instanceof StateWriteAfterSuccess) {
+        // External side effect (openPr/mergePr) already succeeded; persist failed.
+        // Keep the real outcome so a retry doesn't reopen or re-merge.
+        this.outcomes.push(err.outcome);
+        return;
+      }
       const reason = err instanceof Error ? err.message : String(err);
       try {
         await this.markStatus(group.id, 'blocked');
@@ -163,7 +188,12 @@ export class WorkLoop {
     const delivery = workerResult.delivery;
     await orchestrator.finalizeCommit(group, delivery, worktree.path);
     const pr = await orchestrator.openPr(group, delivery, baseBranch);
-    await this.markStatus(group.id, 'awaiting-pr', { pr: pr.number });
+    // openPr already landed externally; if persistence fails here, surface the real
+    // outcome via StateWriteAfterSuccess so the outer catch doesn't flip us to 'blocked'.
+    await this.persistAfterSideEffect(
+      { groupId: group.id, status: 'awaiting-pr', pr: pr.number },
+      () => this.markStatus(group.id, 'awaiting-pr', { pr: pr.number }),
+    );
 
     if (!this.deps.autoMerge) {
       this.outcomes.push({ groupId: group.id, status: 'awaiting-pr', pr: pr.number });
@@ -171,8 +201,24 @@ export class WorkLoop {
     }
 
     await this.autoMergeFlow(group, pr, worktree, baseBranch);
-    await this.markStatus(group.id, 'merged');
+    // mergePr already landed externally; same guard as above.
+    await this.persistAfterSideEffect({ groupId: group.id, status: 'merged', pr: pr.number }, () =>
+      this.markStatus(group.id, 'merged'),
+    );
     this.outcomes.push({ groupId: group.id, status: 'merged', pr: pr.number });
+  }
+
+  // Run a state write that follows a successful external side effect. If the write throws,
+  // wrap the error in StateWriteAfterSuccess so callers don't roll the outcome back.
+  private async persistAfterSideEffect(
+    outcome: GroupOutcome,
+    write: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await write();
+    } catch (err) {
+      throw new StateWriteAfterSuccess(outcome, err);
+    }
   }
 
   private async autoMergeFlow(
@@ -229,11 +275,26 @@ export class WorkLoop {
     status: PrGroup['status'],
     patch: Partial<Pick<PrGroup, 'branch' | 'pr'>> = {},
   ): Promise<void> {
+    // Status transitions do not bump sessionCount — that's owned by incrementSessionCount,
+    // which fires once per batch dispatch so the in-memory and persisted counters agree.
     await this.deps.state.update((s) => ({
       ...s,
       prGroups: s.prGroups.map((g) => (g.id === id ? { ...g, ...patch, status } : g)),
-      sessionCount: s.sessionCount + 1,
     }));
+  }
+
+  // Single source of truth for session counting: bump both the in-memory counter (used by
+  // run() to enforce maxSessions) and the persisted counter (used by reporting/resume) in
+  // one call. Drops in-memory if persistence fails so the two stay aligned.
+  private async incrementSessionCount(by: number): Promise<void> {
+    if (by <= 0) return;
+    this.sessionCount += by;
+    try {
+      await this.deps.state.update((s) => ({ ...s, sessionCount: s.sessionCount + by }));
+    } catch (err) {
+      this.sessionCount -= by;
+      throw err;
+    }
   }
 
   private finalResult(): WorkLoopResult {

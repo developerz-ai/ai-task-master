@@ -16,7 +16,6 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join, resolve as resolvePath } from 'node:path';
 import { test } from 'node:test';
-import type { LanguageModel } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
 import type { RunLoopInput } from '../../src/cli/commands.ts';
@@ -37,7 +36,7 @@ import { WorktreePool } from '../../src/workspace/worktree-pool.ts';
 // ---------------------------------------------------------------------------
 
 /** MockLanguageModelV3 that returns a canned commit-message string. */
-function makeMockModel(): LanguageModel {
+function makeMockModel(): MockLanguageModelV3 {
   return new MockLanguageModelV3({
     doGenerate: async () => ({
       content: [{ type: 'text' as const, text: 'feat: add hello' }],
@@ -57,7 +56,7 @@ function makeMockModel(): LanguageModel {
       },
       warnings: [],
     }),
-  }) as unknown as LanguageModel;
+  });
 }
 
 /**
@@ -66,7 +65,9 @@ function makeMockModel(): LanguageModel {
  * runs with the injected MockLanguageModelV3 — the only real AI SDK boundary exercised.
  * GitHubClient is stubbed so no gh binary calls are made.
  */
-function makeRunLoop(mockModel: LanguageModel): (input: RunLoopInput) => Promise<WorkLoopResult> {
+function makeRunLoop(
+  mockModel: MockLanguageModelV3,
+): (input: RunLoopInput) => Promise<WorkLoopResult> {
   return async (input: RunLoopInput): Promise<WorkLoopResult> => {
     const stateDir = resolvePath(input.cwd, '.ai-task-master');
 

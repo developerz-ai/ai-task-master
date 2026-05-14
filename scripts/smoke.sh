@@ -38,16 +38,15 @@ echo "==> 4. aitm start smoke (dry-run: no-automerge, max-prs 1)"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-git clone "git@github.com:${SANDBOX_REPO}.git" "$TMPDIR/repo"
+gh repo clone "$SANDBOX_REPO" "$TMPDIR/repo"
 cd "$TMPDIR/repo"
 
 # Requires a CLAUDE.md or AGENTS.md in the sandbox repo.
-# If neither exists, create a minimal one for the smoke run:
+# Fail fast rather than mutating the default branch — avoids branch-protection
+# failures and prevents permanent state changes on a shared sandbox.
 if [[ ! -f CLAUDE.md && ! -f AGENTS.md ]]; then
-  echo "# Smoke test repo" > CLAUDE.md
-  git add CLAUDE.md
-  git commit -m "chore: add CLAUDE.md for smoke test"
-  git push
+  echo "Missing CLAUDE.md or AGENTS.md on default branch of ${SANDBOX_REPO}. Add one, then rerun smoke.sh." >&2
+  exit 1
 fi
 
 OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \

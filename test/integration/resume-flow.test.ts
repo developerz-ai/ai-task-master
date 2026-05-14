@@ -13,7 +13,6 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join, resolve as resolvePath } from 'node:path';
 import { test } from 'node:test';
-import type { LanguageModel } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
 import type { RunLoopInput } from '../../src/cli/commands.ts';
@@ -33,7 +32,7 @@ import { WorktreePool } from '../../src/workspace/worktree-pool.ts';
 // Helpers shared with start-flow.test.ts (copied to keep tests self-contained)
 // ---------------------------------------------------------------------------
 
-function makeMockModel(): LanguageModel {
+function makeMockModel(): MockLanguageModelV3 {
   return new MockLanguageModelV3({
     doGenerate: async () => ({
       content: [{ type: 'text' as const, text: 'feat: add hello' }],
@@ -53,7 +52,7 @@ function makeMockModel(): LanguageModel {
       },
       warnings: [],
     }),
-  }) as unknown as LanguageModel;
+  });
 }
 
 /**
@@ -61,7 +60,9 @@ function makeMockModel(): LanguageModel {
  * Worker writes hello.ts; Orchestrator.finalizeCommit uses MockLanguageModelV3.
  * GitHubClient is fully stubbed — no real gh calls.
  */
-function makeRunLoop(mockModel: LanguageModel): (input: RunLoopInput) => Promise<WorkLoopResult> {
+function makeRunLoop(
+  mockModel: MockLanguageModelV3,
+): (input: RunLoopInput) => Promise<WorkLoopResult> {
   return async (input: RunLoopInput): Promise<WorkLoopResult> => {
     const stateDir = resolvePath(input.cwd, '.ai-task-master');
 
@@ -159,26 +160,6 @@ function makeRunLoop(mockModel: LanguageModel): (input: RunLoopInput) => Promise
     });
 
     return loop.run();
-  };
-}
-
-/**
- * Wraps makeRunLoop to additionally persist currentPr into state after an
- * awaiting-pr result — required so runMergePr can pick up the PR without --pr.
- */
-function makeNoAutomergeLoop(
-  mockModel: LanguageModel,
-): (input: RunLoopInput) => Promise<WorkLoopResult> {
-  const inner = makeRunLoop(mockModel);
-  return async (input: RunLoopInput): Promise<WorkLoopResult> => {
-    const result = await inner(input);
-    if (result.kind === 'awaiting-pr') {
-      const firstPr = result.prs[0];
-      if (firstPr !== undefined) {
-        await input.state.update((s) => ({ ...s, currentPr: firstPr }));
-      }
-    }
-    return result;
   };
 }
 
@@ -298,7 +279,7 @@ test('resume-flow: --no-automerge exits 0 with merge-pr instruction; merge-pr pi
       { kind: 'start', goal: 'add hello', autoMerge: false },
       {
         ...commonCtx,
-        runLoop: makeNoAutomergeLoop(makeMockModel()),
+        runLoop: makeRunLoop(makeMockModel()),
       },
     );
 

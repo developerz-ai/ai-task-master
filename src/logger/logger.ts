@@ -15,6 +15,17 @@ export type LogRecord = {
   [k: string]: unknown;
 };
 
+// Structural view of Logger for callers that need to accept test doubles.
+// The class implements this; consumers depend on it instead of the concrete class.
+export type LoggerLike = {
+  debug(msg: string, fields?: Record<string, unknown>): void;
+  info(msg: string, fields?: Record<string, unknown>): void;
+  warn(msg: string, fields?: Record<string, unknown>): void;
+  error(msg: string, fields?: Record<string, unknown>): void;
+  status(msg: string): void;
+  flush(): Promise<void>;
+};
+
 const LEVEL_RANK: Readonly<Record<LogLevel, number>> = {
   debug: 10,
   info: 20,
@@ -25,7 +36,7 @@ const LEVEL_RANK: Readonly<Record<LogLevel, number>> = {
 const REDACT_KEY = /key|token|secret|authorization/i;
 const REDACTED = '[REDACTED]';
 
-export class Logger {
+export class Logger implements LoggerLike {
   private writeTail: Promise<void> = Promise.resolve();
   private parentEnsured = false;
   private lastError: Error | null = null;

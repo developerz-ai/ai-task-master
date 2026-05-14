@@ -28,6 +28,7 @@
     "format": "biome format --write ."
   },
   "dependencies": {
+    "@ai-sdk/mcp": "^1.0.42",
     "@openrouter/ai-sdk-provider": "^2.9.0",
     "ai": "^6.0.182",
     "execa": "^9.6.1",

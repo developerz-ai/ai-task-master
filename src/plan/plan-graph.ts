@@ -5,31 +5,78 @@
 import type { PrGroup } from '../state/schema.ts';
 
 export class PlanGraph {
-  // Constructed from RunState.prGroups. Validates: no cycles, no dangling deps.
+  private readonly index: Map<string, PrGroup>;
 
-  constructor(private readonly groups: ReadonlyArray<PrGroup>) {}
+  constructor(private readonly groups: ReadonlyArray<PrGroup>) {
+    PlanGraph.validate(groups);
+    this.index = new Map(groups.map((g) => [g.id, g]));
+  }
 
   // Groups currently ready to run: status === 'pending' AND all deps merged.
   ready(): PrGroup[] {
-    throw new Error('not implemented');
+    return this.groups.filter(
+      (g) =>
+        g.status === 'pending' &&
+        g.dependsOn.every((dep) => this.index.get(dep)?.status === 'merged'),
+    );
   }
 
   // Groups blocked on at least one unmerged dep.
   blocked(): PrGroup[] {
-    throw new Error('not implemented');
+    return this.groups.filter(
+      (g) =>
+        g.status === 'pending' &&
+        g.dependsOn.some((dep) => this.index.get(dep)?.status !== 'merged'),
+    );
   }
 
-  byId(_id: string): PrGroup | undefined {
-    throw new Error('not implemented');
+  byId(id: string): PrGroup | undefined {
+    return this.index.get(id);
   }
 
   // True when every group is in a terminal state (merged or blocked).
   isComplete(): boolean {
-    throw new Error('not implemented');
+    return this.groups.every((g) => g.status === 'merged' || g.status === 'blocked');
   }
 
   // Static: detect cycles + dangling deps at plan-acceptance time.
-  static validate(_groups: ReadonlyArray<PrGroup>): void {
-    throw new Error('not implemented');
+  // DFS coloring — white=unvisited, gray=on stack, black=fully explored.
+  static validate(groups: ReadonlyArray<PrGroup>): void {
+    const ids = new Set<string>();
+    for (const g of groups) {
+      if (ids.has(g.id)) {
+        throw new Error(`PlanGraph: duplicate group id '${g.id}'`);
+      }
+      ids.add(g.id);
+    }
+    for (const g of groups) {
+      for (const dep of g.dependsOn) {
+        if (!ids.has(dep)) {
+          throw new Error(`PlanGraph: group '${g.id}' depends on unknown group '${dep}'`);
+        }
+      }
+    }
+
+    const byId = new Map(groups.map((g) => [g.id, g]));
+    const color = new Map<string, 'gray' | 'black'>();
+
+    const visit = (id: string, path: string[]): void => {
+      const state = color.get(id);
+      if (state === 'black') return;
+      if (state === 'gray') {
+        const cycle = [...path.slice(path.indexOf(id)), id].join(' -> ');
+        throw new Error(`PlanGraph: cycle detected: ${cycle}`);
+      }
+      color.set(id, 'gray');
+      const node = byId.get(id);
+      if (node) {
+        for (const dep of node.dependsOn) {
+          visit(dep, [...path, id]);
+        }
+      }
+      color.set(id, 'black');
+    };
+
+    for (const g of groups) visit(g.id, []);
   }
 }

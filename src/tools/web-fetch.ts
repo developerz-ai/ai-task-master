@@ -9,6 +9,8 @@
 // SDK ref: docs/vendor/ai-sdk/chunk-02.md §"Tool Calling" — tool({ description, inputSchema, execute }).
 
 import type { Tool } from 'ai';
+import { type FlexibleSchema, tool } from 'ai';
+import { z } from 'zod';
 
 export type WebFetchInput = {
   url: string;
@@ -59,6 +61,67 @@ export const DEFAULT_STEALTH_HEADERS: Readonly<Record<string, string>> = Object.
   'Upgrade-Insecure-Requests': '1',
 });
 
-export function webFetchTool(_init: WebFetchInit = {}): Tool {
-  throw new Error('not implemented');
+const DEFAULT_MAX_CHARS = 200_000;
+const DEFAULT_TIMEOUT_MS = 15_000;
+
+const SERVER_TOOL_STUB =
+  'Local web-fetch is disabled. Use the openrouter:web_fetch server tool instead (see webFetchServerTool in src/openrouter/server-tools.ts).';
+
+export function webFetchTool(init: WebFetchInit = {}): Tool {
+  const local = init.local ?? true;
+  const headers: Record<string, string> = { ...DEFAULT_STEALTH_HEADERS, ...init.headers };
+  const inputSchema = z.object({
+    url: z.string().url(),
+    maxChars: z.number().int().positive().optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    referrer: z.string().optional(),
+  }) as unknown as FlexibleSchema<WebFetchInput>;
+
+  if (!local) {
+    return tool({
+      description:
+        'Fetch a URL via stealthed local HTTP. Stubbed: this instance delegates to OpenRouter web_fetch server tool.',
+      inputSchema,
+      execute: async (input: WebFetchInput): Promise<WebFetchOutput> => ({
+        url: input.url,
+        finalUrl: input.url,
+        status: 0,
+        contentType: null,
+        body: SERVER_TOOL_STUB,
+        truncated: false,
+        retrievedAt: new Date().toISOString(),
+      }),
+    });
+  }
+
+  return tool({
+    description:
+      'Fetch a URL with browser-like headers and return the response body. Body is truncated to maxChars (default 200_000).',
+    inputSchema,
+    execute: async (input: WebFetchInput): Promise<WebFetchOutput> => {
+      const maxChars = input.maxChars ?? DEFAULT_MAX_CHARS;
+      const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const requestHeaders: Record<string, string> = { ...headers };
+      if (input.referrer !== undefined) {
+        requestHeaders.Referer = input.referrer;
+      }
+      const response = await fetch(input.url, {
+        headers: requestHeaders,
+        redirect: 'follow',
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const rawBody = await response.text();
+      const truncated = rawBody.length > maxChars;
+      const body = truncated ? rawBody.slice(0, maxChars) : rawBody;
+      return {
+        url: input.url,
+        finalUrl: response.url || input.url,
+        status: response.status,
+        contentType: response.headers.get('content-type'),
+        body,
+        truncated,
+        retrievedAt: new Date().toISOString(),
+      };
+    },
+  });
 }

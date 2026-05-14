@@ -16,14 +16,14 @@
 //     (use prepareStep to swap in compacted messages between steps)
 
 import { generateText, type LanguageModel } from 'ai';
-import type { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
+import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
 
 export type CompactionDecision = { kind: 'skip' } | { kind: 'compact'; keepLastSteps: number };
 
 export type CompactionInit = {
   // The "fast" tier model used to write the summary. See src/credentials/defaults.ts.
   summarizer: LanguageModel;
-  limits: ModelLimitsRegistry;
+  limits: ModelLimitsLookup;
   // Compact when usage / contextLength crosses this fraction.
   threshold?: number; // default 0.7
   // How many of the most-recent steps to keep verbatim after compacting older history.
@@ -48,6 +48,11 @@ export class Compactor {
 
   async shouldCompact(modelId: string, liveInputTokens: number): Promise<CompactionDecision> {
     const { contextLength } = await this.init.limits.forModel(modelId);
+    // A non-finite or non-positive window would make ratio NaN/Infinity and force a
+    // wrong decision. Treat it as "we don't know enough to compact" — skip.
+    if (!Number.isFinite(contextLength) || contextLength <= 0) {
+      return { kind: 'skip' };
+    }
     const ratio = liveInputTokens / contextLength;
     const threshold = this.init.threshold ?? DEFAULT_THRESHOLD;
     if (ratio >= threshold) {

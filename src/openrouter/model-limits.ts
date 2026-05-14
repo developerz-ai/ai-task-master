@@ -9,6 +9,13 @@ export type ModelLimits = {
   contextLength: number;
 };
 
+// Structural view of the registry used by the Compactor and its tests. The class
+// implements this so test stubs can `satisfies ModelLimitsLookup` without casts.
+export type ModelLimitsLookup = {
+  forModel(modelId: string): Promise<ModelLimits>;
+  preload(): Promise<void>;
+};
+
 export class ModelNotFound extends Error {
   override readonly name = 'ModelNotFound';
   constructor(public readonly modelId: string) {
@@ -16,7 +23,7 @@ export class ModelNotFound extends Error {
   }
 }
 
-export class ModelLimitsRegistry {
+export class ModelLimitsRegistry implements ModelLimitsLookup {
   private cache: Map<string, ModelLimits> | undefined;
 
   constructor(private readonly client: OpenRouterClient) {}

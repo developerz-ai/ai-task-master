@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { MCPClient, MCPClientConfig } from '@ai-sdk/mcp';
 import type { ToolSet } from 'ai';
+import type { LoggerLike } from '../logger/logger.ts';
 import { type CreateMcpClient, McpClientManager } from './mcp-client.ts';
 
 type FakeClient = MCPClient & {
@@ -24,7 +25,7 @@ function fakeClient(tools: ToolSet): FakeClient {
 }
 
 function fakeTool(): ToolSet[string] {
-  return { description: 't', inputSchema: { type: 'object' } } as unknown as ToolSet[string];
+  return { description: 't', inputSchema: { type: 'object' } } as ToolSet[string];
 }
 
 function recordingFactory(map: Record<string, ToolSet>): {
@@ -111,7 +112,7 @@ test('toolsForRole respects roleAllowlist (filters by server name)', async () =>
 test('connectAll logs and skips failed servers without throwing', async () => {
   const { createClient: ok } = recordingFactory({ good: { good_tool: fakeTool() } });
   const warnings: Array<{ msg: string; fields: Record<string, unknown> | undefined }> = [];
-  const logger = {
+  const logger: LoggerLike = {
     debug: () => {},
     info: () => {},
     warn: (msg: string, fields?: Record<string, unknown>) => {
@@ -133,7 +134,7 @@ test('connectAll logs and skips failed servers without throwing', async () => {
       broken: { command: 'b' },
     },
     createClient,
-    logger: logger as unknown as McpClientManager['init']['logger'],
+    logger,
   });
   await m.connectAll();
 
@@ -175,10 +176,12 @@ test('close() swallows per-client close errors and still clears state', async ()
     return c;
   };
   const warnings: string[] = [];
-  const logger = {
+  const logger: LoggerLike = {
     debug: () => {},
     info: () => {},
-    warn: (msg: string) => warnings.push(msg),
+    warn: (msg: string) => {
+      warnings.push(msg);
+    },
     error: () => {},
     status: () => {},
     flush: async () => {},
@@ -186,7 +189,7 @@ test('close() swallows per-client close errors and still clears state', async ()
   const m = new McpClientManager({
     servers: { bad: { command: 'x' } },
     createClient,
-    logger: logger as unknown as McpClientManager['init']['logger'],
+    logger,
   });
   await m.connectAll();
   await m.close();
@@ -214,6 +217,116 @@ test('connected() reports tool counts and transport per server', async () => {
   assert.equal(byName.fs?.transport, 'stdio');
   assert.equal(byName.web?.toolCount, 1);
   assert.equal(byName.web?.transport, 'sse');
+});
+
+test('connectAll closes the client when tools() throws and logs both failures', async () => {
+  const warnings: Array<{ msg: string; fields: Record<string, unknown> | undefined }> = [];
+  const logger: LoggerLike = {
+    debug: () => {},
+    info: () => {},
+    warn: (msg: string, fields?: Record<string, unknown>) => {
+      warnings.push({ msg, fields });
+    },
+    error: () => {},
+    status: () => {},
+    flush: async () => {},
+  };
+  const created: FakeClient[] = [];
+  const createClient: CreateMcpClient = async (_config) => {
+    const c = fakeClient({});
+    c.tools = async () => {
+      throw new Error('tools-boom');
+    };
+    created.push(c);
+    return c;
+  };
+
+  const m = new McpClientManager({
+    servers: { flaky: { command: 'x' } },
+    createClient,
+    logger,
+  });
+  await m.connectAll();
+
+  assert.equal(m.connected().length, 0);
+  assert.equal(created.length, 1);
+  assert.equal(created[0]?.closeCalls, 1);
+  const messages = warnings.map((w) => w.msg);
+  assert.ok(messages.includes('mcp server connect failed'));
+});
+
+test('connectAll surfaces cleanup failures separately from the original error', async () => {
+  const warnings: Array<{ msg: string; fields: Record<string, unknown> | undefined }> = [];
+  const logger: LoggerLike = {
+    debug: () => {},
+    info: () => {},
+    warn: (msg: string, fields?: Record<string, unknown>) => {
+      warnings.push({ msg, fields });
+    },
+    error: () => {},
+    status: () => {},
+    flush: async () => {},
+  };
+  const createClient: CreateMcpClient = async (_config) => {
+    const c = fakeClient({});
+    c.tools = async () => {
+      throw new Error('tools-boom');
+    };
+    c.close = async () => {
+      throw new Error('close-boom');
+    };
+    return c;
+  };
+
+  const m = new McpClientManager({
+    servers: { flaky: { command: 'x' } },
+    createClient,
+    logger,
+  });
+  await m.connectAll();
+
+  const messages = warnings.map((w) => w.msg);
+  assert.ok(messages.includes('mcp server cleanup failed'));
+  assert.ok(messages.includes('mcp server connect failed'));
+});
+
+test('toolsForRole warns and keeps the first occurrence on duplicate tool names', async () => {
+  const warnings: Array<{ msg: string; fields: Record<string, unknown> | undefined }> = [];
+  const logger: LoggerLike = {
+    debug: () => {},
+    info: () => {},
+    warn: (msg: string, fields?: Record<string, unknown>) => {
+      warnings.push({ msg, fields });
+    },
+    error: () => {},
+    status: () => {},
+    flush: async () => {},
+  };
+  const firstTool = fakeTool();
+  const secondTool = fakeTool();
+  const { createClient } = recordingFactory({
+    alpha: { shared: firstTool },
+    beta: { shared: secondTool },
+  });
+
+  const m = new McpClientManager({
+    servers: {
+      alpha: { command: 'a' },
+      beta: { command: 'b' },
+    },
+    createClient,
+    logger,
+  });
+  await m.connectAll();
+  const tools = m.toolsForRole('worker');
+
+  assert.deepEqual(Object.keys(tools), ['shared']);
+  assert.strictEqual(tools.shared, firstTool);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]?.msg, 'duplicate mcp tool name');
+  assert.equal(warnings[0]?.fields?.tool, 'shared');
+  assert.equal(warnings[0]?.fields?.server, 'beta');
+  assert.equal(warnings[0]?.fields?.existingServer, 'alpha');
 });
 
 test('http transport propagates headers through client config', async () => {

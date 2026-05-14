@@ -13,7 +13,7 @@ import { experimental_createMCPClient, type MCPClient, type MCPClientConfig } fr
 import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { ToolSet } from 'ai';
 import type { Role } from '../credentials/credentials.ts';
-import type { Logger } from '../logger/logger.ts';
+import type { LoggerLike } from '../logger/logger.ts';
 import type { McpServer, McpServers } from './schema.ts';
 
 export type TransportKind = 'stdio' | 'http' | 'sse';
@@ -28,7 +28,7 @@ export type McpClientInit = {
   roleAllowlist?: Partial<Record<Role, string[]>>;
   // Injection seam for tests — defaults to the AI SDK factory.
   createClient?: CreateMcpClient;
-  logger?: Logger;
+  logger?: LoggerLike;
 };
 
 type ConnectedServer = {
@@ -48,12 +48,25 @@ export class McpClientManager {
 
   async connectAll(): Promise<void> {
     for (const [name, server] of Object.entries(this.init.servers)) {
+      // Track the client outside the try so a failure during tools() can still
+      // close the spawned process / socket instead of leaking it.
+      let client: MCPClient | undefined;
       try {
         const transport = transportKind(server);
-        const client = await this.createClient(buildClientConfig(name, server));
+        client = await this.createClient(buildClientConfig(name, server));
         const tools = (await client.tools()) as ToolSet;
         this.servers.push({ name, transport, client, tools });
       } catch (err) {
+        if (client) {
+          try {
+            await client.close();
+          } catch (closeErr) {
+            this.init.logger?.warn('mcp server cleanup failed', {
+              name,
+              error: errorMessage(closeErr),
+            });
+          }
+        }
         this.init.logger?.warn('mcp server connect failed', {
           name,
           error: errorMessage(err),
@@ -65,9 +78,22 @@ export class McpClientManager {
   toolsForRole(role: Role): ToolSet {
     const allowed = this.init.roleAllowlist?.[role];
     const merged: ToolSet = {};
+    const owner = new Map<string, string>();
     for (const s of this.servers) {
       if (allowed !== undefined && !allowed.includes(s.name)) continue;
-      Object.assign(merged, s.tools);
+      for (const [toolName, tool] of Object.entries(s.tools)) {
+        const previous = owner.get(toolName);
+        if (previous !== undefined) {
+          this.init.logger?.warn('duplicate mcp tool name', {
+            tool: toolName,
+            server: s.name,
+            existingServer: previous,
+          });
+          continue;
+        }
+        merged[toolName] = tool;
+        owner.set(toolName, s.name);
+      }
     }
     return merged;
   }

@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
-import type { ModelLimits, ModelLimitsRegistry } from '../openrouter/model-limits.ts';
+import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import { Compactor } from './compactor.ts';
 
-function stubLimits(contextLength: number, modelId = 'openai/gpt-5'): ModelLimitsRegistry {
+function stubLimits(contextLength: number, modelId = 'openai/gpt-5'): ModelLimitsLookup {
   return {
     forModel: async (id: string): Promise<ModelLimits> => ({ modelId: id, contextLength }),
     preload: async () => {},
-  } as unknown as ModelLimitsRegistry;
+  } satisfies ModelLimitsLookup;
 }
 
 function summarizerReturning(text: string): {
@@ -72,6 +72,16 @@ test('shouldCompact returns compact above the threshold and carries keepLastStep
   });
   const decision = await c.shouldCompact('openai/gpt-5', 99_999);
   assert.deepEqual(decision, { kind: 'compact', keepLastSteps: 3 });
+});
+
+test('shouldCompact skips when contextLength is zero, negative, or non-finite', async () => {
+  for (const contextLength of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const c = new Compactor({
+      summarizer: new MockLanguageModelV3(),
+      limits: stubLimits(contextLength),
+    });
+    assert.deepEqual(await c.shouldCompact('openai/gpt-5', 1_000_000), { kind: 'skip' });
+  }
 });
 
 test('shouldCompact honors a custom threshold', async () => {

@@ -125,14 +125,31 @@ export async function runStart(
 
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
-  const initial = buildInitialRunState({ resolved, agentConfig });
 
+  // Resume detection: if a previous run left a valid state.json, skip re-init so
+  // runId and prGroups are preserved. Only fall back on expected "missing/invalid
+  // prior state" cases (ENOENT, JSON parse failure, schema mismatch); surface every
+  // other error (permissions, IO) as a hard failure rather than silently re-initing.
+  let resuming = false;
   try {
-    await state.init(initial);
-    await state.writeGoal(args.goal, args.criteria);
-    await loader.writeSnapshot(resolved, stateDir);
+    await state.read();
+    resuming = true;
   } catch (err) {
-    return { code: 1, message: errMsg(err) };
+    if (!isMissingOrInvalidState(err, stateDir)) {
+      return { code: 1, message: `Could not read run state: ${errMsg(err)}` };
+    }
+    // No valid state.json — proceed with fresh init.
+  }
+
+  if (!resuming) {
+    const initial = buildInitialRunState({ resolved, agentConfig });
+    try {
+      await state.init(initial);
+      await state.writeGoal(args.goal, args.criteria);
+      await loader.writeSnapshot(resolved, stateDir);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
   }
 
   const runLoop = ctx.runLoop ?? defaultRunLoop;
@@ -151,6 +168,21 @@ export async function runStart(
   } catch (err) {
     return { code: 1, message: errMsg(err) };
   }
+
+  // Persist the first awaiting-pr number into state so `aitm merge-pr` (with no --pr)
+  // can pick it up. WorkLoop tracks per-group PR numbers but does not nominate one as
+  // "current"; that's a CLI-level concern resolved here.
+  if (result.kind === 'awaiting-pr' && result.prs.length > 0) {
+    const firstPr = result.prs[0];
+    if (firstPr !== undefined) {
+      try {
+        await state.update((s) => ({ ...s, currentPr: firstPr }));
+      } catch (err) {
+        return { code: 1, message: `Failed to persist currentPr: ${errMsg(err)}` };
+      }
+    }
+  }
+
   return mapResultToExit(result);
 }
 
@@ -351,6 +383,26 @@ function buildInitialRunState(input: {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// Recognises "no valid prior state" — the only conditions where we fall through to a
+// fresh init. ENOENT means the file is absent. StateStore.read() prefixes any JSON
+// parse or Zod schema error with the state-file path, so we match that prefix to
+// distinguish corrupt state from genuine IO/permission errors.
+function isMissingOrInvalidState(err: unknown, stateDir: string): boolean {
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code: unknown }).code === 'ENOENT'
+  ) {
+    return true;
+  }
+  if (err instanceof Error) {
+    const stateFile = join(stateDir, 'state.json');
+    if (err.message.startsWith(`${stateFile}:`)) return true;
+  }
+  return false;
 }
 
 function formatConfigValue(value: unknown): string {

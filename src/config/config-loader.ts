@@ -2,10 +2,11 @@
 // Only module allowed to read ~/.aitm.json and .ai-task-master/config.json.
 // Merge order: defaults < global < project < env < CLI flags. Frozen snapshot written by writeSnapshot().
 
-import { open, readFile, rename } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ZodError } from 'zod';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
+import { atomicWrite } from '../fs/atomic-write.ts';
 import {
   type CliOverrides,
   type ConfigFile,
@@ -227,18 +228,6 @@ function pickNullable<T>(
   if (project !== undefined) return project;
   if (global !== undefined) return global;
   return fallback;
-}
-
-async function atomicWrite(path: string, contents: string): Promise<void> {
-  const tmp = `${path}.tmp`;
-  const fh = await open(tmp, 'w');
-  try {
-    await fh.writeFile(contents);
-    await fh.sync();
-  } finally {
-    await fh.close();
-  }
-  await rename(tmp, path);
 }
 
 function isNotFound(err: unknown): boolean {

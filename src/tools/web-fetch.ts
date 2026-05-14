@@ -63,7 +63,25 @@ function assertSafeUrl(rawUrl: string): URL {
 }
 
 function isPrivateOrLoopbackHost(h: string): boolean {
+  // WHATWG URL preserves brackets on IPv6 hostnames — strip them so the rest can pattern-match.
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
   if (h === 'localhost' || h === '::1' || h === '::' || h.endsWith('.localhost')) return true;
+  // IPv4-mapped IPv6 (::ffff:0:0/96). URL normalizes ::ffff:127.0.0.1 → ::ffff:7f00:1
+  // (compressed hex), so handle both dotted and hex tails. Extract embedded IPv4 and re-check.
+  if (h.startsWith('::ffff:')) {
+    const tail = h.slice(7);
+    const dotted = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(tail);
+    if (dotted) return isPrivateOrLoopbackHost(dotted[1]);
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+    if (hex) {
+      const high = parseInt(hex[1], 16);
+      const low = parseInt(hex[2], 16);
+      const ipv4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+      return isPrivateOrLoopbackHost(ipv4);
+    }
+    // Unrecognized ::ffff: form — block as a safety net rather than fall through.
+    return true;
+  }
   const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
   if (ipv4) {
     const a = Number(ipv4[1]);

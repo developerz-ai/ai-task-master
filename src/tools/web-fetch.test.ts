@@ -175,6 +175,15 @@ test('webFetchTool rejects loopback and private hosts (SSRF guard)', async () =>
     'http://192.168.1.1/',
     'http://169.254.169.254/',
     'http://172.16.0.1/',
+    // IPv6 loopback / link-local / unique-local.
+    'http://[::1]/',
+    'http://[fc00::1]/',
+    'http://[fe80::1]/',
+    // IPv4-mapped IPv6 must not bypass the guard (URL normalizes to ::ffff:HEX:HEX).
+    'http://[::ffff:127.0.0.1]/',
+    'http://[::ffff:169.254.169.254]/',
+    'http://[::ffff:10.0.0.1]/',
+    'http://[::ffff:192.168.1.1]/',
   ]) {
     await assert.rejects(() => t.execute({ url }), /private\/loopback/);
   }

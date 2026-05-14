@@ -55,8 +55,8 @@ export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAge
 }
 
 export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Promise<PlannerResult> {
-  if (input.maxPrs < 1) {
-    return { kind: 'error', error: `maxPrs must be >= 1, received ${input.maxPrs}` };
+  if (!Number.isInteger(input.maxPrs) || input.maxPrs < 1) {
+    return { kind: 'error', error: `maxPrs must be a positive integer, received ${input.maxPrs}` };
   }
   try {
     const result = await agent.generate({ prompt: buildUserPrompt(input) });

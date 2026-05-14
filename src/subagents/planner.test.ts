@@ -126,3 +126,26 @@ test('runPlanner rejects maxPrs < 1 up front', async () => {
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 0 });
   assert.equal(result.kind, 'error');
 });
+
+test('runPlanner rejects non-integer maxPrs', async () => {
+  const agent = createPlannerAgent({
+    model: new MockLanguageModelV3(),
+    tools: {},
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
+  const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 2.5 });
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') {
+    assert.match(result.error, /positive integer/);
+  }
+});
+
+test('runPlanner rejects NaN maxPrs', async () => {
+  const agent = createPlannerAgent({
+    model: new MockLanguageModelV3(),
+    tools: {},
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
+  const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: Number.NaN });
+  assert.equal(result.kind, 'error');
+});

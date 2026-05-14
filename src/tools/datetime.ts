@@ -6,6 +6,8 @@
 // SDK ref: docs/vendor/ai-sdk/chunk-02.md §"Tool Calling" — tool({ description, inputSchema, execute }).
 
 import type { Tool } from 'ai';
+import { type FlexibleSchema, tool } from 'ai';
+import { z } from 'zod';
 
 export type DatetimeInput = {
   timezone?: string;
@@ -17,5 +19,19 @@ export type DatetimeOutput = {
 };
 
 export function datetimeTool(): Tool {
-  throw new Error('not implemented');
+  return tool({
+    description: 'Get the current date and time, optionally formatted for a specific timezone',
+    inputSchema: z.object({
+      timezone: z.string().optional(),
+    }) as unknown as FlexibleSchema<DatetimeInput>,
+    execute: async (input: DatetimeInput): Promise<DatetimeOutput> => {
+      const datetime = new Date().toLocaleString('en-US', {
+        timeZone: input.timezone,
+      });
+      return {
+        datetime,
+        timezone: input.timezone ?? '',
+      };
+    },
+  });
 }

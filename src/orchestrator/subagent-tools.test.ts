@@ -292,6 +292,7 @@ test('planner tool: toModelOutput collapses blocked + error results', async () =
     input: { goal: 'g', maxPrs: 3 },
     output: { kind: 'error', error: 'boom' },
   });
+  assert.equal(err.type, 'text');
   if (err.type === 'text') assert.match(err.value, /^planner \[error\]: boom$/);
 });
 
@@ -369,6 +370,7 @@ test('worker tool: toModelOutput collapses ok result to "worker [ok]: …"', asy
       },
     },
   });
+  assert.equal(summary.type, 'text');
   if (summary.type === 'text') {
     assert.match(summary.value, /^worker \[ok\]: aitm\/core — feat: add a \(2 file\(s\)\)$/);
   }
@@ -394,6 +396,7 @@ test('worker tool: toModelOutput collapses blocked + error results', async () =>
     input: {},
     output: { kind: 'blocked', reason: 'empty manifest' },
   });
+  assert.equal(blocked.type, 'text');
   if (blocked.type === 'text') assert.match(blocked.value, /^worker \[blocked\]: empty manifest$/);
 
   const err = await toModelOutput({
@@ -401,6 +404,7 @@ test('worker tool: toModelOutput collapses blocked + error results', async () =>
     input: {},
     output: { kind: 'error', error: 'bash failed' },
   });
+  assert.equal(err.type, 'text');
   if (err.type === 'text') assert.match(err.value, /^worker \[error\]: bash failed$/);
 });
 
@@ -466,6 +470,7 @@ test('reviewer tool: toModelOutput collapses ok result to "reviewer [ok]: …"',
       ],
     },
   });
+  assert.equal(summary.type, 'text');
   if (summary.type === 'text') {
     assert.match(summary.value, /^reviewer \[ok\]: 3 resolution\(s\) — /);
     assert.match(summary.value, /fixed=1/);
@@ -495,6 +500,7 @@ test('planner tool: toModelOutput truncates long IDs to a preview + "+N more"', 
     input: { goal: 'g', maxPrs: 12 },
     output: { kind: 'ok', plan: { goal: 'g', groups } },
   });
+  assert.equal(out.type, 'text');
   if (out.type === 'text') {
     assert.match(
       out.value,
@@ -519,6 +525,7 @@ test('planner tool: toModelOutput collapses multiline / long error payloads to o
     input: { goal: 'g', maxPrs: 3 },
     output: { kind: 'error', error: longError },
   });
+  assert.equal(out.type, 'text');
   if (out.type === 'text') {
     assert.ok(out.value.length <= 220, `summary length ${out.value.length} should be ≤ 220`);
     assert.ok(!out.value.includes('\n'), 'summary must be single line');
@@ -553,6 +560,7 @@ test('worker tool: toModelOutput bounds a verbose draft commit message and strip
       },
     },
   });
+  assert.equal(summary.type, 'text');
   if (summary.type === 'text') {
     assert.ok(summary.value.length <= 220);
     assert.ok(!summary.value.includes('\n'));
@@ -580,6 +588,7 @@ test('reviewer tool: toModelOutput collapses zero-resolution ok, blocked + error
     input: {},
     output: { kind: 'ok', resolutions: [] },
   });
+  assert.equal(empty.type, 'text');
   if (empty.type === 'text') assert.match(empty.value, /^reviewer \[ok\]: 0 resolution\(s\)$/);
 
   const blocked = await toModelOutput({
@@ -587,6 +596,7 @@ test('reviewer tool: toModelOutput collapses zero-resolution ok, blocked + error
     input: {},
     output: { kind: 'blocked', reason: 'no threads' } as never,
   });
+  assert.equal(blocked.type, 'text');
   if (blocked.type === 'text') assert.match(blocked.value, /^reviewer \[blocked\]: no threads$/);
 
   const err = await toModelOutput({
@@ -594,5 +604,6 @@ test('reviewer tool: toModelOutput collapses zero-resolution ok, blocked + error
     input: {},
     output: { kind: 'error', error: 'gh failed' },
   });
+  assert.equal(err.type, 'text');
   if (err.type === 'text') assert.match(err.value, /^reviewer \[error\]: gh failed$/);
 });

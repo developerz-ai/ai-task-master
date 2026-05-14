@@ -9,16 +9,36 @@ export type ModelLimits = {
   contextLength: number;
 };
 
+export class ModelNotFound extends Error {
+  override readonly name = 'ModelNotFound';
+  constructor(public readonly modelId: string) {
+    super(`Model not found in OpenRouter catalog: ${modelId}`);
+  }
+}
+
 export class ModelLimitsRegistry {
+  private cache: Map<string, ModelLimits> | undefined;
+
   constructor(private readonly client: OpenRouterClient) {}
 
-  // Populated on first call to forModel(); subsequent calls hit the in-memory cache.
-  async forModel(_modelId: string): Promise<ModelLimits> {
-    throw new Error('not implemented');
+  async forModel(modelId: string): Promise<ModelLimits> {
+    if (!this.cache) {
+      await this.preload();
+    }
+    const hit = this.cache?.get(modelId);
+    if (!hit) {
+      throw new ModelNotFound(modelId);
+    }
+    return hit;
   }
 
-  // Optional pre-warm: fetch catalog once before any agent runs.
   async preload(): Promise<void> {
-    throw new Error('not implemented');
+    if (this.cache) return;
+    const models = await this.client.listModels();
+    const next = new Map<string, ModelLimits>();
+    for (const m of models) {
+      next.set(m.id, { modelId: m.id, contextLength: m.context_length });
+    }
+    this.cache = next;
   }
 }

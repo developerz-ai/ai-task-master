@@ -8,6 +8,7 @@
 //
 // SDK ref: docs/vendor/ai-sdk/chunk-02.md §"Tool Calling" — tool({ description, inputSchema, execute }).
 
+import * as dns from 'node:dns/promises';
 import type { Tool } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
@@ -32,6 +33,8 @@ export type WebFetchOutput = {
   retrievedAt: string;
 };
 
+export type LookupFn = (hostname: string) => Promise<Array<{ address: string }>>;
+
 export type WebFetchInit = {
   // Default true — stealthed local fetch from the agent host. When false, the local
   // function tool is a no-op stub; the model uses OpenRouter's web_fetch server tool
@@ -39,13 +42,22 @@ export type WebFetchInit = {
   local?: boolean;
   // Override the stealth header set if needed. Default = chrome-on-mac fingerprint.
   headers?: Record<string, string>;
+  // DNS lookup used by the SSRF guard. Default = node:dns/promises#lookup with all: true.
+  // Injected primarily so tests don't hit real DNS.
+  lookup?: LookupFn;
 };
 
-// Lightweight SSRF guard: reject non-http(s) and obvious private/loopback/link-local hosts
-// (no DNS rebinding protection — that requires resolving + revalidation around connect).
-// The agent runs arbitrary URLs from a language model; without this, AWS-metadata-style
-// internal endpoints become trivially reachable.
-function assertSafeUrl(rawUrl: string): URL {
+const defaultLookup: LookupFn = async (hostname) => {
+  return await dns.lookup(hostname, { all: true });
+};
+
+// SSRF guard. Rejects non-http(s), private/loopback/link-local literals, and hostnames
+// that resolve to private/loopback IPs. NOT a full DNS-rebinding fix: we don't pin the
+// resolved address at connect time, so a hostile resolver could return a public IP here
+// and a private one when `fetch` re-resolves. Portable connect-time pinning across
+// Bun/Node/Deno isn't possible via standard fetch — that needs a runtime-specific
+// dispatcher (e.g. undici `lookup` on Node) and is out of scope here.
+async function assertSafeUrl(rawUrl: string, lookup: LookupFn): Promise<URL> {
   let u: URL;
   try {
     u = new URL(rawUrl);
@@ -59,7 +71,36 @@ function assertSafeUrl(rawUrl: string): URL {
   if (isPrivateOrLoopbackHost(h)) {
     throw new Error(`Refusing to fetch private/loopback address: ${h}`);
   }
+  // For non-literal hostnames, resolve and re-check every returned IP. Closes the
+  // "public-looking domain resolves to private IP" bypass on the literal-hostname check.
+  if (!isIpLiteral(h)) {
+    let addrs: Array<{ address: string }>;
+    try {
+      addrs = await lookup(h);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`DNS lookup failed for ${h}: ${message}`);
+    }
+    if (addrs.length === 0) {
+      throw new Error(`Hostname did not resolve to any address: ${h}`);
+    }
+    for (const { address } of addrs) {
+      if (isPrivateOrLoopbackHost(address.toLowerCase())) {
+        throw new Error(
+          `Refusing to fetch hostname resolving to private/loopback: ${h} → ${address}`,
+        );
+      }
+    }
+  }
   return u;
+}
+
+function isIpLiteral(h: string): boolean {
+  // Brackets are already stripped by URL.hostname for IPv6, but be defensive.
+  const s = h.startsWith('[') && h.endsWith(']') ? h.slice(1, -1) : h;
+  // IPv6 literals always contain a colon. IPv4 literals are pure dotted quads.
+  if (s.includes(':')) return true;
+  return /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s);
 }
 
 function isPrivateOrLoopbackHost(h: string): boolean {
@@ -91,10 +132,13 @@ function isPrivateOrLoopbackHost(h: string): boolean {
     if (a === 172 && b >= 16 && b <= 31) return true;
     if (a === 192 && b === 168) return true;
   }
-  // IPv6 unique-local fc00::/7, link-local fe80::/10.
-  if (h.startsWith('fc') || h.startsWith('fd')) return true;
-  if (h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb')) {
-    return true;
+  // IPv6 unique-local fc00::/7, link-local fe80::/10 — only meaningful on IPv6 literals,
+  // otherwise we'd block valid public domains like `fc-example.com`.
+  if (h.includes(':')) {
+    if (h.startsWith('fc') || h.startsWith('fd')) return true;
+    if (h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb')) {
+      return true;
+    }
   }
   return false;
 }
@@ -164,6 +208,7 @@ const SERVER_TOOL_STUB =
 export function webFetchTool(init: WebFetchInit = {}): Tool {
   const local = init.local ?? true;
   const headers: Record<string, string> = { ...DEFAULT_STEALTH_HEADERS, ...init.headers };
+  const lookup = init.lookup ?? defaultLookup;
 
   if (!local) {
     return tool({
@@ -189,7 +234,7 @@ export function webFetchTool(init: WebFetchInit = {}): Tool {
     execute: async (input: WebFetchInput): Promise<WebFetchOutput> => {
       const maxChars = input.maxChars ?? DEFAULT_MAX_CHARS;
       const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-      const safeUrl = assertSafeUrl(input.url);
+      const safeUrl = await assertSafeUrl(input.url, lookup);
       const requestHeaders: Record<string, string> = { ...headers };
       if (input.referrer !== undefined) {
         requestHeaders.Referer = input.referrer;

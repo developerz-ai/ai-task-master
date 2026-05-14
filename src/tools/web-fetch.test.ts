@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { DEFAULT_STEALTH_HEADERS, webFetchTool } from './web-fetch.ts';
+import { DEFAULT_STEALTH_HEADERS, type LookupFn, webFetchTool } from './web-fetch.ts';
 
 type FetchCall = { url: string; init: RequestInit };
 
@@ -17,6 +17,10 @@ function stubFetch(responder: (call: FetchCall) => Response | Promise<Response>)
   }) as typeof fetch;
   return { calls };
 }
+
+// Default lookup stub: resolve every hostname to a known-public address so tests
+// never hit real DNS. Specific tests override this to exercise resolution checks.
+const publicLookup: LookupFn = async () => [{ address: '93.184.216.34' }];
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -40,7 +44,10 @@ test('webFetchTool merges DEFAULT_STEALTH_HEADERS with init.headers (override wi
   const { calls } = stubFetch(
     () => new Response('hello', { status: 200, headers: { 'content-type': 'text/plain' } }),
   );
-  const t = webFetchTool({ headers: { 'User-Agent': 'override-ua', 'X-Custom': '1' } });
+  const t = webFetchTool({
+    headers: { 'User-Agent': 'override-ua', 'X-Custom': '1' },
+    lookup: publicLookup,
+  });
   assert.ok(t.execute);
   await t.execute({ url: 'https://example.com/' });
   const headers = calls[0]?.init.headers as Record<string, string>;
@@ -53,7 +60,7 @@ test('webFetchTool merges DEFAULT_STEALTH_HEADERS with init.headers (override wi
 test('webFetchTool truncates body to maxChars and flags truncated', async () => {
   const long = 'a'.repeat(500);
   stubFetch(() => new Response(long, { status: 200 }));
-  const t = webFetchTool();
+  const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   const result = await t.execute({ url: 'https://example.com/', maxChars: 100 });
   assert.equal(result.body.length, 100);
@@ -63,7 +70,7 @@ test('webFetchTool truncates body to maxChars and flags truncated', async () => 
 
 test('webFetchTool returns full body when shorter than maxChars', async () => {
   stubFetch(() => new Response('short', { status: 200 }));
-  const t = webFetchTool();
+  const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   const result = await t.execute({ url: 'https://example.com/' });
   assert.equal(result.body, 'short');
@@ -78,7 +85,7 @@ test('webFetchTool tracks finalUrl via Response.url and surfaces status + conten
         headers: { 'content-type': 'application/json; charset=utf-8' },
       }),
   );
-  const t = webFetchTool();
+  const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   const result = await t.execute({ url: 'https://example.com/start' });
   // Response.url is empty when constructed manually; we fall back to input url.
@@ -91,7 +98,7 @@ test('webFetchTool tracks finalUrl via Response.url and surfaces status + conten
 
 test('webFetchTool passes AbortSignal with timeout through to fetch', async () => {
   const { calls } = stubFetch(() => new Response('x', { status: 200 }));
-  const t = webFetchTool();
+  const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   await t.execute({ url: 'https://example.com/', timeoutMs: 250 });
   const signal = calls[0]?.init.signal;
@@ -116,14 +123,14 @@ test('webFetchTool propagates an aborted signal as a thrown error', async () => 
         });
       }),
   );
-  const t = webFetchTool();
+  const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   await assert.rejects(() => t.execute({ url: 'https://example.com/', timeoutMs: 10 }));
 });
 
 test('webFetchTool sets Referer when referrer input provided', async () => {
   const { calls } = stubFetch(() => new Response('x', { status: 200 }));
-  const t = webFetchTool();
+  const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   await t.execute({ url: 'https://example.com/', referrer: 'https://ref.example/' });
   const headers = calls[0]?.init.headers as Record<string, string>;
@@ -151,7 +158,7 @@ test('webFetchTool rejects non-http(s) URLs (SSRF guard)', async () => {
     called = true;
     return new Response('x', { status: 200 });
   });
-  const t = webFetchTool();
+  const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   await assert.rejects(
     () => t.execute({ url: 'file:///etc/passwd' }),
@@ -166,7 +173,7 @@ test('webFetchTool rejects loopback and private hosts (SSRF guard)', async () =>
     called = true;
     return new Response('x', { status: 200 });
   });
-  const t = webFetchTool();
+  const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   for (const url of [
     'http://localhost/',
@@ -190,6 +197,91 @@ test('webFetchTool rejects loopback and private hosts (SSRF guard)', async () =>
   assert.equal(called, false);
 });
 
+test('webFetchTool rejects hostname that resolves to a private IP (SSRF guard)', async () => {
+  let called = false;
+  stubFetch(() => {
+    called = true;
+    return new Response('x', { status: 200 });
+  });
+  const privateLookup: LookupFn = async () => [{ address: '127.0.0.1' }];
+  const t = webFetchTool({ lookup: privateLookup });
+  assert.ok(t.execute);
+  await assert.rejects(
+    () => t.execute({ url: 'https://attacker.example/' }),
+    /resolving to private\/loopback/,
+  );
+  assert.equal(called, false);
+});
+
+test('webFetchTool rejects hostname when any resolved IP is private (SSRF guard)', async () => {
+  let called = false;
+  stubFetch(() => {
+    called = true;
+    return new Response('x', { status: 200 });
+  });
+  // Mix of public + private — must fail closed on the private one.
+  const mixedLookup: LookupFn = async () => [
+    { address: '93.184.216.34' },
+    { address: '169.254.169.254' },
+  ];
+  const t = webFetchTool({ lookup: mixedLookup });
+  assert.ok(t.execute);
+  await assert.rejects(
+    () => t.execute({ url: 'https://attacker.example/' }),
+    /resolving to private\/loopback/,
+  );
+  assert.equal(called, false);
+});
+
+test('webFetchTool rejects hostname that fails DNS resolution (SSRF guard fails closed)', async () => {
+  let called = false;
+  stubFetch(() => {
+    called = true;
+    return new Response('x', { status: 200 });
+  });
+  const failingLookup: LookupFn = async () => {
+    throw new Error('ENOTFOUND');
+  };
+  const t = webFetchTool({ lookup: failingLookup });
+  assert.ok(t.execute);
+  await assert.rejects(() => t.execute({ url: 'https://nx.example/' }), /DNS lookup failed/);
+  assert.equal(called, false);
+});
+
+test('webFetchTool does NOT block public domain that happens to start with "fc"', async () => {
+  // Regression: prior code applied IPv6 ULA prefix checks (fc/fd/fe8-feb) to all hostnames,
+  // which blocked valid public domains like `fc-example.com`. Now gated to IPv6 literals.
+  stubFetch(() => new Response('ok', { status: 200 }));
+  const t = webFetchTool({ lookup: publicLookup });
+  assert.ok(t.execute);
+  const result = await t.execute({ url: 'https://fc-example.com/' });
+  assert.equal(result.status, 200);
+});
+
+test('webFetchTool does NOT block public domain that happens to start with "fe8"', async () => {
+  stubFetch(() => new Response('ok', { status: 200 }));
+  const t = webFetchTool({ lookup: publicLookup });
+  assert.ok(t.execute);
+  const result = await t.execute({ url: 'https://feb-public.example/' });
+  assert.equal(result.status, 200);
+});
+
+test('webFetchTool skips DNS lookup for IP-literal hosts', async () => {
+  // IP literals already go through the literal allow/deny in isPrivateOrLoopbackHost,
+  // so DNS lookup should not be invoked. Public IP literals must work without DNS access.
+  let lookupCalled = false;
+  const trackingLookup: LookupFn = async () => {
+    lookupCalled = true;
+    return [];
+  };
+  stubFetch(() => new Response('ok', { status: 200 }));
+  const t = webFetchTool({ lookup: trackingLookup });
+  assert.ok(t.execute);
+  const result = await t.execute({ url: 'https://93.184.216.34/' });
+  assert.equal(result.status, 200);
+  assert.equal(lookupCalled, false);
+});
+
 test('webFetchTool stops reading once maxChars reached', async () => {
   // Build a stream that yields huge chunks. If the implementation buffers everything,
   // the test will OOM-equivalent (or at least slow drastically). Streaming variant
@@ -209,7 +301,7 @@ test('webFetchTool stops reading once maxChars reached', async () => {
         { status: 200 },
       ),
   );
-  const t = webFetchTool();
+  const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   const result = await t.execute({ url: 'https://example.com/', maxChars: 500 });
   assert.equal(result.truncated, true);

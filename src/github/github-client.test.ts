@@ -23,12 +23,17 @@ function makeRun(replies: Reply[] | ((call: Call, idx: number) => Reply)): {
   const run: RunCmd = async (file, args, options) => {
     const call: Call = { file, args: [...args], ...(options?.cwd ? { cwd: options.cwd } : {}) };
     calls.push(call);
-    const reply =
-      typeof replies === 'function' ? replies(call, calls.length - 1) : replies[calls.length - 1];
+    const idx = calls.length - 1;
+    const reply = typeof replies === 'function' ? replies(call, idx) : replies[idx];
+    if (!reply) {
+      throw new Error(
+        `No mocked reply for call #${idx}: ${file} ${args.join(' ')}`,
+      );
+    }
     return {
-      stdout: reply?.stdout ?? '',
-      stderr: reply?.stderr ?? '',
-      exitCode: reply?.exitCode ?? 0,
+      stdout: reply.stdout ?? '',
+      stderr: reply.stderr ?? '',
+      exitCode: reply.exitCode ?? 0,
     };
   };
   return { run, calls };

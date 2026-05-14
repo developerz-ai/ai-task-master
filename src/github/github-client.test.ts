@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CiFailed, GhAuthRequired, MergeConflict, PrNotFound } from './errors.ts';
-import { DEFAULT_PR_LABEL, GitHubClient, type RunCmd, type RunCmdResult } from './github-client.ts';
+import {
+  CHECKS_INITIAL_DELAY_MS,
+  CHECKS_MAX_DELAY_MS,
+  DEFAULT_PR_LABEL,
+  GitHubClient,
+  type RunCmd,
+  type RunCmdResult,
+  type Sleep,
+} from './github-client.ts';
 
 type Call = { file: string; args: string[]; cwd?: string };
 
@@ -24,6 +32,24 @@ function makeRun(replies: Reply[] | ((call: Call, idx: number) => Reply)): {
     };
   };
   return { run, calls };
+}
+
+function makeSleep(): { sleep: Sleep; delays: number[] } {
+  const delays: number[] = [];
+  const sleep: Sleep = async (ms) => {
+    delays.push(ms);
+  };
+  return { sleep, delays };
+}
+
+function findFieldValue(args: readonly string[], flag: '-f' | '-F', key: string): string | null {
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === flag) {
+      const kv = args[i + 1];
+      if (typeof kv === 'string' && kv.startsWith(`${key}=`)) return kv.slice(key.length + 1);
+    }
+  }
+  return null;
 }
 
 test('GitHubClient is constructible (skeleton)', () => {
@@ -247,4 +273,211 @@ test('authStatus reports not-ok on non-zero exit, scopes empty when absent', asy
   const result = await g.authStatus();
   assert.equal(result.ok, false);
   assert.deepEqual(result.scopes, []);
+});
+
+test('waitForChecks returns success when all checks pass', async () => {
+  const { run, calls } = makeRun([
+    {
+      stdout: JSON.stringify([
+        { bucket: 'pass', name: 'lint', state: 'SUCCESS' },
+        { bucket: 'pass', name: 'test', state: 'SUCCESS' },
+        { bucket: 'skipping', name: 'release', state: 'NEUTRAL' },
+      ]),
+    },
+  ]);
+  const { sleep, delays } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  const status = await g.waitForChecks(42);
+  assert.equal(status, 'success');
+  assert.deepEqual(calls[0]?.args, ['pr', 'checks', '42', '--json', 'bucket,name,state']);
+  assert.equal(delays.length, 0);
+});
+
+test('waitForChecks returns success when there are no checks at all', async () => {
+  const { run } = makeRun([{ stdout: '[]' }]);
+  const { sleep } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  assert.equal(await g.waitForChecks(1), 'success');
+});
+
+test('waitForChecks polls while pending with 1s→2s→4s backoff (60s cap)', async () => {
+  const pending = JSON.stringify([{ bucket: 'pending', name: 'test', state: 'IN_PROGRESS' }]);
+  const passing = JSON.stringify([{ bucket: 'pass', name: 'test', state: 'SUCCESS' }]);
+  const { run, calls } = makeRun([
+    { stdout: pending },
+    { stdout: pending },
+    { stdout: pending },
+    { stdout: passing },
+  ]);
+  const { sleep, delays } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  const status = await g.waitForChecks(7);
+  assert.equal(status, 'success');
+  assert.equal(calls.length, 4);
+  assert.deepEqual(delays, [1000, 2000, 4000]);
+});
+
+test('waitForChecks caps backoff at CHECKS_MAX_DELAY_MS', async () => {
+  // 7 pending replies before success → delays: 1, 2, 4, 8, 16, 32, 60 (capped).
+  const pending = JSON.stringify([{ bucket: 'pending', name: 'slow', state: 'QUEUED' }]);
+  const passing = JSON.stringify([{ bucket: 'pass', name: 'slow', state: 'SUCCESS' }]);
+  const replies: Reply[] = Array.from({ length: 7 }, () => ({ stdout: pending }));
+  replies.push({ stdout: passing });
+  const { run } = makeRun(replies);
+  const { sleep, delays } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  await g.waitForChecks(1);
+  assert.deepEqual(delays, [1000, 2000, 4000, 8000, 16_000, 32_000, CHECKS_MAX_DELAY_MS]);
+  assert.equal(CHECKS_INITIAL_DELAY_MS, 1000);
+});
+
+test('waitForChecks throws CiFailed on any failure bucket', async () => {
+  const { run } = makeRun([
+    {
+      stdout: JSON.stringify([
+        { bucket: 'pass', name: 'lint', state: 'SUCCESS' },
+        { bucket: 'fail', name: 'test', state: 'FAILURE' },
+      ]),
+      exitCode: 8,
+    },
+  ]);
+  const { sleep, delays } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  await assert.rejects(
+    () => g.waitForChecks(99),
+    (err) => err instanceof CiFailed && /test=fail/.test(err.message),
+  );
+  assert.equal(delays.length, 0);
+});
+
+test('waitForChecks throws CiFailed on cancelled bucket', async () => {
+  const { run } = makeRun([
+    { stdout: JSON.stringify([{ bucket: 'cancel', name: 'test', state: 'CANCELLED' }]) },
+  ]);
+  const { sleep } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  await assert.rejects(() => g.waitForChecks(99), CiFailed);
+});
+
+test('waitForChecks throws on unparseable stdout', async () => {
+  const { run } = makeRun([{ exitCode: 1, stdout: '', stderr: 'auth required' }]);
+  const { sleep } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  await assert.rejects(() => g.waitForChecks(1), /gh pr checks failed/);
+});
+
+test('listUnresolvedThreads fetches repo meta then GraphQL with owner/repo/pr variables', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  const gql = JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: [
+              {
+                id: 'PRRT_1',
+                isResolved: false,
+                path: 'src/foo.ts',
+                comments: {
+                  nodes: [{ id: 'IC_1', body: 'please fix', author: { login: 'reviewer' } }],
+                },
+              },
+              {
+                id: 'PRRT_2',
+                isResolved: true,
+                path: 'src/bar.ts',
+                comments: { nodes: [] },
+              },
+              {
+                id: 'PRRT_3',
+                isResolved: false,
+                path: null,
+                comments: {
+                  nodes: [{ id: 'IC_2', body: 'general', author: null }],
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
+  const { run, calls } = makeRun([{ stdout: meta }, { stdout: gql }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  const threads = await g.listUnresolvedThreads(42);
+
+  assert.equal(threads.length, 2);
+  assert.equal(threads[0]?.id, 'PRRT_1');
+  assert.equal(threads[0]?.isResolved, false);
+  assert.equal(threads[0]?.path, 'src/foo.ts');
+  assert.deepEqual(threads[0]?.comments, [{ id: 'IC_1', body: 'please fix', author: 'reviewer' }]);
+  assert.equal(threads[1]?.id, 'PRRT_3');
+  assert.equal(threads[1]?.path, null);
+  assert.equal(threads[1]?.comments[0]?.author, 'ghost');
+
+  assert.deepEqual(calls[0]?.args, ['repo', 'view', '--json', 'owner,name']);
+  const gqlArgs = calls[1]?.args ?? [];
+  assert.equal(calls[1]?.file, 'gh');
+  assert.equal(gqlArgs[0], 'api');
+  assert.equal(gqlArgs[1], 'graphql');
+  assert.equal(findFieldValue(gqlArgs, '-f', 'owner'), 'org');
+  assert.equal(findFieldValue(gqlArgs, '-f', 'repo'), 'repo');
+  assert.equal(findFieldValue(gqlArgs, '-F', 'pr'), '42');
+  const query = findFieldValue(gqlArgs, '-f', 'query');
+  assert.ok(query?.includes('reviewThreads(first: 100)'));
+  assert.ok(query?.includes('pullRequest(number: $pr)'));
+  assert.ok(query?.includes('repository(owner: $owner, name: $repo)'));
+});
+
+test('listUnresolvedThreads throws when GraphQL call fails', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  const { run } = makeRun([{ stdout: meta }, { exitCode: 1, stderr: 'GraphQL: not found' }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(() => g.listUnresolvedThreads(1), /gh api graphql \(reviewThreads\) failed/);
+});
+
+test('replyToThread sends mutation with threadId + body variables', async () => {
+  const { run, calls } = makeRun([{ stdout: '{"data":{"addPullRequestReviewThreadReply":{}}}' }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await g.replyToThread('PRRT_abc', 'thanks for the catch');
+  const args = calls[0]?.args ?? [];
+  assert.equal(calls[0]?.file, 'gh');
+  assert.equal(args[0], 'api');
+  assert.equal(args[1], 'graphql');
+  assert.equal(findFieldValue(args, '-f', 'threadId'), 'PRRT_abc');
+  assert.equal(findFieldValue(args, '-f', 'body'), 'thanks for the catch');
+  const query = findFieldValue(args, '-f', 'query');
+  assert.ok(query?.includes('addPullRequestReviewThreadReply'));
+  assert.ok(query?.includes('pullRequestReviewThreadId: $threadId'));
+  assert.ok(query?.includes('body: $body'));
+});
+
+test('replyToThread throws on non-zero exit', async () => {
+  const { run } = makeRun([{ exitCode: 1, stderr: 'GraphQL: thread is locked' }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(
+    () => g.replyToThread('PRRT_x', 'hi'),
+    /gh api graphql \(replyToThread\) failed/,
+  );
+});
+
+test('resolveThread sends mutation with threadId variable', async () => {
+  const { run, calls } = makeRun([
+    { stdout: '{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_x","isResolved":true}}}}' },
+  ]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await g.resolveThread('PRRT_x');
+  const args = calls[0]?.args ?? [];
+  assert.equal(args[0], 'api');
+  assert.equal(args[1], 'graphql');
+  assert.equal(findFieldValue(args, '-f', 'threadId'), 'PRRT_x');
+  const query = findFieldValue(args, '-f', 'query');
+  assert.ok(query?.includes('resolveReviewThread'));
+  assert.ok(query?.includes('threadId: $threadId'));
+});
+
+test('resolveThread throws on non-zero exit', async () => {
+  const { run } = makeRun([{ exitCode: 1, stderr: 'GraphQL: not authorized' }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(() => g.resolveThread('PRRT_x'), /gh api graphql \(resolveThread\) failed/);
 });

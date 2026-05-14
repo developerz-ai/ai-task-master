@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .ai-task-master/
+.claude-task-master/
 *.log
 .DS_Store
 *.tsbuildinfo

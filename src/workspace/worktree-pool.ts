@@ -16,8 +16,23 @@ export type Worktree = {
   path: string;
 };
 
+// Restrict groupId to characters safe as a single path segment so `join(worktreesDir,
+// groupId)` cannot escape into a parent directory and `release()`'s force-remove of
+// the computed path cannot reach outside `worktrees/`.
+const SAFE_GROUP_ID = /^[A-Za-z0-9._-]+$/;
+
+function assertSafeGroupId(groupId: string): void {
+  if (!SAFE_GROUP_ID.test(groupId) || groupId === '.' || groupId === '..') {
+    throw new Error(`invalid groupId: ${groupId}`);
+  }
+}
+
 export class WorktreePool {
   private readonly worktrees = new Map<string, Worktree>();
+  // `pendingGroupIds` covers acquires that have passed the duplicate check but not yet
+  // completed `git worktree add`. Without it, two concurrent `acquire(g1, ...)` calls
+  // could both pass the `worktrees.has` gate and race in `git worktree add`.
+  private readonly pendingGroupIds = new Set<string>();
   private readonly waiters: Array<() => void> = [];
   // `reserved` covers both checked-out worktrees AND acquires that have passed the
   // gate but not yet completed `git worktree add`. Without this, two concurrent
@@ -31,9 +46,11 @@ export class WorktreePool {
   ) {}
 
   async acquire(groupId: string, branch: string, baseBranch: string): Promise<Worktree> {
-    if (this.worktrees.has(groupId)) {
+    assertSafeGroupId(groupId);
+    if (this.worktrees.has(groupId) || this.pendingGroupIds.has(groupId)) {
       throw new Error(`worktree already acquired for group ${groupId}`);
     }
+    this.pendingGroupIds.add(groupId);
     await this.reserveSlot();
     const worktreesDir = join(this.stateDir, 'worktrees');
     const path = join(worktreesDir, groupId);
@@ -42,24 +59,26 @@ export class WorktreePool {
       await execa('git', ['worktree', 'add', path, '-b', branch, baseBranch], {
         cwd: this.repoRoot,
       });
+      const wt: Worktree = { groupId, branch, path };
+      this.worktrees.set(groupId, wt);
+      return wt;
     } catch (err) {
       this.freeSlot();
       throw err;
+    } finally {
+      this.pendingGroupIds.delete(groupId);
     }
-    const wt: Worktree = { groupId, branch, path };
-    this.worktrees.set(groupId, wt);
-    return wt;
   }
 
   async release(groupId: string): Promise<void> {
     const wt = this.worktrees.get(groupId);
     if (!wt) return;
+    // Don't drop tracking until `git worktree remove` succeeds: a failed cleanup must
+    // remain re-tryable via `release(groupId)`, and the slot must stay reserved so the
+    // pool doesn't overbook after an untracked worktree is left on disk.
+    await execa('git', ['worktree', 'remove', '--force', wt.path], { cwd: this.repoRoot });
     this.worktrees.delete(groupId);
-    try {
-      await execa('git', ['worktree', 'remove', '--force', wt.path], { cwd: this.repoRoot });
-    } finally {
-      this.freeSlot();
-    }
+    this.freeSlot();
   }
 
   async releaseAll(): Promise<void> {

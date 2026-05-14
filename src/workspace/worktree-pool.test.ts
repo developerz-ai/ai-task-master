@@ -130,3 +130,27 @@ test('acquire rejects duplicate groupId while still active', async () => {
     await repo.cleanup();
   }
 });
+
+test('acquire rejects groupId with path traversal segments', async () => {
+  const pool = new WorktreePool('/tmp/repo', '/tmp/repo/.ai-task-master', 2);
+  for (const bad of ['../escape', 'a/b', '..', '.', 'has space', 'has\\slash']) {
+    await assert.rejects(() => pool.acquire(bad, 'br', 'main'), /invalid groupId/);
+  }
+  assert.strictEqual(pool.active().length, 0);
+});
+
+test('acquire rejects in-flight duplicate before git worktree add completes', async () => {
+  const repo = await seedRepo();
+  const stateDir = join(repo.path, '.ai-task-master');
+  const pool = new WorktreePool(repo.path, stateDir, 2);
+  try {
+    const p1 = pool.acquire('g1', 'aitm/r1/g1', 'main');
+    // The second acquire is dispatched before the first has resolved — it must see
+    // the in-flight reservation, not race against `git worktree add`.
+    await assert.rejects(() => pool.acquire('g1', 'aitm/r1/g1-bis', 'main'), /already acquired/);
+    await p1;
+  } finally {
+    await pool.releaseAll();
+    await repo.cleanup();
+  }
+});

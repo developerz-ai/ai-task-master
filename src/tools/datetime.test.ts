@@ -36,3 +36,21 @@ test('datetimeTool execute returns datetime and timezone', async () => {
   assert.match(result2.datetime, /\d+\/\d+\/\d+/); // Basic date pattern
   assert.equal(result2.timezone, 'America/Los_Angeles');
 });
+
+test('datetimeTool rejects empty string timezone', async () => {
+  const tool = datetimeTool();
+  assert.ok(tool.inputSchema);
+  await assert.rejects(
+    () => tool.inputSchema.parseAsync({ timezone: '' }),
+    /Invalid IANA timezone/,
+  );
+});
+
+test('datetimeTool rejects unknown timezone', async () => {
+  const tool = datetimeTool();
+  assert.ok(tool.inputSchema);
+  await assert.rejects(
+    () => tool.inputSchema.parseAsync({ timezone: 'Atlantis/Lost' }),
+    /Invalid IANA timezone/,
+  );
+});

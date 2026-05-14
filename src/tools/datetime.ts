@@ -6,12 +6,27 @@
 // SDK ref: docs/vendor/ai-sdk/chunk-02.md §"Tool Calling" — tool({ description, inputSchema, execute }).
 
 import type { Tool } from 'ai';
-import { type FlexibleSchema, tool } from 'ai';
+import { tool } from 'ai';
 import { z } from 'zod';
 
-export type DatetimeInput = {
-  timezone?: string;
-};
+// Reject empty string and invalid IANA tz strings; allow `undefined` from `.optional()`.
+// `toLocaleString` throws on both empty and unknown timezones, so we validate upfront.
+function isValidTimezone(tz: string | undefined): boolean {
+  if (tz === undefined) return true;
+  if (tz === '') return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const datetimeInputSchema = z.object({
+  timezone: z.string().optional().refine(isValidTimezone, { message: 'Invalid IANA timezone' }),
+});
+
+export type DatetimeInput = z.infer<typeof datetimeInputSchema>;
 
 export type DatetimeOutput = {
   datetime: string;
@@ -21,9 +36,7 @@ export type DatetimeOutput = {
 export function datetimeTool(): Tool {
   return tool({
     description: 'Get the current date and time, optionally formatted for a specific timezone',
-    inputSchema: z.object({
-      timezone: z.string().optional(),
-    }) as unknown as FlexibleSchema<DatetimeInput>,
+    inputSchema: datetimeInputSchema,
     execute: async (input: DatetimeInput): Promise<DatetimeOutput> => {
       const datetime = new Date().toLocaleString('en-US', {
         timeZone: input.timezone,

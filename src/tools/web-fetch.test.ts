@@ -104,7 +104,16 @@ test('webFetchTool propagates an aborted signal as a thrown error', async () => 
     ({ init }) =>
       new Promise<Response>((_resolve, reject) => {
         const signal = init.signal as AbortSignal;
-        signal.addEventListener('abort', () => reject(signal.reason ?? new Error('aborted')));
+        // `AbortSignal.timeout()` schedules an unref'd timer. If the listener below is
+        // the only pending work, Node's test runner sees the event loop empty out and
+        // reports "Promise resolution is still pending but the event loop has already
+        // resolved" (cancelledByParent). A ref'd heartbeat keeps the loop alive until
+        // the abort fires.
+        const heartbeat = setInterval(() => {}, 1);
+        signal.addEventListener('abort', () => {
+          clearInterval(heartbeat);
+          reject(signal.reason ?? new Error('aborted'));
+        });
       }),
   );
   const t = webFetchTool();
@@ -134,4 +143,68 @@ test('webFetchTool with init.local=false returns stub redirecting to server tool
   assert.match(result.body, /openrouter:web_fetch/);
   assert.equal(result.status, 0);
   assert.equal(result.finalUrl, 'https://example.com/');
+});
+
+test('webFetchTool rejects non-http(s) URLs (SSRF guard)', async () => {
+  let called = false;
+  stubFetch(() => {
+    called = true;
+    return new Response('x', { status: 200 });
+  });
+  const t = webFetchTool();
+  assert.ok(t.execute);
+  await assert.rejects(
+    () => t.execute({ url: 'file:///etc/passwd' }),
+    /Only http\/https URLs are allowed/,
+  );
+  assert.equal(called, false);
+});
+
+test('webFetchTool rejects loopback and private hosts (SSRF guard)', async () => {
+  let called = false;
+  stubFetch(() => {
+    called = true;
+    return new Response('x', { status: 200 });
+  });
+  const t = webFetchTool();
+  assert.ok(t.execute);
+  for (const url of [
+    'http://localhost/',
+    'http://127.0.0.1/',
+    'http://10.0.0.1/',
+    'http://192.168.1.1/',
+    'http://169.254.169.254/',
+    'http://172.16.0.1/',
+  ]) {
+    await assert.rejects(() => t.execute({ url }), /private\/loopback/);
+  }
+  assert.equal(called, false);
+});
+
+test('webFetchTool stops reading once maxChars reached', async () => {
+  // Build a stream that yields huge chunks. If the implementation buffers everything,
+  // the test will OOM-equivalent (or at least slow drastically). Streaming variant
+  // should bail at the first chunk past maxChars.
+  let chunksPulled = 0;
+  const huge = 'x'.repeat(10_000);
+  stubFetch(
+    () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            chunksPulled += 1;
+            controller.enqueue(new TextEncoder().encode(huge));
+            if (chunksPulled > 100) controller.close();
+          },
+        }),
+        { status: 200 },
+      ),
+  );
+  const t = webFetchTool();
+  assert.ok(t.execute);
+  const result = await t.execute({ url: 'https://example.com/', maxChars: 500 });
+  assert.equal(result.truncated, true);
+  assert.equal(result.body.length, 500);
+  // We must have stopped early — not pulled all 100+ chunks.
+  assert.ok(chunksPulled < 5, `streamed too long: ${chunksPulled} chunks`);
 });

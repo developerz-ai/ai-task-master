@@ -71,9 +71,9 @@ function isPrivateOrLoopbackHost(h: string): boolean {
   if (h.startsWith('::ffff:')) {
     const tail = h.slice(7);
     const dotted = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(tail);
-    if (dotted) return isPrivateOrLoopbackHost(dotted[1]);
+    if (dotted?.[1]) return isPrivateOrLoopbackHost(dotted[1]);
     const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
-    if (hex) {
+    if (hex?.[1] && hex[2]) {
       const high = parseInt(hex[1], 16);
       const low = parseInt(hex[2], 16);
       const ipv4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;

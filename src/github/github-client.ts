@@ -1,7 +1,14 @@
 // docs/github-integration.md, docs/auth.md §"GitHub"
 // Only module allowed to shell out to gh. Uses execa (docs/runtime.md — Bun.$ forbidden in src/).
 
-import type { CheckStatus, PullRequest, ReviewThread } from './schema.ts';
+import { ExecaError, execa } from 'execa';
+import { MergeConflict } from './errors.ts';
+import {
+  type CheckStatus,
+  type PullRequest,
+  PullRequestSchema,
+  type ReviewThread,
+} from './schema.ts';
 
 export type CreatePrInput = {
   title: string;
@@ -18,26 +25,118 @@ export const DEFAULT_PR_LABEL = 'ai-task-master';
 
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
 
+// Thin DI shim wrapping execa — lets unit tests assert command shape without spawning processes.
+// The actual integration test (PR 12) uses a replay shim. `runCmd` (not `runGh`) because we also
+// shell out to plain `git` for `currentBranch`.
+export type RunCmdOptions = { cwd?: string };
+export type RunCmdResult = { stdout: string; stderr: string; exitCode: number };
+export type RunCmd = (
+  file: string,
+  args: readonly string[],
+  options?: RunCmdOptions,
+) => Promise<RunCmdResult>;
+
+export const defaultRunCmd: RunCmd = async (file, args, options) => {
+  try {
+    const r = await execa(file, [...args], options?.cwd ? { cwd: options.cwd } : {});
+    return {
+      stdout: typeof r.stdout === 'string' ? r.stdout : '',
+      stderr: typeof r.stderr === 'string' ? r.stderr : '',
+      exitCode: r.exitCode ?? 0,
+    };
+  } catch (err) {
+    if (err instanceof ExecaError) {
+      return {
+        stdout: typeof err.stdout === 'string' ? err.stdout : '',
+        stderr: typeof err.stderr === 'string' ? err.stderr : '',
+        exitCode: err.exitCode ?? 1,
+      };
+    }
+    throw err;
+  }
+};
+
 export class GitHubClient {
   // Capability matrix — docs/github-integration.md §"Capabilities".
   // Backoff — docs/github-integration.md §"Rate limits" (1s, doubling, 60s cap).
 
-  constructor(private readonly cwd: string) {}
+  constructor(
+    private readonly cwd: string,
+    private readonly runCmd: RunCmd = defaultRunCmd,
+  ) {}
 
   async currentBranch(): Promise<string> {
-    throw new Error('not implemented');
+    const r = await this.runCmd('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: this.cwd });
+    if (r.exitCode !== 0) {
+      throw new Error(`git rev-parse failed: ${r.stderr.trim() || r.stdout.trim()}`);
+    }
+    return r.stdout.trim();
   }
 
   async defaultBranch(): Promise<string> {
-    throw new Error('not implemented');
+    const r = await this.runCmd('gh', ['repo', 'view', '--json', 'defaultBranchRef'], {
+      cwd: this.cwd,
+    });
+    if (r.exitCode !== 0) {
+      throw new Error(`gh repo view failed: ${r.stderr.trim() || r.stdout.trim()}`);
+    }
+    const parsed: unknown = JSON.parse(r.stdout);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'defaultBranchRef' in parsed &&
+      typeof parsed.defaultBranchRef === 'object' &&
+      parsed.defaultBranchRef !== null &&
+      'name' in parsed.defaultBranchRef &&
+      typeof parsed.defaultBranchRef.name === 'string'
+    ) {
+      return parsed.defaultBranchRef.name;
+    }
+    throw new Error(`gh repo view: unexpected JSON shape: ${r.stdout}`);
   }
 
-  async getPrForBranch(_branch: string): Promise<PullRequest | null> {
-    throw new Error('not implemented');
+  async getPrForBranch(branch: string): Promise<PullRequest | null> {
+    const r = await this.runCmd(
+      'gh',
+      ['pr', 'view', branch, '--json', 'number,state,url,headRefName,baseRefName'],
+      { cwd: this.cwd },
+    );
+    if (r.exitCode !== 0) {
+      if (isPrNotFoundStderr(r.stderr)) return null;
+      throw new Error(`gh pr view failed: ${r.stderr.trim() || r.stdout.trim()}`);
+    }
+    return PullRequestSchema.parse(JSON.parse(r.stdout));
   }
 
-  async createPr(_input: CreatePrInput): Promise<PullRequest> {
-    throw new Error('not implemented');
+  async createPr(input: CreatePrInput): Promise<PullRequest> {
+    const labels = input.labels ?? [DEFAULT_PR_LABEL];
+    const args: string[] = [
+      'pr',
+      'create',
+      '--title',
+      input.title,
+      '--body',
+      input.body,
+      '--base',
+      input.base,
+      '--head',
+      input.head,
+    ];
+    if (input.draft) args.push('--draft');
+    for (const label of labels) args.push('--label', label);
+
+    const r = await this.runCmd('gh', args, { cwd: this.cwd });
+    if (r.exitCode !== 0) {
+      throw new Error(`gh pr create failed: ${r.stderr.trim() || r.stdout.trim()}`);
+    }
+    // gh prints the PR URL to stdout; we re-fetch to get the full typed shape.
+    const pr = await this.getPrForBranch(input.head);
+    if (!pr) {
+      throw new Error(
+        `gh pr create succeeded for ${input.head} but PR lookup returned null (stdout: ${r.stdout.trim()})`,
+      );
+    }
+    return pr;
   }
 
   async waitForChecks(_pr: number): Promise<CheckStatus> {
@@ -56,11 +155,46 @@ export class GitHubClient {
     throw new Error('not implemented');
   }
 
-  async mergePr(_pr: number, _method: MergeMethod): Promise<void> {
-    throw new Error('not implemented');
+  async mergePr(pr: number, method: MergeMethod): Promise<void> {
+    const r = await this.runCmd('gh', ['pr', 'merge', String(pr), `--${method}`], {
+      cwd: this.cwd,
+    });
+    if (r.exitCode === 0) return;
+    const combined = `${r.stderr}\n${r.stdout}`;
+    if (/merge conflict|not mergeable|conflict/i.test(combined)) {
+      throw new MergeConflict(`Merge conflict on PR #${pr}: ${r.stderr.trim() || r.stdout.trim()}`);
+    }
+    throw new Error(`gh pr merge failed: ${r.stderr.trim() || r.stdout.trim()}`);
   }
 
   async authStatus(): Promise<{ ok: boolean; scopes: string[] }> {
-    throw new Error('not implemented');
+    const r = await this.runCmd('gh', ['auth', 'status', '--hostname', 'github.com'], {
+      cwd: this.cwd,
+    });
+    // `gh auth status` writes its human-readable summary to stderr; stdout is usually empty.
+    const text = `${r.stderr}\n${r.stdout}`;
+    const scopes = parseScopes(text);
+    return { ok: r.exitCode === 0, scopes };
   }
+}
+
+// `gh pr view` exits non-zero with messages like:
+//   "no pull requests found for branch <name>"
+//   "GraphQL: Could not resolve to a PullRequest..."
+function isPrNotFoundStderr(stderr: string): boolean {
+  return /no pull requests? found|could not resolve to a pullrequest|no open pull requests/i.test(
+    stderr,
+  );
+}
+
+// `gh auth status` line shape: "  - Token scopes: 'repo', 'workflow', 'read:org'"
+function parseScopes(text: string): string[] {
+  const match = text.match(/Token scopes:\s*([^\n]+)/i);
+  if (!match?.[1]) return [];
+  const scopes: string[] = [];
+  for (const raw of match[1].split(',')) {
+    const cleaned = raw.replace(/['"`]/g, '').trim();
+    if (cleaned) scopes.push(cleaned);
+  }
+  return scopes;
 }

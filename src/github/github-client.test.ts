@@ -26,9 +26,7 @@ function makeRun(replies: Reply[] | ((call: Call, idx: number) => Reply)): {
     const idx = calls.length - 1;
     const reply = typeof replies === 'function' ? replies(call, idx) : replies[idx];
     if (!reply) {
-      throw new Error(
-        `No mocked reply for call #${idx}: ${file} ${args.join(' ')}`,
-      );
+      throw new Error(`No mocked reply for call #${idx}: ${file} ${args.join(' ')}`);
     }
     return {
       stdout: reply.stdout ?? '',

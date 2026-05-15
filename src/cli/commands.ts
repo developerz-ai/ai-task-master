@@ -55,12 +55,20 @@ export type StartCtx = {
   runLoop?: (input: RunLoopInput) => Promise<WorkLoopResult>;
 };
 
+// Minimal slice of GitHubClient used during the take-over precondition path (branch
+// + PR auto-discovery). The full client is still injected into the merge flow itself;
+// this narrower type lets tests stub the precondition path without spawning git.
+export type MergePrGithub = Pick<GitHubClient, 'currentBranch' | 'getPrForBranch'>;
+
 export type MergePrCtx = {
   cwd?: string;
   homeDir?: string;
   env?: Record<string, string | undefined>;
   authStatus?: AuthStatusFn;
   runMergeFlow?: (input: RunMergeFlowInput) => Promise<WorkLoopResult>;
+  // Test seam: when omitted, a real GitHubClient(cwd) is constructed. Tests pass a
+  // stub so the take-over flow does not actually shell out to git on a temp repo.
+  github?: GitHubClient;
 };
 
 export type ConfigCtx = {
@@ -210,21 +218,39 @@ export async function runMergePr(
 
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
+  const github = ctx.github ?? new GitHubClient(cwd);
+
+  // Take-over flow: `aitm merge-pr` (no args, no prior state) should work against any PR
+  // the user built by hand — e.g. via Claude Code or `gh pr create`. We mirror the
+  // claude-task-master `merge_pr` pattern: try to read existing state, and if absent,
+  // synthesize a minimal one from --pr (or the current branch's PR) and persist it so
+  // subsequent calls resume.
   let runState: RunState;
   try {
     runState = await state.read();
   } catch (err) {
-    return {
-      code: 1,
-      message: `Could not read run state at ${join(stateDir, 'state.json')}. Did you run \`aitm start\`? (${errMsg(err)})`,
-    };
+    if (!isFileNotFound(err)) {
+      return {
+        code: 1,
+        message: `Run state at ${join(stateDir, 'state.json')} is unreadable: ${errMsg(err)}. Fix or delete the file to start fresh.`,
+      };
+    }
+    const synth = await synthesizeTakeoverState({ args, github, resolved });
+    if (synth.kind === 'error') return synth.exit;
+    runState = synth.state;
+    try {
+      await state.init(runState);
+    } catch (initErr) {
+      return { code: 1, message: errMsg(initErr) };
+    }
   }
 
   const pr = args.pr ?? runState.currentPr ?? undefined;
   if (pr === undefined) {
     return {
       code: 1,
-      message: 'No PR to merge. Pass --pr <N> or run `aitm start` first to populate state.',
+      message:
+        'No PR to merge. Pass --pr <N>, switch to the PR branch, or run `aitm start` to populate state.',
     };
   }
 
@@ -256,7 +282,6 @@ export async function runMergePr(
   if (!auth.ok) {
     return { code: 1, message: 'gh CLI is not authenticated. Run `gh auth login`.' };
   }
-  const github = new GitHubClient(cwd);
 
   const runMergeFlow = ctx.runMergeFlow ?? defaultRunMergeFlow;
   let result: WorkLoopResult;
@@ -433,4 +458,83 @@ async function defaultRunMergeFlow(_input: RunMergeFlowInput): Promise<WorkLoopR
       'merge-pr flow adapter not yet wired in this build. Inject `runMergeFlow` via CLI options, or wait for the integration wiring task.',
     outcomes: [],
   };
+}
+
+type SynthesizeTakeoverResult =
+  | { kind: 'ok'; state: RunState }
+  | { kind: 'error'; exit: CommandExit };
+
+// Build a minimal RunState that lets `merge-pr` take over a PR opened outside aitm. PR
+// number comes from --pr or, failing that, from `gh pr view` against the current branch.
+async function synthesizeTakeoverState(input: {
+  args: Extract<ParsedArgs, { kind: 'merge-pr' }>;
+  github: GitHubClient;
+  resolved: ResolvedConfig;
+}): Promise<SynthesizeTakeoverResult> {
+  const { args, github, resolved } = input;
+  let pr = args.pr ?? null;
+  if (pr === null) {
+    let branch: string;
+    try {
+      branch = await github.currentBranch();
+    } catch (err) {
+      return {
+        kind: 'error',
+        exit: {
+          code: 1,
+          message: `Cannot detect a PR to take over: ${errMsg(err)}. Pass --pr <N> or switch to a branch with an open PR.`,
+        },
+      };
+    }
+    let found: { number: number } | null;
+    try {
+      found = await github.getPrForBranch(branch);
+    } catch (err) {
+      return { kind: 'error', exit: { code: 1, message: errMsg(err) } };
+    }
+    if (found === null) {
+      return {
+        kind: 'error',
+        exit: {
+          code: 1,
+          message: `No open PR found for branch ${branch}. Pass --pr <N> to specify, or open a PR first.`,
+        },
+      };
+    }
+    pr = found.number;
+  }
+
+  const now = new Date().toISOString();
+  const state: RunState = {
+    status: 'awaiting-pr',
+    prGroups: [],
+    currentGroupIndex: 0,
+    currentTaskIndex: 0,
+    sessionCount: 0,
+    currentPr: pr,
+    runId: `takeover-${Date.now().toString(36)}`,
+    provider: 'openrouter',
+    model: resolved.models.generic ?? DEFAULT_MODELS.generic,
+    agentConfigFile: 'CLAUDE.md',
+    createdAt: now,
+    updatedAt: now,
+    options: {
+      autoMerge: resolved.autoMerge,
+      maxPrs: resolved.maxPrs,
+      maxSessions: resolved.maxSessions,
+      mergeMethod: resolved.mergeMethod,
+      stylePath: resolved.stylePath,
+      concurrency: resolved.concurrency,
+    },
+  };
+  return { kind: 'ok', state };
+}
+
+function isFileNotFound(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code: unknown }).code === 'ENOENT'
+  );
 }

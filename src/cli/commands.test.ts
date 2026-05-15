@@ -22,6 +22,20 @@ function badAuth(): StartCtx['authStatus'] {
   return async () => ({ ok: false, scopes: [] });
 }
 
+// Stub for the `github` slot on MergePrCtx — short-circuits the precondition path
+// that would otherwise shell out to git on a freshly-initialised temp repo with no
+// commits and no branches.
+function stubGithub(opts: {
+  currentBranch: string;
+  prForBranch: { number: number } | null;
+}): import('../github/github-client.ts').GitHubClient {
+  const stub = {
+    currentBranch: async () => opts.currentBranch,
+    getPrForBranch: async () => opts.prForBranch,
+  };
+  return stub as unknown as import('../github/github-client.ts').GitHubClient;
+}
+
 // ---- runStart ---------------------------------------------------------------
 
 test('runStart: happy path → initialises state, calls runLoop, exits 0', async () => {
@@ -352,7 +366,44 @@ test('runMergePr: falls back to state.currentPr when --pr absent', async () => {
   }
 });
 
-test('runMergePr: no state file → exit 1', async () => {
+test('runMergePr: no state file + --pr synthesizes state and runs the flow', async () => {
+  // Take-over flow: user opened the PR by hand (Claude Code, `gh pr create`) and
+  // never ran `aitm start`. `aitm merge-pr --pr N` must auto-init state and proceed,
+  // not error with "did you run aitm start?".
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let flowPr: number | null = null;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 42 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        runMergeFlow: async (input) => {
+          flowPr = input.pr;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(flowPr, 42);
+    // Persisted so the next call resumes without --pr.
+    const persisted = JSON.parse(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+    ) as { currentPr: number; status: string };
+    assert.equal(persisted.currentPr, 42);
+    assert.equal(persisted.status, 'awaiting-pr');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: no state, no --pr, no branch PR → exit 1 with help', async () => {
+  // Stubbed github so we don't actually shell out to git on the temp repo (which has
+  // no commits or branches). Exercises the precondition path: no --pr, no current PR.
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();
   try {
@@ -363,11 +414,14 @@ test('runMergePr: no state file → exit 1', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
-        runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
+        runMergeFlow: async () => {
+          assert.fail('flow must not run when no PR can be discovered');
+        },
+        github: stubGithub({ currentBranch: 'main', prForBranch: null }),
       },
     );
     assert.equal(result.code, 1);
-    assert.match(result.message ?? '', /run state|aitm start/i);
+    assert.match(result.message ?? '', /no open PR found|--pr/i);
   } finally {
     await repo.cleanup();
     await home.cleanup();

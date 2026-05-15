@@ -451,12 +451,58 @@ async function defaultRunLoop(_input: RunLoopInput): Promise<WorkLoopResult> {
   };
 }
 
-async function defaultRunMergeFlow(_input: RunMergeFlowInput): Promise<WorkLoopResult> {
+// Real merge-pr adapter. Drives runTakeOverFlow against the cwd worktree: wait CI →
+// Reviewer per unresolved thread → push → loop → merge. See src/loop/take-over-flow.ts
+// for the iteration shape (mirrors claude-task-master `merge_pr`).
+async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopResult> {
+  const { runTakeOverFlow } = await import('../loop/take-over-flow.ts');
+  const { execa } = await import('execa');
+  const { bashTool, readFileTool, writeFileTool } = await import('../tools/fs-tools.ts');
+  const { githubThreadTool } = await import('../tools/github-thread-tool.ts');
+
+  const worktreePath = input.cwd;
+  const baseBranch = await input.github.defaultBranch();
+  const styleContents = input.agentConfig.contents;
+
+  // Build the bash/readFile/writeFile/github tool surfaces, scoped to the cwd worktree.
+  // The Reviewer needs all four; Worker needs the first three.
+  const fsInit = { cwd: worktreePath };
+  const bash = bashTool(fsInit);
+  const readFile = readFileTool(fsInit);
+  const writeFile = writeFileTool(fsInit);
+  const github = githubThreadTool({ github: input.github });
+
+  const result = await runTakeOverFlow({
+    pr: input.pr,
+    worktreePath,
+    baseBranch,
+    github: input.github,
+    mergeMethod: input.runState.options.mergeMethod,
+    push: async (cwd) => {
+      const r = await execa('git', ['push'], { cwd });
+      if (r.exitCode !== 0) {
+        throw new Error(`git push failed: ${r.stderr || r.stdout}`);
+      }
+    },
+    subagents: {
+      reviewerModel: input.credentials.modelFor('reviewer'),
+      reviewerTools: { readFile, writeFile, bash, github },
+      workerModel: input.credentials.modelFor('worker'),
+      workerTools: { readFile, writeFile, bash },
+      styleContents,
+    },
+  });
+
+  if (result.kind === 'merged') {
+    return {
+      kind: 'success',
+      outcomes: [{ groupId: `takeover-${result.pr}`, status: 'merged', pr: result.pr }],
+    };
+  }
   return {
     kind: 'blocked',
-    reason:
-      'merge-pr flow adapter not yet wired in this build. Inject `runMergeFlow` via CLI options, or wait for the integration wiring task.',
-    outcomes: [],
+    reason: result.reason,
+    outcomes: [{ groupId: `takeover-${input.pr}`, status: 'blocked', reason: result.reason }],
   };
 }
 

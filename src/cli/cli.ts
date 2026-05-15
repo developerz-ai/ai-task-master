@@ -2,6 +2,7 @@
 // docs/commands/start.md, docs/commands/merge-pr.md, docs/commands/config.md
 // Single entry. Parses argv, dispatches, exits with the right code.
 
+import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from './args.ts';
 import type { MergePrCtx, StartCtx } from './commands.ts';
@@ -98,7 +99,7 @@ Docs: docs/commands/start.md, docs/commands/merge-pr.md, docs/commands/config.md
 
 // Entry-point: when invoked as a script (via the `aitm` bin), parse process.argv
 // and propagate the exit code. When imported (e.g. from tests), this is skipped.
-if (isEntrypoint()) {
+if (isEntrypoint(import.meta.url, process.argv[1])) {
   main(process.argv.slice(2)).then(
     (code) => {
       process.exit(code);
@@ -110,11 +111,14 @@ if (isEntrypoint()) {
   );
 }
 
-function isEntrypoint(): boolean {
-  const entry = process.argv[1];
-  if (entry === undefined) return false;
+// Exported for unit-test coverage of the symlink case (global installs put a symlink at
+// e.g. ~/.bun/bin/aitm pointing at dist/cli/cli.js — argv[1] and import.meta.url differ
+// until argv[1] is resolved via realpath).
+export function isEntrypoint(metaUrl: string, argv1: string | undefined): boolean {
+  if (argv1 === undefined) return false;
   try {
-    return import.meta.url === pathToFileURL(entry).href;
+    const real = realpathSync(argv1);
+    return metaUrl === pathToFileURL(real).href;
   } catch {
     return false;
   }

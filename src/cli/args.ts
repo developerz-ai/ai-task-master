@@ -57,45 +57,52 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
 
   let i = 0;
   while (i < args.length) {
-    const arg = args[i];
-    if (arg === undefined) break;
-    if (arg === '--criteria') {
-      const v = args[i + 1];
-      if (v === undefined) return HELP;
+    const raw = args[i];
+    if (raw === undefined) break;
+    const { flag, inlineValue, consumed } = splitFlag(raw);
+    if (flag === '--criteria') {
+      const v = takeValue(args, i, inlineValue);
+      if (v === null) return HELP;
       criteria = v;
-      i += 2;
-    } else if (arg === '--max-prs') {
-      const n = parseNonNegativeInt(args[i + 1]);
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--max-prs') {
+      const v = takeValue(args, i, inlineValue);
+      const n = parseNonNegativeInt(v);
       if (n === null) return HELP;
       maxPrs = n;
-      i += 2;
-    } else if (arg === '--max-sessions') {
-      const n = parseNonNegativeInt(args[i + 1]);
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--max-sessions') {
+      const v = takeValue(args, i, inlineValue);
+      const n = parseNonNegativeInt(v);
       if (n === null) return HELP;
       maxSessions = n;
-      i += 2;
-    } else if (arg === '--concurrency') {
-      const n = parsePositiveInt(args[i + 1]);
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--concurrency') {
+      const v = takeValue(args, i, inlineValue);
+      const n = parsePositiveInt(v);
       if (n === null) return HELP;
       concurrency = n;
-      i += 2;
-    } else if (arg === '--no-automerge') {
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--no-automerge') {
+      // Boolean flag rejects any inline value: `--no-automerge=true` is a usage error,
+      // not silently treated as the boolean.
+      if (inlineValue !== null) return HELP;
       autoMerge = false;
       i += 1;
-    } else if (arg === '--style') {
-      const v = args[i + 1];
-      if (v === undefined) return HELP;
+    } else if (flag === '--style') {
+      const v = takeValue(args, i, inlineValue);
+      if (v === null) return HELP;
       stylePath = v;
-      i += 2;
-    } else if (arg === '--model') {
-      const v = args[i + 1];
-      if (v === undefined) return HELP;
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--model') {
+      const v = takeValue(args, i, inlineValue);
+      if (v === null) return HELP;
       model = v;
-      i += 2;
-    } else if (arg.startsWith('--')) {
+      i += consumed(inlineValue !== null);
+    } else if (raw.startsWith('--')) {
       return HELP;
     } else {
-      positionals.push(arg);
+      positionals.push(raw);
       i += 1;
     }
   }
@@ -119,14 +126,17 @@ function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {
   let resume = true;
   let i = 0;
   while (i < args.length) {
-    const arg = args[i];
-    if (arg === undefined) break;
-    if (arg === '--pr') {
-      const n = parsePositiveInt(args[i + 1]);
+    const raw = args[i];
+    if (raw === undefined) break;
+    const { flag, inlineValue, consumed } = splitFlag(raw);
+    if (flag === '--pr') {
+      const v = takeValue(args, i, inlineValue);
+      const n = parsePositiveInt(v);
       if (n === null) return HELP;
       pr = n;
-      i += 2;
-    } else if (arg === '--no-resume') {
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--no-resume') {
+      if (inlineValue !== null) return HELP;
       resume = false;
       i += 1;
     } else {
@@ -148,6 +158,7 @@ function parseConfig(args: ReadonlyArray<string>): ParsedArgs {
     if (arg === '--project') {
       scope = 'project';
     } else if (arg.startsWith('--')) {
+      // `--project=anything` is a usage error: --project is a boolean flag.
       return HELP;
     } else {
       positionals.push(arg);
@@ -181,14 +192,47 @@ function parseConfig(args: ReadonlyArray<string>): ParsedArgs {
   }
 }
 
-function parseNonNegativeInt(s: string | undefined): number | null {
-  if (s === undefined) return null;
+function parseNonNegativeInt(s: string | null | undefined): number | null {
+  if (s === undefined || s === null) return null;
   if (!/^\d+$/.test(s)) return null;
   const n = Number(s);
   return Number.isSafeInteger(n) ? n : null;
 }
 
-function parsePositiveInt(s: string | undefined): number | null {
+function parsePositiveInt(s: string | null | undefined): number | null {
   const n = parseNonNegativeInt(s);
   return n !== null && n > 0 ? n : null;
+}
+
+// Split `--key=value` into flag + inline value. For `--key` alone, inlineValue is null
+// and the caller must read args[i+1] for the value (two-token form).
+function splitFlag(raw: string): {
+  flag: string;
+  inlineValue: string | null;
+  consumed: (inline: boolean) => number;
+} {
+  if (!raw.startsWith('--')) {
+    return { flag: raw, inlineValue: null, consumed: () => 1 };
+  }
+  const eq = raw.indexOf('=');
+  if (eq === -1) {
+    return { flag: raw, inlineValue: null, consumed: (inline) => (inline ? 1 : 2) };
+  }
+  return {
+    flag: raw.slice(0, eq),
+    inlineValue: raw.slice(eq + 1),
+    consumed: (inline) => (inline ? 1 : 2),
+  };
+}
+
+// Resolve the value for a flag: prefer the inline form (--key=value); fall back to the
+// next argv token (--key value). Returns null when neither is present.
+function takeValue(
+  args: ReadonlyArray<string>,
+  i: number,
+  inlineValue: string | null,
+): string | null {
+  if (inlineValue !== null) return inlineValue;
+  const next = args[i + 1];
+  return next ?? null;
 }

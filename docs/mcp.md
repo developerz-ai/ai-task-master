@@ -2,9 +2,16 @@
 
 `aitm` is an **MCP client only**. It connects to external MCP servers declared in config and mounts their tools into subagent tool surfaces. It never exposes itself as an MCP server (out of scope per `CLAUDE.md`).
 
-## Config
+## Config sources
 
-`mcpServers` lives in `~/.aitm.json` (global) and/or `./.ai-task-master/config.json` (project). Project entries merge over global by server name.
+`aitm` discovers `mcpServers` from **four** locations and merges them, so a config that already works in Claude Code works here unchanged. Precedence, lowest → highest (higher entries with the same name shadow lower ones and emit a warning):
+
+1. `~/.claude.json` — Claude Code user scope (`mcpServers` key).
+2. `~/.aitm.json` — aitm user scope.
+3. `./.mcp.json` — Claude Code project scope, checked into git ([reference](https://code.claude.com/docs/en/mcp)).
+4. `./.ai-task-master/config.json` — aitm project scope (final word).
+
+The same shape (a `mcpServers` object keyed by server name) is used everywhere.
 
 ```jsonc
 {

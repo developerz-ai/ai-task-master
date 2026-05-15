@@ -4,13 +4,15 @@
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ZodError } from 'zod';
+import { ZodError, z } from 'zod';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
+import { type McpServers, McpServersSchema } from '../mcp/schema.ts';
 import {
   type CliOverrides,
   type ConfigFile,
   ConfigFileSchema,
+  type McpServerSource,
   type ResolvedConfig,
 } from './schema.ts';
 
@@ -18,6 +20,12 @@ const GLOBAL_FILE = '.aitm.json';
 const PROJECT_DIR = '.ai-task-master';
 const PROJECT_FILE = 'config.json';
 const SNAPSHOT_FILE = 'config.snapshot.json';
+// Claude Code's standard MCP config files. Discovering these lets users plug aitm into
+// the same MCP servers their Claude Code session already uses, without re-declaring them.
+// Refs: https://code.claude.com/docs/en/mcp ("Project scope" = .mcp.json in project root;
+// "User scope" = ~/.claude.json with an mcpServers key).
+const CLAUDE_PROJECT_MCP_FILE = '.mcp.json';
+const CLAUDE_USER_FILE = '.claude.json';
 
 const KNOWN_KEYS = new Set<string>([
   'openrouterApiKey',
@@ -63,6 +71,8 @@ export class ConfigLoader {
   async resolve(cliOverrides: CliOverrides): Promise<ResolvedConfig> {
     const global = await this.readGlobal();
     const project = await this.readProject();
+    const claudeUser = await this.readClaudeUserMcp();
+    const claudeProject = await this.readClaudeProjectMcp();
 
     const { apiKey, apiKeySource } = this.resolveApiKey(global, project);
 
@@ -72,6 +82,13 @@ export class ConfigLoader {
           '"openrouterApiKey" to ~/.aitm.json or ./.ai-task-master/config.json.',
       );
     }
+
+    const { mcpServers, mcpServerSources } = this.resolveMcpServers({
+      aitmGlobal: global?.mcpServers,
+      aitmProject: project?.mcpServers,
+      claudeUser,
+      claudeProject,
+    });
 
     return {
       openrouterApiKey: apiKey,
@@ -110,6 +127,8 @@ export class ConfigLoader {
         global?.concurrency,
         DEFAULTS.concurrency,
       ),
+      mcpServers,
+      mcpServerSources,
     };
   }
 
@@ -121,6 +140,19 @@ export class ConfigLoader {
     return this.readConfigFile(join(this.cwd, PROJECT_DIR, PROJECT_FILE));
   }
 
+  // Read Claude Code's project-scoped MCP file (./.mcp.json). Schema is permissive:
+  // we only extract `mcpServers`, ignore any other keys Claude Code may add.
+  async readClaudeProjectMcp(): Promise<McpServers | null> {
+    return this.readMcpEnvelope(join(this.cwd, CLAUDE_PROJECT_MCP_FILE));
+  }
+
+  // Read Claude Code's user-scoped config (~/.claude.json) and extract the `mcpServers`
+  // block, if any. ~/.claude.json holds many unrelated keys (auth tokens, history); we
+  // intentionally read it but only consume `mcpServers`.
+  async readClaudeUserMcp(): Promise<McpServers | null> {
+    return this.readMcpEnvelope(join(this.homeDir, CLAUDE_USER_FILE));
+  }
+
   // Frozen run snapshot. API key value is replaced by its source label so the
   // file is safe to inspect; only the resolution source is recorded.
   async writeSnapshot(resolved: ResolvedConfig, stateDir: string): Promise<void> {
@@ -130,6 +162,64 @@ export class ConfigLoader {
     };
     const path = join(stateDir, SNAPSHOT_FILE);
     await atomicWrite(path, `${JSON.stringify(redacted, null, 2)}\n`);
+  }
+
+  // Reads any JSON file whose only field we care about is `mcpServers` (Claude Code's
+  // .mcp.json or the much larger ~/.claude.json). Missing file → null. Malformed JSON
+  // is a hard error — we don't want to silently ignore a corrupted user file.
+  private async readMcpEnvelope(path: string): Promise<McpServers | null> {
+    let raw: string;
+    try {
+      raw = await readFile(path, 'utf8');
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`${path}: invalid JSON — ${msg}`);
+    }
+    const envelope = McpEnvelopeSchema.safeParse(parsed);
+    if (!envelope.success) {
+      throw new Error(`${path}: ${formatZodError(envelope.error)}`);
+    }
+    return envelope.data.mcpServers ?? null;
+  }
+
+  private resolveMcpServers(sources: {
+    aitmGlobal: McpServers | undefined;
+    aitmProject: McpServers | undefined;
+    claudeUser: McpServers | null;
+    claudeProject: McpServers | null;
+  }): { mcpServers: McpServers; mcpServerSources: Record<string, McpServerSource> } {
+    // Precedence, lowest → highest:
+    //   1. ~/.claude.json (user-scoped Claude Code config)
+    //   2. ~/.aitm.json   (user-scoped aitm config)
+    //   3. ./.mcp.json    (project-scoped Claude Code config, checked into git)
+    //   4. ./.ai-task-master/config.json (project-scoped aitm config — final word)
+    // Same name in two places: higher precedence wins; the lower is shadowed with a warn.
+    const layers: Array<[McpServerSource, McpServers | null | undefined]> = [
+      ['claude-user', sources.claudeUser],
+      ['aitm-global', sources.aitmGlobal],
+      ['claude-mcp-project', sources.claudeProject],
+      ['aitm-project', sources.aitmProject],
+    ];
+    const merged: McpServers = {};
+    const sourceMap: Record<string, McpServerSource> = {};
+    for (const [label, servers] of layers) {
+      if (!servers) continue;
+      for (const [name, server] of Object.entries(servers)) {
+        if (name in merged) {
+          this.warn(`mcp server "${name}" from ${label} shadows entry from ${sourceMap[name]}`);
+        }
+        merged[name] = server;
+        sourceMap[name] = label;
+      }
+    }
+    return { mcpServers: merged, mcpServerSources: sourceMap };
   }
 
   private async readConfigFile(path: string): Promise<ConfigFile | null> {
@@ -242,3 +332,11 @@ function isNotFound(err: unknown): boolean {
 function formatZodError(err: ZodError): string {
   return err.issues.map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ');
 }
+
+// Permissive envelope for Claude Code config files: we only extract `mcpServers` and
+// ignore every other key (~/.claude.json especially has many auth/history fields).
+const McpEnvelopeSchema = z
+  .object({
+    mcpServers: McpServersSchema.optional(),
+  })
+  .passthrough();

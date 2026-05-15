@@ -66,4 +66,13 @@ export type ResolvedConfig = {
   stylePath: string | null;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   concurrency: number;
+  // Merged MCP server map across all discovered sources (see ConfigLoader.resolve for
+  // precedence). Empty object when nothing was found — never undefined, so callers can
+  // iterate without null-checks.
+  mcpServers: import('../mcp/schema.ts').McpServers;
+  // One label per server name explaining where the entry came from. Useful for the
+  // snapshot, `aitm config list`, and "duplicate name shadowed by X" warnings.
+  mcpServerSources: Record<string, McpServerSource>;
 };
+
+export type McpServerSource = 'aitm-global' | 'aitm-project' | 'claude-mcp-project' | 'claude-user';

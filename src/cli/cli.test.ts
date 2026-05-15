@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type { MainCtx } from './cli.ts';
-import { main } from './cli.ts';
+import { isEntrypoint, main } from './cli.ts';
 
 const FAKE_KEY = 'sk-or-fake-test-key';
 
@@ -227,4 +228,50 @@ test('cli.ts source preserves shebang as first line', async () => {
   const cliPath = join(here, '..', 'cli.ts');
   const contents = await readFile(cliPath, 'utf8');
   assert.match(contents, /^#!\/usr\/bin\/env node\n/);
+});
+
+// ---- entrypoint detection ---------------------------------------------
+
+test('isEntrypoint: direct invocation (argv[1] === real cli path) is true', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-ep-'));
+  try {
+    const cli = join(dir, 'cli.js');
+    await writeFile(cli, '// noop');
+    assert.equal(isEntrypoint(pathToFileURL(cli).href, cli), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('isEntrypoint: symlink invocation resolves through realpath (global-install case)', async () => {
+  // Reproduces what `npm i -g .` does: places a symlink at ~/.bun/bin/aitm pointing at
+  // dist/cli/cli.js. Without realpath, the equality check failed and the CLI exited
+  // silently with no output (the bug this regression test guards against).
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-ep-link-'));
+  try {
+    const real = join(dir, 'cli.js');
+    const link = join(dir, 'aitm');
+    await writeFile(real, '// noop');
+    await symlink(real, link);
+    assert.equal(isEntrypoint(pathToFileURL(real).href, link), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('isEntrypoint: imported as a module (argv[1] points elsewhere) is false', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-ep-other-'));
+  try {
+    const cli = join(dir, 'cli.js');
+    const other = join(dir, 'other.js');
+    await writeFile(cli, '// noop');
+    await writeFile(other, '// noop');
+    assert.equal(isEntrypoint(pathToFileURL(cli).href, other), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('isEntrypoint: undefined argv[1] is false (no crash)', () => {
+  assert.equal(isEntrypoint('file:///whatever', undefined), false);
 });

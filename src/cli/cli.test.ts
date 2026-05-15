@@ -130,21 +130,28 @@ test('main: start without OPENROUTER_API_KEY → exit 1, message on stderr', asy
 
 // ---- merge-pr dispatch -----------------------------------------------------
 
-test('main: merge-pr with no run state → exit 1 with actionable message', async () => {
+test('main: merge-pr --pr N with no prior state → exit 0 (take-over path)', async () => {
+  // Regression test for the take-over flow: `aitm merge-pr --pr N` from a freshly cloned
+  // repo (no prior `aitm start`) should auto-init state and run the flow, mirroring the
+  // claude-task-master `merge_pr` behavior.
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();
   const cap = capture();
   try {
-    const code = await main(['merge-pr'], {
+    let flowRan = false;
+    const code = await main(['merge-pr', '--pr', '7'], {
       ...cap.ctx,
       cwd: repo.path,
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
-      runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
+      runMergeFlow: async () => {
+        flowRan = true;
+        return { kind: 'success', outcomes: [] };
+      },
     });
-    assert.equal(code, 1);
-    assert.match(cap.err.join(''), /run state|aitm start/i);
+    assert.equal(code, 0, cap.err.join(''));
+    assert.equal(flowRan, true);
   } finally {
     await repo.cleanup();
     await home.cleanup();

@@ -123,3 +123,15 @@ test('compact returns the summarizer text and embeds the JSON of older messages'
   assert.match(sent, /bulleted note/);
   assert.ok(sent.includes(JSON.stringify(older)), 'prompt must embed JSON of older messages');
 });
+
+test('compact survives circular references in messages', async () => {
+  const { model } = summarizerReturning('- summary');
+  const c = new Compactor({ summarizer: model, limits: stubLimits(100_000) });
+  type CyclicMessage = { role: string; content: string; self?: unknown };
+  const a: CyclicMessage = { role: 'user', content: 'first' };
+  const b: CyclicMessage = { role: 'assistant', content: 'second' };
+  a.self = b;
+  b.self = a; // cycle: a.self -> b.self -> a
+  const summary = await c.compact([a, b]);
+  assert.equal(summary, '- summary');
+});

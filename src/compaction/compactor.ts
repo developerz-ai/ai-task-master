@@ -68,8 +68,23 @@ export class Compactor {
   async compact(olderMessages: ReadonlyArray<unknown>): Promise<string> {
     const { text } = await generateText({
       model: this.init.summarizer,
-      prompt: `${SUMMARY_INSTRUCTIONS}\n${JSON.stringify(olderMessages)}`,
+      prompt: `${SUMMARY_INSTRUCTIONS}\n${safeStringify(olderMessages)}`,
     });
     return text;
   }
+}
+
+// Cycle-safe JSON.stringify. SDK message objects can transitively reference each other
+// (tool result -> tool call -> step -> message), and a single circular ref would throw a
+// raw TypeError out of compact() and crash the agent loop mid-step. Replace any cycle
+// with the literal "[CYCLE]" so the summarizer still gets a usable transcript.
+function safeStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+  return JSON.stringify(value, (_key, v) => {
+    if (v !== null && typeof v === 'object') {
+      if (seen.has(v)) return '[CYCLE]';
+      seen.add(v);
+    }
+    return v;
+  });
 }

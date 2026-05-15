@@ -51,6 +51,31 @@ const startCases: Case[] = [
     argv: ['start', 'goal', '--max-sessions', '0'],
     expected: { kind: 'start', goal: 'goal', maxSessions: 0 },
   },
+  {
+    name: 'start: --max-prs=N inline form',
+    argv: ['start', 'goal', '--max-prs=4'],
+    expected: { kind: 'start', goal: 'goal', maxPrs: 4 },
+  },
+  {
+    name: 'start: --max-sessions=0 inline form',
+    argv: ['start', 'goal', '--max-sessions=0'],
+    expected: { kind: 'start', goal: 'goal', maxSessions: 0 },
+  },
+  {
+    name: 'start: --criteria= with value containing =',
+    argv: ['start', 'goal', '--criteria=foo=bar'],
+    expected: { kind: 'start', goal: 'goal', criteria: 'foo=bar' },
+  },
+  {
+    name: 'start: --model=anthropic/claude inline',
+    argv: ['start', 'goal', '--model=anthropic/claude-opus-4.7'],
+    expected: { kind: 'start', goal: 'goal', model: 'anthropic/claude-opus-4.7' },
+  },
+  {
+    name: 'start: mix of inline and two-token flags',
+    argv: ['start', '--max-prs=2', 'goal', '--concurrency', '3'],
+    expected: { kind: 'start', goal: 'goal', maxPrs: 2, concurrency: 3 },
+  },
 ];
 
 const mergeCases: Case[] = [
@@ -73,6 +98,11 @@ const mergeCases: Case[] = [
     name: 'merge-pr: both flags',
     argv: ['merge-pr', '--pr', '7', '--no-resume'],
     expected: { kind: 'merge-pr', resume: false, pr: 7 },
+  },
+  {
+    name: 'merge-pr: --pr=N inline form',
+    argv: ['merge-pr', '--pr=42'],
+    expected: { kind: 'merge-pr', resume: true, pr: 42 },
   },
 ];
 
@@ -189,6 +219,21 @@ const helpCases: Case[] = [
   {
     name: 'start: unknown flag',
     argv: ['start', 'g', '--bogus'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: --no-automerge=true rejected (boolean flag, no value allowed)',
+    argv: ['start', 'g', '--no-automerge=true'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: --max-prs= with empty value',
+    argv: ['start', 'g', '--max-prs='],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: --max-prs=abc inline rejected',
+    argv: ['start', 'g', '--max-prs=abc'],
     expected: { kind: 'help' },
   },
   {

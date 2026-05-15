@@ -290,6 +290,138 @@ test('writeSnapshot writes config.snapshot.json with API key replaced by source 
   }
 });
 
+test('resolve: discovers mcpServers from Claude Code .mcp.json at project root', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeFile(
+      join(cwd.path, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem'] },
+        },
+      }),
+    );
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    const resolved = await loader.resolve({});
+    assert.ok(resolved.mcpServers.filesystem, 'filesystem entry must be picked up');
+    assert.equal(resolved.mcpServerSources.filesystem, 'claude-mcp-project');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: discovers mcpServers from ~/.claude.json user file', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeFile(
+      join(home.path, '.claude.json'),
+      JSON.stringify({
+        oauthAccount: { something: 'unrelated' },
+        mcpServers: {
+          notes: { command: 'mcp-notes' },
+        },
+      }),
+    );
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    const resolved = await loader.resolve({});
+    assert.ok(resolved.mcpServers.notes);
+    assert.equal(resolved.mcpServerSources.notes, 'claude-user');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: project aitm config beats Claude .mcp.json on same server name', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeFile(
+      join(cwd.path, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: { fs: { command: 'claude-fs' } },
+      }),
+    );
+    await writeProjectConfig(cwd.path, {
+      openrouterApiKey: 'sk-proj',
+      mcpServers: { fs: { command: 'aitm-fs' } },
+    });
+    const warn = makeWarnCollector();
+    const loader = new ConfigLoader(cwd.path, home.path, {}, { warn: warn.warn });
+    const resolved = await loader.resolve({});
+    const fs = resolved.mcpServers.fs;
+    assert.ok(fs && 'command' in fs);
+    assert.equal(fs.command, 'aitm-fs');
+    assert.equal(resolved.mcpServerSources.fs, 'aitm-project');
+    assert.ok(warn.calls.some((m) => m.includes('shadows')));
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: merges mcpServers from all four sources without overlap', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeFile(
+      join(home.path, '.claude.json'),
+      JSON.stringify({ mcpServers: { a: { command: 'a' } } }),
+    );
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-global',
+      mcpServers: { b: { command: 'b' } },
+    });
+    await writeFile(
+      join(cwd.path, '.mcp.json'),
+      JSON.stringify({ mcpServers: { c: { command: 'c' } } }),
+    );
+    await writeProjectConfig(cwd.path, { mcpServers: { d: { command: 'd' } } });
+    const loader = new ConfigLoader(cwd.path, home.path, {});
+    const resolved = await loader.resolve({});
+    assert.deepEqual(Object.keys(resolved.mcpServers).sort(), ['a', 'b', 'c', 'd']);
+    assert.deepEqual(resolved.mcpServerSources, {
+      a: 'claude-user',
+      b: 'aitm-global',
+      c: 'claude-mcp-project',
+      d: 'aitm-project',
+    });
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: empty mcpServers when no source provides any', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    const resolved = await loader.resolve({});
+    assert.deepEqual(resolved.mcpServers, {});
+    assert.deepEqual(resolved.mcpServerSources, {});
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: malformed .mcp.json throws with file path in message', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeFile(join(cwd.path, '.mcp.json'), '{ not valid json');
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    await assert.rejects(() => loader.resolve({}), /\.mcp\.json.*invalid JSON/);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('writeSnapshot preserves apiKeySource=project label when project supplied key', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

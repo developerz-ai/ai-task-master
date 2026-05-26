@@ -83,12 +83,17 @@ export function writeFileTool(init: FsToolInit): Tool<WriteFileInput, WriteFileO
   });
 }
 
+// Unlike readFileTool/writeFileTool, bash is intentionally NOT confined to the worktree:
+// subagents need git, test and build commands, so `cd`, absolute paths and `git -C` are all
+// legitimate uses. The trust boundary is "an agent is running on your repo" — the same as
+// Claude Code itself; sandboxing/containerization is out of scope for v1 (see CLAUDE.md).
+// The worktree is the initial cwd as a convenience default, not a security boundary.
 export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
   const exec = init.exec ?? execa;
   const defaultTimeout = init.defaultTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
   return tool({
     description:
-      'Run a shell command inside the current worktree. Returns stdout, stderr, and exit code. The command is executed via `bash -c` with cwd locked to the worktree.',
+      'Run a shell command inside the current worktree. Returns stdout, stderr, and exit code. The command runs via `bash -c` with its initial cwd set to the worktree.',
     inputSchema: bashInputSchema,
     execute: async (input): Promise<BashOutput> => {
       const timeout = input.timeoutMs ?? defaultTimeout;

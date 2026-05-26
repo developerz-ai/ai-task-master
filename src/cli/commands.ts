@@ -15,6 +15,7 @@ import type { CliOverrides, ResolvedConfig } from '../config/schema.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { GitHubClient } from '../github/github-client.ts';
+import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
 import type { RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
@@ -438,17 +439,11 @@ function formatConfigValue(value: unknown): string {
 
 const defaultAuthStatus: AuthStatusFn = (cwd) => new GitHubClient(cwd).authStatus();
 
-// Default loop seam — the production wiring of Orchestrator+Worker+Reviewer subagent
-// tools, MCP servers, and worktree pool lands in the integration phase (plan PR 12).
-// Until that adapter exists, surface a clear `blocked` outcome instead of throwing
-// "not implemented", so the dispatch path itself stays observable.
-async function defaultRunLoop(_input: RunLoopInput): Promise<WorkLoopResult> {
-  return {
-    kind: 'blocked',
-    reason:
-      'WorkLoop adapter not yet wired in this build. Inject `runLoop` via CLI options, or wait for the integration wiring task.',
-    outcomes: [],
-  };
+// Default loop seam — production wiring of Planner → PlanGraph → WorktreePool → WorkLoop with
+// the Orchestrator/Worker/Reviewer subagents and MCP tools. Lives in run-loop-adapter.ts so this
+// module stays pure dispatch; the adapter exposes its own seams for unit + integration tests.
+async function defaultRunLoop(input: RunLoopInput): Promise<WorkLoopResult> {
+  return runLoopAdapter(input);
 }
 
 async function defaultRunMergeFlow(_input: RunMergeFlowInput): Promise<WorkLoopResult> {

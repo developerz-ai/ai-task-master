@@ -88,12 +88,14 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
   const defaultTimeout = init.defaultTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
   return tool({
     description:
-      'Run a shell command inside the current worktree. Returns stdout, stderr, and exit code. The command is executed via `bash -lc` with cwd locked to the worktree.',
+      'Run a shell command inside the current worktree. Returns stdout, stderr, and exit code. The command is executed via `bash -c` with cwd locked to the worktree.',
     inputSchema: bashInputSchema,
     execute: async (input): Promise<BashOutput> => {
       const timeout = input.timeoutMs ?? defaultTimeout;
       try {
-        const r = await exec('bash', ['-lc', input.command], {
+        // Plain `-c`, not a login shell (`-lc`): a login shell sources /etc/profile and
+        // ~/.bash_profile, which in CI can `cd` away from `cwd` before the command runs.
+        const r = await exec('bash', ['-c', input.command], {
           cwd: init.cwd,
           timeout,
         });

@@ -107,7 +107,10 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   const sleep = input.sleep ?? defaultSleep;
   const log = input.logger;
 
-  for (let iteration = 0; iteration < maxIterations; iteration++) {
+  // Hoisted so the post-loop merge can report how many iterations actually ran: on an
+  // early `break` it holds the break index, on natural exhaustion it equals maxIterations.
+  let iteration = 0;
+  for (; iteration < maxIterations; iteration++) {
     log?.info('take-over: iteration start', { pr: input.pr, iteration });
 
     // 1. Wait for CI to settle. waitForChecks throws CiFailed on hard failure; we treat
@@ -186,7 +189,7 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
 
   await input.github.mergePr(input.pr, input.mergeMethod);
   log?.info('take-over: merged', { pr: input.pr });
-  return { kind: 'merged', pr: input.pr, iterations: maxIterations };
+  return { kind: 'merged', pr: input.pr, iterations: iteration };
 }
 
 // Convert waitForChecks' throw-on-failure semantics into a status return so the loop can

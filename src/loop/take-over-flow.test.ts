@@ -92,6 +92,8 @@ test('runTakeOverFlow: CI green + no threads → merges immediately', async () =
   const gh = fakeGithub({ checks: ['success'], threads: [[]] });
   const result = await runTakeOverFlow(baseInput(gh.github));
   assert.equal(result.kind, 'merged');
+  // Broke on the first pass (CI already green, no threads) → zero fix iterations ran.
+  if (result.kind === 'merged') assert.equal(result.iterations, 0);
   assert.deepEqual(
     gh.calls.map((c) => c.method),
     ['waitForChecks', 'listUnresolvedThreads', 'waitForChecks', 'listUnresolvedThreads', 'mergePr'],
@@ -137,6 +139,8 @@ test('runTakeOverFlow: unresolved threads → invokes Reviewer, pushes, then mer
   });
   const result = await runTakeOverFlow(input);
   assert.equal(result.kind, 'merged');
+  // One fix iteration ran (threads → reviewer → push), then iteration 1 was clean → merge.
+  if (result.kind === 'merged') assert.equal(result.iterations, 1);
   assert.equal(reviewerInvocations, 1);
   assert.equal(pushed, 1, 'must push after Reviewer fixed something');
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 1);

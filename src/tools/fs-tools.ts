@@ -95,9 +95,12 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
       try {
         // Plain `-c`, not a login shell (`-lc`): a login shell sources /etc/profile and
         // ~/.bash_profile, which in CI can `cd` away from `cwd` before the command runs.
+        // Also scrub BASH_ENV — even a non-login `bash -c` sources the file it points to
+        // at startup, which could `cd` away and defeat the cwd lock.
         const r = await exec('bash', ['-c', input.command], {
           cwd: init.cwd,
           timeout,
+          env: { ...process.env, BASH_ENV: '' },
         });
         return {
           stdout: typeof r.stdout === 'string' ? r.stdout : '',

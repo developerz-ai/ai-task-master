@@ -50,8 +50,6 @@ function positivePr(label: string, raw: string | undefined, fallback: number | n
   return n;
 }
 
-const SEED_PR = positivePr('AITM_DEBUG_PR', process.env.AITM_DEBUG_PR, 1);
-
 // `--pr N` anywhere in argv attaches to an existing PR; otherwise we seed state. A present
 // but malformed `--pr` value is an error (no silent fallback to the seeded PR).
 function parsePrFlag(argv: readonly string[]): number | undefined {
@@ -124,16 +122,20 @@ async function reportState(statePath: string): Promise<void> {
 
 async function run(): Promise<number> {
   const prFlag = parsePrFlag(process.argv.slice(2));
+  // Seed mode (no --pr) reads the PR from AITM_DEBUG_PR; validate it only here so a
+  // malformed env var never breaks an explicit `--pr` run that doesn't use it.
+  const seedPr =
+    prFlag === undefined ? positivePr('AITM_DEBUG_PR', process.env.AITM_DEBUG_PR, 1) : undefined;
   const repo = await setupRepo();
   const statePath = join(repo, '.ai-task-master', 'state.json');
 
   // With --pr, aitm synthesizes state from the number; otherwise seed a currentPr.
   const argv = prFlag !== undefined ? ['merge-pr', '--pr', String(prFlag)] : ['merge-pr'];
-  if (prFlag === undefined) await seedState(repo, SEED_PR);
+  if (seedPr !== undefined) await seedState(repo, seedPr);
 
   console.log(`[debug:merge-pr] temp repo : ${repo}`);
   console.log(`[debug:merge-pr] state file: ${statePath}`);
-  console.log(`[debug:merge-pr] pr        : ${prFlag ?? `${SEED_PR} (seeded)`}`);
+  console.log(`[debug:merge-pr] pr        : ${prFlag ?? `${seedPr} (seeded)`}`);
   console.log(`[debug:merge-pr] argv      : ${argv.join(' ')}\n`);
 
   let aitmCode = 1;

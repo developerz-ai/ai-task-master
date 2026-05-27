@@ -17,7 +17,7 @@ import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { GitHubClient } from '../github/github-client.ts';
 import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
-import type { RunState } from '../state/schema.ts';
+import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import type { ParsedArgs } from './args.ts';
 
@@ -48,11 +48,36 @@ export type RunMergeFlowInput = {
   github: GitHubClient;
 };
 
+// Inputs for the optional one-shot planning phase (issue #17). Mirrors the Planner's needs:
+// goal + criteria + coding-style payload + a planner model handle (`credentials.modelFor('planner')`).
+export type RunPlannerInput = {
+  cwd: string;
+  resolved: ResolvedConfig;
+  credentials: Credentials;
+  agentConfig: AgentConfig;
+  goal: string;
+  criteria: string | undefined;
+};
+
+// Planner already returns the plan-time `Plan` shape; the adapter maps it to persisted
+// `PrGroup[]` (see `planToPrGroups` in src/loop/run-loop-adapter.ts). A `runPlanner` seam
+// therefore hands `runStart` the already-mapped groups, or a block reason.
+export type RunPlannerOutcome =
+  | { kind: 'ok'; groups: PrGroup[] }
+  | { kind: 'blocked'; reason: string };
+
 export type StartCtx = {
   cwd?: string;
   homeDir?: string;
   env?: Record<string, string | undefined>;
   authStatus?: AuthStatusFn;
+  // Optional one-shot planning hook (issue #17). When injected, `runStart` runs it once on a
+  // fresh run — between `state.init` and `runLoop` — to populate `prGroups` and flip status
+  // `planning → working`, and skips it on resume. When omitted, planning happens inside the
+  // WorkLoop adapter (the merged default in src/loop/run-loop-adapter.ts), so production
+  // behaviour is unchanged; this keeps the planning phase observable + injectable at the
+  // dispatch layer, which is what the start-flow tests exercise.
+  runPlanner?: (input: RunPlannerInput) => Promise<RunPlannerOutcome>;
   runLoop?: (input: RunLoopInput) => Promise<WorkLoopResult>;
 };
 
@@ -158,6 +183,35 @@ export async function runStart(
       await loader.writeSnapshot(resolved, stateDir);
     } catch (err) {
       return { code: 1, message: errMsg(err) };
+    }
+  }
+
+  // Planning phase (issue #17): a one-shot step that runs the Planner once on a fresh run,
+  // before the loop, so `prGroups` is populated and the loop has something to iterate.
+  // Skipped on resume — `prGroups` is already persisted. Only runs when a `runPlanner` seam
+  // is injected; otherwise planning is handled inside the WorkLoop adapter (merged default),
+  // keeping production behaviour unchanged and this module pure dispatch.
+  if (!resuming && ctx.runPlanner) {
+    let plan: RunPlannerOutcome;
+    try {
+      plan = await ctx.runPlanner({
+        cwd,
+        resolved,
+        credentials,
+        agentConfig,
+        goal: args.goal,
+        criteria: args.criteria,
+      });
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+    if (plan.kind === 'blocked') {
+      return { code: 1, message: plan.reason };
+    }
+    try {
+      await state.update((s) => ({ ...s, status: 'working', prGroups: plan.groups }));
+    } catch (err) {
+      return { code: 1, message: `Failed to persist plan: ${errMsg(err)}` };
     }
   }
 

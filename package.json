@@ -23,6 +23,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test",
     "test:node": "node --test --import tsx \"src/**/*.test.ts\"",
+    "debug:start": "bun --inspect-brk scripts/debug-start.ts",
+    "debug:merge-pr": "bun --inspect-brk scripts/debug-merge-pr.ts",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write ."

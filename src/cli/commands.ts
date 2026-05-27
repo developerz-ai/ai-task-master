@@ -8,6 +8,7 @@
 
 import { homedir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
+import type { LanguageModel } from 'ai';
 import { type AgentConfig, AgentConfigDetector } from '../agent-config/agent-config-detector.ts';
 import { ConfigLoader } from '../config/config-loader.ts';
 import { ConfigWriter } from '../config/config-writer.ts';
@@ -16,8 +17,10 @@ import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { GitHubClient } from '../github/github-client.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
-import type { RunState } from '../state/schema.ts';
+import type { PlannedGroup } from '../plan/schema.ts';
+import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
+import type { PlannerResult } from '../subagents/planner.ts';
 import type { ParsedArgs } from './args.ts';
 
 export type CommandExit = { code: 0 | 1 | 2; message?: string };
@@ -34,6 +37,15 @@ export type RunLoopInput = {
   goal: string;
   criteria: string | undefined;
 };
+
+export type RunPlannerFn = (input: {
+  goal: string;
+  criteria: string | undefined;
+  agentConfig: AgentConfig;
+  model: LanguageModel;
+  maxPrs: number;
+  cwd: string;
+}) => Promise<PlannerResult>;
 
 export type RunMergeFlowInput = {
   cwd: string;
@@ -52,6 +64,7 @@ export type StartCtx = {
   homeDir?: string;
   env?: Record<string, string | undefined>;
   authStatus?: AuthStatusFn;
+  runPlanner?: RunPlannerFn;
   runLoop?: (input: RunLoopInput) => Promise<WorkLoopResult>;
 };
 
@@ -155,6 +168,35 @@ export async function runStart(
       await state.init(initial);
       await state.writeGoal(args.goal, args.criteria);
       await loader.writeSnapshot(resolved, stateDir);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+
+    const runPlannerFn = ctx.runPlanner ?? defaultRunPlanner;
+    let plannerResult: PlannerResult;
+    try {
+      plannerResult = await runPlannerFn({
+        goal: args.goal,
+        criteria: args.criteria,
+        agentConfig,
+        model: credentials.modelFor('planner'),
+        maxPrs: resolved.maxPrs,
+        cwd,
+      });
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+
+    if (plannerResult.kind === 'error') {
+      return { code: 1, message: plannerResult.error };
+    }
+    if (plannerResult.kind === 'blocked') {
+      return { code: 1, message: plannerResult.reason };
+    }
+
+    const prGroups: PrGroup[] = toPrGroups(plannerResult.plan.groups);
+    try {
+      await state.update((s) => ({ ...s, prGroups, status: 'working' }));
     } catch (err) {
       return { code: 1, message: errMsg(err) };
     }
@@ -406,6 +448,18 @@ function buildInitialRunState(input: {
   };
 }
 
+function toPrGroups(groups: PlannedGroup[]): PrGroup[] {
+  return groups.map((g) => ({
+    id: g.id,
+    title: g.title,
+    tasks: g.tasks.map((t) => t.description),
+    dependsOn: g.dependsOn,
+    branch: null,
+    pr: null,
+    status: 'pending',
+  }));
+}
+
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -437,6 +491,43 @@ function formatConfigValue(value: unknown): string {
 }
 
 const defaultAuthStatus: AuthStatusFn = (cwd) => new GitHubClient(cwd).authStatus();
+
+// Default planner seam — creates a PlannerAgent with read-only repo tools scoped to
+// cwd, then runs it. Uses dynamic imports so the test path stays light.
+async function defaultRunPlanner(input: {
+  goal: string;
+  criteria: string | undefined;
+  agentConfig: AgentConfig;
+  model: LanguageModel;
+  maxPrs: number;
+  cwd: string;
+}): Promise<PlannerResult> {
+  const { readFileTool, bashTool } = await import('../tools/fs-tools.ts');
+  const { createPlannerAgent, runPlanner, PLANNER_SYSTEM_PREFIX } = await import(
+    '../subagents/planner.ts'
+  );
+
+  const fsInit = { cwd: input.cwd };
+  const tools = {
+    readFile: readFileTool(fsInit),
+    bash: bashTool(fsInit),
+  };
+
+  const systemPrompt = input.agentConfig.contents + PLANNER_SYSTEM_PREFIX;
+
+  const agent = createPlannerAgent({
+    model: input.model,
+    tools,
+    systemPrompt,
+  });
+
+  return runPlanner(agent, {
+    goal: input.goal,
+    criteria: input.criteria,
+    styleContents: input.agentConfig.contents,
+    maxPrs: input.maxPrs,
+  });
+}
 
 // Default loop seam — the production wiring of Orchestrator+Worker+Reviewer subagent
 // tools, MCP servers, and worktree pool lands in the integration phase (plan PR 12).

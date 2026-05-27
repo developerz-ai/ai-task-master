@@ -89,6 +89,13 @@ test('main: start with stubbed env routes to runStart and forwards exit code', a
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      runPlanner: async () => ({
+        kind: 'ok' as const,
+        plan: {
+          goal: 'add jwt auth',
+          groups: [{ id: 'g1', title: 'G1', tasks: [{ description: 'do it' }], dependsOn: [] }],
+        },
+      }),
       runLoop: async () => {
         called++;
         return { kind: 'success', outcomes: [] };

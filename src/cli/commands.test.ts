@@ -22,6 +22,16 @@ function badAuth(): StartCtx['authStatus'] {
   return async () => ({ ok: false, scopes: [] });
 }
 
+function okPlanner() {
+  return async () => ({
+    kind: 'ok' as const,
+    plan: {
+      goal: 'g',
+      groups: [{ id: 'g1', title: 'G1', tasks: [{ description: 'do it' }], dependsOn: [] }],
+    },
+  });
+}
+
 // Stub for the `github` slot on MergePrCtx — short-circuits the precondition path
 // that would otherwise shell out to git on a freshly-initialised temp repo with no
 // commits and no branches.
@@ -51,6 +61,7 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        runPlanner: okPlanner(),
         runLoop: async (input) => {
           loopCalls++;
           captured = input;
@@ -63,7 +74,7 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
     assert.ok(captured, 'runLoop received input');
     const stateRaw = await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8');
     const persisted = JSON.parse(stateRaw) as { status: string; options: { autoMerge: boolean } };
-    assert.equal(persisted.status, 'planning');
+    assert.equal(persisted.status, 'working');
     assert.equal(persisted.options.autoMerge, true);
     const goal = await readFile(join(repo.path, '.ai-task-master', 'goal.txt'), 'utf8');
     assert.equal(goal.trim(), 'add jwt auth');
@@ -184,6 +195,7 @@ test('runStart: WorkLoopResult.blocked → exit 1 carrying reason', async () => 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        runPlanner: okPlanner(),
         runLoop: async () => ({
           kind: 'blocked',
           reason: 'planner refused',
@@ -210,6 +222,7 @@ test('runStart: awaiting-pr (--no-automerge) → exit 0 with merge-pr instructio
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        runPlanner: okPlanner(),
         runLoop: async () => ({ kind: 'awaiting-pr', prs: [17], outcomes: [] }),
       },
     );
@@ -233,6 +246,7 @@ test('runStart: session-cap → exit 0', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        runPlanner: okPlanner(),
         runLoop: async () => ({ kind: 'session-cap', outcomes: [] }),
       },
     );
@@ -261,6 +275,7 @@ test('runStart: CLI overrides reach the persisted run state', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        runPlanner: okPlanner(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -270,6 +285,112 @@ test('runStart: CLI overrides reach the persisted run state', async () => {
     assert.equal(persisted.options.maxPrs, 3);
     assert.equal(persisted.options.autoMerge, false);
     assert.equal(persisted.options.concurrency, 2);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: runs Planner on fresh state and persists prGroups with status working', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let plannerCalls = 0;
+    const result = await runStart(
+      { kind: 'start', goal: 'add hello world', criteria: 'tests pass' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        runPlanner: async () => {
+          plannerCalls++;
+          return {
+            kind: 'ok',
+            plan: {
+              goal: 'add hello world',
+              groups: [
+                {
+                  id: 'add-hello',
+                  title: 'Add hello.txt',
+                  tasks: [{ description: 'Create hello.txt with "hello"' }],
+                  dependsOn: [],
+                },
+              ],
+            },
+          };
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(plannerCalls, 1);
+    const persisted = JSON.parse(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+    ) as {
+      status: string;
+      prGroups: { id: string; title: string; tasks: string[]; dependsOn: string[]; branch: null; pr: null; status: string }[];
+    };
+    assert.equal(persisted.status, 'working');
+    assert.equal(persisted.prGroups.length, 1);
+    assert.equal(persisted.prGroups[0].id, 'add-hello');
+    assert.equal(persisted.prGroups[0].title, 'Add hello.txt');
+    assert.deepEqual(persisted.prGroups[0].tasks, ['Create hello.txt with "hello"']);
+    assert.deepEqual(persisted.prGroups[0].dependsOn, []);
+    assert.equal(persisted.prGroups[0].branch, null);
+    assert.equal(persisted.prGroups[0].pr, null);
+    assert.equal(persisted.prGroups[0].status, 'pending');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: skips Planner on resume', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const stateDir = join(repo.path, '.ai-task-master');
+    await mkdir(stateDir, { recursive: true });
+    const existingState = {
+      status: 'working',
+      prGroups: [{ id: 'existing', title: 'Existing', tasks: ['old task'], dependsOn: [], branch: null, pr: null, status: 'pending' }],
+      currentGroupIndex: 0,
+      currentTaskIndex: 0,
+      sessionCount: 0,
+      currentPr: null,
+      runId: 'run-existing',
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-4.6',
+      agentConfigFile: 'CLAUDE.md',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      options: { autoMerge: true, maxPrs: 5, maxSessions: null, mergeMethod: 'squash', stylePath: null, concurrency: 1 },
+    };
+    await writeFile(join(stateDir, 'state.json'), `${JSON.stringify(existingState, null, 2)}\n`);
+
+    let plannerCalls = 0;
+    let loopCalls = 0;
+    const result = await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        runPlanner: async () => {
+          plannerCalls++;
+          return { kind: 'ok', plan: { goal: 'g', groups: [] } };
+        },
+        runLoop: async () => {
+          loopCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(plannerCalls, 0, 'Planner must not be called on resume');
+    assert.equal(loopCalls, 1);
   } finally {
     await repo.cleanup();
     await home.cleanup();

@@ -15,6 +15,7 @@ export type MainCtx = {
   stdout?: (chunk: string) => void;
   stderr?: (chunk: string) => void;
   authStatus?: StartCtx['authStatus'];
+  runPlanner?: StartCtx['runPlanner'];
   runLoop?: StartCtx['runLoop'];
   runMergeFlow?: MergePrCtx['runMergeFlow'];
 };
@@ -45,6 +46,7 @@ function buildStartCtx(ctx: MainCtx): StartCtx {
   if (ctx.homeDir !== undefined) out.homeDir = ctx.homeDir;
   if (ctx.env !== undefined) out.env = ctx.env;
   if (ctx.authStatus !== undefined) out.authStatus = ctx.authStatus;
+  if (ctx.runPlanner !== undefined) out.runPlanner = ctx.runPlanner;
   if (ctx.runLoop !== undefined) out.runLoop = ctx.runLoop;
   return out;
 }

@@ -16,8 +16,8 @@ import type { Capability } from '../config/schema.ts';
 //   opus   → smart   : Planner, Reviewer (architectural reasoning, critique)
 //   opus   → coding  : Worker (best-in-class code generation)
 export const DEFAULT_MODELS: Record<Capability, string> = {
-  fast: 'anthropic/claude-haiku-4.5',
-  generic: 'anthropic/claude-sonnet-4.6',
-  smart: 'anthropic/claude-opus-4.7',
-  coding: 'anthropic/claude-opus-4.7',
+  fast: 'openrouter/owl-alpha',
+  generic: 'openrouter/owl-alpha',
+  smart: 'openrouter/owl-alpha',
+  coding: 'openrouter/owl-alpha',
 };

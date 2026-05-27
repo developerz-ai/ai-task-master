@@ -1,0 +1,59 @@
+name: release
+
+# Publish to npm when a v* tag is pushed. Gated on the same test suite CI runs, on both
+# runtimes, before publishing. Requires an NPM_TOKEN repo secret (see RELEASING / the PR).
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  test-bun:
+    name: test (bun)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun test
+
+  test-node:
+    name: test (node 20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run test:node -- --test-concurrency=2
+
+  publish:
+    name: publish to npm
+    needs: [test-bun, test-node]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - run: bun install
+      - run: bun run build
+      # `npm publish` also runs `prepublishOnly` (build + test) as a final guard.
+      - name: publish
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

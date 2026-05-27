@@ -28,12 +28,12 @@ No babysitting. No prompt-stuffing. No bespoke agent framework.
 ## ⚡ Install
 
 ```bash
-bun  install -g aitm    # recommended for local dev
-npm  install -g aitm    # works the same
-deno install -A npm:aitm
+npm  install -g ai-task-master    # puts the `aitm` command on your PATH
+bun  install -g ai-task-master    # works the same
+deno install -A -n aitm npm:ai-task-master
 ```
 
-Plain ESM + a `bun build --compile` single-file binary. No runtime lock-in.
+The package is `ai-task-master`; the command it installs is `aitm`. Plain ESM — no runtime lock-in.
 
 ## 🚀 Quickstart
 

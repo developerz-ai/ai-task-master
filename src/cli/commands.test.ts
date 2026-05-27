@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { makeTempRepo } from '../testing/temp-repo.ts';
-import type { CommandExit, RunLoopInput, RunMergeFlowInput, StartCtx } from './commands.ts';
+import type {
+  CommandExit,
+  RunLoopInput,
+  RunMergeFlowInput,
+  RunPlannerInput,
+  StartCtx,
+} from './commands.ts';
 import { runConfig, runMergePr, runStart } from './commands.ts';
 
 const FAKE_KEY = 'sk-or-fake-test-key';
@@ -20,6 +26,51 @@ function okAuth(): StartCtx['authStatus'] {
 
 function badAuth(): StartCtx['authStatus'] {
   return async () => ({ ok: false, scopes: [] });
+}
+
+// Writes a schema-valid state.json so `runStart` takes the resume branch (state.read()
+// succeeds). prGroups defaults to a single pre-populated group (a prior planning phase);
+// pass `prGroups: []` to mirror a run whose planning blocked before persisting any plan.
+async function seedStartState(
+  repoPath: string,
+  opts: { prGroups?: unknown[] } = {},
+): Promise<void> {
+  const dir = join(repoPath, '.ai-task-master');
+  await mkdir(dir, { recursive: true });
+  const now = new Date().toISOString();
+  const state = {
+    status: 'working',
+    prGroups: opts.prGroups ?? [
+      {
+        id: 'seeded',
+        title: 'seeded group',
+        tasks: ['existing task'],
+        dependsOn: [],
+        branch: 'aitm/seeded',
+        pr: null,
+        status: 'pending',
+      },
+    ],
+    currentGroupIndex: 0,
+    currentTaskIndex: 0,
+    sessionCount: 0,
+    currentPr: null,
+    runId: 'run-resume',
+    provider: 'openrouter',
+    model: 'anthropic/claude-sonnet-4.6',
+    agentConfigFile: 'CLAUDE.md',
+    createdAt: now,
+    updatedAt: now,
+    options: {
+      autoMerge: true,
+      maxPrs: 5,
+      maxSessions: null,
+      mergeMethod: 'squash',
+      stylePath: null,
+      concurrency: 1,
+    },
+  };
+  await writeFile(join(dir, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
 }
 
 // Stub for the `github` slot on MergePrCtx — short-circuits the precondition path
@@ -270,6 +321,164 @@ test('runStart: CLI overrides reach the persisted run state', async () => {
     assert.equal(persisted.options.maxPrs, 3);
     assert.equal(persisted.options.autoMerge, false);
     assert.equal(persisted.options.concurrency, 2);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+// ---- runStart: planning phase (issue #17) -----------------------------------
+
+test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups + status working', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const seq: string[] = [];
+    let plannerInput: RunPlannerInput | null = null;
+    const groups = [
+      {
+        id: 'hello',
+        title: 'add hello.txt',
+        tasks: ['create hello.txt with the word hi'],
+        dependsOn: [],
+        branch: 'aitm/hello',
+        pr: null,
+        status: 'pending' as const,
+      },
+    ];
+    const result = await runStart(
+      { kind: 'start', goal: 'add a hello.txt with the word hi', criteria: 'file exists' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        runPlanner: async (input) => {
+          seq.push('plan');
+          plannerInput = input;
+          return { kind: 'ok', groups };
+        },
+        runLoop: async () => {
+          seq.push('loop');
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    // Planning is a one-shot phase that runs once, before the loop.
+    assert.deepEqual(seq, ['plan', 'loop']);
+    assert.equal(plannerInput?.goal, 'add a hello.txt with the word hi');
+    assert.equal(plannerInput?.criteria, 'file exists');
+    // Plan persisted: prGroups populated, status flipped planning → working.
+    const persisted = JSON.parse(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+    ) as { status: string; prGroups: { id: string; status: string }[] };
+    assert.equal(persisted.status, 'working');
+    assert.equal(persisted.prGroups.length, 1);
+    assert.equal(persisted.prGroups[0]?.id, 'hello');
+    assert.equal(persisted.prGroups[0]?.status, 'pending');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: resume (existing state.json) skips runPlanner, preserves prior prGroups', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedStartState(repo.path);
+    let plannerCalls = 0;
+    const result = await runStart(
+      { kind: 'start', goal: 'add hello' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        runPlanner: async () => {
+          plannerCalls++;
+          return { kind: 'ok', groups: [] };
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(plannerCalls, 0, 'planner must not run on resume — prGroups already persisted');
+    const persisted = JSON.parse(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+    ) as { prGroups: { id: string }[] };
+    assert.equal(persisted.prGroups[0]?.id, 'seeded');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: resume with empty prGroups (prior planning blocked) re-runs runPlanner', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    // A prior run initialised state.json but its planning blocked before persisting any plan.
+    await seedStartState(repo.path, { prGroups: [] });
+    let plannerCalls = 0;
+    const groups = [
+      {
+        id: 'replanned',
+        title: 'replanned group',
+        tasks: ['do the work'],
+        dependsOn: [],
+        branch: 'aitm/replanned',
+        pr: null,
+        status: 'pending' as const,
+      },
+    ];
+    const result = await runStart(
+      { kind: 'start', goal: 'add hello' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        runPlanner: async () => {
+          plannerCalls++;
+          return { kind: 'ok', groups };
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(plannerCalls, 1, 'planner must re-run when no plan is persisted yet');
+    const persisted = JSON.parse(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+    ) as { status: string; prGroups: { id: string }[] };
+    assert.equal(persisted.status, 'working');
+    assert.equal(persisted.prGroups[0]?.id, 'replanned');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: runPlanner blocked → exit 1 with reason, runLoop not invoked', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const result = await runStart(
+      { kind: 'start', goal: 'unbuildable' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        runPlanner: async () => ({ kind: 'blocked', reason: 'goal is not actionable' }),
+        runLoop: async () => {
+          assert.fail('runLoop must not run when planning blocks');
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /goal is not actionable/);
   } finally {
     await repo.cleanup();
     await home.cleanup();

@@ -15,8 +15,9 @@ import type { CliOverrides, ResolvedConfig } from '../config/schema.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { GitHubClient } from '../github/github-client.ts';
+import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
-import type { RunState } from '../state/schema.ts';
+import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import type { ParsedArgs } from './args.ts';
 
@@ -47,11 +48,36 @@ export type RunMergeFlowInput = {
   github: GitHubClient;
 };
 
+// Inputs for the optional one-shot planning phase (issue #17). Mirrors the Planner's needs:
+// goal + criteria + coding-style payload + a planner model handle (`credentials.modelFor('planner')`).
+export type RunPlannerInput = {
+  cwd: string;
+  resolved: ResolvedConfig;
+  credentials: Credentials;
+  agentConfig: AgentConfig;
+  goal: string;
+  criteria: string | undefined;
+};
+
+// Planner already returns the plan-time `Plan` shape; the adapter maps it to persisted
+// `PrGroup[]` (see `planToPrGroups` in src/loop/run-loop-adapter.ts). A `runPlanner` seam
+// therefore hands `runStart` the already-mapped groups, or a block reason.
+export type RunPlannerOutcome =
+  | { kind: 'ok'; groups: PrGroup[] }
+  | { kind: 'blocked'; reason: string };
+
 export type StartCtx = {
   cwd?: string;
   homeDir?: string;
   env?: Record<string, string | undefined>;
   authStatus?: AuthStatusFn;
+  // Optional one-shot planning hook (issue #17). When injected, `runStart` runs it once on a
+  // fresh run — between `state.init` and `runLoop` — to populate `prGroups` and flip status
+  // `planning → working`, and skips it on resume. When omitted, planning happens inside the
+  // WorkLoop adapter (the merged default in src/loop/run-loop-adapter.ts), so production
+  // behaviour is unchanged; this keeps the planning phase observable + injectable at the
+  // dispatch layer, which is what the start-flow tests exercise.
+  runPlanner?: (input: RunPlannerInput) => Promise<RunPlannerOutcome>;
   runLoop?: (input: RunLoopInput) => Promise<WorkLoopResult>;
 };
 
@@ -139,8 +165,9 @@ export async function runStart(
   // prior state" cases (ENOENT, JSON parse failure, schema mismatch); surface every
   // other error (permissions, IO) as a hard failure rather than silently re-initing.
   let resuming = false;
+  let existingState: RunState | null = null;
   try {
-    await state.read();
+    existingState = await state.read();
     resuming = true;
   } catch (err) {
     if (!isMissingOrInvalidState(err, stateDir)) {
@@ -157,6 +184,38 @@ export async function runStart(
       await loader.writeSnapshot(resolved, stateDir);
     } catch (err) {
       return { code: 1, message: errMsg(err) };
+    }
+  }
+
+  // Planning phase (issue #17): a one-shot step that runs the Planner once, before the loop,
+  // so `prGroups` is populated and the loop has something to iterate. Gated on whether a plan
+  // is already persisted — not merely on `resuming` — because a prior run whose planning
+  // blocked leaves a resumable state.json with empty `prGroups`; that case must re-plan rather
+  // than hand the loop an empty plan. Only runs when a `runPlanner` seam is injected; otherwise
+  // planning is handled inside the WorkLoop adapter (merged default), keeping production
+  // behaviour unchanged and this module pure dispatch.
+  const hasPersistedPlan = (existingState?.prGroups.length ?? 0) > 0;
+  if (ctx.runPlanner && !hasPersistedPlan) {
+    let plan: RunPlannerOutcome;
+    try {
+      plan = await ctx.runPlanner({
+        cwd,
+        resolved,
+        credentials,
+        agentConfig,
+        goal: args.goal,
+        criteria: args.criteria,
+      });
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+    if (plan.kind === 'blocked') {
+      return { code: 1, message: plan.reason };
+    }
+    try {
+      await state.update((s) => ({ ...s, status: 'working', prGroups: plan.groups }));
+    } catch (err) {
+      return { code: 1, message: `Failed to persist plan: ${errMsg(err)}` };
     }
   }
 
@@ -438,17 +497,11 @@ function formatConfigValue(value: unknown): string {
 
 const defaultAuthStatus: AuthStatusFn = (cwd) => new GitHubClient(cwd).authStatus();
 
-// Default loop seam — the production wiring of Orchestrator+Worker+Reviewer subagent
-// tools, MCP servers, and worktree pool lands in the integration phase (plan PR 12).
-// Until that adapter exists, surface a clear `blocked` outcome instead of throwing
-// "not implemented", so the dispatch path itself stays observable.
-async function defaultRunLoop(_input: RunLoopInput): Promise<WorkLoopResult> {
-  return {
-    kind: 'blocked',
-    reason:
-      'WorkLoop adapter not yet wired in this build. Inject `runLoop` via CLI options, or wait for the integration wiring task.',
-    outcomes: [],
-  };
+// Default loop seam — production wiring of Planner → PlanGraph → WorktreePool → WorkLoop with
+// the Orchestrator/Worker/Reviewer subagents and MCP tools. Lives in run-loop-adapter.ts so this
+// module stays pure dispatch; the adapter exposes its own seams for unit + integration tests.
+async function defaultRunLoop(input: RunLoopInput): Promise<WorkLoopResult> {
+  return runLoopAdapter(input);
 }
 
 // Real merge-pr adapter. Drives runTakeOverFlow against the cwd worktree: wait CI →

@@ -52,10 +52,10 @@ jobs:
       - name: lint
         run: npm run lint
 
+      # Per-workspace (npm), so the Node job never shells out to bun — the root
+      # typecheck/test:node scripts delegate via `bun run --filter`.
       - name: typecheck
-        run: npm run typecheck
+        run: npm run typecheck --workspaces
 
-      # node --test parallelizes per-file by default (one worker per CPU). On a 2 vCPU box
-      # that pins concurrency to 2 — explicit so the behavior is the same on any runner size.
       - name: test
-        run: npm run test:node -- --test-concurrency=2
+        run: npm run test:node --workspaces

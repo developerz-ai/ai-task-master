@@ -1,0 +1,45 @@
+{
+  "name": "aitm",
+  "version": "0.0.0",
+  "description": "Autonomous task orchestrator. Goal in, merged PRs out.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "aitm": "./dist/cli/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
+    "test:node": "node --test --import tsx \"src/**/*.test.ts\"",
+    "debug:start": "bun --inspect-brk scripts/debug-start.ts",
+    "debug:merge-pr": "bun --inspect-brk scripts/debug-merge-pr.ts",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write ."
+  },
+  "dependencies": {
+    "@ai-sdk/mcp": "^1.0.42",
+    "@openrouter/ai-sdk-provider": "^2.9.0",
+    "ai": "^6.0.182",
+    "execa": "^9.6.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
+    "@types/node": "^25.7.0",
+    "tsx": "^4.22.0",
+    "typescript": "^6.0.3"
+  }
+}

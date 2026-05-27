@@ -2,7 +2,14 @@
   "$schema": "https://biomejs.dev/schemas/2.4.15/schema.json",
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!dist", "!node_modules", "!docs/vendor", "!**/*.tsbuildinfo", "!coverage"]
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/node_modules",
+      "!**/docs/vendor",
+      "!**/*.tsbuildinfo",
+      "!**/coverage"
+    ]
   },
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   "assist": {

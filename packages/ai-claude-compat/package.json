@@ -1,0 +1,23 @@
+{
+  "name": "@developerz-ai/ai-claude-compat",
+  "version": "0.0.0",
+  "description": "Claude-Code-style agent primitives for the Vercel AI SDK: FS/bash tools, an <env> system-context block, a subagent-as-tool factory, and .claude/ skills/agents loading.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:node": "node --test --import tsx \"src/**/*.test.ts\""
+  }
+}

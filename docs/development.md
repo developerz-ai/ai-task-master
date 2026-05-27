@@ -100,3 +100,36 @@ launches with `--inspect-brk` / `stopOnEntry`, execution halts before the first 
 your breakpoints are registered before anything runs; continue (F5) and you'll stop at
 them. Verified: under `--inspect-brk` the runner halts at entry and hands control to the
 attached debugger.
+
+## End-to-end smoke (`aitm start` → PR → `aitm merge-pr` → merged)
+
+A single named, repeatable smoke that crosses **both** commands against a **real** sandbox
+GitHub repo — the source of truth for behavior per the project CLAUDE.md. It creates a fresh
+repo with a minimal `CLAUDE.md`, runs `aitm start "add file FOO with content BAR" --max-prs 1
+--max-sessions 2 --no-automerge` (expects `awaiting-pr` + a real PR number), then `aitm
+merge-pr` (resume from state), asserts `FOO` landed on the default branch, and deletes the
+repo. **Cleanup happens only on success** — a failing run leaves the repo behind for
+inspection.
+
+```bash
+# As a test — runs under both runners. With the envs UNSET it SKIPS cleanly (no failure):
+OPENROUTER_API_KEY=… AITM_SANDBOX_REPO=<github-owner> bun test test/integration/e2e-smoke.test.ts
+OPENROUTER_API_KEY=… AITM_SANDBOX_REPO=<github-owner> node --test --import tsx test/integration/e2e-smoke.test.ts
+
+# As a local script — with the envs UNSET it FAILS FAST (exit 2) printing what to set:
+OPENROUTER_API_KEY=… AITM_SANDBOX_REPO=<github-owner> bun scripts/smoke-e2e.ts
+```
+
+Gating differs by entry point on purpose: the **test skips** so it's safe in a secret-less CI
+run, while the **script exits non-zero** with guidance so an interactive operator who forgot
+the envs gets a clear error instead of a silent no-op.
+
+- `AITM_SANDBOX_REPO` is the **owner** (org/user); a fresh `aitm-smoke-<id>` repo is created under it each run.
+- `AITM_SMOKE_MODEL` overrides the model (defaults to a free OpenRouter model — never spends credits).
+
+Prerequisites for a green run:
+
+- `gh` authenticated with the **`delete_repo`** scope (cleanup deletes the repo).
+- The `start` half's Worker needs file-edit tools (`readFile`/`writeFile`/`bash`) from an MCP
+  filesystem+shell server (see `./mcp.md`); without them `aitm start` blocks before opening a
+  PR. The `merge-pr` half uses aitm's own local fs-tools and needs no MCP.

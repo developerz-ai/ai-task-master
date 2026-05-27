@@ -46,7 +46,11 @@ export class Credentials {
       this.resolved.models[capability] ||
       this.resolved.models.generic ||
       DEFAULT_MODELS[capability];
-    return this.provider().chat(modelId);
+    // Subagents lean on structured output (Output.object). OpenRouter may route a model to a
+    // provider — notably Amazon Bedrock — that rejects the AI SDK's structured-output request
+    // (`output_config.format`), failing the Planner/Worker/Reviewer at random. Skip Bedrock so
+    // those calls land on a provider that accepts the parameter.
+    return this.provider().chat(modelId, { provider: { ignore: ['amazon-bedrock'] } });
   }
 
   // Lets CLI fail fast before any LLM call (docs/commands/start.md §Preconditions step 2).

@@ -29,14 +29,18 @@ function badAuth(): StartCtx['authStatus'] {
 }
 
 // Writes a schema-valid state.json so `runStart` takes the resume branch (state.read()
-// succeeds). prGroups is pre-populated to mirror a prior planning phase.
-async function seedStartState(repoPath: string): Promise<void> {
+// succeeds). prGroups defaults to a single pre-populated group (a prior planning phase);
+// pass `prGroups: []` to mirror a run whose planning blocked before persisting any plan.
+async function seedStartState(
+  repoPath: string,
+  opts: { prGroups?: unknown[] } = {},
+): Promise<void> {
   const dir = join(repoPath, '.ai-task-master');
   await mkdir(dir, { recursive: true });
   const now = new Date().toISOString();
   const state = {
     status: 'working',
-    prGroups: [
+    prGroups: opts.prGroups ?? [
       {
         id: 'seeded',
         title: 'seeded group',
@@ -405,6 +409,51 @@ test('runStart: resume (existing state.json) skips runPlanner, preserves prior p
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
     ) as { prGroups: { id: string }[] };
     assert.equal(persisted.prGroups[0]?.id, 'seeded');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: resume with empty prGroups (prior planning blocked) re-runs runPlanner', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    // A prior run initialised state.json but its planning blocked before persisting any plan.
+    await seedStartState(repo.path, { prGroups: [] });
+    let plannerCalls = 0;
+    const groups = [
+      {
+        id: 'replanned',
+        title: 'replanned group',
+        tasks: ['do the work'],
+        dependsOn: [],
+        branch: 'aitm/replanned',
+        pr: null,
+        status: 'pending' as const,
+      },
+    ];
+    const result = await runStart(
+      { kind: 'start', goal: 'add hello' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        runPlanner: async () => {
+          plannerCalls++;
+          return { kind: 'ok', groups };
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(plannerCalls, 1, 'planner must re-run when no plan is persisted yet');
+    const persisted = JSON.parse(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+    ) as { status: string; prGroups: { id: string }[] };
+    assert.equal(persisted.status, 'working');
+    assert.equal(persisted.prGroups[0]?.id, 'replanned');
   } finally {
     await repo.cleanup();
     await home.cleanup();

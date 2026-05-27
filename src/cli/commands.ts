@@ -165,8 +165,9 @@ export async function runStart(
   // prior state" cases (ENOENT, JSON parse failure, schema mismatch); surface every
   // other error (permissions, IO) as a hard failure rather than silently re-initing.
   let resuming = false;
+  let existingState: RunState | null = null;
   try {
-    await state.read();
+    existingState = await state.read();
     resuming = true;
   } catch (err) {
     if (!isMissingOrInvalidState(err, stateDir)) {
@@ -186,12 +187,15 @@ export async function runStart(
     }
   }
 
-  // Planning phase (issue #17): a one-shot step that runs the Planner once on a fresh run,
-  // before the loop, so `prGroups` is populated and the loop has something to iterate.
-  // Skipped on resume — `prGroups` is already persisted. Only runs when a `runPlanner` seam
-  // is injected; otherwise planning is handled inside the WorkLoop adapter (merged default),
-  // keeping production behaviour unchanged and this module pure dispatch.
-  if (!resuming && ctx.runPlanner) {
+  // Planning phase (issue #17): a one-shot step that runs the Planner once, before the loop,
+  // so `prGroups` is populated and the loop has something to iterate. Gated on whether a plan
+  // is already persisted — not merely on `resuming` — because a prior run whose planning
+  // blocked leaves a resumable state.json with empty `prGroups`; that case must re-plan rather
+  // than hand the loop an empty plan. Only runs when a `runPlanner` seam is injected; otherwise
+  // planning is handled inside the WorkLoop adapter (merged default), keeping production
+  // behaviour unchanged and this module pure dispatch.
+  const hasPersistedPlan = (existingState?.prGroups.length ?? 0) > 0;
+  if (ctx.runPlanner && !hasPersistedPlan) {
     let plan: RunPlannerOutcome;
     try {
       plan = await ctx.runPlanner({

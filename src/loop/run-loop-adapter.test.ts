@@ -10,7 +10,6 @@ import type { RunLoopInput } from '../cli/commands.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { GitHubClient } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
-import { McpClientManager } from '../mcp/mcp-client.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
@@ -19,7 +18,7 @@ import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import {
   type AdapterStatePort,
   githubThreadTool,
-  NO_EDIT_TOOLS_REASON,
+  localEditTools,
   type PlanGroupsOutcome,
   planToPrGroups,
   type RunLoopAdapterSeams,
@@ -328,21 +327,15 @@ test('resume: prior prGroups in state skip planning entirely', async () => {
   assert.equal(result.kind, 'success');
 });
 
-// ---- Default orchestrator bridge: no MCP edit tools → blocked --------------
+// ---- Default orchestrator bridge: no MCP → local fs-tools fallback ----------
 
-test('default orchestrator blocks the group when no MCP edit tools are connected', async () => {
-  const { state } = makeState();
-  const result = await runLoopAdapter(makeInput({ autoMerge: false }), {
-    // Real default orchestrator bridge; an unconnected MCP manager exposes no tools.
-    state,
-    planGroups: async () => ({ kind: 'ok', groups: [group('only')] }),
-    makeMcp: () => new McpClientManager({ servers: {} }),
-    makePool: () => makePool(),
-    makeGithub: () => makeGithub(),
-  });
-  assert.equal(result.kind, 'blocked');
-  if (result.kind === 'blocked') assert.match(result.reason, /No edit tools available/);
-  assert.equal(NO_EDIT_TOOLS_REASON.includes('readFile'), true);
+test('localEditTools supplies worktree-scoped readFile/writeFile/bash (no-MCP fallback)', () => {
+  // When no MCP server provides edit tools, the Worker/Reviewer fall back to these so a bare
+  // `aitm start` can still edit, commit and open a PR (instead of blocking).
+  const tools = localEditTools('/tmp/some-worktree');
+  assert.equal(typeof tools.readFile.execute, 'function');
+  assert.equal(typeof tools.writeFile.execute, 'function');
+  assert.equal(typeof tools.bash.execute, 'function');
 });
 
 // ---- githubThreadTool ------------------------------------------------------

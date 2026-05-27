@@ -137,6 +137,13 @@ export class GitHubClient {
     if (input.draft) args.push('--draft');
     for (const label of labels) args.push('--label', label);
 
+    // `gh pr create --label X` fails if X doesn't exist yet — which it won't on a fresh repo the
+    // first time aitm opens a PR. Ensure each label exists first (idempotent via --force; the
+    // result is intentionally not checked so a labels-permission gap doesn't block PR creation).
+    for (const label of labels) {
+      await this.runCmd('gh', ['label', 'create', label, '--force'], { cwd: this.cwd });
+    }
+
     const r = await this.runCmd('gh', args, { cwd: this.cwd });
     if (r.exitCode !== 0) {
       throw new Error(`gh pr create failed: ${r.stderr.trim() || r.stdout.trim()}`);

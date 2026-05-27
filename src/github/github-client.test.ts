@@ -148,8 +148,9 @@ test('createPr passes title/body/base/head and default label, then refetches', a
     baseRefName: 'main',
   };
   const { run, calls } = makeRun([
-    { stdout: 'https://github.com/org/repo/pull/7\n' },
-    { stdout: JSON.stringify(pr) },
+    { stdout: '' }, // gh label create <default> --force (idempotent ensure)
+    { stdout: 'https://github.com/org/repo/pull/7\n' }, // gh pr create
+    { stdout: JSON.stringify(pr) }, // gh pr view (refetch)
   ]);
   const g = new GitHubClient('/tmp/repo', run);
   const result = await g.createPr({
@@ -159,8 +160,9 @@ test('createPr passes title/body/base/head and default label, then refetches', a
     head: 'feature/bar',
   });
   assert.deepEqual(result, pr);
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls[0]?.args, [
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0]?.args, ['label', 'create', DEFAULT_PR_LABEL, '--force']);
+  assert.deepEqual(calls[1]?.args, [
     'pr',
     'create',
     '--title',
@@ -174,7 +176,7 @@ test('createPr passes title/body/base/head and default label, then refetches', a
     '--label',
     DEFAULT_PR_LABEL,
   ]);
-  assert.deepEqual(calls[1]?.args.slice(0, 3), ['pr', 'view', 'feature/bar']);
+  assert.deepEqual(calls[2]?.args.slice(0, 3), ['pr', 'view', 'feature/bar']);
 });
 
 test('createPr appends --draft and custom labels', async () => {
@@ -185,7 +187,13 @@ test('createPr appends --draft and custom labels', async () => {
     headRefName: 'feature/baz',
     baseRefName: 'main',
   };
-  const { run, calls } = makeRun([{ stdout: 'url' }, { stdout: JSON.stringify(pr) }]);
+  // 2 label-create calls (l1, l2) + pr create + pr view.
+  const { run, calls } = makeRun([
+    { stdout: '' },
+    { stdout: '' },
+    { stdout: 'url' },
+    { stdout: JSON.stringify(pr) },
+  ]);
   const g = new GitHubClient('/tmp/repo', run);
   await g.createPr({
     title: 't',
@@ -195,7 +203,12 @@ test('createPr appends --draft and custom labels', async () => {
     draft: true,
     labels: ['l1', 'l2'],
   });
-  const args = calls[0]?.args ?? [];
+  // Each custom label is ensured first via `gh label create … --force`.
+  assert.deepEqual(
+    calls.filter((c) => c.args[0] === 'label').map((c) => c.args[2]),
+    ['l1', 'l2'],
+  );
+  const args = calls.find((c) => c.args[0] === 'pr' && c.args[1] === 'create')?.args ?? [];
   assert.ok(args.includes('--draft'));
   const labelIdx: number[] = [];
   args.forEach((v, i) => {
@@ -208,7 +221,11 @@ test('createPr appends --draft and custom labels', async () => {
 });
 
 test('createPr throws if create fails', async () => {
-  const { run } = makeRun([{ exitCode: 1, stderr: 'a label by that name already exists' }]);
+  // call #0 = label-create (ignored), call #1 = pr create (fails).
+  const { run } = makeRun([
+    { stdout: '' },
+    { exitCode: 1, stderr: 'pull request create failed: validation error' },
+  ]);
   const g = new GitHubClient('/tmp/repo', run);
   await assert.rejects(
     () =>

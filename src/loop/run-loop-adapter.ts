@@ -15,6 +15,7 @@
 
 import { resolve as resolvePath } from 'node:path';
 import { type Tool, type ToolSet, tool } from 'ai';
+import { execa } from 'execa';
 import { z } from 'zod';
 // Type-only import — no runtime cycle with commands.ts, which imports this module's value.
 import type { RunLoopInput } from '../cli/commands.ts';
@@ -39,6 +40,7 @@ import {
   WORKER_SYSTEM_PREFIX,
   type WorkerTools,
 } from '../subagents/worker.ts';
+import { bashTool, readFileTool, writeFileTool } from '../tools/fs-tools.ts';
 import { WorktreePool } from '../workspace/worktree-pool.ts';
 import {
   WorkLoop,
@@ -49,13 +51,17 @@ import {
   type WorkLoopState,
 } from './work-loop.ts';
 
-// Surfaced to the model/operator when the Worker (or Reviewer) has no edit tools to work with.
-// Reaching this is how a bare `aitm start` on a repo with no `mcpServers` configured produces
-// the `blocked` WorkLoopResult kind: aitm is an MCP *client*, so readFile/writeFile/bash come
-// from an external MCP filesystem/shell server, not from aitm itself.
-export const NO_EDIT_TOOLS_REASON =
-  'No edit tools available (need readFile, writeFile, bash). Configure an MCP filesystem/shell ' +
-  'server under `mcpServers` so the Worker can read, write and commit files.';
+// Worktree-scoped edit tools the Worker/Reviewer fall back to when no MCP server supplies
+// readFile/writeFile/bash. aitm is MCP-first, but a bare `aitm start` (no `mcpServers`
+// configured) must still be able to edit, commit and open a PR — so it uses aitm's own
+// fs-tools (the same ones the merge-pr flow already wires), scoped to the active worktree.
+export function localEditTools(cwd: string): WorkerTools {
+  return {
+    readFile: readFileTool({ cwd }),
+    writeFile: writeFileTool({ cwd }),
+    bash: bashTool({ cwd }),
+  };
+}
 
 // Narrow state surface the adapter drives. StateStore satisfies it; tests pass an in-memory stub.
 // readContext is optional — the rolling summary of prior PRs is threaded into subagent prompts
@@ -234,8 +240,9 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
 
   return {
     runWorker: async ({ group, worktree, baseBranch }) => {
-      const tools = extractWorkerTools(mcp.toolsForRole('worker'));
-      if (!tools) return { kind: 'blocked', reason: NO_EDIT_TOOLS_REASON };
+      // Prefer MCP-supplied edit tools; fall back to aitm's own worktree-scoped fs-tools so a
+      // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
+      const tools = extractWorkerTools(mcp.toolsForRole('worker')) ?? localEditTools(worktree.path);
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
         tools,
@@ -251,13 +258,21 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
     },
     finalizeCommit: (group, delivery, worktreePath) =>
       orch.finalizeCommit(group, delivery, worktreePath),
-    openPr: (group, delivery, baseBranch) => orch.openPr(group, delivery, baseBranch),
+    openPr: async (group, delivery, baseBranch) => {
+      // The Worker's commits live on the group branch in a linked worktree (shared object
+      // store). Push it to origin first — `gh pr create` won't open a PR for a branch that
+      // isn't on the remote ("No commits between … / Head ref must be a branch").
+      const head = group.branch ?? `aitm/${group.id}`;
+      await execa('git', ['push', '-u', 'origin', head], { cwd: input.cwd });
+      return orch.openPr(group, delivery, baseBranch);
+    },
     runReviewer: async ({ pr, threads, worktree }) => {
-      const tools = extractReviewerTools(
-        mcp.toolsForRole('reviewer'),
-        githubThreadTool(input.github),
-      );
-      if (!tools) return { kind: 'blocked', reason: NO_EDIT_TOOLS_REASON };
+      const github = githubThreadTool(input.github);
+      // Same fallback as the Worker: local fs-tools when no MCP server supplies them.
+      const tools = extractReviewerTools(mcp.toolsForRole('reviewer'), github) ?? {
+        ...localEditTools(worktree.path),
+        github,
+      };
       const agent = createReviewerAgent({
         model: input.credentials.modelFor('reviewer'),
         tools,

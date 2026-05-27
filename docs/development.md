@@ -45,7 +45,7 @@ is printed either way.
 `bun run debug:start` launches with `bun --inspect-brk` and prints an inspector banner on
 stderr, then waits:
 
-```
+```text
 ------------------ Bun Inspector ------------------
 Inspect in browser:
   https://debug.bun.sh/#localhost:6499/<id>

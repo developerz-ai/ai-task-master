@@ -32,14 +32,32 @@ import { main } from '../src/cli/cli.ts';
 
 const MODEL = process.env.AITM_DEBUG_MODEL ?? 'qwen/qwen3-next-80b-a3b-instruct:free';
 const KEEP = process.env.AITM_DEBUG_KEEP === '1';
-const SEED_PR = Number.parseInt(process.env.AITM_DEBUG_PR ?? '1', 10);
 
-// `--pr N` anywhere in argv attaches to an existing PR; otherwise we seed state.
+// Parse a positive-integer PR input. A present-but-invalid value fails fast with a clear
+// message rather than silently falling back — silently seeding the wrong PR (or a NaN that
+// serializes to `null` in state.json) hides operator mistakes.
+function positivePr(label: string, raw: string | undefined, fallback: number | null): number {
+  if (raw === undefined || raw === '') {
+    if (fallback !== null) return fallback;
+    console.error(`[debug:merge-pr] ${label} is required and must be a positive integer`);
+    process.exit(1);
+  }
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`[debug:merge-pr] ${label} must be a positive integer, got "${raw}"`);
+    process.exit(1);
+  }
+  return n;
+}
+
+const SEED_PR = positivePr('AITM_DEBUG_PR', process.env.AITM_DEBUG_PR, 1);
+
+// `--pr N` anywhere in argv attaches to an existing PR; otherwise we seed state. A present
+// but malformed `--pr` value is an error (no silent fallback to the seeded PR).
 function parsePrFlag(argv: readonly string[]): number | undefined {
   const i = argv.indexOf('--pr');
   if (i === -1) return undefined;
-  const n = Number.parseInt(argv[i + 1] ?? '', 10);
-  return Number.isInteger(n) && n > 0 ? n : undefined;
+  return positivePr('--pr', argv[i + 1], null);
 }
 
 async function setupRepo(): Promise<string> {

@@ -112,11 +112,17 @@ repo. **Cleanup happens only on success** — a failing run leaves the repo behi
 inspection.
 
 ```bash
-# Gated on both envs; without them the test/script skips cleanly.
-OPENROUTER_API_KEY=… AITM_SANDBOX_REPO=<github-owner> bun scripts/smoke-e2e.ts
-# As a test (skips when the envs are unset; runs under bun test AND node --test):
+# As a test — runs under both runners. With the envs UNSET it SKIPS cleanly (no failure):
 OPENROUTER_API_KEY=… AITM_SANDBOX_REPO=<github-owner> bun test test/integration/e2e-smoke.test.ts
+OPENROUTER_API_KEY=… AITM_SANDBOX_REPO=<github-owner> node --test --import tsx test/integration/e2e-smoke.test.ts
+
+# As a local script — with the envs UNSET it FAILS FAST (exit 2) printing what to set:
+OPENROUTER_API_KEY=… AITM_SANDBOX_REPO=<github-owner> bun scripts/smoke-e2e.ts
 ```
+
+Gating differs by entry point on purpose: the **test skips** so it's safe in a secret-less CI
+run, while the **script exits non-zero** with guidance so an interactive operator who forgot
+the envs gets a clear error instead of a silent no-op.
 
 - `AITM_SANDBOX_REPO` is the **owner** (org/user); a fresh `aitm-smoke-<id>` repo is created under it each run.
 - `AITM_SMOKE_MODEL` overrides the model (defaults to a free OpenRouter model — never spends credits).

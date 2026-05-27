@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 // Local runner for the end-to-end smoke (issue #19) — the script counterpart to
 // test/integration/e2e-smoke.test.ts. Same flow, runnable by hand:
 //

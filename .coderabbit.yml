@@ -31,13 +31,13 @@ reviews:
 
   # Vendored AI SDK chunks are not our code — never review them.
   path_filters:
-    - '!docs/vendor/**'
-    - '!dist/**'
-    - '!node_modules/**'
+    - '!**/docs/vendor/**'
+    - '!**/dist/**'
+    - '!**/node_modules/**'
     - '!**/*.lockb'
 
   path_instructions:
-    - path: 'src/**/*.ts'
+    - path: '**/src/**/*.ts'
       instructions: >
         This is an autonomous task orchestrator (TypeScript) on the Vercel AI SDK
         subagents pattern (ToolLoopAgent + subagent-as-tool). Provider is OpenRouter
@@ -46,16 +46,16 @@ reviews:
         named exports only, kebab-case file names, no Bun-only APIs in src/
         (use node:fs/promises, execa, fetch — never Bun.$, Bun.file, Bun.spawn).
         Subagents must remain pure factories: (model, tools, systemPrompt) -> Agent.
-    - path: 'src/**/*.test.ts'
+    - path: '**/src/**/*.test.ts'
       instructions: >
         Tests use `node:test` syntax so the same file runs under `bun test` and
         `node --test`. Flag jest/vitest API leakage. Tests must be deterministic
         and not require network unless explicitly marked integration.
-    - path: 'test/integration/**/*.ts'
+    - path: '**/test/integration/**/*.ts'
       instructions: >
         Integration tests run against a real temp git repo and a sandbox `gh` token.
         No mocking of `gh` or the AI SDK at this layer.
-    - path: 'docs/**/*.md'
+    - path: '**/docs/**/*.md'
       instructions: >
         Check for clarity and accuracy. Don't nitpick formatting. House style:
         lead with the rule, fragments over sentences, tables for structured data,

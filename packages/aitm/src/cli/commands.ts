@@ -15,7 +15,7 @@ import type { CliOverrides, ResolvedConfig } from '../config/schema.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { GitHubClient } from '../github/github-client.ts';
-import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
+import { localEditTools, runLoopAdapter } from '../loop/run-loop-adapter.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
@@ -510,19 +510,15 @@ async function defaultRunLoop(input: RunLoopInput): Promise<WorkLoopResult> {
 async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopResult> {
   const { runTakeOverFlow } = await import('../loop/take-over-flow.ts');
   const { execa } = await import('execa');
-  const { bashTool, readFileTool, writeFileTool } = await import('../tools/fs-tools.ts');
   const { githubThreadTool } = await import('../tools/github-thread-tool.ts');
 
   const worktreePath = input.cwd;
   const baseBranch = await input.github.defaultBranch();
   const styleContents = input.agentConfig.contents;
 
-  // Build the bash/readFile/writeFile/github tool surfaces, scoped to the cwd worktree.
-  // The Reviewer needs all four; Worker needs the first three.
-  const fsInit = { cwd: worktreePath };
-  const bash = bashTool(fsInit);
-  const readFile = readFileTool(fsInit);
-  const writeFile = writeFileTool(fsInit);
+  // Build the Claude-Code-style tool surface scoped to the cwd worktree. The Worker gets the
+  // full read/write/edit/search/bash set; the Reviewer adds the `github` thread tool.
+  const workerTools = localEditTools(worktreePath);
   const github = githubThreadTool({ github: input.github });
 
   const result = await runTakeOverFlow({
@@ -539,9 +535,9 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
     },
     subagents: {
       reviewerModel: input.credentials.modelFor('reviewer'),
-      reviewerTools: { readFile, writeFile, bash, github },
+      reviewerTools: { ...workerTools, github },
       workerModel: input.credentials.modelFor('worker'),
-      workerTools: { readFile, writeFile, bash },
+      workerTools,
       styleContents,
     },
   });

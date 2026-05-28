@@ -15,9 +15,11 @@ Subagents never call each other. Only `Orchestrator` composes them — the depen
 
 | Subagent | Single responsibility | Tools it gets | Output contract |
 | --- | --- | --- | --- |
-| `Planner` | Turn goal plus repo survey into an ordered list of **PR groups**, each containing tasks. | Read-only FS, grep, glob. | `PrGroup[]` (Zod schema). Capped by `options.maxPrs`. |
-| `Worker` | Implement one PR group end-to-end on a dedicated branch and open the PR. | FS read/write, bash, `GitHubClient`. | PR number or `blocked` reason. |
-| `Reviewer` | Address PR review comments, push fixes, resolve threads. | FS read/write, bash, `GitHubClient` GraphQL. | Resolution report per comment. |
+| `Planner` | Turn goal plus repo survey into an ordered list of **PR groups**, each containing tasks. | Read-only subset: `readFile` (offset/limit), `grep`, `glob`. | `PrGroup[]` (Zod schema). Capped by `options.maxPrs`. |
+| `Worker` | Implement one PR group on a dedicated branch (commits + branch); the Orchestrator opens the PR. | `readFile`, `writeFile`, `editFile`, `multiEdit`, `grep`, `glob`, `bash`. | Branch + draft commit message, or `blocked` reason. |
+| `Reviewer` | Address PR review comments, push fixes, resolve threads. | The Worker's full set plus a `github` thread tool (`GitHubClient` GraphQL). | Resolution report per comment. |
+
+The FS/edit/search/shell tools are the Claude-Code-style surface from `@developerz-ai/ai-claude-compat`, scoped to the active worktree. When an MCP server supplies some of them, the rest are partial-filled from the local set so a bare `aitm start` (no `mcpServers`) still works.
 
 ## SRP
 
@@ -25,7 +27,7 @@ Each subagent owns exactly one phase of the lifecycle. Planning, building, and r
 
 ## Context isolation
 
-Subagent system prompts are assembled from `CLAUDE.md` or `AGENTS.md` plus a role-specific prefix. `AgentConfigDetector` decides which file to read — it drives **coding-style** only. Provider is always OpenRouter; the per-role model id comes from `ConfigLoader` (`models.planner`, `models.worker`, `models.reviewer`), so each subagent can run on a different OpenRouter-routed model.
+Subagent system prompts are assembled from `CLAUDE.md` or `AGENTS.md` plus a role-specific prefix plus an `<env>` block (`envBlock` from `@developerz-ai/ai-claude-compat`: worktree cwd, platform, OS version, runtime, date). The `<env>` block is composed at the wiring site via `composeSystemPrompt` because cwd is per-worktree. `AgentConfigDetector` decides which config file to read — it drives **coding-style** only. Provider is always OpenRouter; the per-role model id comes from `ConfigLoader` (`models.planner`, `models.worker`, `models.reviewer`), so each subagent can run on a different OpenRouter-routed model.
 
 ## Schemas
 

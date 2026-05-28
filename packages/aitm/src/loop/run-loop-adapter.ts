@@ -14,6 +14,15 @@
 //   4. Bridge the Orchestrator/subagents into the WorkLoopOrchestrator port and run the loop.
 
 import { resolve as resolvePath } from 'node:path';
+import {
+  bashTool,
+  editFileTool,
+  globTool,
+  grepTool,
+  multiEditTool,
+  readFileTool,
+  writeFileTool,
+} from '@developerz-ai/ai-claude-compat';
 import { type Tool, type ToolSet, tool } from 'ai';
 import { execa } from 'execa';
 import { z } from 'zod';
@@ -25,7 +34,13 @@ import { Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
-import { createPlannerAgent, PLANNER_SYSTEM_PREFIX, runPlanner } from '../subagents/planner.ts';
+import { composeSystemPrompt } from '../subagents/factory.ts';
+import {
+  createPlannerAgent,
+  PLANNER_SYSTEM_PREFIX,
+  type PlannerTools,
+  runPlanner,
+} from '../subagents/planner.ts';
 import {
   createReviewerAgent,
   type GithubToolInput,
@@ -40,7 +55,6 @@ import {
   WORKER_SYSTEM_PREFIX,
   type WorkerTools,
 } from '../subagents/worker.ts';
-import { bashTool, readFileTool, writeFileTool } from '../tools/fs-tools.ts';
 import { WorktreePool } from '../workspace/worktree-pool.ts';
 import {
   WorkLoop,
@@ -51,15 +65,28 @@ import {
   type WorkLoopState,
 } from './work-loop.ts';
 
-// Worktree-scoped edit tools the Worker/Reviewer fall back to when no MCP server supplies
-// readFile/writeFile/bash. aitm is MCP-first, but a bare `aitm start` (no `mcpServers`
-// configured) must still be able to edit, commit and open a PR — so it uses aitm's own
-// fs-tools (the same ones the merge-pr flow already wires), scoped to the active worktree.
+// Worktree-scoped Claude-Code-style tools the Worker/Reviewer fall back to when no MCP server
+// supplies them. aitm is MCP-first, but a bare `aitm start` (no `mcpServers` configured) must
+// still be able to read, search, edit, commit and open a PR — so it uses the compat lib's
+// tools, scoped to the active worktree.
 export function localEditTools(cwd: string): WorkerTools {
   return {
     readFile: readFileTool({ cwd }),
     writeFile: writeFileTool({ cwd }),
+    editFile: editFileTool({ cwd }),
+    multiEdit: multiEditTool({ cwd }),
+    grep: grepTool({ cwd }),
+    glob: globTool({ cwd }),
     bash: bashTool({ cwd }),
+  };
+}
+
+// Read-only subset for the Planner — survey the repo without write/edit/bash.
+export function localReadTools(cwd: string): PlannerTools {
+  return {
+    readFile: readFileTool({ cwd }),
+    grep: grepTool({ cwd }),
+    glob: globTool({ cwd }),
   };
 }
 
@@ -211,8 +238,8 @@ async function defaultPlanGroups(
   const style = input.agentConfig.contents;
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
-    tools: mcp.toolsForRole('planner'),
-    systemPrompt: style + PLANNER_SYSTEM_PREFIX,
+    tools: resolvePlannerTools(mcp.toolsForRole('planner'), input.cwd),
+    systemPrompt: composeSystemPrompt(style, PLANNER_SYSTEM_PREFIX, input.cwd),
   });
   const result = await runPlanner(agent, {
     goal: input.goal,
@@ -240,13 +267,13 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
 
   return {
     runWorker: async ({ group, worktree, baseBranch }) => {
-      // Prefer MCP-supplied edit tools; fall back to aitm's own worktree-scoped fs-tools so a
+      // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
       // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
-      const tools = extractWorkerTools(mcp.toolsForRole('worker')) ?? localEditTools(worktree.path);
+      const tools = resolveWorkerTools(mcp.toolsForRole('worker'), worktree.path);
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
         tools,
-        systemPrompt: style + WORKER_SYSTEM_PREFIX,
+        systemPrompt: composeSystemPrompt(style, WORKER_SYSTEM_PREFIX, worktree.path),
       });
       return runWorkerSubagent(agent, {
         group,
@@ -268,15 +295,12 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
     },
     runReviewer: async ({ pr, threads, worktree }) => {
       const github = githubThreadTool(input.github);
-      // Same fallback as the Worker: local fs-tools when no MCP server supplies them.
-      const tools = extractReviewerTools(mcp.toolsForRole('reviewer'), github) ?? {
-        ...localEditTools(worktree.path),
-        github,
-      };
+      // Same partial-fill as the Worker, plus the local `github` thread tool.
+      const tools = resolveReviewerTools(mcp.toolsForRole('reviewer'), worktree.path, github);
       const agent = createReviewerAgent({
         model: input.credentials.modelFor('reviewer'),
         tools,
-        systemPrompt: style + REVIEWER_SYSTEM_PREFIX,
+        systemPrompt: composeSystemPrompt(style, REVIEWER_SYSTEM_PREFIX, worktree.path),
       });
       return runReviewerSubagent(agent, {
         pr,
@@ -288,22 +312,42 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
   };
 }
 
-// MCP exposes a dynamically-typed ToolSet. The Worker/Reviewer agents need a statically-shaped
-// tool record; we validate the required names are present, then assert the shape at this single
-// boundary. Returns null when any required tool is missing so the caller can block cleanly.
-function extractWorkerTools(set: ToolSet): WorkerTools | null {
-  const { readFile, writeFile, bash } = set;
-  if (!readFile || !writeFile || !bash) return null;
-  return { readFile, writeFile, bash } as WorkerTools;
+// MCP exposes a dynamically-typed ToolSet. The subagents need a statically-shaped tool record.
+// Rather than fail closed when a server only exports the legacy readFile/writeFile/bash, we
+// partial-fill: prefer the MCP tool for each name, falling back to the local worktree-scoped
+// tool for any the server omits. The shape is asserted once at this boundary.
+function resolveWorkerTools(set: ToolSet, cwd: string): WorkerTools {
+  const local = localEditTools(cwd);
+  return {
+    readFile: set.readFile ?? local.readFile,
+    writeFile: set.writeFile ?? local.writeFile,
+    editFile: set.editFile ?? local.editFile,
+    multiEdit: set.multiEdit ?? local.multiEdit,
+    grep: set.grep ?? local.grep,
+    glob: set.glob ?? local.glob,
+    bash: set.bash ?? local.bash,
+  } as WorkerTools;
 }
 
-function extractReviewerTools(
+function resolveReviewerTools(
   set: ToolSet,
+  cwd: string,
   github: Tool<GithubToolInput, GithubToolOutput>,
-): ReviewerTools | null {
-  const { readFile, writeFile, bash } = set;
-  if (!readFile || !writeFile || !bash) return null;
-  return { readFile, writeFile, bash, github } as ReviewerTools;
+): ReviewerTools {
+  return { ...resolveWorkerTools(set, cwd), github };
+}
+
+// The Planner gets only the read-only subset, partial-filled the same way. This is also the fix
+// for the latent no-MCP bug: previously the Planner was handed the raw MCP ToolSet with no local
+// fallback, so a bare `aitm start` left it with zero tools despite its prompt promising
+// readFile/grep/glob.
+function resolvePlannerTools(set: ToolSet, cwd: string): PlannerTools {
+  const local = localReadTools(cwd);
+  return {
+    readFile: set.readFile ?? local.readFile,
+    grep: set.grep ?? local.grep,
+    glob: set.glob ?? local.glob,
+  } as PlannerTools;
 }
 
 // The Reviewer's `github` tool is local glue over GitHubClient — not an MCP tool — so the

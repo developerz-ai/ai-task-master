@@ -13,14 +13,14 @@
     "esModuleInterop": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "declaration": true,
-    "sourceMap": true,
-    "outDir": "dist",
-    "rootDir": "src",
     "resolveJsonModule": true,
     "verbatimModuleSyntax": false,
     "allowImportingTsExtensions": true,
-    "rewriteRelativeImportExtensions": true
+    "rewriteRelativeImportExtensions": true,
+    "noEmit": true,
+    "paths": {
+      "@developerz-ai/ai-claude-compat": ["../ai-claude-compat/src/index.ts"]
+    }
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts", "dist", "node_modules"]

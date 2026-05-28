@@ -23,9 +23,14 @@ import type { WorkerTools } from './worker.ts';
 
 // Subset of GitHubClient methods exposed to the agent. Kept as a single discriminated tool so
 // the SDK only registers one `github` slot — matches the task's tool surface contract.
-export type GithubToolInput =
-  | { action: 'replyToThread'; threadId: string; body: string }
-  | { action: 'resolveThread'; threadId: string };
+// Flat (not a union) so the tool's parameter JSON-Schema isn't `oneOf` — several
+// OpenRouter-routed providers reject `oneOf` in tool params ("Invalid arguments passed to the
+// model"). `body` is used only by replyToThread.
+export type GithubToolInput = {
+  action: 'replyToThread' | 'resolveThread';
+  threadId: string;
+  body?: string | undefined;
+};
 export type GithubToolOutput = { ok: boolean };
 
 // The Reviewer gets the Worker's full edit/search surface (it pushes fixes) plus a `github`

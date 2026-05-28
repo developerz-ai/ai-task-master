@@ -62,9 +62,11 @@ test('githubThreadTool: input schema rejects unknown action at parse time', () =
     .inputSchema;
   assert.ok(schema?.safeParse, 'tool must carry an inputSchema');
   assert.equal(schema.safeParse({ action: 'unknown', threadId: 'x' }).success, false);
-  assert.equal(schema.safeParse({ action: 'replyToThread', threadId: 'x' }).success, false);
+  // Flat object (no oneOf, for provider compatibility): `body` is optional at the schema level;
+  // the tool description asks for one and execute tolerates its absence.
   assert.equal(
     schema.safeParse({ action: 'replyToThread', threadId: 'x', body: 'ok' }).success,
     true,
   );
+  assert.equal(schema.safeParse({ action: 'resolveThread', threadId: 'x' }).success, true);
 });

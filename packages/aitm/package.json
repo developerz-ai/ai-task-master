@@ -1,6 +1,6 @@
 {
   "name": "@developerz.ai/aitm",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Autonomous task orchestrator. Goal in, merged PRs out.",
   "license": "MIT",
   "type": "module",
@@ -35,7 +35,7 @@
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.42",
-    "@developerz.ai/ai-claude-compat": "0.0.1",
+    "@developerz.ai/ai-claude-compat": "0.0.2",
     "@openrouter/ai-sdk-provider": "^2.9.0",
     "ai": "^6.0.182",
     "execa": "^9.6.1",

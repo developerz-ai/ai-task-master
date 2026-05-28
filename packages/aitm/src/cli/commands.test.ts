@@ -789,6 +789,37 @@ test('runConfig list → prints JSON, exit 0', async () => {
   }
 });
 
+test('runConfig list → masks openrouterApiKey (no cleartext leak)', async () => {
+  const repo = await makeTempRepo();
+  const home = await tempHome();
+  try {
+    const secret = 'sk-or-v1-0123456789abcdef0123456789abcdef';
+    await writeFile(join(home.path, '.aitm.json'), JSON.stringify({ openrouterApiKey: secret }));
+    const writes: string[] = [];
+    const result = await runConfig(
+      { kind: 'config-list', scope: 'global' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        stdout: (s) => {
+          writes.push(s);
+        },
+      },
+    );
+    assert.equal(result.code, 0);
+    const out = writes.join('');
+    assert.ok(!out.includes(secret), 'full API key must not appear in config list output');
+    const printed = JSON.parse(out.trim()) as { openrouterApiKey: string };
+    assert.ok(
+      printed.openrouterApiKey.endsWith('cdef'),
+      'last 4 chars retained for identification',
+    );
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('runConfig unset → key removed, exit 0', async () => {
   const repo = await makeTempRepo();
   const home = await tempHome();

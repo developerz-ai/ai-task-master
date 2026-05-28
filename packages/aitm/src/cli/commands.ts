@@ -386,7 +386,11 @@ export async function runConfig(
       }
       case 'config-list': {
         const file = await writer.list(args.scope);
-        stdout(`${JSON.stringify(file, null, 2)}\n`);
+        // Never dump the API key in cleartext — `config list` output lands in terminals/logs.
+        const safe = file.openrouterApiKey
+          ? { ...file, openrouterApiKey: maskSecret(file.openrouterApiKey) }
+          : file;
+        stdout(`${JSON.stringify(safe, null, 2)}\n`);
         return { code: 0 };
       }
       default:
@@ -487,6 +491,12 @@ function isMissingOrInvalidState(err: unknown, stateDir: string): boolean {
     if (err.message.startsWith(`${stateFile}:`)) return true;
   }
   return false;
+}
+
+// Mask a secret for display: keep the non-secret `sk-or-` prefix + last 4 chars so the user can
+// confirm WHICH key is set without exposing it. Short values are fully hidden.
+function maskSecret(value: string): string {
+  return value.length <= 12 ? '***' : `${value.slice(0, 6)}…${value.slice(-4)}`;
 }
 
 function formatConfigValue(value: unknown): string {

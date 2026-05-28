@@ -28,10 +28,12 @@ No babysitting. No prompt-stuffing. No bespoke agent framework.
 ## ⚡ Install
 
 ```bash
-bun  install -g aitm    # recommended for local dev
-npm  install -g aitm    # works the same
-deno install -A npm:aitm
+bun  install -g @developerz.ai/aitm    # recommended for local dev
+npm  install -g @developerz.ai/aitm    # works the same
+deno install -A npm:@developerz.ai/aitm
 ```
+
+The package is scoped (`@developerz.ai/aitm`); the installed command is still `aitm`.
 
 Plain ESM + a `bun build --compile` single-file binary. No runtime lock-in.
 

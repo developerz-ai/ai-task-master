@@ -1,30 +1,94 @@
-# @developerz.ai/aitm
+# 🤖 @developerz.ai/aitm
 
-Autonomous task orchestrator. Goal in, merged PRs out.
+> Autonomous task orchestrator. Goal in, merged PRs out.
 
-`aitm` drives a plan → work → review loop over a real git repo: an Orchestrator
-agent decomposes a goal into PR-sized groups, a Worker opens PRs, and a Reviewer
-turns review comments into follow-up commits. Inference runs through OpenRouter.
+Give `aitm` a sentence, walk away, come back to a stack of merged pull requests.
+It runs a **Planner → Worker → Reviewer** loop against a real repo using the
+[Vercel AI SDK](https://ai-sdk.dev) and [OpenRouter](https://openrouter.ai), and
+ships the work as PR-sized commits with CI gating and review-comment handling
+baked in.
 
-## Install
+> 💡 Spiritual successor to the (deprecated)
+> [`developerz-ai/claude-task-master`](https://github.com/developerz-ai/claude-task-master)
+> — same idea, rebuilt on the AI SDK + OpenRouter: provider-agnostic, concurrent
+> PR groups, MCP client support, smaller surface area.
 
-```sh
-npm install -g @developerz.ai/aitm
+## ⚡ Install
+
+```bash
+npm  install -g @developerz.ai/aitm
+bun  install -g @developerz.ai/aitm
+deno install -A npm:@developerz.ai/aitm
 ```
 
-This installs the `aitm` command.
+The package is scoped; the installed command is just **`aitm`**.
 
-## Usage
+## 🚀 Quickstart
 
-```sh
-export OPENROUTER_API_KEY=...      # required
-aitm start                          # plan + work the current repo toward a goal
-aitm merge-pr                       # merge the current task's PR
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+cd path/to/your/repo
+aitm start "add JWT auth to /login" --max-prs 3
 ```
 
-See the [project README](https://github.com/developerz-ai/ai-task-master#readme)
-for configuration (`mcpServers`, per-role models) and the full workflow.
+`aitm` plans the goal into up to 3 PR-sized groups, opens a branch per group,
+works through them in parallel, opens each PR, watches CI, addresses review
+comments, and **auto-merges**. Want a human gate?
+
+```bash
+aitm start "migrate Mongo → Postgres" --no-automerge
+# ... review the PR in your browser ...
+aitm merge-pr
+```
+
+## 🧠 How it works
+
+| Role | Responsibility |
+| --- | --- |
+| **Orchestrator** | Top-level agent; drives the run group-by-group |
+| **Planner** | Goal in → ordered PR groups (each a list of tasks) out |
+| **Worker** | One PR group in → commits + an opened PR out |
+| **Reviewer** | Review comments in → follow-up commits out |
+
+Subagents are wired with the [subagents-as-tools](https://ai-sdk.dev/docs/agents/subagents)
+pattern (isolated context windows, focused prompts, natural parallelism), built
+on [`@developerz.ai/ai-claude-compat`](https://www.npmjs.com/package/@developerz.ai/ai-claude-compat).
+
+## 🎯 Use cases
+
+| What you type | What `aitm` does |
+| --- | --- |
+| `aitm start "add password reset flow"` | Splits into schema + endpoint + email + tests, one PR per slice |
+| `aitm start "rename Logger to Tracer everywhere" --max-prs 1` | Single sweeping PR, full test pass before merge |
+| `aitm start "add tests for src/billing/* until 90% coverage"` | Iterates until the coverage target hits, or the session cap |
+| `aitm start "bump zod to v4 and fix all type errors"` | Bumps, fixes, runs tests, opens PR; conflicts surface as `blocked` |
+
+## ⚙️ Configuration
+
+User config lives at `~/.aitm.json`; per-project overrides at
+`.ai-task-master/config.json`:
+
+```bash
+aitm config set models.smart  anthropic/claude-opus-4.7
+aitm config set models.coding anthropic/claude-sonnet-4.6
+aitm config set models.fast   openai/gpt-5-mini
+aitm config set autoMerge true --project
+aitm config list
+```
+
+- **Provider**: OpenRouter only (`OPENROUTER_API_KEY`). Any OpenRouter-routed
+  model id works per role — no Anthropic SDK involved.
+- **Coding style**: `aitm` reads your repo's `CLAUDE.md` / `AGENTS.md` and feeds
+  it to subagents as a style signal (the provider stays OpenRouter).
+- **MCP**: `aitm` is an MCP **client** — declare `mcpServers` in config and their
+  tools mount into the subagent tool surfaces.
+
+## 🛠 Requirements
+
+- `OPENROUTER_API_KEY` in the environment.
+- The [`gh`](https://cli.github.com) CLI, authenticated (PRs, CI status, reviews).
+- Node ≥ 20, Bun, or Deno ≥ 1.40 — ESM, no runtime lock-in.
 
 ## License
 
-MIT
+MIT · [source & full docs](https://github.com/developerz-ai/ai-task-master#readme)

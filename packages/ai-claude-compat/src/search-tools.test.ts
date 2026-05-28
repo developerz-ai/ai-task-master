@@ -113,6 +113,21 @@ test('grepTool: filesWithMatches returns one path per file', async () => {
   }
 });
 
+test('grepTool: filesWithMatches respects maxResults and truncation', async () => {
+  const dir = await tempDir();
+  try {
+    await fixture(dir.path);
+    const out = await run<
+      { pattern: string; filesWithMatches: boolean; maxResults: number },
+      { matches: string[]; truncated: boolean }
+    >(grepTool({ cwd: dir.path }), { pattern: 'const', filesWithMatches: true, maxResults: 1 });
+    assert.equal(out.matches.length, 1);
+    assert.equal(out.truncated, true);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
 test('grepTool: maxResults caps and flags truncation', async () => {
   const dir = await tempDir();
   try {

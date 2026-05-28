@@ -70,6 +70,11 @@ export function multiEditTool(init: ToolInit): Tool<MultiEditInput, MultiEditOut
 // Pure string replacement with the uniqueness contract. Uses split/join so `newString` is
 // inserted verbatim (no `$&`/`$1` substitution that String.prototype.replace would apply).
 export function applyEdit(content: string, edit: EditSpec): { next: string; count: number } {
+  // Guard the exported API: the tool schemas enforce min(1), but a direct caller could pass
+  // '' — which `split('')` would treat as a match at every character boundary.
+  if (edit.oldString.length === 0) {
+    throw new Error('oldString must be non-empty');
+  }
   const occurrences = content.split(edit.oldString).length - 1;
   if (occurrences === 0) {
     throw new Error(`oldString not found: ${preview(edit.oldString)}`);

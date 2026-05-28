@@ -61,11 +61,11 @@ export function grepTool(init: ToolInit): Tool<GrepInput, GrepOutput> {
           const line = lines[i] ?? '';
           if (!re.test(line)) continue;
           matches.push(input.filesWithMatches ? file.rel : `${file.rel}:${i + 1}:${line}`);
-          if (input.filesWithMatches) continue outer; // one entry per file
           if (matches.length >= cap) {
             truncated = true;
             break outer;
           }
+          if (input.filesWithMatches) continue outer; // one entry per file
         }
       }
       return { matches, truncated };

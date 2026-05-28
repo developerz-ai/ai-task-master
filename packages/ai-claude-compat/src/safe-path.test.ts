@@ -41,6 +41,16 @@ test('resolveInside: rejects ../ escape by string', async () => {
   }
 });
 
+test('resolveInside: allows an in-root name that merely starts with ".."', async () => {
+  const dir = await tempDir();
+  try {
+    const out = await resolveInside(dir.path, '..cache/file');
+    assert.equal(out, join(dir.path, '..cache/file'));
+  } finally {
+    await dir.cleanup();
+  }
+});
+
 test('resolveInside: rejects an absolute path outside root', async () => {
   const dir = await tempDir();
   try {

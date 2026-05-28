@@ -7,7 +7,7 @@
 // write), so we realpath the parent and re-check the relative path from there.
 
 import { realpath } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 // Resolve `requested` against `root` and assert the result stays inside `root`. Accepts a
 // relative path (resolved against root) or an absolute path (must still be inside root).
@@ -29,7 +29,9 @@ export async function resolveInside(root: string, requested: string): Promise<st
 function escapesRoot(root: string, target: string): boolean {
   const rel = relative(root, target);
   if (rel === '') return false;
-  if (rel.startsWith('..')) return true;
+  // Only a real parent-traversal token escapes — not an in-root name that merely starts with
+  // ".." (e.g. "..cache/file").
+  if (rel === '..' || rel.startsWith(`..${sep}`)) return true;
   if (isAbsolute(rel)) return true;
   return false;
 }

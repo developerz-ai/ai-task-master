@@ -36,6 +36,10 @@ test('applyEdit: throws when oldString is absent', () => {
   assert.throws(() => applyEdit('abc', { oldString: 'z', newString: 'y' }), /not found/);
 });
 
+test('applyEdit: rejects an empty oldString', () => {
+  assert.throws(() => applyEdit('abc', { oldString: '', newString: 'y' }), /must be non-empty/);
+});
+
 test('applyEdit: throws on ambiguous oldString without replaceAll', () => {
   assert.throws(
     () => applyEdit('a a a', { oldString: 'a', newString: 'b' }),

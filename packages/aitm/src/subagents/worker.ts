@@ -35,10 +35,18 @@ import type {
   WriteFileInput,
   WriteFileOutput,
 } from '@developerz-ai/ai-claude-compat';
-import { type DeepPartial, generateText, Output, stepCountIs, type Tool, ToolLoopAgent } from 'ai';
+import { composeSystemPrompt, createSubagent } from '@developerz-ai/ai-claude-compat';
+import {
+  type DeepPartial,
+  generateText,
+  Output,
+  stepCountIs,
+  type Tool,
+  type ToolLoopAgent,
+} from 'ai';
 import { z } from 'zod';
 import type { PrGroup } from '../state/schema.ts';
-import { composeSystemPrompt, type SubagentInit } from './factory.ts';
+import type { SubagentInit } from './factory.ts';
 
 // The Claude-Code-style tool surface (from @developerz-ai/ai-claude-compat) the Worker drives:
 // read/write whole files, edit by exact string replace (single + atomic batch), and search the
@@ -141,13 +149,16 @@ const EDITOR_SYSTEM_PREFIX = [
 const workerInitRegistry = new WeakMap<WorkerAgent, SubagentInit<WorkerTools>>();
 
 export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent {
-  const agent = new ToolLoopAgent<never, WorkerTools, WorkerOutput>({
-    model: init.model,
-    tools: init.tools,
-    instructions: init.systemPrompt,
-    output: Output.object({ schema: FileManifestSchema, name: 'FileManifest' }),
-    stopWhen: stepCountIs(init.maxSteps ?? 30),
-  });
+  const agent = createSubagent<WorkerTools, WorkerOutput>(
+    {
+      model: init.model,
+      tools: init.tools,
+      systemPrompt: init.systemPrompt,
+      output: Output.object({ schema: FileManifestSchema, name: 'FileManifest' }),
+      ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
+    },
+    30,
+  );
   workerInitRegistry.set(agent, init);
   return agent;
 }

@@ -32,3 +32,8 @@ export {
   globToRegExp,
   grepTool,
 } from './search-tools.ts';
+export {
+  composeSystemPrompt,
+  createSubagent,
+  type SubagentConfig,
+} from './subagent.ts';

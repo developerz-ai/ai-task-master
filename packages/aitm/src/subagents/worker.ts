@@ -19,23 +19,37 @@
 //   chunk-04.md §"ToolLoopAgent" (agent class)
 //   chunk-02.md §"Tool Calling" (parallelToolCalls)
 
+import type {
+  BashInput,
+  BashOutput,
+  EditFileInput,
+  EditFileOutput,
+  GlobInput,
+  GlobOutput,
+  GrepInput,
+  GrepOutput,
+  MultiEditInput,
+  MultiEditOutput,
+  ReadFileInput,
+  ReadFileOutput,
+  WriteFileInput,
+  WriteFileOutput,
+} from '@developerz-ai/ai-claude-compat';
 import { type DeepPartial, generateText, Output, stepCountIs, type Tool, ToolLoopAgent } from 'ai';
 import { z } from 'zod';
 import type { PrGroup } from '../state/schema.ts';
-import type { SubagentInit } from './factory.ts';
+import { composeSystemPrompt, type SubagentInit } from './factory.ts';
 
-// Conventional tool shapes — concrete wiring lives in workspace tools (later tasks).
-// Worker only needs the shapes typed enough to invoke them directly during the commit phase.
-export type ReadFileInput = { path: string };
-export type ReadFileOutput = { content: string };
-export type WriteFileInput = { path: string; content: string };
-export type WriteFileOutput = { ok: boolean };
-export type BashInput = { command: string };
-export type BashOutput = { stdout: string; stderr: string; exitCode: number };
-
+// The Claude-Code-style tool surface (from @developerz-ai/ai-claude-compat) the Worker drives:
+// read/write whole files, edit by exact string replace (single + atomic batch), and search the
+// repo with grep/glob. The Worker also invokes `bash` directly during the commit phase.
 export type WorkerTools = {
   readFile: Tool<ReadFileInput, ReadFileOutput>;
   writeFile: Tool<WriteFileInput, WriteFileOutput>;
+  editFile: Tool<EditFileInput, EditFileOutput>;
+  multiEdit: Tool<MultiEditInput, MultiEditOutput>;
+  grep: Tool<GrepInput, GrepOutput>;
+  glob: Tool<GlobInput, GlobOutput>;
   bash: Tool<BashInput, BashOutput>;
 };
 
@@ -92,10 +106,9 @@ export const WORKER_SYSTEM_PREFIX = [
   'You are the Worker subagent. You receive one PR group: a coherent batch of tasks that',
   'land in a single pull request on a dedicated branch. Work in two phases.',
   '',
-  'Phase 1 — manifest. Use the read-only side of your tools (readFile + bash with',
-  '"git ls-files", "rg", "grep") to ground yourself in the existing code, then emit a',
-  'FileManifest JSON listing every file to create/modify/delete plus a one-line draft',
-  'commit message. Do not edit yet.',
+  'Phase 1 — manifest. Use your read-only tools (readFile with optional offset/limit, grep,',
+  'glob) to ground yourself in the existing code, then emit a FileManifest JSON listing every',
+  'file to create/modify/delete plus a one-line draft commit message. Do not edit yet.',
   '',
   'Phase 2 — edits. Each manifest entry is handed to a dedicated editor subagent in',
   'parallel by the runtime; you do not execute Phase 2 yourself.',
@@ -111,9 +124,13 @@ export const WORKER_SYSTEM_PREFIX = [
 // owns the contract its editors run under.
 const EDITOR_SYSTEM_PREFIX = [
   '',
-  'You are a per-file editor subagent. You receive one file path and a purpose. Read the',
-  'file with `readFile` (if it exists), then emit its new contents via `writeFile`. To delete,',
-  'use `bash` with `rm -f <path>`. You may issue multiple tool calls in parallel.',
+  'You are a per-file editor subagent. You receive one file path and a purpose.',
+  '- To CREATE a file, emit its full contents via `writeFile`.',
+  '- To MODIFY an existing file, `readFile` it first, then prefer `editFile` (one exact string',
+  '  replacement) or `multiEdit` (several replacements applied atomically). Use `writeFile` only',
+  '  for a full rewrite.',
+  '- To DELETE a file, use `bash` with `rm -f <path>`.',
+  'You may issue multiple tool calls in parallel.',
   '',
   "IMPORTANT: your final assistant message is returned to the outer Worker as this file's",
   'summary. Keep it to one line, present-tense, and specific.',
@@ -195,7 +212,7 @@ async function runEditor(
   const { text } = await generateText({
     model: init.model,
     tools: init.tools,
-    system: input.styleContents + EDITOR_SYSTEM_PREFIX,
+    system: composeSystemPrompt(input.styleContents, EDITOR_SYSTEM_PREFIX, input.worktreePath),
     prompt: buildEditorPrompt(file, input),
     stopWhen: stepCountIs(12),
     providerOptions: { openai: { parallelToolCalls: true } },

@@ -2,7 +2,15 @@
 // Goal + repo survey → ordered PR groups (DAG) with Zod-validated output.
 // SDK reference: docs/vendor/ai-sdk/chunk-09.md §"Subagents" + chunk-05.md §"Generating Structured Data".
 
-import { type DeepPartial, Output, stepCountIs, ToolLoopAgent, type ToolSet } from 'ai';
+import type {
+  GlobInput,
+  GlobOutput,
+  GrepInput,
+  GrepOutput,
+  ReadFileInput,
+  ReadFileOutput,
+} from '@developerz-ai/ai-claude-compat';
+import { type DeepPartial, Output, stepCountIs, type Tool, ToolLoopAgent } from 'ai';
 import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../plan/schema.ts';
 import type { SubagentInit } from './factory.ts';
 
@@ -10,7 +18,13 @@ type PlannerOutput = Output.Output<Plan, DeepPartial<Plan>, never>;
 
 export type PlannerAgent = ToolLoopAgent<never, PlannerTools, PlannerOutput>;
 
-export type PlannerTools = ToolSet;
+// The Planner only surveys the repo — it gets the read-only subset of the Claude-Code-style
+// tool surface (no write/edit/bash).
+export type PlannerTools = {
+  readFile: Tool<ReadFileInput, ReadFileOutput>;
+  grep: Tool<GrepInput, GrepOutput>;
+  glob: Tool<GlobInput, GlobOutput>;
+};
 
 export type PlannerInput = {
   goal: string;

@@ -22,11 +22,13 @@
 
 Real `gh` + real OpenRouter inference against throwaway sandbox repos on a personal account (`OGtwelve`), per the #29 constraint (not the `developerz-ai` org).
 
+**Public evidence repo:** [`OGtwelve/aitm-e2e-rr-1779979041`](https://github.com/OGtwelve/aitm-e2e-rr-1779979041) — made public for inspection. The full review-loop (scenario 3) is in [PR #1](https://github.com/OGtwelve/aitm-e2e-rr-1779979041/pull/1): the change-request comment, the Reviewer subagent's follow-up commit, the resolved thread, and the merge are all visible there.
+
 | # | Scenario | Result | Evidence / exit codes |
 | --- | --- | --- | --- |
 | 1 | **Happy path** — `aitm start` → planner → worker opens a PR | ✅ pass | `start` exit 0; planner emitted 1 PR group; worker opened a real PR with a `node:test`. |
 | 2 | **Take-over** — PR opened outside aitm, then `aitm merge-pr` (no prior `start`) | ✅ pass | `merge-pr` exit 0 → PR **MERGED**. |
-| 3 | **Review-loop** — a `gh` review comment is left; `aitm merge-pr` runs the Reviewer subagent to address it | ✅ pass | Posted an inline change-request ("add an empty-name test"). The Reviewer subagent read it, **added exactly that test case**, committed + pushed (commits 1→2), **resolved the thread** (unresolved 1→0), CI green → **MERGED**. PR: `OGtwelve/aitm-e2e-rr-1779979041#1`. |
+| 3 | **Review-loop** — a `gh` review comment is left; `aitm merge-pr` runs the Reviewer subagent to address it | ✅ pass | Posted an inline change-request ("add an empty-name test"). The Reviewer subagent read it, **added exactly that test case**, committed + pushed (commits 1→2), **resolved the thread** (unresolved 1→0), CI green → **MERGED**. PR: [`OGtwelve/aitm-e2e-rr-1779979041#1`](https://github.com/OGtwelve/aitm-e2e-rr-1779979041/pull/1). |
 | 4 | **Failure mode** — interrupt `aitm` mid-run, then `aitm merge-pr --no-resume` | ✅ pass | Interrupted run left state behind; `merge-pr --no-resume` exited **1 cleanly** (precondition block, no crash/stack trace). |
 
 **Driven flow (scenario 3, end-to-end):** `aitm start` → PR → Claude posts good + change-request comments via `gh` (emulating CodeRabbit) → `aitm merge-pr` → Reviewer subagent addresses the comment + pushes a fix + resolves → merge. This is the realistic loop and it works.

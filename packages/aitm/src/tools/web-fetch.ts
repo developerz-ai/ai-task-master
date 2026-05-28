@@ -47,7 +47,7 @@ export type WebFetchInit = {
   lookup?: LookupFn;
 };
 
-const defaultLookup: LookupFn = async (hostname) => {
+export const defaultLookup: LookupFn = async (hostname) => {
   return await dns.lookup(hostname, { all: true });
 };
 
@@ -57,7 +57,7 @@ const defaultLookup: LookupFn = async (hostname) => {
 // and a private one when `fetch` re-resolves. Portable connect-time pinning across
 // Bun/Node/Deno isn't possible via standard fetch — that needs a runtime-specific
 // dispatcher (e.g. undici `lookup` on Node) and is out of scope here.
-async function assertSafeUrl(rawUrl: string, lookup: LookupFn): Promise<URL> {
+export async function assertSafeUrl(rawUrl: string, lookup: LookupFn): Promise<URL> {
   let u: URL;
   try {
     u = new URL(rawUrl);

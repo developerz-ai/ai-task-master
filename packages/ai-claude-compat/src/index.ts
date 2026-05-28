@@ -42,3 +42,4 @@ export {
   grepTool,
 } from './search-tools.ts';
 export { loadSkills, type SkillDefinition } from './skills-loader.ts';
+export { composeSystemPrompt, createSubagent, type SubagentConfig } from './subagent.ts';

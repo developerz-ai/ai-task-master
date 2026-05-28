@@ -14,8 +14,8 @@
 //   chunk-05.md §"Generating Structured Data"
 //   chunk-09.md §"Subagents"
 
-import type { BashInput, BashOutput } from '@developerz-ai/ai-claude-compat';
-import { type DeepPartial, Output, stepCountIs, type Tool, ToolLoopAgent } from 'ai';
+import { type BashInput, type BashOutput, createSubagent } from '@developerz-ai/ai-claude-compat';
+import { type DeepPartial, Output, type Tool, type ToolLoopAgent } from 'ai';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
 import type { SubagentInit } from './factory.ts';
@@ -96,16 +96,19 @@ export const REVIEWER_SYSTEM_PREFIX = [
 const reviewerInitRegistry = new WeakMap<ReviewerAgent, SubagentInit<ReviewerTools>>();
 
 export function createReviewerAgent(init: SubagentInit<ReviewerTools>): ReviewerAgent {
-  const agent = new ToolLoopAgent<never, ReviewerTools, ReviewerAgentOutput>({
-    model: init.model,
-    tools: init.tools,
-    instructions: init.systemPrompt,
-    output: Output.object({
-      schema: ThreadResolutionOutputSchema,
-      name: 'ThreadResolution',
-    }),
-    stopWhen: stepCountIs(init.maxSteps ?? 20),
-  });
+  const agent = createSubagent<ReviewerTools, ReviewerAgentOutput>(
+    {
+      model: init.model,
+      tools: init.tools,
+      systemPrompt: init.systemPrompt,
+      output: Output.object({
+        schema: ThreadResolutionOutputSchema,
+        name: 'ThreadResolution',
+      }),
+      ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
+    },
+    20,
+  );
   reviewerInitRegistry.set(agent, init);
   return agent;
 }

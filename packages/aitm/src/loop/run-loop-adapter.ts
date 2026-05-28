@@ -16,6 +16,7 @@
 import { resolve as resolvePath } from 'node:path';
 import {
   bashTool,
+  composeSystemPrompt,
   editFileTool,
   globTool,
   grepTool,
@@ -34,7 +35,6 @@ import { Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
-import { composeSystemPrompt } from '../subagents/factory.ts';
 import {
   createPlannerAgent,
   PLANNER_SYSTEM_PREFIX,

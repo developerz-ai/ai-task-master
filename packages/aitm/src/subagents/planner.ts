@@ -10,7 +10,8 @@ import type {
   ReadFileInput,
   ReadFileOutput,
 } from '@developerz-ai/ai-claude-compat';
-import { type DeepPartial, Output, stepCountIs, type Tool, ToolLoopAgent } from 'ai';
+import { createSubagent } from '@developerz-ai/ai-claude-compat';
+import { type DeepPartial, Output, type Tool, type ToolLoopAgent } from 'ai';
 import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../plan/schema.ts';
 import type { SubagentInit } from './factory.ts';
 
@@ -59,13 +60,16 @@ export const PLANNER_SYSTEM_PREFIX = [
 ].join('\n');
 
 export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAgent {
-  return new ToolLoopAgent<never, PlannerTools, PlannerOutput>({
-    model: init.model,
-    tools: init.tools,
-    instructions: init.systemPrompt,
-    output: plannerOutput(),
-    stopWhen: stepCountIs(init.maxSteps ?? 20),
-  });
+  return createSubagent<PlannerTools, PlannerOutput>(
+    {
+      model: init.model,
+      tools: init.tools,
+      systemPrompt: init.systemPrompt,
+      output: plannerOutput(),
+      ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
+    },
+    20,
+  );
 }
 
 export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Promise<PlannerResult> {

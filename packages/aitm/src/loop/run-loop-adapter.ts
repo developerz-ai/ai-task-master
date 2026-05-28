@@ -358,7 +358,7 @@ type ThreadGithub = Pick<GitHubClient, 'replyToThread' | 'resolveThread'>;
 // OpenRouter-routed providers). `body` applies to replyToThread only.
 const githubToolInputSchema = z.object({
   action: z.enum(['replyToThread', 'resolveThread']),
-  threadId: z.string(),
+  threadId: z.string().min(1),
   body: z.string().optional(),
 });
 

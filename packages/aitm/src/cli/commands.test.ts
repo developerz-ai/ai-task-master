@@ -810,6 +810,11 @@ test('runConfig list → masks openrouterApiKey (no cleartext leak)', async () =
     const out = writes.join('');
     assert.ok(!out.includes(secret), 'full API key must not appear in config list output');
     const printed = JSON.parse(out.trim()) as { openrouterApiKey: string };
+    assert.match(
+      printed.openrouterApiKey,
+      /^sk-or-…[A-Za-z0-9]{4}$/,
+      'masked key should keep sk-or- prefix and last 4 chars',
+    );
     assert.ok(
       printed.openrouterApiKey.endsWith('cdef'),
       'last 4 chars retained for identification',

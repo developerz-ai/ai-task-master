@@ -27,5 +27,11 @@ export type { Plan, PlannedGroup, PlannedTask } from './plan/schema.ts';
 export type { PrGroup, RunState } from './state/schema.ts';
 export { StateStore } from './state/state-store.ts';
 export { datetimeTool } from './tools/datetime.ts';
+export {
+  DEFAULT_IMPERSONATE_TARGETS,
+  type FetchHtmlInput,
+  fetchHtmlTool,
+  isFetchHtmlAvailable,
+} from './tools/fetch-html.ts';
 export { DEFAULT_STEALTH_HEADERS, webFetchTool } from './tools/web-fetch.ts';
 export { WorktreePool } from './workspace/worktree-pool.ts';

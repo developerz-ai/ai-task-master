@@ -9,8 +9,8 @@ import type {
   GrepOutput,
   ReadFileInput,
   ReadFileOutput,
-} from '@developerz-ai/ai-claude-compat';
-import { createSubagent } from '@developerz-ai/ai-claude-compat';
+} from '@developerz.ai/ai-claude-compat';
+import { createSubagent } from '@developerz.ai/ai-claude-compat';
 import { type DeepPartial, Output, type Tool, type ToolLoopAgent } from 'ai';
 import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../plan/schema.ts';
 import type { SubagentInit } from './factory.ts';

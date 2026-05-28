@@ -1,7 +1,7 @@
 # Verification Report
 
 **Date:** 2026-05-28
-**Project:** `ai-task-master` (monorepo: `packages/aitm` CLI + `@developerz-ai/ai-claude-compat`)
+**Project:** `ai-task-master` (monorepo: `packages/aitm` CLI + `@developerz.ai/ai-claude-compat`)
 **Tested at:** branch `fix/reviewer-output-and-config-key` (`4abb75c`) = `main` (`53a31c6`) + the E2E-blocker fixes in PR #43
 **Runtime:** Bun 1.3.14 / Node 22, dev build (`bun packages/aitm/src/cli/cli.ts`)
 **Models:** `x-ai/grok-build-0.1` for the LLM paths (planner/worker/reviewer); take-over + failure-mode are model-agnostic

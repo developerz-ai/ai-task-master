@@ -23,7 +23,7 @@ import {
   multiEditTool,
   readFileTool,
   writeFileTool,
-} from '@developerz-ai/ai-claude-compat';
+} from '@developerz.ai/ai-claude-compat';
 import { type Tool, type ToolSet, tool } from 'ai';
 import { execa } from 'execa';
 import { z } from 'zod';

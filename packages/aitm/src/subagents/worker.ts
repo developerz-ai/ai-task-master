@@ -34,8 +34,8 @@ import type {
   ReadFileOutput,
   WriteFileInput,
   WriteFileOutput,
-} from '@developerz-ai/ai-claude-compat';
-import { composeSystemPrompt, createSubagent } from '@developerz-ai/ai-claude-compat';
+} from '@developerz.ai/ai-claude-compat';
+import { composeSystemPrompt, createSubagent } from '@developerz.ai/ai-claude-compat';
 import {
   type DeepPartial,
   generateText,
@@ -48,7 +48,7 @@ import { z } from 'zod';
 import type { PrGroup } from '../state/schema.ts';
 import type { SubagentInit } from './factory.ts';
 
-// The Claude-Code-style tool surface (from @developerz-ai/ai-claude-compat) the Worker drives:
+// The Claude-Code-style tool surface (from @developerz.ai/ai-claude-compat) the Worker drives:
 // read/write whole files, edit by exact string replace (single + atomic batch), and search the
 // repo with grep/glob. The Worker also invokes `bash` directly during the commit phase.
 export type WorkerTools = {

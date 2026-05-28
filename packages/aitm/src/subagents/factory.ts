@@ -4,7 +4,7 @@
 // still says experimental_Agent — that is the legacy AI SDK 5 name; v6 ships ToolLoopAgent).
 //
 // The ToolLoopAgent wrapper (`createSubagent`) and the system-prompt composer
-// (`composeSystemPrompt`) now live in @developerz-ai/ai-claude-compat; the concrete factories
+// (`composeSystemPrompt`) now live in @developerz.ai/ai-claude-compat; the concrete factories
 // (planner.ts/worker.ts/reviewer.ts) call createSubagent with their own tools + output type.
 
 import type { LanguageModel, ToolSet } from 'ai';

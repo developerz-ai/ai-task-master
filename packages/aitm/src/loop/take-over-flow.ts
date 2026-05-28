@@ -19,7 +19,7 @@
 // docs/vendor/ai-sdk/chunk-09.md §"Subagents" — Reviewer/Worker are built ad-hoc per loop
 // iteration because their tool bindings (worktree, threads) change each iteration.
 
-import { composeSystemPrompt } from '@developerz-ai/ai-claude-compat';
+import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel } from 'ai';
 import { CiFailed } from '../github/errors.ts';
 import type { MergeMethod } from '../github/github-client.ts';

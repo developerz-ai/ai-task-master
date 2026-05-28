@@ -14,7 +14,7 @@
 //   chunk-05.md §"Generating Structured Data"
 //   chunk-09.md §"Subagents"
 
-import { type BashInput, type BashOutput, createSubagent } from '@developerz-ai/ai-claude-compat';
+import { type BashInput, type BashOutput, createSubagent } from '@developerz.ai/ai-claude-compat';
 import { type DeepPartial, Output, type Tool, type ToolLoopAgent } from 'ai';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';

@@ -1,4 +1,4 @@
-// Public API for @developerz-ai/ai-claude-compat. Claude-Code-style agent primitives for the
+// Public API for @developerz.ai/ai-claude-compat. Claude-Code-style agent primitives for the
 // Vercel AI SDK: cwd-scoped FS/edit/search/shell tools, an <env> system-context block, and
 // .claude/ skills + agents loading.
 

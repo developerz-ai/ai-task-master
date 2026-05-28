@@ -19,7 +19,7 @@
     "rewriteRelativeImportExtensions": true,
     "noEmit": true,
     "paths": {
-      "@developerz-ai/ai-claude-compat": ["../ai-claude-compat/src/index.ts"]
+      "@developerz.ai/ai-claude-compat": ["../ai-claude-compat/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts"],

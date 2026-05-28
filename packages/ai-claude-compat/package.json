@@ -4,6 +4,13 @@
   "description": "Claude-Code-style agent primitives for the Vercel AI SDK: FS/bash tools, an <env> system-context block, a subagent-as-tool factory, and .claude/ skills/agents loading.",
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/developerz-ai/ai-task-master.git",
+    "directory": "packages/ai-claude-compat"
+  },
+  "homepage": "https://github.com/developerz-ai/ai-task-master/tree/main/packages/ai-claude-compat#readme",
+  "bugs": "https://github.com/developerz-ai/ai-task-master/issues",
   "publishConfig": {
     "access": "public",
     "provenance": true

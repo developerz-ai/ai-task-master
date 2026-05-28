@@ -4,6 +4,13 @@
   "description": "Autonomous task orchestrator. Goal in, merged PRs out.",
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/developerz-ai/ai-task-master.git",
+    "directory": "packages/aitm"
+  },
+  "homepage": "https://github.com/developerz-ai/ai-task-master/tree/main/packages/aitm#readme",
+  "bugs": "https://github.com/developerz-ai/ai-task-master/issues",
   "publishConfig": {
     "access": "public",
     "provenance": true

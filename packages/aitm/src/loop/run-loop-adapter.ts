@@ -354,10 +354,13 @@ function resolvePlannerTools(set: ToolSet, cwd: string): PlannerTools {
 // adapter constructs it here rather than sourcing it from a server.
 type ThreadGithub = Pick<GitHubClient, 'replyToThread' | 'resolveThread'>;
 
-const githubToolInputSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('replyToThread'), threadId: z.string(), body: z.string() }),
-  z.object({ action: z.literal('resolveThread'), threadId: z.string() }),
-]);
+// Flat object, not a discriminatedUnion → no `oneOf` in the tool params (rejected by some
+// OpenRouter-routed providers). `body` applies to replyToThread only.
+const githubToolInputSchema = z.object({
+  action: z.enum(['replyToThread', 'resolveThread']),
+  threadId: z.string().min(1),
+  body: z.string().optional(),
+});
 
 export function githubThreadTool(github: ThreadGithub): Tool<GithubToolInput, GithubToolOutput> {
   return tool<GithubToolInput, GithubToolOutput>({
@@ -365,7 +368,7 @@ export function githubThreadTool(github: ThreadGithub): Tool<GithubToolInput, Gi
     inputSchema: githubToolInputSchema,
     execute: async (input): Promise<GithubToolOutput> => {
       if (input.action === 'replyToThread') {
-        await github.replyToThread(input.threadId, input.body);
+        await github.replyToThread(input.threadId, input.body ?? '');
         return { ok: true };
       }
       await github.resolveThread(input.threadId);

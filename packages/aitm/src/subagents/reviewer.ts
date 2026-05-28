@@ -23,9 +23,14 @@ import type { WorkerTools } from './worker.ts';
 
 // Subset of GitHubClient methods exposed to the agent. Kept as a single discriminated tool so
 // the SDK only registers one `github` slot — matches the task's tool surface contract.
-export type GithubToolInput =
-  | { action: 'replyToThread'; threadId: string; body: string }
-  | { action: 'resolveThread'; threadId: string };
+// Flat (not a union) so the tool's parameter JSON-Schema isn't `oneOf` — several
+// OpenRouter-routed providers reject `oneOf` in tool params ("Invalid arguments passed to the
+// model"). `body` is used only by replyToThread.
+export type GithubToolInput = {
+  action: 'replyToThread' | 'resolveThread';
+  threadId: string;
+  body?: string | undefined;
+};
 export type GithubToolOutput = { ok: boolean };
 
 // The Reviewer gets the Worker's full edit/search surface (it pushes fixes) plus a `github`
@@ -34,13 +39,16 @@ export type ReviewerTools = WorkerTools & {
   github: Tool<GithubToolInput, GithubToolOutput>;
 };
 
-// Per-thread structured output emitted by the model. `fixed` carries the commit message the
-// runner should use; `wontfix` carries the rationale.
-export const ThreadResolutionOutputSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('fixed'), commitMessage: z.string().min(1) }),
-  z.object({ kind: z.literal('replied') }),
-  z.object({ kind: z.literal('wontfix'), reason: z.string().min(1) }),
-]);
+// Per-thread structured output emitted by the model. A FLAT object (not a discriminatedUnion):
+// a discriminated union compiles to JSON-Schema `oneOf`, which several OpenRouter-routed
+// providers reject for structured output (`output_config.format.schema: Schema type 'oneOf' is
+// not supported` — seen on Anthropic, which is also aitm's default tier). `kind` selects the
+// outcome; `commitMessage` is expected for "fixed" and `reason` for "wontfix".
+export const ThreadResolutionOutputSchema = z.object({
+  kind: z.enum(['fixed', 'replied', 'wontfix']),
+  commitMessage: z.string().optional(),
+  reason: z.string().optional(),
+});
 export type ThreadResolutionOutput = z.infer<typeof ThreadResolutionOutputSchema>;
 
 type ReviewerAgentOutput = Output.Output<
@@ -148,13 +156,19 @@ async function resolveOneThread(
   const out = result.experimental_output;
   switch (out.kind) {
     case 'fixed': {
-      const commitSha = await commitFix(init.tools.bash, input.worktreePath, out.commitMessage);
+      // commitMessage is optional on the flat schema; fall back to a generic subject.
+      const message = out.commitMessage?.trim() || `fix: address review thread ${thread.id}`;
+      const commitSha = await commitFix(init.tools.bash, input.worktreePath, message);
       return { threadId: thread.id, kind: 'fixed', commitSha };
     }
     case 'replied':
       return { threadId: thread.id, kind: 'replied' };
-    case 'wontfix':
-      return { threadId: thread.id, kind: 'wontfix', reason: out.reason };
+    default:
+      return {
+        threadId: thread.id,
+        kind: 'wontfix',
+        reason: out.reason?.trim() || 'no reason provided',
+      };
   }
 }
 

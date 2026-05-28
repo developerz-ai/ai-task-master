@@ -21,17 +21,14 @@ export type GithubThreadClient = {
   resolveThread(threadId: string): Promise<void>;
 };
 
-const githubInputSchema = z.discriminatedUnion('action', [
-  z.object({
-    action: z.literal('replyToThread'),
-    threadId: z.string().min(1),
-    body: z.string().min(1),
-  }),
-  z.object({
-    action: z.literal('resolveThread'),
-    threadId: z.string().min(1),
-  }),
-]);
+// Flat object, not a discriminatedUnion: a union compiles to JSON-Schema `oneOf` in the tool's
+// parameters, which some OpenRouter-routed providers reject ("Invalid arguments passed to the
+// model"). `body` is required only for replyToThread (enforced in execute).
+const githubInputSchema = z.object({
+  action: z.enum(['replyToThread', 'resolveThread']),
+  threadId: z.string().min(1),
+  body: z.string().optional(),
+});
 
 export type GithubThreadToolInit = {
   github: GithubThreadClient;
@@ -45,14 +42,12 @@ export function githubThreadTool(
       'Act on a single PR review thread. action="replyToThread" posts a reply; action="resolveThread" marks it resolved. Use replyToThread before resolveThread so the resolution carries an explanation.',
     inputSchema: githubInputSchema,
     execute: async (input): Promise<GithubToolOutput> => {
-      switch (input.action) {
-        case 'replyToThread':
-          await init.github.replyToThread(input.threadId, input.body);
-          return { ok: true };
-        case 'resolveThread':
-          await init.github.resolveThread(input.threadId);
-          return { ok: true };
+      if (input.action === 'replyToThread') {
+        await init.github.replyToThread(input.threadId, input.body ?? '');
+        return { ok: true };
       }
+      await init.github.resolveThread(input.threadId);
+      return { ok: true };
     },
   });
 }

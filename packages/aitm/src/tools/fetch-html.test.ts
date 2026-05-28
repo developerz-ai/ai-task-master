@@ -72,6 +72,20 @@ test('fetchHtmlTool: truncates the body to maxChars', async () => {
   assert.equal(out.truncated, true);
 });
 
+test('fetchHtmlTool: clamps an oversized timeout to the hard max', async () => {
+  let captured: string[] = [];
+  const exec: ExecLike = async (_file, args) => {
+    captured = [...args];
+    return { stdout: 'x', stderr: metaStderr(200, 'https://example.com/', 'text/html') };
+  };
+  await run(fetchHtmlTool({ exec, lookup: publicLookup }), {
+    url: 'https://example.com/',
+    timeoutMs: 999_999_999,
+  });
+  // --max-time is in seconds; the 120_000ms ceiling caps it at 120.
+  assert.equal(captured[captured.indexOf('--max-time') + 1], '120');
+});
+
 test('fetchHtmlTool: rejects a private/loopback URL via the shared SSRF guard', async () => {
   const exec: ExecLike = async () => ({ stdout: '', stderr: '' });
   await assert.rejects(

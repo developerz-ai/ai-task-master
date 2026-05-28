@@ -36,6 +36,10 @@ export const DEFAULT_IMPERSONATE_TARGETS: Readonly<
 const DEFAULT_BINARY = 'curl-impersonate-chrome';
 const DEFAULT_MAX_CHARS = 200_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
+// Hard ceilings on model-provided inputs so one tool call can't exhaust resources: cap the
+// request runtime, and cap maxChars (which also bounds the subprocess maxBuffer below).
+const MAX_TIMEOUT_MS = 120_000;
+const MAX_OUTPUT_CHARS = 5_000_000;
 // Marker separating curl's `--write-out` metadata (redirected to stderr via %{stderr}) from any
 // real stderr noise. Chosen to be vanishingly unlikely to occur in normal output.
 const META = '__AITM_FETCH_HTML_META__';
@@ -87,8 +91,8 @@ export function fetchHtmlTool(init: FetchHtmlInit = {}): Tool<FetchHtmlInput, We
       'Fetch a URL using a real browser TLS fingerprint (via curl-impersonate), for sites that block stock fetch with a JS challenge / 403 (Cloudflare, Akamai). Same output shape as web-fetch. Use this only when web-fetch returns a challenge or 403.',
     inputSchema: fetchHtmlInputSchema,
     execute: async (input: FetchHtmlInput): Promise<WebFetchOutput> => {
-      const maxChars = input.maxChars ?? DEFAULT_MAX_CHARS;
-      const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const maxChars = Math.min(input.maxChars ?? DEFAULT_MAX_CHARS, MAX_OUTPUT_CHARS);
+      const timeoutMs = Math.min(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
       const safeUrl = await assertSafeUrl(input.url, lookup);
       const target = targets[input.impersonate ?? 'chrome'];
       // -sS: quiet but show errors; -L: follow redirects; --max-time bounds the request.

@@ -35,7 +35,7 @@ test('loadSkills: parses each SKILL.md, sorted by name', async () => {
     const deploy = skills.find((s) => s.name === 'deploy');
     assert.equal(deploy?.description, 'Ship it');
     assert.equal(deploy?.body, '# Steps\n1. go');
-    assert.ok(deploy?.path.endsWith('skills/deploy/SKILL.md'));
+    assert.ok(deploy?.path.endsWith(join('skills', 'deploy', 'SKILL.md')));
   } finally {
     await dir.cleanup();
   }

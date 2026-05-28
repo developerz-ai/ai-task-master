@@ -51,6 +51,20 @@ test('readFileTool: offset+limit returns a 1-based line window', async () => {
   }
 });
 
+test('readFileTool: a window running to EOF keeps the trailing newline', async () => {
+  const dir = await tempDir();
+  try {
+    await writeFile(join(dir.path, 'f.txt'), 'l1\nl2\nl3\n');
+    const out = await run<{ path: string; offset: number }, { content: string }>(
+      readFileTool({ cwd: dir.path }),
+      { path: 'f.txt', offset: 2 },
+    );
+    assert.equal(out.content, 'l2\nl3\n');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
 test('readFileTool: offset past EOF returns empty', async () => {
   const dir = await tempDir();
   try {

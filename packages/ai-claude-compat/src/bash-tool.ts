@@ -31,6 +31,9 @@ export type BashToolInit = {
 };
 
 const DEFAULT_BASH_TIMEOUT_MS = 60_000;
+// Hard ceiling on the effective timeout so a single tool call — via a huge per-call timeoutMs or
+// an over-large configured default — can't pin the agent loop far longer than intended.
+const MAX_BASH_TIMEOUT_MS = 600_000;
 
 export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
   const exec = init.exec ?? execa;
@@ -40,7 +43,7 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
       'Run a shell command inside the current worktree. Returns stdout, stderr, and exit code. The command runs via `bash -c` with its initial cwd set to the worktree.',
     inputSchema: bashInputSchema,
     execute: async (input): Promise<BashOutput> => {
-      const timeout = input.timeoutMs ?? defaultTimeout;
+      const timeout = Math.min(input.timeoutMs ?? defaultTimeout, MAX_BASH_TIMEOUT_MS);
       try {
         // Plain `-c`, not a login shell (`-lc`): a login shell sources /etc/profile and
         // ~/.bash_profile, which in CI can `cd` away from `cwd` before the command runs. Also

@@ -105,6 +105,9 @@ type WalkedFile = { abs: string; rel: string };
 async function* walk(dir: string, cwd: string): AsyncGenerator<WalkedFile> {
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
   if (entries === null) return;
+  // readdir order is filesystem-dependent; sort so capped grep/glob results (and which entries
+  // survive maxResults) stay deterministic across environments.
+  entries.sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of entries) {
     if (entry.isSymbolicLink()) continue;
     if (entry.name === '.git' || entry.name === 'node_modules') continue;

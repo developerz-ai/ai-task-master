@@ -36,11 +36,19 @@ function escapesRoot(root: string, target: string): boolean {
   return false;
 }
 
+// Only a genuinely-absent path (ENOENT) may fall back to the string form. EACCES/ELOOP/EIO and
+// the like must propagate — swallowing them would silently downgrade the symlink guard to the
+// weaker string-only check.
+function isEnoent(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'ENOENT';
+}
+
 async function safeRealpath(p: string): Promise<string> {
   try {
     return await realpath(p);
-  } catch {
-    return resolve(p);
+  } catch (err) {
+    if (isEnoent(err)) return resolve(p);
+    throw err;
   }
 }
 
@@ -49,7 +57,8 @@ async function safeRealpath(p: string): Promise<string> {
 async function realpathOfExisting(target: string): Promise<string> {
   try {
     return await realpath(target);
-  } catch {
+  } catch (err) {
+    if (!isEnoent(err)) throw err;
     const parent = dirname(target);
     if (parent === target) return target;
     const realParent = await realpathOfExisting(parent);

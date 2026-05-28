@@ -16,7 +16,7 @@ Subagents never call each other. Only `Orchestrator` composes them — the depen
 | Subagent | Single responsibility | Tools it gets | Output contract |
 | --- | --- | --- | --- |
 | `Planner` | Turn goal plus repo survey into an ordered list of **PR groups**, each containing tasks. | Read-only subset: `readFile` (offset/limit), `grep`, `glob`. | `PrGroup[]` (Zod schema). Capped by `options.maxPrs`. |
-| `Worker` | Implement one PR group end-to-end on a dedicated branch and open the PR. | `readFile`, `writeFile`, `editFile`, `multiEdit`, `grep`, `glob`, `bash`, `GitHubClient`. | PR number or `blocked` reason. |
+| `Worker` | Implement one PR group on a dedicated branch (commits + branch); the Orchestrator opens the PR. | `readFile`, `writeFile`, `editFile`, `multiEdit`, `grep`, `glob`, `bash`. | Branch + draft commit message, or `blocked` reason. |
 | `Reviewer` | Address PR review comments, push fixes, resolve threads. | The Worker's full set plus a `github` thread tool (`GitHubClient` GraphQL). | Resolution report per comment. |
 
 The FS/edit/search/shell tools are the Claude-Code-style surface from `@developerz-ai/ai-claude-compat`, scoped to the active worktree. When an MCP server supplies some of them, the rest are partial-filled from the local set so a bare `aitm start` (no `mcpServers`) still works.

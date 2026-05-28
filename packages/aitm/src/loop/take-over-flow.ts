@@ -25,6 +25,7 @@ import type { MergeMethod } from '../github/github-client.ts';
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup } from '../state/schema.ts';
+import { composeSystemPrompt } from '../subagents/factory.ts';
 import {
   createReviewerAgent,
   REVIEWER_SYSTEM_PREFIX,
@@ -218,7 +219,11 @@ async function runReviewerThreads(
   const agent = createReviewerAgent({
     model: input.subagents.reviewerModel,
     tools: input.subagents.reviewerTools,
-    systemPrompt: input.subagents.styleContents + REVIEWER_SYSTEM_PREFIX,
+    systemPrompt: composeSystemPrompt(
+      input.subagents.styleContents,
+      REVIEWER_SYSTEM_PREFIX,
+      input.worktreePath,
+    ),
   });
   return runReviewer(agent, {
     pr: input.pr,
@@ -256,7 +261,11 @@ async function runWorkerCiFix(input: TakeOverFlowInput): Promise<WorkerResult> {
   const agent = createWorkerAgent({
     model: input.subagents.workerModel,
     tools: input.subagents.workerTools,
-    systemPrompt: input.subagents.styleContents + WORKER_SYSTEM_PREFIX,
+    systemPrompt: composeSystemPrompt(
+      input.subagents.styleContents,
+      WORKER_SYSTEM_PREFIX,
+      input.worktreePath,
+    ),
   });
   return runWorker(agent, {
     group,

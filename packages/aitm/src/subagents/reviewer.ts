@@ -14,18 +14,12 @@
 //   chunk-05.md §"Generating Structured Data"
 //   chunk-09.md §"Subagents"
 
+import type { BashInput, BashOutput } from '@developerz-ai/ai-claude-compat';
 import { type DeepPartial, Output, stepCountIs, type Tool, ToolLoopAgent } from 'ai';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
 import type { SubagentInit } from './factory.ts';
-import type {
-  BashInput,
-  BashOutput,
-  ReadFileInput,
-  ReadFileOutput,
-  WriteFileInput,
-  WriteFileOutput,
-} from './worker.ts';
+import type { WorkerTools } from './worker.ts';
 
 // Subset of GitHubClient methods exposed to the agent. Kept as a single discriminated tool so
 // the SDK only registers one `github` slot — matches the task's tool surface contract.
@@ -34,10 +28,9 @@ export type GithubToolInput =
   | { action: 'resolveThread'; threadId: string };
 export type GithubToolOutput = { ok: boolean };
 
-export type ReviewerTools = {
-  readFile: Tool<ReadFileInput, ReadFileOutput>;
-  writeFile: Tool<WriteFileInput, WriteFileOutput>;
-  bash: Tool<BashInput, BashOutput>;
+// The Reviewer gets the Worker's full edit/search surface (it pushes fixes) plus a `github`
+// tool for replying to and resolving review threads.
+export type ReviewerTools = WorkerTools & {
   github: Tool<GithubToolInput, GithubToolOutput>;
 };
 
@@ -80,8 +73,9 @@ export const REVIEWER_SYSTEM_PREFIX = [
   'You are the Reviewer subagent. You receive ONE unresolved PR review thread at a time and',
   'decide between three outcomes, emitting a ThreadResolutionOutput JSON that names the choice.',
   '',
-  '- "fixed": the reviewer is right and a code change is needed. Use readFile/writeFile/bash to',
-  '  make the fix inside the worktree. DO NOT run `git commit` yourself — the runner commits',
+  '- "fixed": the reviewer is right and a code change is needed. Use your tools (grep/glob/',
+  '  readFile to locate, editFile/multiEdit to change, writeFile to rewrite, bash for the rest)',
+  '  to make the fix inside the worktree. DO NOT run `git commit` yourself — the runner commits',
   '  every staged change after you finish. Reply on the thread via the github tool explaining',
   '  the fix and resolve the thread, then emit { kind: "fixed", commitMessage } where',
   '  commitMessage is the subject line the runner will pass to `git commit`.',

@@ -14,6 +14,11 @@
     "packages/ai-claude-compat": {
       "name": "@developerz-ai/ai-claude-compat",
       "version": "0.0.0",
+      "dependencies": {
+        "ai": "^6.0.182",
+        "execa": "^9.6.1",
+        "zod": "^4.4.3",
+      },
     },
     "packages/aitm": {
       "name": "aitm",
@@ -23,6 +28,7 @@
       },
       "dependencies": {
         "@ai-sdk/mcp": "^1.0.42",
+        "@developerz-ai/ai-claude-compat": "*",
         "@openrouter/ai-sdk-provider": "^2.9.0",
         "ai": "^6.0.182",
         "execa": "^9.6.1",

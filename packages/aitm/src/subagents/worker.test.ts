@@ -242,6 +242,12 @@ test('runWorker returns blocked when the manifest is empty', async () => {
 
   const result = await runWorker(agent, baseInput());
   assert.equal(result.kind, 'blocked');
+  // The block reason must be actionable: name the empty manifest AND point at a more capable
+  // model, so a user on a weak model gets guidance instead of a bare error (issue #45).
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /empty file manifest/i);
+    assert.match(result.reason, /more capable/i);
+  }
   // No commit should be attempted on a blocked run.
   assert.equal(calls.bashes.length, 0);
 });

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { bashTool } from './bash-tool.ts';
+import { bashTool, multiBashTool } from './bash-tool.ts';
 
 async function tempDir(
   prefix = 'compat-bash-',
@@ -62,6 +62,65 @@ test('bashTool: command timeout returns non-zero exit, not a thrown rejection', 
       { command: 'sleep 5' },
     );
     assert.notEqual(out.exitCode, 0);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+type MultiOut = {
+  results: Array<{ command: string; stdout: string; exitCode: number }>;
+  exitCode: number;
+  failedAt: number | null;
+};
+
+test('multiBashTool: runs commands in sequence, all succeed', async () => {
+  const dir = await tempDir();
+  try {
+    const out = await run<{ commands: string[] }, MultiOut>(multiBashTool({ cwd: dir.path }), {
+      commands: ['echo one', 'echo two', 'echo three'],
+    });
+    assert.equal(out.exitCode, 0);
+    assert.equal(out.failedAt, null);
+    assert.equal(out.results.length, 3);
+    assert.match(out.results[0]?.stdout ?? '', /one/);
+    assert.match(out.results[2]?.stdout ?? '', /three/);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('multiBashTool: stops at the first failure and skips the rest', async () => {
+  const dir = await tempDir();
+  try {
+    const out = await run<{ commands: string[] }, MultiOut>(multiBashTool({ cwd: dir.path }), {
+      commands: ['echo first', 'false', 'echo never > marker'],
+    });
+    assert.notEqual(out.exitCode, 0);
+    assert.equal(out.failedAt, 1);
+    // The third command must not have run — no marker file.
+    assert.equal(out.results.length, 2);
+    const check = await run<{ command: string }, { exitCode: number }>(
+      bashTool({ cwd: dir.path }),
+      {
+        command: 'test -f marker',
+      },
+    );
+    assert.notEqual(check.exitCode, 0);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('multiBashTool: each command gets a fresh cwd (cd does not leak)', async () => {
+  const dir = await tempDir();
+  try {
+    await mkdir(join(dir.path, 'sub'), { recursive: true });
+    const out = await run<{ commands: string[] }, MultiOut>(multiBashTool({ cwd: dir.path }), {
+      commands: ['cd sub', 'pwd'],
+    });
+    assert.equal(out.exitCode, 0);
+    // The second command's pwd is the worktree root, not sub — the cd in command 1 was scoped.
+    assert.equal(out.results[1]?.stdout.endsWith('/sub'), false);
   } finally {
     await dir.cleanup();
   }

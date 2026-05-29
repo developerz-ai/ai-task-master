@@ -28,6 +28,8 @@ import type {
   GlobOutput,
   GrepInput,
   GrepOutput,
+  MultiBashInput,
+  MultiBashOutput,
   MultiEditInput,
   MultiEditOutput,
   ReadFileInput,
@@ -59,6 +61,7 @@ export type WorkerTools = {
   grep: Tool<GrepInput, GrepOutput>;
   glob: Tool<GlobInput, GlobOutput>;
   bash: Tool<BashInput, BashOutput>;
+  multiBash: Tool<MultiBashInput, MultiBashOutput>;
 };
 
 // File manifest — Phase 1 structured output. Each entry drives one editor in Phase 2.
@@ -138,6 +141,9 @@ const EDITOR_SYSTEM_PREFIX = [
   '  replacement) or `multiEdit` (several replacements applied atomically). Use `writeFile` only',
   '  for a full rewrite.',
   '- To DELETE a file, use `bash` with `rm -f <path>`.',
+  '- For a dependent sequence of shell steps (e.g. `mkdir … && generate && test`), prefer',
+  '  `multiBash` with an ordered `commands` array — it stops at the first failure, so you',
+  '  see exactly which step broke without chaining `&&` by hand.',
   'You may issue multiple tool calls in parallel.',
   '',
   "IMPORTANT: your final assistant message is returned to the outer Worker as this file's",

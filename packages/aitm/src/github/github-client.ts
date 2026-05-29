@@ -182,6 +182,92 @@ export class GitHubClient {
     }
   }
 
+  // Download the FULL logs of every failed CI job for a PR — no truncation, no ZIP. Mirrors
+  // claude-task-master's CILogDownloader: resolve the PR's head run(s), list their jobs via the
+  // REST API, keep only the failed ones, and pull each job's complete log text. Returns one entry
+  // per failed job. Defensive: a gh failure on any single step yields fewer entries, never a throw,
+  // so the merge-pr loop can still proceed (and report "no logs") rather than crash.
+  async getFailedCiLogs(pr: number): Promise<Array<{ check: string; logs: string }>> {
+    const head = await this.runCmd(
+      'gh',
+      ['pr', 'view', String(pr), '--json', 'headRefName,headRefOid'],
+      { cwd: this.cwd },
+    );
+    if (head.exitCode !== 0) return [];
+    const parsedHead = safeJson(head.stdout);
+    const branch = isRecord(parsedHead) ? parsedHead.headRefName : undefined;
+    const sha = isRecord(parsedHead) ? parsedHead.headRefOid : undefined;
+    if (typeof branch !== 'string') return [];
+
+    const runIds = await this.failedRunIds(branch, typeof sha === 'string' ? sha : undefined);
+    if (runIds.length === 0) return [];
+    const { owner, name } = await this.repoMeta();
+    const out: Array<{ check: string; logs: string }> = [];
+    for (const runId of runIds) {
+      for (const job of await this.failedJobs(owner, name, runId)) {
+        const logs = await this.jobLogs(owner, name, job.id);
+        if (logs.trim()) out.push({ check: job.name, logs });
+      }
+    }
+    return out;
+  }
+
+  // Run ids of failed/timed-out runs for the branch. When a head sha is known, prefer runs for
+  // that exact commit (the PR's current head) so we don't surface logs from a stale push.
+  private async failedRunIds(branch: string, sha: string | undefined): Promise<number[]> {
+    const r = await this.runCmd(
+      'gh',
+      [
+        'run',
+        'list',
+        '--branch',
+        branch,
+        '--json',
+        'databaseId,headSha,conclusion',
+        '--limit',
+        '30',
+      ],
+      { cwd: this.cwd },
+    );
+    if (r.exitCode !== 0) return [];
+    const parsed = safeJson(r.stdout);
+    const rows = WorkflowRunsSchema.safeParse(parsed);
+    if (!rows.success) return [];
+    const failed = rows.data.filter((run) => FAILED_CONCLUSIONS.has(run.conclusion ?? ''));
+    const forSha = sha ? failed.filter((run) => run.headSha === sha) : [];
+    return (forSha.length > 0 ? forSha : failed).map((run) => run.databaseId);
+  }
+
+  private async failedJobs(
+    owner: string,
+    name: string,
+    runId: number,
+  ): Promise<Array<{ id: number; name: string }>> {
+    const r = await this.runCmd(
+      'gh',
+      ['api', `repos/${owner}/${name}/actions/runs/${runId}/jobs`],
+      { cwd: this.cwd },
+    );
+    if (r.exitCode !== 0) return [];
+    const parsed = JobsResponseSchema.safeParse(safeJson(r.stdout));
+    if (!parsed.success) return [];
+    return parsed.data.jobs
+      .filter((job) => FAILED_CONCLUSIONS.has(job.conclusion ?? ''))
+      .map((job) => ({ id: job.id, name: job.name }));
+  }
+
+  // Full per-job log text via the REST API (plain text, not a ZIP). gh prints it to stdout.
+  private async jobLogs(owner: string, name: string, jobId: number): Promise<string> {
+    const r = await this.runCmd(
+      'gh',
+      ['api', `repos/${owner}/${name}/actions/jobs/${jobId}/logs`],
+      {
+        cwd: this.cwd,
+      },
+    );
+    return r.exitCode === 0 ? r.stdout : '';
+  }
+
   async listUnresolvedThreads(pr: number): Promise<ReviewThread[]> {
     const { owner, name } = await this.repoMeta();
     // GitHub caps connections at 100 nodes per page — page through threads and
@@ -346,6 +432,40 @@ export class GitHubClient {
     const scopes = parseScopes(text);
     return { ok: r.exitCode === 0, scopes };
   }
+}
+
+// Conclusions that count as "this job failed and is worth pulling logs for". `cancelled` is
+// excluded (intentionally stopped, not a real failure) — same call claude-task-master makes.
+const FAILED_CONCLUSIONS = new Set(['failure', 'timed_out', 'startup_failure', 'action_required']);
+
+const WorkflowRunsSchema = z.array(
+  z.object({
+    databaseId: z.number(),
+    headSha: z.string().optional(),
+    conclusion: z.string().nullable().optional(),
+  }),
+);
+
+const JobsResponseSchema = z.object({
+  jobs: z.array(
+    z.object({
+      id: z.number(),
+      name: z.string(),
+      conclusion: z.string().nullable().optional(),
+    }),
+  ),
+});
+
+function safeJson(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
 }
 
 // `gh pr view` exits non-zero with messages like:

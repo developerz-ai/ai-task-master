@@ -549,6 +549,7 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
       workerModel: input.credentials.modelFor('worker'),
       workerTools,
       styleContents,
+      ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
     },
   });
 

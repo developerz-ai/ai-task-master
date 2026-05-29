@@ -160,6 +160,46 @@ test('runWorker: manifest → per-file edits → commit sequence', async () => {
   assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' commit -m 'feat: add a \+ fix b'/);
 });
 
+test('runWorker runs formatCommand in the worktree before staging when set (issue #48)', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  const { tools, calls } = makeTools();
+  const model = makeWorkerModel(manifest, ['created a']);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), formatCommand: 'bun run lint:fix' });
+  assert.equal(result.kind, 'ok');
+
+  // Sequence: checkout -B, <format>, add -A, commit. Format runs in the worktree, before add.
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.equal(cmds.length, 4);
+  assert.match(cmds[0] ?? '', /checkout -B/);
+  assert.match(cmds[1] ?? '', /cd '\/tmp\/wt' && bun run lint:fix/);
+  assert.match(cmds[2] ?? '', /add -A/);
+  assert.match(cmds[3] ?? '', /commit -m/);
+});
+
+test('runWorker omits the format step when formatCommand is unset', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  const { tools, calls } = makeTools();
+  const model = makeWorkerModel(manifest, ['created a']);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  // No format step: exactly checkout, add, commit.
+  assert.equal(calls.bashes.length, 3);
+  assert.equal(
+    calls.bashes.some((b) => b.command.includes('lint:fix')),
+    false,
+  );
+});
+
 test('runWorker collapses multi-line editor responses to a one-line summary', async () => {
   const manifest: FileManifest = {
     files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],

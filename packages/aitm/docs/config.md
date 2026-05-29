@@ -41,11 +41,16 @@ The merged result is what every other module sees. A frozen snapshot is written 
   "autoMerge": true,
   "mergeMethod": "squash",
   "stylePath": null,
+  "formatCommand": null,              // optional; run in the worktree before the Worker commits
   "logLevel": "info"
 }
 ```
 
 All fields optional. Missing fields fall through to the next source.
+
+## formatCommand
+
+LLM output is rarely byte-identical to a project's formatter, so on a repo with a format-gated CI (biome/prettier/gofmt/black) an otherwise-correct PR would fail on formatting alone. Set `formatCommand` to a shell command (e.g. `"bun run lint:fix"`); the Worker runs it in the worktree **before `git add -A`**, so the committed diff already matches the formatter. A non-zero exit (e.g. unfixable lint errors) surfaces as a Worker error rather than a later CI failure. Project/global config only — not a CLI flag. Unset → no format step (current behavior).
 
 ## Per-role models
 

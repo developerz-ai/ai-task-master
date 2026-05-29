@@ -46,9 +46,26 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     assert.equal(resolved.autoMerge, true);
     assert.equal(resolved.mergeMethod, 'squash');
     assert.equal(resolved.stylePath, null);
+    assert.equal(resolved.formatCommand, null);
     assert.equal(resolved.logLevel, 'info');
     assert.equal(resolved.concurrency, 1);
     assert.deepEqual(resolved.models, DEFAULT_MODELS);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: formatCommand is read from project, then global (issue #48)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, { formatCommand: 'global fmt' });
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    assert.equal((await loader.resolve({})).formatCommand, 'global fmt');
+
+    await writeProjectConfig(cwd.path, { formatCommand: 'bun run lint:fix' });
+    assert.equal((await loader.resolve({})).formatCommand, 'bun run lint:fix');
   } finally {
     await home.cleanup();
     await cwd.cleanup();

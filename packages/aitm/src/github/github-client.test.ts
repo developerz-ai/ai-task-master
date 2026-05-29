@@ -645,3 +645,72 @@ test('resolveThread throws on non-zero exit', async () => {
   const g = new GitHubClient('/tmp/repo', run);
   await assert.rejects(() => g.resolveThread('PRRT_x'), /gh api graphql \(resolveThread\) failed/);
 });
+
+test('getFailedCiLogs downloads full logs for failed jobs of the PR head run', async () => {
+  // Sequence: pr view → run list → repo view (repoMeta) → api jobs → api job logs.
+  const run: RunCmd = async (file, args) => {
+    const a = args.join(' ');
+    if (file === 'gh' && a.startsWith('pr view')) {
+      return { stdout: '{"headRefName":"feat/x","headRefOid":"abc123"}', stderr: '', exitCode: 0 };
+    }
+    if (file === 'gh' && a.startsWith('run list')) {
+      return {
+        stdout: JSON.stringify([
+          { databaseId: 111, headSha: 'abc123', conclusion: 'failure' },
+          { databaseId: 222, headSha: 'old', conclusion: 'failure' },
+          { databaseId: 333, headSha: 'abc123', conclusion: 'success' },
+        ]),
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    if (file === 'gh' && a.startsWith('repo view')) {
+      return { stdout: '{"owner":{"login":"o"},"name":"r"}', stderr: '', exitCode: 0 };
+    }
+    if (file === 'gh' && a.includes('actions/runs/111/jobs')) {
+      return {
+        stdout: JSON.stringify({
+          jobs: [
+            { id: 9001, name: 'bun (test + lint)', conclusion: 'failure' },
+            { id: 9002, name: 'node (test + lint)', conclusion: 'success' },
+          ],
+        }),
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    if (file === 'gh' && a.includes('actions/jobs/9001/logs')) {
+      return {
+        stdout: 'FULL LOG LINE 1\nbiome format error\nFULL LOG LINE 3',
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    throw new Error(`unexpected call: ${file} ${a}`);
+  };
+  const g = new GitHubClient('/tmp/repo', run);
+  const out = await g.getFailedCiLogs(42);
+  // Only run 111 (matches head sha abc123 + failed) and only its failed job 9001.
+  assert.equal(out.length, 1);
+  assert.equal(out[0]?.check, 'bun (test + lint)');
+  assert.match(out[0]?.logs ?? '', /biome format error/);
+});
+
+test('getFailedCiLogs returns [] when the PR has no failed runs', async () => {
+  const run: RunCmd = async (file, args) => {
+    const a = args.join(' ');
+    if (a.startsWith('pr view')) {
+      return { stdout: '{"headRefName":"feat/x","headRefOid":"abc"}', stderr: '', exitCode: 0 };
+    }
+    if (a.startsWith('run list')) {
+      return {
+        stdout: '[{"databaseId":1,"headSha":"abc","conclusion":"success"}]',
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  const g = new GitHubClient('/tmp/repo', run);
+  assert.deepEqual(await g.getFailedCiLogs(42), []);
+});

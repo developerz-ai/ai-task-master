@@ -48,6 +48,21 @@ export type TakeOverGithub = {
   mergePr(pr: number, method: MergeMethod): Promise<void>;
   replyToThread(threadId: string, body: string): Promise<void>;
   resolveThread(threadId: string): Promise<void>;
+  // Optional — present on the real GitHubClient. When available, the flow downloads the full
+  // failed-CI logs so the CI-fix Worker can read them off disk instead of guessing (issue #48).
+  getFailedCiLogs?(pr: number): Promise<Array<{ check: string; logs: string }>>;
+};
+
+// Persists downloaded PR context (CI logs / comments) to disk under the state dir. PrContextStore
+// satisfies this; tests pass a stub. Optional on the flow input — when omitted, nothing is
+// downloaded and the CI-fix Worker falls back to its generic "read the CI logs via gh" task.
+export type PrContextPort = {
+  clear(pr: number): Promise<void>;
+  saveCiFailures(
+    pr: number,
+    failures: ReadonlyArray<{ check: string; logs: string }>,
+  ): Promise<string | null>;
+  saveComments(pr: number, threads: readonly ReviewThread[]): Promise<string | null>;
 };
 
 // Subagent factories injected so tests can swap them for stubs without touching the AI SDK.
@@ -83,6 +98,9 @@ export type TakeOverFlowInput = {
   baseBranch: string;
   github: TakeOverGithub;
   subagents: TakeOverSubagents;
+  // Optional store for downloaded CI logs / comments (issue #48). When present, the flow writes
+  // full failed-CI logs under .ai-task-master/debugging/pr/<pr>/ and points the Worker at them.
+  prContext?: PrContextPort;
   mergeMethod: MergeMethod;
   // Cap on iterations of the CI-wait/fix loop. Default 10 — claude-task-master uses 30 but
   // each iteration here is heavier (model calls per thread), so default lower.
@@ -131,10 +149,28 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
       break;
     }
 
+    // 3. Download context to disk so subagents can READ it instead of guessing: full failed-CI
+    //    logs (one file per check) + the review comments, under .ai-task-master/debugging/pr/<pr>/.
+    //    Re-downloaded each iteration so the Worker never reads stale logs from a prior push.
+    let ciLogsDir: string | null = null;
+    if (input.prContext) {
+      await input.prContext.clear(input.pr);
+      if ((ciStatus === 'failure' || ciStatus === 'cancelled') && input.github.getFailedCiLogs) {
+        const failures = await input.github.getFailedCiLogs(input.pr);
+        ciLogsDir = await input.prContext.saveCiFailures(input.pr, failures);
+        log?.info('take-over: downloaded ci logs', {
+          pr: input.pr,
+          checks: failures.length,
+          dir: ciLogsDir,
+        });
+      }
+      if (threads.length > 0) await input.prContext.saveComments(input.pr, threads);
+    }
+
     let pushedSomething = false;
 
     if (ciStatus === 'failure' || ciStatus === 'cancelled') {
-      const fixed = await runWorkerCiFix(input);
+      const fixed = await runWorkerCiFix(input, ciLogsDir);
       if (fixed.kind === 'blocked') {
         return { kind: 'blocked', reason: fixed.reason, iterations: iteration };
       }
@@ -238,14 +274,19 @@ async function runReviewerThreads(
 // Worker CI-fix path. Build a synthetic PR group whose only task is "fix CI on this PR",
 // then run the regular Worker. Worker emits a FileManifest and runs per-file editors —
 // suitable for "test failed, fix it" if Worker has enough context from the worktree.
-async function runWorkerCiFix(input: TakeOverFlowInput): Promise<WorkerResult> {
+async function runWorkerCiFix(
+  input: TakeOverFlowInput,
+  ciLogsDir: string | null,
+): Promise<WorkerResult> {
+  // When the logs were downloaded, point the Worker at the exact files (full logs, one per failed
+  // check) so a weak model has concrete errors to act on instead of being told to run `gh` itself.
+  const readTask = ciLogsDir
+    ? `Read the downloaded CI failure logs in ${ciLogsDir} (one file per failed check, full untruncated logs) with your shell/read tools, then fix every failure those logs report.`
+    : `Read the CI logs (via gh) and fix every failing check on PR #${input.pr}.`;
   const group: PrGroup = {
     id: `takeover-ci-${input.pr}`,
     title: `Fix CI failures on PR #${input.pr}`,
-    tasks: [
-      `Read the CI logs (via gh) and fix every failing check on PR #${input.pr}.`,
-      'Run the project test/lint commands locally to verify, then stage fixes.',
-    ],
+    tasks: [readTask, 'Run the project test/lint commands locally to verify, then stage fixes.'],
     dependsOn: [],
     branch: null,
     pr: input.pr,

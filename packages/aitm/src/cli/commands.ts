@@ -521,10 +521,14 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
   const { runTakeOverFlow } = await import('../loop/take-over-flow.ts');
   const { execa } = await import('execa');
   const { githubThreadTool } = await import('../tools/github-thread-tool.ts');
+  const { PrContextStore } = await import('../state/pr-context-store.ts');
 
   const worktreePath = input.cwd;
   const baseBranch = await input.github.defaultBranch();
   const styleContents = input.agentConfig.contents;
+  // Downloads full failed-CI logs + review comments under .ai-task-master/debugging/pr/<pr>/ so
+  // the CI-fix Worker reads them off disk instead of guessing (issue #48).
+  const prContext = new PrContextStore(resolvePath(input.cwd, '.ai-task-master'));
 
   // Build the Claude-Code-style tool surface scoped to the cwd worktree. The Worker gets the
   // full read/write/edit/search/bash set; the Reviewer adds the `github` thread tool.
@@ -536,6 +540,7 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
     worktreePath,
     baseBranch,
     github: input.github,
+    prContext,
     mergeMethod: input.runState.options.mergeMethod,
     push: async (cwd) => {
       const r = await execa('git', ['push'], { cwd });

@@ -29,23 +29,55 @@ can't read or write outside the root you give it.
 import {
   readFileTool, writeFileTool,   // Read (offset/limit window) + Write
   editFileTool, multiEditTool,   // exact-string Edit + batched MultiEdit
-  bashTool,                       // streaming shell, scoped to cwd
+  bashTool, multiBashTool,        // one shell command / an ordered sequence, scoped to cwd
   globTool, grepTool,             // file glob + content search
 } from '@developerz.ai/ai-claude-compat';
 
 const cwd = process.cwd();
 const tools = {
-  read:  readFileTool({ cwd }),
-  write: writeFileTool({ cwd }),
-  edit:  editFileTool({ cwd }),
-  bash:  bashTool({ cwd }),
-  grep:  grepTool({ cwd }),
-  glob:  globTool({ cwd }),
+  read:      readFileTool({ cwd }),
+  write:     writeFileTool({ cwd }),
+  edit:      editFileTool({ cwd }),
+  bash:      bashTool({ cwd }),
+  multiBash: multiBashTool({ cwd }),
+  grep:      grepTool({ cwd }),
+  glob:      globTool({ cwd }),
 };
 ```
 
 Pass `tools` straight into a `generateText` / `streamText` call or an
 `Agent`/`ToolLoopAgent`.
+
+## Background processes
+
+`bashTool`/`multiBashTool` block until the command exits, so they can't hold a
+dev server open. `backgroundProcessTools` does: it spawns `bash -c …` without
+awaiting, returns a process id immediately, and lets the agent tail output, kill
+one process, or kill them all on teardown. **The caller owns lifecycle** — keep
+the returned `manager` and call `killAll()` when the run ends, or processes leak.
+
+```ts
+import { backgroundProcessTools } from '@developerz.ai/ai-claude-compat';
+
+const { manager, backgroundBash, bashOutput, killBash, listBackground } =
+  backgroundProcessTools({ cwd });
+
+const agentTools = { ...tools, backgroundBash, bashOutput, killBash, listBackground };
+// agent: backgroundBash("npm run dev") -> { id }
+//        bashOutput(id) -> new stdout/stderr since last poll, running, exitCode
+//        killBash(id)
+try {
+  await agent.generate({ prompt: 'start the dev server and check it serves /health' });
+} finally {
+  manager.killAll(); // teardown — nothing else guarantees the server is stopped
+}
+```
+
+`bashOutput` is **incremental** (like Claude Code's BashOutput): each call returns
+only the bytes produced since the last call. Buffers are capped (256 KiB/stream by
+default); past the cap the oldest bytes are dropped and `truncated` is set.
+Browser/CDP automation is intentionally **out of scope** — drive a browser with a
+dedicated MCP server (e.g. Playwright MCP), not from this library.
 
 ## Subagents (subagent-as-tool)
 
@@ -99,7 +131,9 @@ for (const dir of claudeDirs(process.cwd())) {
 | --- | --- |
 | `readFileTool`, `writeFileTool` | Read (offset/limit window) + Write, cwd-scoped |
 | `editFileTool`, `multiEditTool`, `applyEdit` | Exact-string Edit, batched MultiEdit, pure edit helper |
-| `bashTool` | Streaming shell tool, scoped to cwd |
+| `bashTool` | Run one shell command, cwd as initial dir; returns stdout/stderr/exitCode |
+| `multiBashTool` | Run an ordered sequence of commands; stops at the first non-zero exit |
+| `backgroundProcessTools`, `ProcessManager` | Non-blocking background commands (dev servers): start / tail output / kill / killAll |
 | `globTool`, `grepTool`, `globToRegExp` | File glob + content search |
 | `composeSystemPrompt`, `createSubagent` | System-prompt composer + subagent-as-tool factory |
 | `envBlock` | Render the `<env>` system-context block from `EnvInfo` |
@@ -115,6 +149,30 @@ Types are exported alongside each value (`ReadFileInput`, `BashOutput`,
 ESM only. Runs unchanged on **Node ≥ 20, Bun, and Deno ≥ 1.40**. Peer dep: `ai`
 (AI SDK v6). No Anthropic SDK — "Claude-compat" refers to the *conventions*, not
 the provider.
+
+## Platform: Linux only
+
+The shell tools (`bashTool`, `multiBashTool`) target **Linux**. They spawn
+`bash -c …`, so they need a POSIX `bash` on `PATH` — they are **not** supported
+on native Windows (use WSL) and are only best-effort on macOS. The pure
+filesystem/edit/search tools are platform-neutral, but the package as a whole is
+developed and tested on Linux; treat anything else as unsupported.
+
+### Shell environment (rbenv / nvm / asdf, `~/.bashrc`)
+
+Commands run via a **non-login, non-interactive** `bash -c` with `BASH_ENV`
+scrubbed. That is deliberate: a login/interactive shell would source
+`/etc/profile` and `~/.bashrc`, which often `cd` away and would defeat the
+cwd lock. The consequence:
+
+- **PATH-based tools work** — `rbenv`/`asdf` shims, and any binary already on the
+  `PATH` of the process that launched the agent, are inherited (the child gets
+  `process.env`). If you can run `ruby`/`node` from the shell you start the agent
+  in, the agent can too.
+- **Shell-function tools do not** — `nvm`, and anything that exists only as a
+  function defined in `~/.bashrc`, is **not** loaded. Source it yourself inside
+  the command (`source ~/.nvm/nvm.sh && nvm use && …`) or put the resolved
+  binary on `PATH` before launching.
 
 ## License
 

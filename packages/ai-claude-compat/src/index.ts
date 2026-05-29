@@ -3,7 +3,30 @@
 // .claude/ skills + agents loading.
 
 export { type AgentDefinition, claudeDirs, loadAgents } from './agents-loader.ts';
-export { type BashInput, type BashOutput, type BashToolInit, bashTool } from './bash-tool.ts';
+export {
+  type BackgroundBashInput,
+  type BackgroundBashOutput,
+  type BackgroundProcessInit,
+  type BackgroundProcessTools,
+  type BashOutputInput,
+  backgroundProcessTools,
+  type KillBashInput,
+  type KillBashOutput,
+  type ListBackgroundOutput,
+  ProcessManager,
+  type ProcessOutput,
+  type ProcessStatus,
+  type SpawnFn,
+} from './background-process.ts';
+export {
+  type BashInput,
+  type BashOutput,
+  type BashToolInit,
+  bashTool,
+  type MultiBashInput,
+  type MultiBashOutput,
+  multiBashTool,
+} from './bash-tool.ts';
 export {
   applyEdit,
   type EditFileInput,

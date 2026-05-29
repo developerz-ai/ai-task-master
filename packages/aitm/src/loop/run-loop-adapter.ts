@@ -20,6 +20,7 @@ import {
   editFileTool,
   globTool,
   grepTool,
+  multiBashTool,
   multiEditTool,
   readFileTool,
   writeFileTool,
@@ -78,6 +79,7 @@ export function localEditTools(cwd: string): WorkerTools {
     grep: grepTool({ cwd }),
     glob: globTool({ cwd }),
     bash: bashTool({ cwd }),
+    multiBash: multiBashTool({ cwd }),
   };
 }
 
@@ -326,6 +328,7 @@ function resolveWorkerTools(set: ToolSet, cwd: string): WorkerTools {
     grep: set.grep ?? local.grep,
     glob: set.glob ?? local.glob,
     bash: set.bash ?? local.bash,
+    multiBash: set.multiBash ?? local.multiBash,
   } as WorkerTools;
 }
 

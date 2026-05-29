@@ -59,6 +59,8 @@ export type TakeOverSubagents = {
   workerTools: WorkerTools;
   // Style payload (CLAUDE.md / AGENTS.md). Prepended to subagent system prompts.
   styleContents: string;
+  // Optional formatter command the CI-fix Worker runs before committing (issue #48).
+  formatCommand?: string;
   // Injection seam — bypass the real subagent agents in tests.
   runReviewerOverride?: (input: {
     pr: number;
@@ -273,6 +275,7 @@ async function runWorkerCiFix(input: TakeOverFlowInput): Promise<WorkerResult> {
     baseBranch: input.baseBranch,
     styleContents: input.subagents.styleContents,
     rollingContext: '',
+    ...(input.subagents.formatCommand ? { formatCommand: input.subagents.formatCommand } : {}),
   });
 }
 

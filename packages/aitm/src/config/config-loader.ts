@@ -35,6 +35,7 @@ const KNOWN_KEYS = new Set<string>([
   'autoMerge',
   'mergeMethod',
   'stylePath',
+  'formatCommand',
   'logLevel',
   'concurrency',
   'mcpServers',
@@ -46,6 +47,7 @@ const DEFAULTS = {
   autoMerge: true,
   mergeMethod: 'squash' as const,
   stylePath: null as string | null,
+  formatCommand: null as string | null,
   logLevel: 'info' as const,
   concurrency: 1,
 };
@@ -118,6 +120,13 @@ export class ConfigLoader {
         project?.stylePath,
         global?.stylePath,
         DEFAULTS.stylePath,
+      ),
+      // formatCommand is not exposed via CliOverrides — project/global only.
+      formatCommand: pickNullable(
+        undefined,
+        project?.formatCommand,
+        global?.formatCommand,
+        DEFAULTS.formatCommand,
       ),
       // logLevel is not exposed via CliOverrides — project/global only.
       logLevel: pick(undefined, project?.logLevel, global?.logLevel, DEFAULTS.logLevel),

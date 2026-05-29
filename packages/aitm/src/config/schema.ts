@@ -33,6 +33,10 @@ export const ConfigFileSchema = z
     autoMerge: z.boolean().optional(),
     mergeMethod: MergeMethodSchema.optional(),
     stylePath: z.string().nullable().optional(),
+    // Shell command run in the worktree by the Worker before `git add -A`, so the committed
+    // diff matches the project's formatter (e.g. "bun run lint:fix"). Unset → no format step.
+    // See src/subagents/worker.ts §commitOnBranch and issue #48.
+    formatCommand: z.string().optional(),
     logLevel: LogLevelSchema.optional(),
     // How many PR groups may have a Worker running at the same time. Default 1 = sequential.
     // See src/loop/work-loop.ts and src/workspace/worktree-pool.ts.
@@ -64,6 +68,7 @@ export type ResolvedConfig = {
   autoMerge: boolean;
   mergeMethod: 'squash' | 'merge' | 'rebase';
   stylePath: string | null;
+  formatCommand: string | null;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   concurrency: number;
   // Merged MCP server map across all discovered sources (see ConfigLoader.resolve for

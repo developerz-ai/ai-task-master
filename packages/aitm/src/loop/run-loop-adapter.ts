@@ -283,6 +283,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
         baseBranch,
         styleContents: style,
         rollingContext,
+        ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
       });
     },
     finalizeCommit: (group, delivery, worktreePath) =>

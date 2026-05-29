@@ -88,6 +88,10 @@ export type WorkerInput = {
   baseBranch: string;
   styleContents: string;
   rollingContext: string;
+  // Optional shell command run in the worktree before staging, so the committed diff matches
+  // the project's formatter (LLM output rarely is byte-identical to biome/prettier/gofmt). When
+  // unset, no format step runs. See issue #48.
+  formatCommand?: string;
 };
 
 // Per-file outcome from the parallel editor fanout. Useful to the Orchestrator
@@ -262,6 +266,13 @@ async function commitOnBranch(
   }
   const wt = shQuote(input.worktreePath);
   await runBash(exec, `git -C ${wt} checkout -B ${shQuote(branch)}`);
+  // Format BEFORE staging so the committed diff matches the project's formatter — LLM output
+  // is rarely byte-identical to biome/prettier/gofmt, and a format-gated CI would otherwise
+  // reject an otherwise-correct PR (issue #48). Run in the worktree; a non-zero exit (e.g.
+  // unfixable lint errors) surfaces as a worker error rather than a silent CI failure later.
+  if (input.formatCommand) {
+    await runBash(exec, `cd ${wt} && ${input.formatCommand}`);
+  }
   await runBash(exec, `git -C ${wt} add -A`);
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
 }

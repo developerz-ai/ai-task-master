@@ -185,7 +185,15 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
   try {
     const manifest = await planManifest(agent, input);
     if (manifest.files.length === 0) {
-      return { kind: 'blocked', reason: 'worker produced an empty file manifest' };
+      // A degenerate (empty) manifest almost always means the configured `coding` model wasn't
+      // strong enough to plan this PR group into a structured FileManifest — weak/cheap models
+      // routinely return zero files here. Surface that as actionable guidance instead of a bare
+      // block, so the user reaches for a more capable model rather than re-running blindly.
+      return {
+        kind: 'blocked',
+        reason:
+          'The Worker returned an empty file manifest — the configured coding model produced no files to change for this PR group. This usually means the model is not capable enough to plan the work; try a more capable coding model (set `models.coding` in .ai-task-master/config.json or pass a stronger --model).',
+      };
     }
     const changes = await Promise.all(manifest.files.map((file) => runEditor(init, file, input)));
     await commitOnBranch(init.tools.bash, input, branch, manifest.draftCommitMessage);

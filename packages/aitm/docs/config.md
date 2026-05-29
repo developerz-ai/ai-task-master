@@ -58,6 +58,8 @@ Each subagent can run on a different OpenRouter model. Use a cheap fast model fo
 
 `Credentials` returns role-specific model handles. `Orchestrator` injects the right handle into each subagent when constructing it.
 
+> **Model capability matters for `coding`.** The Worker plans each PR group into a structured `FileManifest` (JSON). Weak/cheap models often return an **empty manifest** here, which blocks the group with an actionable message (issue #45). If you see "the configured coding model produced no files", set `models.coding` to a more capable model. The `smart` tier (Planner/Reviewer) likewise wants a strong reasoning model.
+
 ## SRP
 
 | Module | Owns | Does NOT |

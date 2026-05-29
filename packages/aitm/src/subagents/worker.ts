@@ -175,7 +175,11 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
   try {
     const manifest = await planManifest(agent, input);
     if (manifest.files.length === 0) {
-      return { kind: 'blocked', reason: 'worker produced an empty file manifest' };
+      return {
+          kind: 'blocked',
+          reason:
+            'Worker produced an empty file manifest — the current model may lack the capacity to plan this PR group. Try running with a more capable model (e.g. claude-sonnet-4-20250514) via `--model`.',
+        };
     }
     const changes = await Promise.all(manifest.files.map((file) => runEditor(init, file, input)));
     await commitOnBranch(init.tools.bash, input, branch, manifest.draftCommitMessage);

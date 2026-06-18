@@ -13,7 +13,8 @@
 //   docs/vendor/ai-sdk/chunk-09.md §"Subagents" §"Controlling What the Model Sees"
 //   docs/vendor/ai-sdk/chunk-09.md §"Loop Control" — stopWhen: [stepCountIs(N), hasToolCall('done')]
 
-import { generateText, hasToolCall, Output, stepCountIs, ToolLoopAgent } from 'ai';
+import { submittedOutput } from '@developerz.ai/ai-claude-compat';
+import { generateText, hasToolCall, stepCountIs, ToolLoopAgent, tool } from 'ai';
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
 import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
@@ -229,19 +230,34 @@ export class Orchestrator {
   }
 
   private async composePr(group: PrGroup, delivery: WorkerDelivery): Promise<PrComposition> {
+    // Structured output via a forced submit tool (tool-calling) rather than response_format
+    // json_schema, which some OpenAI-compatible providers ignore. Single tool + forced choice =
+    // one-shot; generateText takes a single step (no stopWhen), so it can't loop on the tool.
     const result = await generateText({
       model: this.init.credentials.modelFor('orchestrator'),
       prompt: this.buildPrPrompt(group, delivery),
-      output: Output.object({ schema: PrCompositionSchema, name: 'PrComposition' }),
+      tools: {
+        submit: tool({
+          description:
+            'Submit the composed pull-request title and body (the PrComposition schema).',
+          inputSchema: PrCompositionSchema,
+          execute: async (composition) => composition,
+        }),
+      },
+      toolChoice: { type: 'tool', toolName: 'submit' },
     });
-    return result.experimental_output;
+    const out = submittedOutput(result, PrCompositionSchema);
+    if (!out) {
+      throw new Error('orchestrator did not submit a PR composition');
+    }
+    return out;
   }
 
   private buildPrPrompt(group: PrGroup, delivery: WorkerDelivery): string {
     return [
       this.buildSystemPrompt(),
       '',
-      'Compose the pull-request title and body for this PR group. Return JSON.',
+      'Compose the pull-request title and body for this PR group, then call the submit tool with it.',
       '- title: conventional-commit style, ≤72 chars',
       '- body: short summary + bulleted file changes + relevant rolling context',
       '',

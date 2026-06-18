@@ -49,6 +49,27 @@ function modelEmitting(text: string | (() => string)): MockLanguageModelV3 {
   });
 }
 
+// composePr now delivers structured output via a forced `submit` tool-call (not response_format),
+// so the mock model emits a submit tool-call carrying the composition (input is a JSON string).
+let submitCallId = 0;
+function modelSubmitting(value: unknown): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: `submit-${submitCallId++}`,
+          toolName: 'submit',
+          input: JSON.stringify(value),
+        },
+      ],
+      finishReason: { unified: 'tool-calls', raw: undefined },
+      usage: emptyUsage(),
+      warnings: [],
+    }),
+  });
+}
+
 function recordingProvider(model: MockLanguageModelV3): {
   provider: ModelProvider;
   roles: Role[];
@@ -264,7 +285,7 @@ test('finalizeCommit throws when git amend fails', async () => {
 
 test('openPr composes title + body via the orchestrator model and calls github.createPr', async () => {
   const composition = { title: 'feat: core — add a', body: 'Adds module a; fixes module b.' };
-  const model = modelEmitting(JSON.stringify(composition));
+  const model = modelSubmitting(composition);
   const { provider, roles } = recordingProvider(model);
 
   const createCalls: CreatePrInput[] = [];
@@ -297,7 +318,7 @@ test('openPr composes title + body via the orchestrator model and calls github.c
 
 test('openPr uses group.branch when set, otherwise aitm/<id>', async () => {
   const composition = { title: 't', body: 'b' };
-  const model = modelEmitting(JSON.stringify(composition));
+  const model = modelSubmitting(composition);
   const { provider } = recordingProvider(model);
 
   const createCalls: CreatePrInput[] = [];

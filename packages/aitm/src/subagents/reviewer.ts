@@ -5,7 +5,7 @@
 //
 // Strategy:
 //   - One agent.generate call per thread, scoped to that thread's conversation.
-//   - Agent emits a structured ThreadResolutionOutput JSON describing the chosen outcome.
+//   - Agent submits a structured ThreadResolutionOutput (via the `submit` tool) for the outcome.
 //   - For "fixed", the runner — not the agent — performs the git commit so commit shas are
 //     deterministic and observable (worker pattern).
 //
@@ -14,8 +14,13 @@
 //   chunk-05.md §"Generating Structured Data"
 //   chunk-09.md §"Subagents"
 
-import { type BashInput, type BashOutput, createSubagent } from '@developerz.ai/ai-claude-compat';
-import { type DeepPartial, Output, type Tool, type ToolLoopAgent } from 'ai';
+import {
+  type BashInput,
+  type BashOutput,
+  createSubagent,
+  submittedOutput,
+} from '@developerz.ai/ai-claude-compat';
+import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
 import type { SubagentInit } from './factory.ts';
@@ -51,13 +56,7 @@ export const ThreadResolutionOutputSchema = z.object({
 });
 export type ThreadResolutionOutput = z.infer<typeof ThreadResolutionOutputSchema>;
 
-type ReviewerAgentOutput = Output.Output<
-  ThreadResolutionOutput,
-  DeepPartial<ThreadResolutionOutput>,
-  never
->;
-
-export type ReviewerAgent = ToolLoopAgent<never, ReviewerTools, ReviewerAgentOutput>;
+export type ReviewerAgent = ToolLoopAgent<never, ReviewerTools>;
 
 export type ReviewerInput = {
   pr: number;
@@ -79,24 +78,24 @@ export type ReviewerResult =
 export const REVIEWER_SYSTEM_PREFIX = [
   '',
   'You are the Reviewer subagent. You receive ONE unresolved PR review thread at a time and',
-  'decide between three outcomes, emitting a ThreadResolutionOutput JSON that names the choice.',
+  'decide between three outcomes, then call the `submit` tool with a ThreadResolutionOutput naming the choice.',
   '',
   '- "fixed": the reviewer is right and a code change is needed. Use your tools (grep/glob/',
   '  readFile to locate, editFile/multiEdit to change, writeFile to rewrite, bash for the rest)',
   '  to make the fix inside the worktree. DO NOT run `git commit` yourself — the runner commits',
   '  every staged change after you finish. Reply on the thread via the github tool explaining',
-  '  the fix and resolve the thread, then emit { kind: "fixed", commitMessage } where',
+  '  the fix and resolve the thread, then submit { kind: "fixed", commitMessage } where',
   '  commitMessage is the subject line the runner will pass to `git commit`.',
   '- "replied": the comment is a question or clarification request and no code change is needed.',
-  '  Answer it via github.replyToThread. Do not edit code. Emit { kind: "replied" }.',
+  '  Answer it via github.replyToThread. Do not edit code. Submit { kind: "replied" }.',
   '- "wontfix": the suggestion is stale, out of scope, or you disagree. Reply with the reason',
-  '  via github.replyToThread, resolve the thread via github.resolveThread, and emit',
+  '  via github.replyToThread, resolve the thread via github.resolveThread, and submit',
   '  { kind: "wontfix", reason }.',
   '',
   'Rules:',
   '- Stay inside the worktree. No work outside the repo.',
   '- Resolve the thread for "fixed" and "wontfix" outcomes; "replied" leaves it open.',
-  '- Return JSON that matches the ThreadResolutionOutput schema exactly.',
+  '- When done, call `submit` once with a value matching the ThreadResolutionOutput schema.',
 ].join('\n');
 
 // Module-private link from agent to its init so runReviewer can drive bash commits with the
@@ -104,14 +103,16 @@ export const REVIEWER_SYSTEM_PREFIX = [
 const reviewerInitRegistry = new WeakMap<ReviewerAgent, SubagentInit<ReviewerTools>>();
 
 export function createReviewerAgent(init: SubagentInit<ReviewerTools>): ReviewerAgent {
-  const agent = createSubagent<ReviewerTools, ReviewerAgentOutput>(
+  const agent = createSubagent<ReviewerTools>(
     {
       model: init.model,
       tools: init.tools,
       systemPrompt: init.systemPrompt,
-      output: Output.object({
-        schema: ThreadResolutionOutputSchema,
-        name: 'ThreadResolution',
+      submit: tool({
+        description:
+          'Submit the resolution for this review thread (the ThreadResolutionOutput schema).',
+        inputSchema: ThreadResolutionOutputSchema,
+        execute: async (resolution) => resolution,
       }),
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
     },
@@ -153,7 +154,11 @@ async function resolveOneThread(
   thread: ReviewThread,
 ): Promise<ThreadResolution> {
   const result = await agent.generate({ prompt: buildThreadPrompt(input, thread) });
-  const out = result.experimental_output;
+  const out = submittedOutput(result, ThreadResolutionOutputSchema);
+  if (!out) {
+    // Agent stopped without submitting (e.g. step budget exhausted) — leave the thread for a human.
+    return { threadId: thread.id, kind: 'wontfix', reason: 'reviewer did not submit a resolution' };
+  }
   switch (out.kind) {
     case 'fixed': {
       // commitMessage is optional on the flat schema; fall back to a generic subject.
@@ -179,7 +184,10 @@ function buildThreadPrompt(input: ReviewerInput, thread: ReviewThread): string {
   for (const c of thread.comments) {
     lines.push(`  @${c.author}: ${c.body}`);
   }
-  lines.push('', 'Decide the outcome, take the action, then emit the ThreadResolutionOutput JSON.');
+  lines.push(
+    '',
+    'Decide the outcome, take the action, then call submit with the ThreadResolutionOutput.',
+  );
   return lines.join('\n');
 }
 

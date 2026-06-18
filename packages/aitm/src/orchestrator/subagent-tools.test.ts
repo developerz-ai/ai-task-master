@@ -52,6 +52,29 @@ function modelEmitting(text: string): MockLanguageModelV3 {
   });
 }
 
+// Subagents deliver structured output via the submit tool-call now, so the mock "submits" the
+// value (input is a JSON string) instead of emitting it as text.
+let submitCallId = 0;
+function submitContent(value: unknown) {
+  return {
+    content: [
+      {
+        type: 'tool-call' as const,
+        toolCallId: `submit-${submitCallId++}`,
+        toolName: 'submit',
+        input: JSON.stringify(value),
+      },
+    ],
+    finishReason: { unified: 'tool-calls' as const, raw: undefined },
+    usage: emptyUsage(),
+    warnings: [],
+  };
+}
+
+function modelSubmitting(value: unknown): MockLanguageModelV3 {
+  return new MockLanguageModelV3({ doGenerate: async () => submitContent(value) });
+}
+
 function recordingProvider(model: MockLanguageModelV3): {
   provider: ModelProvider;
   calls: Role[];
@@ -223,7 +246,7 @@ test('makeReviewerTool returns a Tool with description, inputSchema, execute, to
 
 test('planner tool: execute resolves model via credentials.modelFor("planner") and runs runPlanner', async () => {
   const plan = basePlan();
-  const model = modelEmitting(JSON.stringify(plan));
+  const model = modelSubmitting(plan);
   const { provider, calls } = recordingProvider(model);
   const t = makePlannerTool({
     credentials: provider,
@@ -245,7 +268,7 @@ test('planner tool: execute resolves model via credentials.modelFor("planner") a
 
 test('planner tool: toModelOutput collapses ok result to "planner [ok]: …"', async () => {
   const plan = basePlan();
-  const { provider } = recordingProvider(modelEmitting(JSON.stringify(plan)));
+  const { provider } = recordingProvider(modelSubmitting(plan));
   const t = makePlannerTool({
     credentials: provider,
     styleContents: '',
@@ -301,13 +324,13 @@ test('worker tool: execute resolves model via credentials.modelFor("worker") and
     files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
     draftCommitMessage: 'feat: x',
   };
-  // First call returns the manifest JSON, second is the editor summary.
+  // First call submits the manifest (tool-call); the second is the editor text summary.
   let i = 0;
   const model = new MockLanguageModelV3({
     doGenerate: async () => {
-      const text = i++ === 0 ? JSON.stringify(manifest) : 'created x';
+      if (i++ === 0) return submitContent(manifest);
       return {
-        content: [{ type: 'text', text }],
+        content: [{ type: 'text', text: 'created x' }],
         finishReason: { unified: 'stop', raw: undefined },
         usage: emptyUsage(),
         warnings: [],
@@ -412,15 +435,7 @@ test('reviewer tool: execute resolves model via credentials.modelFor("reviewer")
   const outputs: ThreadResolutionOutput[] = [{ kind: 'replied' }];
   let i = 0;
   const model = new MockLanguageModelV3({
-    doGenerate: async () => {
-      const next = outputs[i++] ?? { kind: 'replied' };
-      return {
-        content: [{ type: 'text', text: JSON.stringify(next) }],
-        finishReason: { unified: 'stop', raw: undefined },
-        usage: emptyUsage(),
-        warnings: [],
-      };
-    },
+    doGenerate: async () => submitContent(outputs[i++] ?? { kind: 'replied' }),
   });
   const { provider, calls } = recordingProvider(model);
   const { tools } = makeReviewerTools();

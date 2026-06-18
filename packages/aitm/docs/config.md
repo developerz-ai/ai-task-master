@@ -30,7 +30,8 @@ The merged result is what every other module sees. A frozen snapshot is written 
 ```jsonc
 {
   "openrouterApiKey": "sk-or-...",    // optional; falls back to env OPENROUTER_API_KEY
-  "baseURL": null,                    // optional; OpenAI-compatible endpoint override, falls back to env OPENROUTER_BASE_URL
+  // omit `baseURL` when unset; if present it must be a valid URL
+  "baseURL": "https://api.z.ai/api/coding/paas/v4", // optional; falls back to env OPENROUTER_BASE_URL when omitted
   "models": {
     "default":  "anthropic/claude-opus-4",
     "planner":  "anthropic/claude-opus-4",

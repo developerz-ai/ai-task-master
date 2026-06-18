@@ -14,6 +14,24 @@ OpenRouter only. OpenAI-compatible API. One credential.
 
 `Credentials` receives the resolved key from `ConfigLoader` and constructs role-specific AI SDK model handles via `@openrouter/ai-sdk-provider`.
 
+### Base URL
+
+The provider defaults to `https://openrouter.ai/api/v1`. Override it to point at any
+**OpenAI-compatible** endpoint — a self-hosted gateway, a proxy, or another provider's
+OpenAI-compatible API (e.g. the z.ai GLM coding plan at
+`https://api.z.ai/api/coding/paas/v4`). This stays within the OpenAI-compatible contract —
+it is **not** an Anthropic SDK path (see [Anthropic](#anthropic) below).
+
+| Source | Order | Owner |
+| --- | --- | --- |
+| `baseURL` in `./.ai-task-master/config.json` (project) | 1 | `ConfigLoader` |
+| `baseURL` in `~/.aitm.json` (global) | 2 | `ConfigLoader` |
+| Env `OPENROUTER_BASE_URL` | 3 | `ConfigLoader` |
+
+Unset in every source → the provider default. The value is validated as a URL. When a
+custom base URL is set, point `models.*` at model ids the endpoint serves (e.g. `glm-4.6`).
+See [`providers.md`](./providers.md) for ready-to-copy OpenRouter / z.ai / generic configs.
+
 Error cases:
 
 | Case | Behavior |

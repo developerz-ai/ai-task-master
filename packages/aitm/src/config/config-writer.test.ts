@@ -105,6 +105,19 @@ test('set rejects malformed scalar types via schema', async () => {
   });
 });
 
+test('set then get round-trips a baseURL', async () => {
+  await withWriter(async ({ writer }) => {
+    await writer.set('global', 'baseURL', 'https://api.z.ai/api/coding/paas/v4');
+    assert.equal(await writer.get('global', 'baseURL'), 'https://api.z.ai/api/coding/paas/v4');
+  });
+});
+
+test('set rejects a baseURL that is not a URL', async () => {
+  await withWriter(async ({ writer }) => {
+    await assert.rejects(() => writer.set('global', 'baseURL', 'not-a-url'), /baseURL/);
+  });
+});
+
 test('set rejects unknown top-level keys before any write', async () => {
   await withWriter(async ({ writer, home }) => {
     await assert.rejects(

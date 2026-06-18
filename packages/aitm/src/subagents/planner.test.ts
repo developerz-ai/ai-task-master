@@ -4,15 +4,30 @@ import { MockLanguageModelV3 } from 'ai/test';
 import type { Plan } from '../plan/schema.ts';
 import { createPlannerAgent, PLANNER_SYSTEM_PREFIX, runPlanner } from './planner.ts';
 
-function planJsonModel(plan: Plan): MockLanguageModelV3 {
+let submitCallId = 0;
+
+// Structured output now flows through the `submit` tool, so the mock model "delivers" the plan by
+// emitting a submit tool-call (input is a JSON string, per the provider spec) instead of text.
+function planSubmitModel(value: unknown): MockLanguageModelV3 {
   return new MockLanguageModelV3({
     doGenerate: async () => ({
-      content: [{ type: 'text', text: JSON.stringify(plan) }],
-      finishReason: { unified: 'stop', raw: undefined },
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: `submit-${submitCallId++}`,
+          toolName: 'submit',
+          input: JSON.stringify(value),
+        },
+      ],
+      finishReason: { unified: 'tool-calls', raw: undefined },
       usage: emptyUsage(),
       warnings: [],
     }),
   });
+}
+
+function planJsonModel(plan: Plan): MockLanguageModelV3 {
+  return planSubmitModel(plan);
 }
 
 function emptyUsage() {
@@ -38,11 +53,12 @@ test('PLANNER_SYSTEM_PREFIX is non-empty and mentions maxPrs + Plan', () => {
   assert.match(PLANNER_SYSTEM_PREFIX, /Plan/);
 });
 
-test('createPlannerAgent builds an agent that exposes injected tools', () => {
+test('createPlannerAgent builds an agent with the injected tools plus a submit tool', () => {
   const model = new MockLanguageModelV3();
   const agent = createPlannerAgent({ model, tools: {}, systemPrompt: 'style' });
   assert.ok(agent);
-  assert.deepEqual(agent.tools, {});
+  // The factory adds the terminal `submit` tool the agent calls to deliver its Plan.
+  assert.deepEqual(Object.keys(agent.tools), ['submit']);
 });
 
 test('runPlanner returns ok with a valid Plan when the model produces one', async () => {
@@ -103,16 +119,28 @@ test('runPlanner returns blocked when the model emits an empty plan', async () =
   assert.equal(result.kind, 'blocked');
 });
 
-test('runPlanner returns error when the model emits invalid JSON', async () => {
+test('runPlanner returns blocked when the model never submits a plan', async () => {
+  // Text-only response (no submit tool-call) → submittedOutput finds nothing → blocked.
   const model = new MockLanguageModelV3({
     doGenerate: async () => ({
-      content: [{ type: 'text', text: 'not json at all' }],
+      content: [{ type: 'text', text: 'I could not produce a plan.' }],
       finishReason: { unified: 'stop', raw: undefined },
       usage: emptyUsage(),
       warnings: [],
     }),
   });
   const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
+  assert.equal(result.kind, 'blocked');
+});
+
+test('runPlanner returns error when the submitted plan fails schema validation', async () => {
+  // submit called with args that don't match PlanSchema (missing groups) → schema.parse throws.
+  const agent = createPlannerAgent({
+    model: planSubmitModel({ goal: 'x' }),
+    tools: {},
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
   assert.equal(result.kind, 'error');
 });

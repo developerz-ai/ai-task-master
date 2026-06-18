@@ -5,7 +5,7 @@
 //
 // Strategy for *really big PRs* (the explicit design goal) — two layers of parallelism:
 //
-//   Layer A (outer, across files): plan a file manifest via Output.object() that lists every
+//   Layer A (outer, across files): plan a file manifest via the `submit` tool that lists every
 //   file to create/modify/delete (docs/vendor/ai-sdk/chunk-09.md §"Orchestrator-Worker"),
 //   then Promise.all over per-file editor sub-subagents.
 //
@@ -37,15 +37,12 @@ import type {
   WriteFileInput,
   WriteFileOutput,
 } from '@developerz.ai/ai-claude-compat';
-import { composeSystemPrompt, createSubagent } from '@developerz.ai/ai-claude-compat';
 import {
-  type DeepPartial,
-  generateText,
-  Output,
-  stepCountIs,
-  type Tool,
-  type ToolLoopAgent,
-} from 'ai';
+  composeSystemPrompt,
+  createSubagent,
+  submittedOutput,
+} from '@developerz.ai/ai-claude-compat';
+import { generateText, stepCountIs, type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
 import type { PrGroup } from '../state/schema.ts';
 import type { SubagentInit } from './factory.ts';
@@ -78,9 +75,7 @@ export const FileManifestSchema = z.object({
 });
 export type FileManifest = z.infer<typeof FileManifestSchema>;
 
-type WorkerOutput = Output.Output<FileManifest, DeepPartial<FileManifest>, never>;
-
-export type WorkerAgent = ToolLoopAgent<never, WorkerTools, WorkerOutput>;
+export type WorkerAgent = ToolLoopAgent<never, WorkerTools>;
 
 export type WorkerInput = {
   group: PrGroup;
@@ -122,8 +117,8 @@ export const WORKER_SYSTEM_PREFIX = [
   'land in a single pull request on a dedicated branch. Work in two phases.',
   '',
   'Phase 1 — manifest. Use your read-only tools (readFile with optional offset/limit, grep,',
-  'glob) to ground yourself in the existing code, then emit a FileManifest JSON listing every',
-  'file to create/modify/delete plus a one-line draft commit message. Do not edit yet.',
+  'glob) to ground yourself in the existing code, then call the `submit` tool with a FileManifest',
+  'listing every file to create/modify/delete plus a one-line draft commit message. Do not edit yet.',
   '',
   'Phase 2 — edits. Each manifest entry is handed to a dedicated editor subagent in',
   'parallel by the runtime; you do not execute Phase 2 yourself.',
@@ -132,7 +127,7 @@ export const WORKER_SYSTEM_PREFIX = [
   '- Stay inside the worktree provided. No work outside the repo.',
   '- One responsibility per file. If a file has multiple unrelated edits, split it.',
   '- draftCommitMessage is a hint to the Orchestrator; keep the subject under 72 chars.',
-  '- Return the FileManifest JSON exactly matching the schema.',
+  '- When the manifest is complete, call `submit` once with the FileManifest (matching the schema).',
 ].join('\n');
 
 // Editor subagent prompt — applied to every per-file fanout. Kept here so the Worker
@@ -159,12 +154,16 @@ const EDITOR_SYSTEM_PREFIX = [
 const workerInitRegistry = new WeakMap<WorkerAgent, SubagentInit<WorkerTools>>();
 
 export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent {
-  const agent = createSubagent<WorkerTools, WorkerOutput>(
+  const agent = createSubagent<WorkerTools>(
     {
       model: init.model,
       tools: init.tools,
       systemPrompt: init.systemPrompt,
-      output: Output.object({ schema: FileManifestSchema, name: 'FileManifest' }),
+      submit: tool({
+        description: 'Submit the file manifest (the FileManifest schema) for this PR group.',
+        inputSchema: FileManifestSchema,
+        execute: async (manifest) => manifest,
+      }),
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
     },
     30,
@@ -213,7 +212,9 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
 
 async function planManifest(agent: WorkerAgent, input: WorkerInput): Promise<FileManifest> {
   const result = await agent.generate({ prompt: buildManifestPrompt(input) });
-  return result.experimental_output;
+  // No submission (e.g. step budget exhausted) → empty manifest; runWorker maps that to a
+  // "blocked" with model-capability guidance, same as a degenerate zero-file manifest.
+  return submittedOutput(result, FileManifestSchema) ?? { files: [], draftCommitMessage: '' };
 }
 
 function buildManifestPrompt(input: WorkerInput): string {
@@ -229,7 +230,7 @@ function buildManifestPrompt(input: WorkerInput): string {
   if (input.rollingContext.trim()) {
     lines.push('', 'Rolling context from prior PRs:', input.rollingContext);
   }
-  lines.push('', 'Survey the repo, then emit the FileManifest JSON.');
+  lines.push('', 'Survey the repo, then call submit with the FileManifest.');
   return lines.join('\n');
 }
 

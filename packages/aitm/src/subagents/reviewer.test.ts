@@ -30,15 +30,23 @@ function emptyUsage() {
   };
 }
 
+// One agent.generate per thread; the agent delivers each resolution via the submit tool-call.
 function makeReviewerModel(outputs: ThreadResolutionOutput[]): MockLanguageModelV3 {
   let i = 0;
   return new MockLanguageModelV3({
     doGenerate: async () => {
-      const next = outputs[i++];
-      const text = next ? JSON.stringify(next) : JSON.stringify({ kind: 'replied' });
+      const idx = i++;
+      const next = outputs[idx] ?? { kind: 'replied' };
       return {
-        content: [{ type: 'text', text }],
-        finishReason: { unified: 'stop', raw: undefined },
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${idx}`,
+            toolName: 'submit',
+            input: JSON.stringify(next),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
         usage: emptyUsage(),
         warnings: [],
       };
@@ -142,7 +150,9 @@ test('createReviewerAgent builds an agent that exposes the injected tools', () =
     systemPrompt: REVIEWER_SYSTEM_PREFIX,
   });
   assert.ok(agent);
-  assert.strictEqual(agent.tools, tools);
+  // The factory registers the injected tools plus the terminal submit tool.
+  assert.deepEqual(Object.keys(agent.tools).sort(), [...Object.keys(tools), 'submit'].sort());
+  assert.strictEqual(agent.tools.github, tools.github);
 });
 
 test('runReviewer yields one resolution per thread, mixed fixed/replied/wontfix', async () => {
@@ -205,12 +215,20 @@ test('runReviewer returns ok with no resolutions when threads is empty', async (
   assert.equal(calls.bashes.length, 0);
 });
 
-test('runReviewer returns error when the model emits invalid JSON', async () => {
+test('runReviewer returns error when the submitted resolution fails schema validation', async () => {
   const { tools } = makeTools();
+  // submit called with a kind outside the enum → ThreadResolutionOutputSchema.parse throws.
   const model = new MockLanguageModelV3({
     doGenerate: async () => ({
-      content: [{ type: 'text', text: 'not json at all' }],
-      finishReason: { unified: 'stop', raw: undefined },
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: 'submit-0',
+          toolName: 'submit',
+          input: JSON.stringify({ kind: 'bogus' }),
+        },
+      ],
+      finishReason: { unified: 'tool-calls', raw: undefined },
       usage: emptyUsage(),
       warnings: [],
     }),

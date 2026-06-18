@@ -10,14 +10,12 @@ import type {
   ReadFileInput,
   ReadFileOutput,
 } from '@developerz.ai/ai-claude-compat';
-import { createSubagent } from '@developerz.ai/ai-claude-compat';
-import { type DeepPartial, Output, type Tool, type ToolLoopAgent } from 'ai';
+import { createSubagent, submittedOutput } from '@developerz.ai/ai-claude-compat';
+import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../plan/schema.ts';
 import type { SubagentInit } from './factory.ts';
 
-type PlannerOutput = Output.Output<Plan, DeepPartial<Plan>, never>;
-
-export type PlannerAgent = ToolLoopAgent<never, PlannerTools, PlannerOutput>;
+export type PlannerAgent = ToolLoopAgent<never, PlannerTools>;
 
 // The Planner only surveys the repo — it gets the read-only subset of the Claude-Code-style
 // tool surface (no write/edit/bash).
@@ -56,16 +54,20 @@ export const PLANNER_SYSTEM_PREFIX = [
   '- Prefer parallelizable siblings over a single linear chain.',
   '- Do not invent files. Do not propose work outside the repo.',
   '',
-  'Return JSON that matches the Plan schema exactly.',
+  'When the plan is ready, call the `submit` tool exactly once with the Plan (matching the Plan schema).',
 ].join('\n');
 
 export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAgent {
-  return createSubagent<PlannerTools, PlannerOutput>(
+  return createSubagent<PlannerTools>(
     {
       model: init.model,
       tools: init.tools,
       systemPrompt: init.systemPrompt,
-      output: plannerOutput(),
+      submit: tool({
+        description: 'Submit the finished plan as an ordered list of PR groups (the Plan schema).',
+        inputSchema: PlanSchema,
+        execute: async (plan) => plan,
+      }),
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
     },
     20,
@@ -78,8 +80,8 @@ export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Prom
   }
   try {
     const result = await agent.generate({ prompt: buildUserPrompt(input) });
-    const raw = result.experimental_output;
-    if (!raw.groups || raw.groups.length === 0) {
+    const raw = submittedOutput(result, PlanSchema);
+    if (!raw || raw.groups.length === 0) {
       return { kind: 'blocked', reason: 'planner returned an empty group list' };
     }
     return { kind: 'ok', plan: capGroups(raw, input.maxPrs) };
@@ -88,17 +90,13 @@ export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Prom
   }
 }
 
-function plannerOutput(): PlannerOutput {
-  return Output.object({ schema: PlanSchema, name: 'Plan' });
-}
-
 function buildUserPrompt(input: PlannerInput): string {
   const lines = [`Goal: ${input.goal}`];
   if (input.criteria?.trim()) {
     lines.push(`Acceptance criteria: ${input.criteria}`);
   }
   lines.push(`maxPrs: ${input.maxPrs}`);
-  lines.push('Survey the repo with the read-only tools, then emit the Plan JSON.');
+  lines.push('Survey the repo with the read-only tools, then call submit with the Plan.');
   return lines.join('\n');
 }
 

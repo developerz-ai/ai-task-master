@@ -32,9 +32,25 @@ function makeWorkerModel(manifest: FileManifest, summaries: string[] = []): Mock
   return new MockLanguageModelV3({
     doGenerate: async () => {
       const idx = i++;
-      const text = idx === 0 ? JSON.stringify(manifest) : (summaries[idx - 1] ?? `edited #${idx}`);
+      // Call 0 is the manifest agent — delivered via the submit tool-call. Later calls are the
+      // per-file editors, which return a plain text summary (they don't use structured output).
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: `submit-${idx}`,
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
       return {
-        content: [{ type: 'text', text }],
+        content: [{ type: 'text', text: summaries[idx - 1] ?? `edited #${idx}` }],
         finishReason: { unified: 'stop', raw: undefined },
         usage: emptyUsage(),
         warnings: [],
@@ -124,7 +140,9 @@ test('createWorkerAgent builds an agent that exposes the injected tools', () => 
     systemPrompt: 'style',
   });
   assert.ok(agent);
-  assert.strictEqual(agent.tools, tools);
+  // The factory registers the injected tools plus the terminal submit tool.
+  assert.deepEqual(Object.keys(agent.tools).sort(), ['bash', 'readFile', 'submit', 'writeFile']);
+  assert.strictEqual(agent.tools.readFile, tools.readFile);
 });
 
 test('runWorker: manifest → per-file edits → commit sequence', async () => {
@@ -252,12 +270,20 @@ test('runWorker returns blocked when the manifest is empty', async () => {
   assert.equal(calls.bashes.length, 0);
 });
 
-test('runWorker returns error when the manifest output is not valid JSON', async () => {
+test('runWorker returns error when the submitted manifest fails schema validation', async () => {
   const { tools } = makeTools();
+  // submit called with args that don't match FileManifestSchema (files is not an array).
   const model = new MockLanguageModelV3({
     doGenerate: async () => ({
-      content: [{ type: 'text', text: 'not json at all' }],
-      finishReason: { unified: 'stop', raw: undefined },
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: 'submit-0',
+          toolName: 'submit',
+          input: JSON.stringify({ files: 'nope', draftCommitMessage: 'x' }),
+        },
+      ],
+      finishReason: { unified: 'tool-calls', raw: undefined },
       usage: emptyUsage(),
       warnings: [],
     }),
@@ -316,8 +342,15 @@ test('runWorker fans out editors in parallel — manifest call comes first, edit
       if (editorStarted === 0 && editorFinished === 0) {
         editorStarted++;
         return {
-          content: [{ type: 'text', text: JSON.stringify(manifest) }],
-          finishReason: { unified: 'stop', raw: undefined },
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
           usage: emptyUsage(),
           warnings: [],
         };

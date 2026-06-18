@@ -1,0 +1,82 @@
+# Providers
+
+`aitm` talks to **one OpenAI-compatible endpoint** through `@openrouter/ai-sdk-provider`. The
+default is OpenRouter; override the base URL to run against any other OpenAI-compatible provider
+(z.ai GLM, a self-hosted gateway, OpenAI, …). One credential, no Anthropic SDK. See
+[`auth.md`](./auth.md) for resolution order and validation, [`config.md`](./config.md) for the
+full config schema.
+
+## Requirement: function/tool calling
+
+Subagents deliver their structured output (Planner plan, Worker file manifest, Reviewer
+resolution, PR composition) by calling a `submit` **tool** — not via `response_format`
+json_schema, which some providers silently ignore and return prose for. So **the provider must
+support OpenAI-style function/tool calling.** OpenRouter, z.ai GLM, and OpenAI all do.
+
+## The three knobs
+
+| Knob | Config key | Env | Notes |
+| --- | --- | --- | --- |
+| Credential | `openrouterApiKey` | `OPENROUTER_API_KEY` | The provider's API key (despite the name, it's whatever the `baseURL` provider expects). |
+| Endpoint | `baseURL` | `OPENROUTER_BASE_URL` | Unset → `https://openrouter.ai/api/v1`. Validated as a URL. |
+| Models | `models.{generic,smart,coding,fast}` | — (config only; `--model` pins `generic`) | Model ids the endpoint serves. |
+
+Each config key works in project config (`./.ai-task-master/config.json`), global
+(`~/.aitm.json`), or env. Precedence: project > global > env.
+
+## OpenRouter (default)
+
+```jsonc
+// ~/.aitm.json  (or ./.ai-task-master/config.json)
+{ "openrouterApiKey": "sk-or-..." }
+```
+
+or just `export OPENROUTER_API_KEY=sk-or-...`. Models default to `anthropic/claude-*` OpenRouter
+routes (see `src/credentials/defaults.ts`); override any tier under `models` if you want a
+different route.
+
+## z.ai (GLM coding plan)
+
+Use z.ai's **OpenAI-compatible** coding endpoint (not its Anthropic endpoint):
+
+```jsonc
+// ./.ai-task-master/config.json  (or ~/.aitm.json)
+{
+  "openrouterApiKey": "<your z.ai api key>",
+  "baseURL": "https://api.z.ai/api/coding/paas/v4",
+  "models": {
+    "generic": "glm-4.6",
+    "smart": "glm-4.6",
+    "coding": "glm-4.6",
+    "fast": "glm-4.5-air"
+  }
+}
+```
+
+Or set the key + base URL via env and the models in config:
+
+```sh
+export OPENROUTER_API_KEY="<your z.ai api key>"
+export OPENROUTER_BASE_URL="https://api.z.ai/api/coding/paas/v4"
+```
+
+The flat-rate coding-plan quota (Lite/Pro/Max) is billed through this endpoint.
+
+## Any other OpenAI-compatible provider
+
+Same three knobs: point `baseURL` at the provider's OpenAI-compatible URL, set `openrouterApiKey`
+to its key, and set `models.*` to ids it serves. The only hard requirement is function/tool
+calling support (see above). Example shape:
+
+```jsonc
+{
+  "openrouterApiKey": "<provider key>",
+  "baseURL": "https://<provider>/v1",
+  "models": { "generic": "<model-id>", "smart": "<model-id>", "coding": "<model-id>", "fast": "<model-id>" }
+}
+```
+
+## Cross-links
+
+- [`auth.md`](./auth.md) — credential + base-URL resolution order, error cases
+- [`config.md`](./config.md) — full config schema

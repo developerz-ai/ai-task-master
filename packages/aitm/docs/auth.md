@@ -30,6 +30,7 @@ it is **not** an Anthropic SDK path (see [Anthropic](#anthropic) below).
 
 Unset in every source → the provider default. The value is validated as a URL. When a
 custom base URL is set, point `models.*` at model ids the endpoint serves (e.g. `glm-4.6`).
+See [`providers.md`](./providers.md) for ready-to-copy OpenRouter / z.ai / generic configs.
 
 Error cases:
 

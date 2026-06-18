@@ -19,6 +19,17 @@ export const ROLE_CAPABILITY: Readonly<Record<Role, Capability>> = {
 
 export type ModelHandles = Record<Role, LanguageModel>;
 
+// Settings forwarded to the OpenAI-compatible provider. Exported so the baseURL
+// passthrough is unit-testable without reaching into provider internals. `baseURL`
+// is omitted (not set to undefined) when unset so the provider keeps its default —
+// an explicit undefined trips exactOptionalPropertyTypes.
+export function providerSettings(resolved: ResolvedConfig): { apiKey: string; baseURL?: string } {
+  return {
+    apiKey: resolved.openrouterApiKey,
+    ...(resolved.baseURL ? { baseURL: resolved.baseURL } : {}),
+  };
+}
+
 export class Credentials {
   // Lazy: provider creation also asserts the API key is present, so callers that
   // only inspect role/capability mapping (tests, dry-run) don't need a real key.
@@ -65,13 +76,7 @@ export class Credentials {
   private provider(): OpenRouterProvider {
     if (!this.providerInstance) {
       Credentials.assertApiKeyPresent(this.resolved);
-      // Omit baseURL entirely when unset so the provider keeps its default; passing
-      // an explicit undefined trips exactOptionalPropertyTypes. Set it to target any
-      // OpenAI-compatible endpoint (see ConfigLoader / docs/auth.md).
-      this.providerInstance = createOpenRouter({
-        apiKey: this.resolved.openrouterApiKey,
-        ...(this.resolved.baseURL ? { baseURL: this.resolved.baseURL } : {}),
-      });
+      this.providerInstance = createOpenRouter(providerSettings(this.resolved));
     }
     return this.providerInstance;
   }

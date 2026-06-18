@@ -96,9 +96,7 @@ export class ConfigLoader {
     return {
       openrouterApiKey: apiKey,
       apiKeySource,
-      // Precedence: project > global > env. Undefined when none set → provider default.
-      // `|| undefined` collapses an empty OPENROUTER_BASE_URL to "no override".
-      baseURL: project?.baseURL ?? global?.baseURL ?? (this.env.OPENROUTER_BASE_URL || undefined),
+      baseURL: this.resolveBaseURL(global, project),
       models: this.resolveModels(global, project, cliOverrides),
       maxPrs: pick(cliOverrides.maxPrs, project?.maxPrs, global?.maxPrs, DEFAULTS.maxPrs),
       maxSessions: pickNullable(
@@ -265,6 +263,25 @@ export class ConfigLoader {
       }
     }
     return validated;
+  }
+
+  // Precedence: project > global > env OPENROUTER_BASE_URL. Undefined → provider default.
+  // Config-file values are already URL-validated by ConfigFileSchema; the env value is
+  // validated here so every source honors the same "validated as a URL" contract
+  // (docs/auth.md §"Base URL"). A whitespace-only / empty env var means "no override".
+  private resolveBaseURL(
+    global: ConfigFile | null,
+    project: ConfigFile | null,
+  ): string | undefined {
+    if (project?.baseURL) return project.baseURL;
+    if (global?.baseURL) return global.baseURL;
+    const env = this.env.OPENROUTER_BASE_URL?.trim();
+    if (!env) return undefined;
+    const parsed = z.url().safeParse(env);
+    if (!parsed.success) {
+      throw new Error(`OPENROUTER_BASE_URL is not a valid URL: ${JSON.stringify(env)}`);
+    }
+    return parsed.data;
   }
 
   private resolveApiKey(

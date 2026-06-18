@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { LanguageModel } from 'ai';
 import type { ResolvedConfig } from '../config/schema.ts';
-import { Credentials, ROLE_CAPABILITY } from './credentials.ts';
+import { Credentials, providerSettings, ROLE_CAPABILITY } from './credentials.ts';
 import { DEFAULT_MODELS } from './defaults.ts';
 
 const baseResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig => ({
@@ -128,9 +128,20 @@ test('modelFor throws when API key is missing (lazy assert)', () => {
   assert.throws(() => creds.modelFor('worker'), /OPENROUTER_API_KEY/);
 });
 
-test('modelFor builds a handle when a baseURL override is set', () => {
-  // Exercises the provider construction path that forwards baseURL to the OpenAI-compatible
-  // provider. The handle still resolves through ROLE_CAPABILITY to the configured tier.
+test('providerSettings omits baseURL when unset (provider keeps its default)', () => {
+  const settings = providerSettings(baseResolved());
+  assert.equal(settings.apiKey, 'sk-or-test');
+  assert.equal('baseURL' in settings, false);
+});
+
+test('providerSettings forwards baseURL when set', () => {
+  const settings = providerSettings(
+    baseResolved({ baseURL: 'https://api.z.ai/api/coding/paas/v4' }),
+  );
+  assert.equal(settings.baseURL, 'https://api.z.ai/api/coding/paas/v4');
+});
+
+test('modelFor still resolves the tier when a baseURL override is set', () => {
   const creds = new Credentials(baseResolved({ baseURL: 'https://api.z.ai/api/coding/paas/v4' }));
   assert.equal(modelIdOf(creds.modelFor('worker')), DEFAULT_MODELS.coding);
 });

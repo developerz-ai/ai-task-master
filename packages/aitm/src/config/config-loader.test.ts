@@ -105,15 +105,32 @@ test('resolve: baseURL resolves env, then global, then project (most specific wi
   }
 });
 
-test('resolve: empty OPENROUTER_BASE_URL collapses to undefined (no override)', async () => {
+test('resolve: empty or whitespace-only OPENROUTER_BASE_URL collapses to undefined', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    for (const v of ['', '   ']) {
+      const loader = new ConfigLoader(cwd.path, home.path, {
+        OPENROUTER_API_KEY: 'sk-env',
+        OPENROUTER_BASE_URL: v,
+      });
+      assert.equal((await loader.resolve({})).baseURL, undefined);
+    }
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: invalid OPENROUTER_BASE_URL throws (same URL contract as config files)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
   try {
     const loader = new ConfigLoader(cwd.path, home.path, {
       OPENROUTER_API_KEY: 'sk-env',
-      OPENROUTER_BASE_URL: '',
+      OPENROUTER_BASE_URL: 'not-a-url',
     });
-    assert.equal((await loader.resolve({})).baseURL, undefined);
+    await assert.rejects(() => loader.resolve({}), /OPENROUTER_BASE_URL is not a valid URL/);
   } finally {
     await home.cleanup();
     await cwd.cleanup();

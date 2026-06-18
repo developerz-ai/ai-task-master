@@ -29,6 +29,7 @@ const CLAUDE_USER_FILE = '.claude.json';
 
 const KNOWN_KEYS = new Set<string>([
   'openrouterApiKey',
+  'baseURL',
   'models',
   'maxPrs',
   'maxSessions',
@@ -95,6 +96,9 @@ export class ConfigLoader {
     return {
       openrouterApiKey: apiKey,
       apiKeySource,
+      // Precedence: project > global > env. Undefined when none set → provider default.
+      // `|| undefined` collapses an empty OPENROUTER_BASE_URL to "no override".
+      baseURL: project?.baseURL ?? global?.baseURL ?? (this.env.OPENROUTER_BASE_URL || undefined),
       models: this.resolveModels(global, project, cliOverrides),
       maxPrs: pick(cliOverrides.maxPrs, project?.maxPrs, global?.maxPrs, DEFAULTS.maxPrs),
       maxSessions: pickNullable(

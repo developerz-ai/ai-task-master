@@ -27,6 +27,11 @@ export const MergeMethodSchema = z.enum(['squash', 'merge', 'rebase']);
 export const ConfigFileSchema = z
   .object({
     openrouterApiKey: z.string().optional(),
+    // Override the OpenAI-compatible inference base URL. Unset → the provider default
+    // (https://openrouter.ai/api/v1). Lets aitm target any OpenAI-compatible endpoint
+    // (e.g. a self-hosted gateway or the z.ai GLM coding plan) without an Anthropic SDK.
+    // See docs/auth.md §"LLM provider".
+    baseURL: z.url().optional(),
     models: CapabilityModelsSchema.optional(),
     maxPrs: z.number().int().positive().optional(),
     maxSessions: z.number().int().positive().nullable().optional(),
@@ -62,6 +67,9 @@ export type CliOverrides = {
 export type ResolvedConfig = {
   openrouterApiKey: string;
   apiKeySource: 'project' | 'global' | 'env';
+  // Optional OpenAI-compatible base URL override. Undefined → the provider default.
+  // Resolved from config (project > global) or the OPENROUTER_BASE_URL env var.
+  baseURL?: string | undefined;
   models: Required<Pick<CapabilityModels, 'generic' | 'smart' | 'coding' | 'fast'>>;
   maxPrs: number;
   maxSessions: number | null;

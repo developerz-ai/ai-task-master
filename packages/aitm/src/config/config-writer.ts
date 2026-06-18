@@ -16,6 +16,7 @@ const PROJECT_FILE = 'config.json';
 
 const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'openrouterApiKey',
+  'baseURL',
   'models',
   'maxPrs',
   'maxSessions',

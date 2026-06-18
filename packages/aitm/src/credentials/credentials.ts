@@ -65,7 +65,13 @@ export class Credentials {
   private provider(): OpenRouterProvider {
     if (!this.providerInstance) {
       Credentials.assertApiKeyPresent(this.resolved);
-      this.providerInstance = createOpenRouter({ apiKey: this.resolved.openrouterApiKey });
+      // Omit baseURL entirely when unset so the provider keeps its default; passing
+      // an explicit undefined trips exactOptionalPropertyTypes. Set it to target any
+      // OpenAI-compatible endpoint (see ConfigLoader / docs/auth.md).
+      this.providerInstance = createOpenRouter({
+        apiKey: this.resolved.openrouterApiKey,
+        ...(this.resolved.baseURL ? { baseURL: this.resolved.baseURL } : {}),
+      });
     }
     return this.providerInstance;
   }

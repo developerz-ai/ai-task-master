@@ -72,6 +72,54 @@ test('resolve: formatCommand is read from project, then global (issue #48)', asy
   }
 });
 
+test('resolve: baseURL is undefined when no source sets it', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    assert.equal((await loader.resolve({})).baseURL, undefined);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: baseURL resolves env, then global, then project (most specific wins)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      OPENROUTER_BASE_URL: 'https://env.example/v1',
+    });
+    assert.equal((await loader.resolve({})).baseURL, 'https://env.example/v1');
+
+    await writeGlobalConfig(home.path, { baseURL: 'https://global.example/v1' });
+    assert.equal((await loader.resolve({})).baseURL, 'https://global.example/v1');
+
+    await writeProjectConfig(cwd.path, { baseURL: 'https://project.example/v1' });
+    assert.equal((await loader.resolve({})).baseURL, 'https://project.example/v1');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: empty OPENROUTER_BASE_URL collapses to undefined (no override)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      OPENROUTER_BASE_URL: '',
+    });
+    assert.equal((await loader.resolve({})).baseURL, undefined);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: throws when no API key in any source', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

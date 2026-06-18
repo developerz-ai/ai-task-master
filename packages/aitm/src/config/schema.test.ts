@@ -36,3 +36,12 @@ test('CapabilityModelsSchema is permissive about unknown extra keys', () => {
   const parsed = CapabilityModelsSchema.parse({ smart: 'x', futureTier: 'y' });
   assert.equal(parsed.smart, 'x');
 });
+
+test('ConfigFileSchema accepts a baseURL that is a valid URL', () => {
+  const parsed = ConfigFileSchema.parse({ baseURL: 'https://api.z.ai/api/coding/paas/v4' });
+  assert.equal(parsed.baseURL, 'https://api.z.ai/api/coding/paas/v4');
+});
+
+test('ConfigFileSchema rejects a baseURL that is not a URL', () => {
+  assert.throws(() => ConfigFileSchema.parse({ baseURL: 'not a url' }));
+});

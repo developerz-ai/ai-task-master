@@ -127,3 +127,10 @@ test('modelFor throws when API key is missing (lazy assert)', () => {
   const creds = new Credentials(baseResolved({ openrouterApiKey: '' }));
   assert.throws(() => creds.modelFor('worker'), /OPENROUTER_API_KEY/);
 });
+
+test('modelFor builds a handle when a baseURL override is set', () => {
+  // Exercises the provider construction path that forwards baseURL to the OpenAI-compatible
+  // provider. The handle still resolves through ROLE_CAPABILITY to the configured tier.
+  const creds = new Credentials(baseResolved({ baseURL: 'https://api.z.ai/api/coding/paas/v4' }));
+  assert.equal(modelIdOf(creds.modelFor('worker')), DEFAULT_MODELS.coding);
+});

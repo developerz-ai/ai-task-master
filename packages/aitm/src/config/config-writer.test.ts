@@ -202,3 +202,20 @@ test('set preserves unknown keys already in the file (forward-compat reads)', as
     assert.equal(parsed.maxPrs, 6);
   });
 });
+
+test('set refuses profile-managed keys (activeProfile, profiles)', async () => {
+  await withWriter(async ({ writer }) => {
+    await assert.rejects(() => writer.set('global', 'activeProfile', 'z.ai'), /managed by/);
+    await assert.rejects(
+      () => writer.set('global', 'profiles.z.ai.baseURL', 'https://x.dev'),
+      /managed by/,
+    );
+  });
+});
+
+test('unset refuses profile-managed keys', async () => {
+  await withWriter(async ({ writer }) => {
+    await assert.rejects(() => writer.unset('global', 'activeProfile'), /managed by/);
+    await assert.rejects(() => writer.unset('global', 'profiles'), /managed by/);
+  });
+});

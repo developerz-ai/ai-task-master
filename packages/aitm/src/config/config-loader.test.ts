@@ -523,3 +523,97 @@ test('writeSnapshot preserves apiKeySource=project label when project supplied k
     await cwd.cleanup();
   }
 });
+
+// ---- provider profiles -----------------------------------------------------
+
+async function resolveWith(
+  globalCfg: unknown,
+  env: Record<string, string | undefined> = {},
+): Promise<import('./schema.ts').ResolvedConfig> {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, globalCfg);
+    const loader = new ConfigLoader(cwd.path, home.path, env, { warn: () => {} });
+    return await loader.resolve({});
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+}
+
+test('profile: active profile supplies apiKey, baseURL, and models', async () => {
+  const resolved = await resolveWith({
+    activeProfile: 'z.ai',
+    profiles: {
+      'z.ai': {
+        openrouterApiKey: 'sk-or-zai',
+        baseURL: 'https://api.z.ai/api/coding/paas/v4',
+        models: { coding: 'glm-4.6' },
+      },
+    },
+  });
+  assert.equal(resolved.openrouterApiKey, 'sk-or-zai');
+  assert.equal(resolved.apiKeySource, 'profile');
+  assert.equal(resolved.activeProfile, 'z.ai');
+  assert.equal(resolved.baseURL, 'https://api.z.ai/api/coding/paas/v4');
+  assert.equal(resolved.models.coding, 'glm-4.6');
+  // tiers the profile didn't set fall back to defaults
+  assert.equal(resolved.models.fast, DEFAULT_MODELS.fast);
+});
+
+test('profile: explicit top-level key overrides the active profile', async () => {
+  const resolved = await resolveWith({
+    openrouterApiKey: 'sk-or-toplevel',
+    baseURL: 'https://top.example/v1',
+    activeProfile: 'z.ai',
+    profiles: {
+      'z.ai': { openrouterApiKey: 'sk-or-zai', baseURL: 'https://api.z.ai/api/coding/paas/v4' },
+    },
+  });
+  assert.equal(resolved.openrouterApiKey, 'sk-or-toplevel');
+  assert.equal(resolved.apiKeySource, 'global');
+  assert.equal(resolved.baseURL, 'https://top.example/v1');
+});
+
+test('profile: active profile key beats a lingering env key (profile > env)', async () => {
+  const resolved = await resolveWith(
+    {
+      activeProfile: 'z.ai',
+      profiles: {
+        'z.ai': { openrouterApiKey: 'sk-or-zai', baseURL: 'https://api.z.ai/api/coding/paas/v4' },
+      },
+    },
+    { OPENROUTER_API_KEY: 'sk-or-stale-env' },
+  );
+  assert.equal(resolved.openrouterApiKey, 'sk-or-zai');
+  assert.equal(resolved.apiKeySource, 'profile');
+});
+
+test('profile: dangling activeProfile warns and falls back to env', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  const warns = makeWarnCollector();
+  try {
+    await writeGlobalConfig(home.path, { activeProfile: 'ghost', profiles: {} });
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' }, warns);
+    const resolved = await loader.resolve({});
+    assert.equal(resolved.apiKeySource, 'env');
+    assert.equal(resolved.activeProfile, undefined);
+    assert.ok(warns.calls.some((m) => m.includes('activeProfile "ghost"')));
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('profile: no activeProfile leaves resolution identical to before (back-compat)', async () => {
+  const resolved = await resolveWith(
+    { profiles: { 'z.ai': { openrouterApiKey: 'sk-or-zai' } } },
+    { OPENROUTER_API_KEY: 'sk-env' },
+  );
+  assert.equal(resolved.openrouterApiKey, 'sk-env');
+  assert.equal(resolved.apiKeySource, 'env');
+  assert.equal(resolved.activeProfile, undefined);
+  assert.deepEqual(resolved.models, DEFAULT_MODELS);
+});

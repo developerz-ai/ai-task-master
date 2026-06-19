@@ -22,7 +22,34 @@ support OpenAI-style function/tool calling.** OpenRouter, z.ai GLM, and OpenAI a
 | Models | `models.{generic,smart,coding,fast}` | — (config only; `--model` pins `generic`) | Model ids the endpoint serves. |
 
 Each config key works in project config (`./.ai-task-master/config.json`), global
-(`~/.aitm.json`), or env. Precedence: project > global > env.
+(`~/.aitm.json`), or env. Precedence: project > global > **active profile** > env.
+
+## Profiles: switch providers in one command
+
+Setting the three knobs by hand every time you change provider is tedious. **Profiles** bundle
+the provider triple (key + base URL + per-tier models) under a name, so you switch the whole
+provider in one command — version-manager style (think `nvm use`). See
+[`commands/profile.md`](./commands/profile.md) for the full command reference.
+
+```sh
+# Create a profile from a built-in preset (--preset openrouter|zai), add your key:
+aitm profile add z.ai       --preset zai        --api-key "<your z.ai key>"
+aitm profile add openrouter --preset openrouter --api-key "sk-or-..."
+
+# Switch the active provider (this is the whole point):
+aitm profile use z.ai
+aitm start "add a /healthz endpoint" --max-prs 1   # now runs on z.ai GLM
+
+aitm profile use openrouter                         # back to OpenRouter
+aitm profile list                                   # see all profiles, '*' marks active
+```
+
+A preset pre-fills `baseURL` and sensible `models.*`; `--api-key` (or `aitm profile set <name>
+openrouterApiKey <key>`) supplies the credential — presets never ship keys. The **active**
+profile fills in provider settings at run time, sitting just below explicit top-level/project
+config and above env (so `aitm profile use` takes effect even if a stale `OPENROUTER_API_KEY`
+lingers in your shell). The sections below show the equivalent **manual** config if you'd rather
+edit JSON directly.
 
 ## OpenRouter (default)
 
@@ -78,5 +105,6 @@ calling support (see above). Example shape:
 
 ## Cross-links
 
+- [`commands/profile.md`](./commands/profile.md) — profile command reference (one-command provider switching)
 - [`auth.md`](./auth.md) — credential + base-URL resolution order, error cases
 - [`config.md`](./config.md) — full config schema

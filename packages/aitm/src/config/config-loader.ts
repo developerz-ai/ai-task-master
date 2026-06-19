@@ -13,6 +13,7 @@ import {
   type ConfigFile,
   ConfigFileSchema,
   type McpServerSource,
+  type Profile,
   type ResolvedConfig,
 } from './schema.ts';
 
@@ -29,6 +30,8 @@ const CLAUDE_USER_FILE = '.claude.json';
 
 const KNOWN_KEYS = new Set<string>([
   'openrouterApiKey',
+  'activeProfile',
+  'profiles',
   'baseURL',
   'models',
   'maxPrs',
@@ -77,12 +80,18 @@ export class ConfigLoader {
     const claudeUser = await this.readClaudeUserMcp();
     const claudeProject = await this.readClaudeProjectMcp();
 
-    const { apiKey, apiKeySource } = this.resolveApiKey(global, project);
+    // The active provider profile (global-only) supplies provider defaults that sit between
+    // explicit top-level config and env — see resolveApiKey/resolveBaseURL/resolveModels.
+    const active = this.resolveActiveProfile(global);
+    const profile = active?.profile;
+
+    const { apiKey, apiKeySource } = this.resolveApiKey(global, project, profile);
 
     if (apiKey === undefined || apiKeySource === undefined) {
       throw new Error(
-        'No OpenRouter API key found. Set OPENROUTER_API_KEY env, or add ' +
-          '"openrouterApiKey" to ~/.aitm.json or ./.ai-task-master/config.json.',
+        'No OpenRouter API key found. Set OPENROUTER_API_KEY env, add ' +
+          '"openrouterApiKey" to ~/.aitm.json or ./.ai-task-master/config.json, or ' +
+          'create a profile with `aitm profile add <name> --api-key <key>`.',
       );
     }
 
@@ -96,8 +105,9 @@ export class ConfigLoader {
     return {
       openrouterApiKey: apiKey,
       apiKeySource,
-      baseURL: this.resolveBaseURL(global, project),
-      models: this.resolveModels(global, project, cliOverrides),
+      ...(active ? { activeProfile: active.name } : {}),
+      baseURL: this.resolveBaseURL(global, project, profile),
+      models: this.resolveModels(global, project, profile, cliOverrides),
       maxPrs: pick(cliOverrides.maxPrs, project?.maxPrs, global?.maxPrs, DEFAULTS.maxPrs),
       maxSessions: pickNullable(
         cliOverrides.maxSessions,
@@ -265,16 +275,37 @@ export class ConfigLoader {
     return validated;
   }
 
-  // Precedence: project > global > env OPENROUTER_BASE_URL. Undefined → provider default.
-  // Config-file values are already URL-validated by ConfigFileSchema; the env value is
-  // validated here so every source honors the same "validated as a URL" contract
-  // (docs/auth.md §"Base URL"). A whitespace-only / empty env var means "no override".
+  // Resolve the active provider profile (global-only). Returns undefined when no profile is
+  // active. A dangling `activeProfile` (set but no matching profile) warns and falls through
+  // to the no-profile path rather than throwing — the run still works off top-level/env.
+  private resolveActiveProfile(
+    global: ConfigFile | null,
+  ): { name: string; profile: Profile } | undefined {
+    const name = global?.activeProfile;
+    if (!name) return undefined;
+    const profile = global?.profiles?.[name];
+    if (!profile) {
+      this.warn(
+        `activeProfile "${name}" is set in ~/.aitm.json but no such profile exists — ignoring it. ` +
+          'Run `aitm profile list` to see available profiles.',
+      );
+      return undefined;
+    }
+    return { name, profile };
+  }
+
+  // Precedence: project > global > active profile > env OPENROUTER_BASE_URL. Undefined →
+  // provider default. Config-file values are already URL-validated by ConfigFileSchema; the
+  // env value is validated here so every source honors the same "validated as a URL"
+  // contract (docs/auth.md §"Base URL"). A whitespace-only / empty env var means "no override".
   private resolveBaseURL(
     global: ConfigFile | null,
     project: ConfigFile | null,
+    profile: Profile | undefined,
   ): string | undefined {
     if (project?.baseURL) return project.baseURL;
     if (global?.baseURL) return global.baseURL;
+    if (profile?.baseURL) return profile.baseURL;
     const env = this.env.OPENROUTER_BASE_URL?.trim();
     if (!env) return undefined;
     const parsed = z.url().safeParse(env);
@@ -284,15 +315,22 @@ export class ConfigLoader {
     return parsed.data;
   }
 
+  // Precedence: project > global > active profile > env. The profile sits below explicit
+  // top-level config (so a legacy flat key still wins) but above env (so `aitm profile use`
+  // takes effect even when a stale OPENROUTER_API_KEY lingers in the environment).
   private resolveApiKey(
     global: ConfigFile | null,
     project: ConfigFile | null,
+    profile: Profile | undefined,
   ): { apiKey: string | undefined; apiKeySource: ResolvedConfig['apiKeySource'] | undefined } {
     if (project?.openrouterApiKey) {
       return { apiKey: project.openrouterApiKey, apiKeySource: 'project' };
     }
     if (global?.openrouterApiKey) {
       return { apiKey: global.openrouterApiKey, apiKeySource: 'global' };
+    }
+    if (profile?.openrouterApiKey) {
+      return { apiKey: profile.openrouterApiKey, apiKeySource: 'profile' };
     }
     const envKey = this.env.OPENROUTER_API_KEY;
     if (envKey) {
@@ -301,9 +339,12 @@ export class ConfigLoader {
     return { apiKey: undefined, apiKeySource: undefined };
   }
 
+  // Layer order (lowest → highest): defaults < active profile < global < project < CLI.
+  // The profile fills tiers it specifies; explicit config still overrides per tier.
   private resolveModels(
     global: ConfigFile | null,
     project: ConfigFile | null,
+    profile: Profile | undefined,
     cliOverrides: CliOverrides,
   ): ResolvedConfig['models'] {
     const merged: ResolvedConfig['models'] = {
@@ -312,7 +353,7 @@ export class ConfigLoader {
       coding: DEFAULT_MODELS.coding,
       fast: DEFAULT_MODELS.fast,
     };
-    for (const src of [global?.models, project?.models]) {
+    for (const src of [profile?.models, global?.models, project?.models]) {
       if (!src) continue;
       if (src.generic) merged.generic = src.generic;
       if (src.smart) merged.smart = src.smart;

@@ -5,8 +5,8 @@
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from './args.ts';
-import type { MergePrCtx, StartCtx } from './commands.ts';
-import { runConfig, runMergePr, runStart } from './commands.ts';
+import type { MergePrCtx, ProfileCtx, StartCtx } from './commands.ts';
+import { runConfig, runMergePr, runProfile, runStart } from './commands.ts';
 
 export type MainCtx = {
   cwd?: string;
@@ -34,6 +34,14 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
     case 'config-get':
     case 'config-list':
       return emit(await runConfig(parsed, buildConfigCtx(ctx, stdout)), stderr);
+    case 'profile-list':
+    case 'profile-use':
+    case 'profile-add':
+    case 'profile-set':
+    case 'profile-get':
+    case 'profile-remove':
+    case 'profile-show':
+      return emit(await runProfile(parsed, buildProfileCtx(ctx, stdout)), stderr);
     case 'help':
       stdout(`${HELP_TEXT}\n`);
       return 0;
@@ -71,6 +79,12 @@ function buildConfigCtx(
   return out;
 }
 
+function buildProfileCtx(ctx: MainCtx, stdout: (chunk: string) => void): ProfileCtx {
+  const out: ProfileCtx = { stdout };
+  if (ctx.homeDir !== undefined) out.homeDir = ctx.homeDir;
+  return out;
+}
+
 function emit(
   exit: { code: 0 | 1 | 2; message?: string },
   stderr: (chunk: string) => void,
@@ -90,6 +104,13 @@ Usage:
   aitm config unset <key>       [--project]
   aitm config get <key>         [--project]
   aitm config list              [--project]
+  aitm profile list
+  aitm profile use <name>
+  aitm profile add <name> [--preset openrouter|zai] [--base-url <url>] [--api-key <key>]
+  aitm profile set <name> <key> <value>
+  aitm profile get <name> <key>
+  aitm profile remove <name>
+  aitm profile show [<name>]
   aitm help | --help | -h
 
 Exit codes:
@@ -97,7 +118,7 @@ Exit codes:
   1  precondition failure or run blocked
   2  cancelled
 
-Docs: docs/commands/start.md, docs/commands/merge-pr.md, docs/commands/config.md`;
+Docs: docs/commands/start.md, docs/commands/merge-pr.md, docs/commands/config.md, docs/commands/profile.md`;
 
 // Entry-point: when invoked as a script (via the `aitm` bin), parse process.argv
 // and propagate the exit code. When imported (e.g. from tests), this is skipped.

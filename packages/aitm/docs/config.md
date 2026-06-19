@@ -34,7 +34,7 @@ The merged result is what every other module sees. A frozen snapshot is written 
   "baseURL": "https://api.z.ai/api/coding/paas/v4", // optional; falls back to env OPENROUTER_BASE_URL when omitted
   "activeProfile": "z.ai",            // optional; name of the profile (below) in effect — global only
   "profiles": {                       // optional; named provider bundles — see §Profiles
-    "z.ai": { "baseURL": "https://api.z.ai/api/coding/paas/v4", "models": { "coding": "glm-4.6" } }
+    "z.ai": { "baseURL": "https://api.z.ai/api/coding/paas/v4", "models": { "coding": "glm-5.2" } }
   },
   "models": {
     "default":  "anthropic/claude-opus-4",
@@ -56,7 +56,7 @@ All fields optional. Missing fields fall through to the next source.
 
 ## baseURL
 
-Overrides the OpenAI-compatible inference endpoint (provider default `https://openrouter.ai/api/v1`). Set it to target a self-hosted gateway, a proxy, or another provider's OpenAI-compatible API — e.g. the z.ai GLM coding plan at `https://api.z.ai/api/coding/paas/v4`. Resolution order: project config > global config > env `OPENROUTER_BASE_URL`; unset everywhere → the provider default. Validated as a URL. When set, point `models.*` at ids the endpoint serves (e.g. `glm-4.6`). This is an OpenAI-compatible path only — see [auth.md](./auth.md) §Anthropic. Not a CLI flag. See also [auth.md](./auth.md) §"Base URL" and [providers.md](./providers.md) for per-provider configs (OpenRouter / z.ai / generic).
+Overrides the OpenAI-compatible inference endpoint (provider default `https://openrouter.ai/api/v1`). Set it to target a self-hosted gateway, a proxy, or another provider's OpenAI-compatible API — e.g. the z.ai GLM coding plan at `https://api.z.ai/api/coding/paas/v4`. Resolution order: project config > global config > env `OPENROUTER_BASE_URL`; unset everywhere → the provider default. Validated as a URL. When set, point `models.*` at ids the endpoint serves (e.g. `glm-5.2`). This is an OpenAI-compatible path only — see [auth.md](./auth.md) §Anthropic. Not a CLI flag. See also [auth.md](./auth.md) §"Base URL" and [providers.md](./providers.md) for per-provider configs (OpenRouter / z.ai / generic).
 
 ## Profiles
 

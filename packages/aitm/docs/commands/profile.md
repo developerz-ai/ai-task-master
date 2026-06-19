@@ -43,7 +43,7 @@ supply it with `--api-key` or `aitm profile set <name> openrouterApiKey <key>`.
 | Preset | Base URL | Models |
 | --- | --- | --- |
 | `openrouter` | `https://openrouter.ai/api/v1` | (built-in capability defaults) |
-| `zai` | `https://api.z.ai/api/coding/paas/v4` | `glm-4.6` (generic/smart/coding), `glm-4.5-air` (fast) |
+| `zai` | `https://api.z.ai/api/coding/paas/v4` | `glm-5.2` (generic/smart/coding), `glm-5-turbo` (fast) |
 
 ## Quickstart
 

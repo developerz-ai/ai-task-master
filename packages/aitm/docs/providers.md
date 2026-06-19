@@ -72,10 +72,10 @@ Use z.ai's **OpenAI-compatible** coding endpoint (not its Anthropic endpoint):
   "openrouterApiKey": "<your z.ai api key>",
   "baseURL": "https://api.z.ai/api/coding/paas/v4",
   "models": {
-    "generic": "glm-4.6",
-    "smart": "glm-4.6",
-    "coding": "glm-4.6",
-    "fast": "glm-4.5-air"
+    "generic": "glm-5.2",
+    "smart": "glm-5.2",
+    "coding": "glm-5.2",
+    "fast": "glm-5-turbo"
   }
 }
 ```
@@ -88,6 +88,11 @@ export OPENROUTER_BASE_URL="https://api.z.ai/api/coding/paas/v4"
 ```
 
 The flat-rate coding-plan quota (Lite/Pro/Max) is billed through this endpoint.
+
+> **Model ids move.** The `zai` preset pins the current GLM coding-plan models (`glm-5.2`,
+> `glm-5-turbo`). z.ai has no stable "latest" alias, so when newer ids ship just point a tier
+> at the new id — `aitm profile set z.ai models.coding <new-id>` (or edit `models.*`). Nothing
+> auto-upgrades the model, by design: a silent model swap would change behaviour and cost mid-run.
 
 ## Any other OpenAI-compatible provider
 

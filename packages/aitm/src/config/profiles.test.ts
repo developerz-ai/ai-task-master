@@ -41,7 +41,7 @@ test('add with preset seeds baseURL + models from the preset', async () => {
   await withManager(async ({ manager }) => {
     const profile = await manager.add('z.ai', { preset: 'zai' });
     assert.equal(profile.baseURL, 'https://api.z.ai/api/coding/paas/v4');
-    assert.equal(profile.models?.coding, 'glm-4.6');
+    assert.equal(profile.models?.coding, 'glm-5.2');
   });
 });
 
@@ -97,9 +97,9 @@ test('use rejects an unknown profile (no dangling pointer)', async () => {
 test('set updates a nested models tier; get reads it back', async () => {
   await withManager(async ({ manager }) => {
     await manager.add('z.ai', { preset: 'zai' });
-    await manager.set('z.ai', 'models.fast', 'glm-4.5-air');
+    await manager.set('z.ai', 'models.fast', 'glm-5-turbo');
     await manager.set('z.ai', 'openrouterApiKey', 'sk-or-set');
-    assert.equal(await manager.get('z.ai', 'models.fast'), 'glm-4.5-air');
+    assert.equal(await manager.get('z.ai', 'models.fast'), 'glm-5-turbo');
     assert.equal(await manager.get('z.ai', 'openrouterApiKey'), 'sk-or-set');
   });
 });

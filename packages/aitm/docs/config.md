@@ -32,6 +32,10 @@ The merged result is what every other module sees. A frozen snapshot is written 
   "openrouterApiKey": "sk-or-...",    // optional; falls back to env OPENROUTER_API_KEY
   // omit `baseURL` when unset; if present it must be a valid URL
   "baseURL": "https://api.z.ai/api/coding/paas/v4", // optional; falls back to env OPENROUTER_BASE_URL when omitted
+  "activeProfile": "z.ai",            // optional; name of the profile (below) in effect — global only
+  "profiles": {                       // optional; named provider bundles — see §Profiles
+    "z.ai": { "baseURL": "https://api.z.ai/api/coding/paas/v4", "models": { "coding": "glm-4.6" } }
+  },
   "models": {
     "default":  "anthropic/claude-opus-4",
     "planner":  "anthropic/claude-opus-4",
@@ -53,6 +57,26 @@ All fields optional. Missing fields fall through to the next source.
 ## baseURL
 
 Overrides the OpenAI-compatible inference endpoint (provider default `https://openrouter.ai/api/v1`). Set it to target a self-hosted gateway, a proxy, or another provider's OpenAI-compatible API — e.g. the z.ai GLM coding plan at `https://api.z.ai/api/coding/paas/v4`. Resolution order: project config > global config > env `OPENROUTER_BASE_URL`; unset everywhere → the provider default. Validated as a URL. When set, point `models.*` at ids the endpoint serves (e.g. `glm-4.6`). This is an OpenAI-compatible path only — see [auth.md](./auth.md) §Anthropic. Not a CLI flag. See also [auth.md](./auth.md) §"Base URL" and [providers.md](./providers.md) for per-provider configs (OpenRouter / z.ai / generic).
+
+## Profiles
+
+`profiles` + `activeProfile` bundle the provider triple (`openrouterApiKey` + `baseURL` +
+`models`) under a name so `aitm profile use <name>` switches the whole provider in one command —
+version-manager style. **Global-only** (the write surface is `aitm profile …`, which always
+targets `~/.aitm.json`).
+
+The active profile supplies provider defaults that sit between explicit top-level config and env:
+
+```
+apiKey / baseURL:  project > global top-level > active profile > env
+models:            defaults < active profile < global < project < --model
+```
+
+So an explicit key/baseURL in a config file still wins, but the active profile beats a stale
+`OPENROUTER_API_KEY` in the environment. No `activeProfile` set → resolution is identical to
+before profiles existed (full back-compat). A dangling `activeProfile` (named but absent from
+`profiles`) warns and falls back rather than failing the run. Full command reference and presets:
+[`commands/profile.md`](./commands/profile.md).
 
 ## formatCommand
 
@@ -84,6 +108,8 @@ Each subagent can run on a different OpenRouter model. Use a cheap fast model fo
 ## Cross-links
 
 - `./auth.md`
+- `./providers.md`
+- `./commands/profile.md`
 - `./state.md`
 - `./commands/start.md`
 - `./architecture.md`

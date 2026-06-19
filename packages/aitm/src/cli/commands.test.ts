@@ -11,7 +11,7 @@ import type {
   RunPlannerInput,
   StartCtx,
 } from './commands.ts';
-import { runConfig, runMergePr, runStart } from './commands.ts';
+import { runConfig, runMergePr, runProfile, runStart } from './commands.ts';
 
 const FAKE_KEY = 'sk-or-fake-test-key';
 
@@ -871,4 +871,106 @@ test('CommandExit narrows to documented codes', () => {
   assert.equal(ok.code, 0);
   assert.equal(bad.code, 1);
   assert.equal(cancelled.code, 2);
+});
+
+// ---- runProfile ------------------------------------------------------------
+
+function collectStdout(): { chunks: string[]; out: (c: string) => void; text: () => string } {
+  const chunks: string[] = [];
+  return { chunks, out: (c) => chunks.push(c), text: () => chunks.join('') };
+}
+
+test('runProfile: add then list shows the profile with a masked key', async () => {
+  const home = await tempHome();
+  try {
+    const add = await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai', apiKey: 'sk-or-supersecret-1234' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    assert.equal(add.code, 0);
+    const sink = collectStdout();
+    const list = await runProfile(
+      { kind: 'profile-list' },
+      { homeDir: home.path, stdout: sink.out },
+    );
+    assert.equal(list.code, 0);
+    const text = sink.text();
+    assert.match(text, /\* z\.ai/); // active marker
+    assert.match(text, /api\.z\.ai/);
+    assert.doesNotMatch(text, /supersecret/, 'raw key must never be printed');
+  } finally {
+    await home.cleanup();
+  }
+});
+
+test('runProfile: use on an unknown profile exits 1 with a helpful message', async () => {
+  const home = await tempHome();
+  try {
+    const res = await runProfile(
+      { kind: 'profile-use', name: 'ghost' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    assert.equal(res.code, 1);
+    assert.match(res.message ?? '', /Unknown profile "ghost"/);
+  } finally {
+    await home.cleanup();
+  }
+});
+
+test('runProfile: show masks the key in its JSON output', async () => {
+  const home = await tempHome();
+  try {
+    await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai', apiKey: 'sk-or-supersecret-1234' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    const sink = collectStdout();
+    const res = await runProfile(
+      { kind: 'profile-show' },
+      { homeDir: home.path, stdout: sink.out },
+    );
+    assert.equal(res.code, 0);
+    assert.doesNotMatch(sink.text(), /supersecret/);
+  } finally {
+    await home.cleanup();
+  }
+});
+
+test('runProfile: get returns a single field value', async () => {
+  const home = await tempHome();
+  try {
+    await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    const sink = collectStdout();
+    const res = await runProfile(
+      { kind: 'profile-get', name: 'z.ai', key: 'baseURL' },
+      { homeDir: home.path, stdout: sink.out },
+    );
+    assert.equal(res.code, 0);
+    assert.equal(sink.text().trim(), 'https://api.z.ai/api/coding/paas/v4');
+  } finally {
+    await home.cleanup();
+  }
+});
+
+test('runProfile: add message reflects auto-activation of the first profile only', async () => {
+  const home = await tempHome();
+  try {
+    const first = collectStdout();
+    await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai' },
+      { homeDir: home.path, stdout: first.out },
+    );
+    assert.match(first.text(), /Created and activated profile "z\.ai"/);
+    const second = collectStdout();
+    await runProfile(
+      { kind: 'profile-add', name: 'openrouter', preset: 'openrouter' },
+      { homeDir: home.path, stdout: second.out },
+    );
+    assert.match(second.text(), /aitm profile use openrouter/);
+  } finally {
+    await home.cleanup();
+  }
 });

@@ -24,9 +24,29 @@ export type Capability = 'generic' | 'smart' | 'coding' | 'fast';
 export const LogLevelSchema = z.enum(['debug', 'info', 'warn', 'error']);
 export const MergeMethodSchema = z.enum(['squash', 'merge', 'rebase']);
 
+// A named provider profile: the provider "triple" (key + base URL + per-tier models)
+// bundled under one name so `aitm profile use <name>` switches the whole provider in one
+// command, version-manager style. Profiles only carry provider-shaped fields — run
+// settings (maxPrs, autoMerge, …) stay at the top level. See docs/commands/profile.md.
+export const ProfileSchema = z
+  .object({
+    openrouterApiKey: z.string().optional(),
+    baseURL: z.url().optional(),
+    models: CapabilityModelsSchema.optional(),
+  })
+  .passthrough();
+
+export type Profile = z.infer<typeof ProfileSchema>;
+
 export const ConfigFileSchema = z
   .object({
     openrouterApiKey: z.string().optional(),
+    // Name of the profile in `profiles` whose provider fields seed this config. Unset →
+    // no profile layer (current behavior). See docs/config.md §"Profiles" for precedence.
+    activeProfile: z.string().optional(),
+    // Named provider profiles. Global-only (write surface is `aitm profile …`). The active
+    // one supplies provider defaults between explicit top-level config and env. See profiles.ts.
+    profiles: z.record(z.string(), ProfileSchema).optional(),
     // Override the OpenAI-compatible inference base URL. Unset → the provider default
     // (https://openrouter.ai/api/v1). Lets aitm target any OpenAI-compatible endpoint
     // (e.g. a self-hosted gateway or the z.ai GLM coding plan) without an Anthropic SDK.
@@ -66,7 +86,10 @@ export type CliOverrides = {
 
 export type ResolvedConfig = {
   openrouterApiKey: string;
-  apiKeySource: 'project' | 'global' | 'env';
+  apiKeySource: 'project' | 'global' | 'env' | 'profile';
+  // Name of the active provider profile, if one supplied provider defaults for this run.
+  // Undefined → no profile layer. Recorded for the snapshot and `aitm config list`.
+  activeProfile?: string | undefined;
   // Optional OpenAI-compatible base URL override. Undefined → the provider default.
   // Resolved from config (project > global) or the OPENROUTER_BASE_URL env var.
   baseURL?: string | undefined;

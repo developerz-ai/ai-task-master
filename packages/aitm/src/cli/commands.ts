@@ -11,7 +11,8 @@ import { join, resolve as resolvePath } from 'node:path';
 import { type AgentConfig, AgentConfigDetector } from '../agent-config/agent-config-detector.ts';
 import { ConfigLoader } from '../config/config-loader.ts';
 import { ConfigWriter } from '../config/config-writer.ts';
-import type { CliOverrides, ResolvedConfig } from '../config/schema.ts';
+import { type AddProfileInput, ProfileManager } from '../config/profiles.ts';
+import type { CliOverrides, ConfigFile, Profile, ResolvedConfig } from '../config/schema.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { GitHubClient } from '../github/github-client.ts';
@@ -99,6 +100,11 @@ export type MergePrCtx = {
 
 export type ConfigCtx = {
   cwd?: string;
+  homeDir?: string;
+  stdout?: (chunk: string) => void;
+};
+
+export type ProfileCtx = {
   homeDir?: string;
   stdout?: (chunk: string) => void;
 };
@@ -386,17 +392,78 @@ export async function runConfig(
       }
       case 'config-list': {
         const file = await writer.list(args.scope);
-        // Never dump the API key in cleartext — `config list` output lands in terminals/logs.
-        const safe = file.openrouterApiKey
-          ? { ...file, openrouterApiKey: maskSecret(file.openrouterApiKey) }
-          : file;
-        stdout(`${JSON.stringify(safe, null, 2)}\n`);
+        // Never dump API keys in cleartext — `config list` output lands in terminals/logs.
+        // Masks both the top-level key and any keys nested inside `profiles`.
+        stdout(`${JSON.stringify(redactConfigKeys(file), null, 2)}\n`);
         return { code: 0 };
       }
       default:
         return {
           code: 1,
           message: `Unknown config subcommand: ${(args as { kind: string }).kind}`,
+        };
+    }
+  } catch (err) {
+    return { code: 1, message: errMsg(err) };
+  }
+}
+
+export async function runProfile(
+  args: Extract<ParsedArgs, { kind: `profile-${string}` }>,
+  ctx: ProfileCtx = {},
+): Promise<CommandExit> {
+  const homeDir = ctx.homeDir ?? homedir();
+  const stdout = ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk));
+  const manager = new ProfileManager(homeDir);
+
+  try {
+    switch (args.kind) {
+      case 'profile-list': {
+        const listing = await manager.list();
+        stdout(formatProfileList(listing.activeProfile, listing.profiles));
+        return { code: 0 };
+      }
+      case 'profile-use': {
+        await manager.use(args.name);
+        stdout(`Active profile is now "${args.name}".\n`);
+        return { code: 0 };
+      }
+      case 'profile-add': {
+        const input: AddProfileInput = {};
+        if (args.preset !== undefined) input.preset = args.preset;
+        if (args.baseURL !== undefined) input.baseURL = args.baseURL;
+        if (args.apiKey !== undefined) input.apiKey = args.apiKey;
+        await manager.add(args.name, input);
+        // The first profile auto-activates; later ones don't — tailor the hint accordingly.
+        const activated = (await manager.list()).activeProfile === args.name;
+        stdout(
+          activated
+            ? `Created and activated profile "${args.name}".\n`
+            : `Created profile "${args.name}". Run \`aitm profile use ${args.name}\` to activate it.\n`,
+        );
+        return { code: 0 };
+      }
+      case 'profile-set':
+        await manager.set(args.name, args.key, args.value);
+        return { code: 0 };
+      case 'profile-get': {
+        const value = await manager.get(args.name, args.key);
+        stdout(`${formatConfigValue(value)}\n`);
+        return { code: 0 };
+      }
+      case 'profile-remove':
+        await manager.remove(args.name);
+        stdout(`Removed profile "${args.name}".\n`);
+        return { code: 0 };
+      case 'profile-show': {
+        const { name, profile } = await manager.show(args.name);
+        stdout(`${name}\n${JSON.stringify(redactProfile(profile), null, 2)}\n`);
+        return { code: 0 };
+      }
+      default:
+        return {
+          code: 1,
+          message: `Unknown profile subcommand: ${(args as { kind: string }).kind}`,
         };
     }
   } catch (err) {
@@ -503,6 +570,44 @@ function formatConfigValue(value: unknown): string {
   if (value === undefined) return '';
   if (typeof value === 'string') return value;
   return JSON.stringify(value, null, 2);
+}
+
+// One line per profile: an active marker, the name, its base URL, and a masked key hint.
+function formatProfileList(active: string | undefined, profiles: Record<string, Profile>): string {
+  const names = Object.keys(profiles).sort();
+  if (names.length === 0) {
+    return 'No profiles configured. Create one with `aitm profile add <name> --preset zai`.\n';
+  }
+  const lines = names.map((name) => {
+    const p = profiles[name] ?? {};
+    const marker = name === active ? '*' : ' ';
+    const base = p.baseURL ?? '(provider default)';
+    const key = p.openrouterApiKey ? maskSecret(p.openrouterApiKey) : '(no key)';
+    return `${marker} ${name}\t${base}\t${key}`;
+  });
+  return `${lines.join('\n')}\n`;
+}
+
+// Mask the API key inside a single profile for display.
+function redactProfile(profile: Profile): Profile {
+  return profile.openrouterApiKey
+    ? { ...profile, openrouterApiKey: maskSecret(profile.openrouterApiKey) }
+    : profile;
+}
+
+// Redact a whole config file for `config list`: the top-level key and every profile's key.
+function redactConfigKeys(file: ConfigFile): ConfigFile {
+  const out: ConfigFile = file.openrouterApiKey
+    ? { ...file, openrouterApiKey: maskSecret(file.openrouterApiKey) }
+    : { ...file };
+  if (out.profiles) {
+    const profiles: Record<string, Profile> = {};
+    for (const [name, profile] of Object.entries(out.profiles)) {
+      profiles[name] = redactProfile(profile);
+    }
+    out.profiles = profiles;
+  }
+  return out;
 }
 
 const defaultAuthStatus: AuthStatusFn = (cwd) => new GitHubClient(cwd).authStatus();

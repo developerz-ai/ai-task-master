@@ -1,5 +1,7 @@
-// docs/commands/start.md §Signature, docs/commands/merge-pr.md §Signature, docs/commands/config.md
-// Tiny dependency-free argv parser. Pure function — easy to unit-test.
+// docs/commands/start.md §Signature, docs/commands/merge-pr.md §Signature, docs/commands/config.md,
+// docs/commands/profile.md §Signature. Tiny argv parser. Pure function — easy to unit-test.
+
+import { isPresetName, type PresetName } from '../config/provider-presets.ts';
 
 export type StartArgs = {
   kind: 'start';
@@ -25,7 +27,16 @@ export type ConfigArgs =
   | { kind: 'config-get'; scope: 'global' | 'project'; key: string }
   | { kind: 'config-list'; scope: 'global' | 'project' };
 
-export type ParsedArgs = StartArgs | MergePrArgs | ConfigArgs | { kind: 'help' };
+export type ProfileArgs =
+  | { kind: 'profile-list' }
+  | { kind: 'profile-use'; name: string }
+  | { kind: 'profile-add'; name: string; preset?: PresetName; baseURL?: string; apiKey?: string }
+  | { kind: 'profile-set'; name: string; key: string; value: string }
+  | { kind: 'profile-get'; name: string; key: string }
+  | { kind: 'profile-remove'; name: string }
+  | { kind: 'profile-show'; name?: string };
+
+export type ParsedArgs = StartArgs | MergePrArgs | ConfigArgs | ProfileArgs | { kind: 'help' };
 
 const HELP: ParsedArgs = { kind: 'help' };
 
@@ -40,6 +51,8 @@ export function parseArgs(argv: ReadonlyArray<string>): ParsedArgs {
       return parseMergePr(rest);
     case 'config':
       return parseConfig(rest);
+    case 'profile':
+      return parseProfile(rest);
     default:
       return HELP;
   }
@@ -190,6 +203,102 @@ function parseConfig(args: ReadonlyArray<string>): ParsedArgs {
     default:
       return HELP;
   }
+}
+
+function parseProfile(args: ReadonlyArray<string>): ParsedArgs {
+  const sub = args[0];
+  if (sub === undefined) return HELP;
+  const tail = args.slice(1);
+  switch (sub) {
+    case 'list':
+      return tail.length === 0 ? { kind: 'profile-list' } : HELP;
+    case 'use': {
+      const name = onlyName(tail);
+      return name === null ? HELP : { kind: 'profile-use', name };
+    }
+    case 'remove': {
+      const name = onlyName(tail);
+      return name === null ? HELP : { kind: 'profile-remove', name };
+    }
+    case 'show': {
+      if (tail.length === 0) return { kind: 'profile-show' };
+      const name = onlyName(tail);
+      return name === null ? HELP : { kind: 'profile-show', name };
+    }
+    case 'get': {
+      if (tail.length !== 2) return HELP;
+      const [name, key] = tail;
+      if (
+        name === undefined ||
+        key === undefined ||
+        name.startsWith('--') ||
+        key.startsWith('--')
+      ) {
+        return HELP;
+      }
+      return { kind: 'profile-get', name, key };
+    }
+    case 'set': {
+      if (tail.length !== 3) return HELP;
+      const [name, key, value] = tail;
+      if (name === undefined || key === undefined || value === undefined) return HELP;
+      if (name.startsWith('--') || key.startsWith('--')) return HELP;
+      return { kind: 'profile-set', name, key, value };
+    }
+    case 'add':
+      return parseProfileAdd(tail);
+    default:
+      return HELP;
+  }
+}
+
+function parseProfileAdd(tail: ReadonlyArray<string>): ParsedArgs {
+  const positionals: string[] = [];
+  let preset: PresetName | undefined;
+  let baseURL: string | undefined;
+  let apiKey: string | undefined;
+  let i = 0;
+  while (i < tail.length) {
+    const raw = tail[i];
+    if (raw === undefined) break;
+    const { flag, inlineValue, consumed } = splitFlag(raw);
+    if (flag === '--preset') {
+      const v = takeValue(tail, i, inlineValue);
+      if (v === null || !isPresetName(v)) return HELP;
+      preset = v;
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--base-url') {
+      const v = takeValue(tail, i, inlineValue);
+      if (v === null) return HELP;
+      baseURL = v;
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--api-key') {
+      const v = takeValue(tail, i, inlineValue);
+      if (v === null) return HELP;
+      apiKey = v;
+      i += consumed(inlineValue !== null);
+    } else if (raw.startsWith('--')) {
+      return HELP;
+    } else {
+      positionals.push(raw);
+      i += 1;
+    }
+  }
+  const name = positionals[0];
+  if (name === undefined || positionals.length > 1) return HELP;
+  const out: ProfileArgs = { kind: 'profile-add', name };
+  if (preset !== undefined) out.preset = preset;
+  if (baseURL !== undefined) out.baseURL = baseURL;
+  if (apiKey !== undefined) out.apiKey = apiKey;
+  return out;
+}
+
+// Exactly one positional name, no flags. Returns null on any deviation (→ HELP).
+function onlyName(tail: ReadonlyArray<string>): string | null {
+  if (tail.length !== 1) return null;
+  const name = tail[0];
+  if (name === undefined || name.startsWith('--')) return null;
+  return name;
 }
 
 function parseNonNegativeInt(s: string | null | undefined): number | null {

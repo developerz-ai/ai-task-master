@@ -10,9 +10,12 @@ OpenRouter only. OpenAI-compatible API. One credential.
 | --- | --- | --- |
 | `openrouterApiKey` in `./.ai-task-master/config.json` (project) | 1 | `ConfigLoader` |
 | `openrouterApiKey` in `~/.aitm.json` (global) | 2 | `ConfigLoader` |
-| Env `OPENROUTER_API_KEY` | 3 | `ConfigLoader` |
+| `openrouterApiKey` in the **active profile** (`~/.aitm.json`) | 3 | `ConfigLoader` |
+| Env `OPENROUTER_API_KEY` | 4 | `ConfigLoader` |
 
-`Credentials` receives the resolved key from `ConfigLoader` and constructs role-specific AI SDK model handles via `@openrouter/ai-sdk-provider`.
+The active profile (set via `aitm profile use`) supplies provider defaults below explicit
+top-level config but above env — see [`commands/profile.md`](./commands/profile.md) and
+[`config.md`](./config.md) §Profiles. `Credentials` receives the resolved key from `ConfigLoader` and constructs role-specific AI SDK model handles via `@openrouter/ai-sdk-provider`.
 
 ### Base URL
 
@@ -26,7 +29,8 @@ it is **not** an Anthropic SDK path (see [Anthropic](#anthropic) below).
 | --- | --- | --- |
 | `baseURL` in `./.ai-task-master/config.json` (project) | 1 | `ConfigLoader` |
 | `baseURL` in `~/.aitm.json` (global) | 2 | `ConfigLoader` |
-| Env `OPENROUTER_BASE_URL` | 3 | `ConfigLoader` |
+| `baseURL` in the **active profile** (`~/.aitm.json`) | 3 | `ConfigLoader` |
+| Env `OPENROUTER_BASE_URL` | 4 | `ConfigLoader` |
 
 Unset in every source → the provider default. The value is validated as a URL. When a
 custom base URL is set, point `models.*` at model ids the endpoint serves (e.g. `glm-4.6`).
@@ -64,6 +68,8 @@ Not used. Ever. `aitm` does not call Anthropic, does not read `~/.claude/.creden
 ## Cross-links
 
 - `./config.md`
+- `./providers.md`
+- `./commands/profile.md`
 - `./agent-config-detection.md`
 - `./github-integration.md`
 - `./architecture.md`

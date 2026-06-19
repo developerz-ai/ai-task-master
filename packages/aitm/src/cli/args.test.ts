@@ -304,7 +304,77 @@ const helpCases: Case[] = [
   },
 ];
 
-for (const c of [...startCases, ...mergeCases, ...configCases, ...helpCases]) {
+const profileCases: Case[] = [
+  { name: 'profile list', argv: ['profile', 'list'], expected: { kind: 'profile-list' } },
+  {
+    name: 'profile use',
+    argv: ['profile', 'use', 'z.ai'],
+    expected: { kind: 'profile-use', name: 'z.ai' },
+  },
+  {
+    name: 'profile remove',
+    argv: ['profile', 'remove', 'z.ai'],
+    expected: { kind: 'profile-remove', name: 'z.ai' },
+  },
+  { name: 'profile show (active)', argv: ['profile', 'show'], expected: { kind: 'profile-show' } },
+  {
+    name: 'profile show (named)',
+    argv: ['profile', 'show', 'z.ai'],
+    expected: { kind: 'profile-show', name: 'z.ai' },
+  },
+  {
+    name: 'profile get',
+    argv: ['profile', 'get', 'z.ai', 'baseURL'],
+    expected: { kind: 'profile-get', name: 'z.ai', key: 'baseURL' },
+  },
+  {
+    name: 'profile set',
+    argv: ['profile', 'set', 'z.ai', 'openrouterApiKey', 'sk-or-x'],
+    expected: { kind: 'profile-set', name: 'z.ai', key: 'openrouterApiKey', value: 'sk-or-x' },
+  },
+  {
+    name: 'profile add: bare name',
+    argv: ['profile', 'add', 'z.ai'],
+    expected: { kind: 'profile-add', name: 'z.ai' },
+  },
+  {
+    name: 'profile add: preset + flags (two-token)',
+    argv: ['profile', 'add', 'z.ai', '--preset', 'zai', '--api-key', 'sk-or-x'],
+    expected: { kind: 'profile-add', name: 'z.ai', preset: 'zai', apiKey: 'sk-or-x' },
+  },
+  {
+    name: 'profile add: inline flag form',
+    argv: ['profile', 'add', 'p', '--base-url=https://x.dev/v1'],
+    expected: { kind: 'profile-add', name: 'p', baseURL: 'https://x.dev/v1' },
+  },
+  // error / HELP cases
+  { name: 'profile: no subcommand', argv: ['profile'], expected: { kind: 'help' } },
+  { name: 'profile: unknown subcommand', argv: ['profile', 'nope'], expected: { kind: 'help' } },
+  { name: 'profile list: extra arg', argv: ['profile', 'list', 'x'], expected: { kind: 'help' } },
+  { name: 'profile use: missing name', argv: ['profile', 'use'], expected: { kind: 'help' } },
+  {
+    name: 'profile use: extra arg',
+    argv: ['profile', 'use', 'a', 'b'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'profile set: too few args',
+    argv: ['profile', 'set', 'a', 'b'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'profile add: unknown preset',
+    argv: ['profile', 'add', 'p', '--preset', 'bogus'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'profile add: unknown flag',
+    argv: ['profile', 'add', 'p', '--nope'],
+    expected: { kind: 'help' },
+  },
+];
+
+for (const c of [...startCases, ...mergeCases, ...configCases, ...profileCases, ...helpCases]) {
   test(c.name, () => {
     assert.deepEqual(parseArgs(c.argv), c.expected);
   });

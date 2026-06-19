@@ -79,7 +79,7 @@ aitm merge-pr
                                           StateStore ◀──── auto-merge ◀─┘
 ```
 
-- **Provider**: OpenRouter only. No Anthropic SDK. Pick any model OpenRouter exposes.
+- **Provider**: any OpenAI-compatible endpoint through one credential — OpenRouter by default, or point `baseURL` at z.ai GLM, a self-hosted gateway, or another provider. No Anthropic SDK. See [🔀 Providers & profiles](#-providers--profiles).
 - **Coding style**: `aitm` reads your repo's `CLAUDE.md` or `AGENTS.md` and feeds it to subagents as a style signal.
 - **State**: every run persists to `.ai-task-master/` so resume-after-crash is one command.
 - **Worktrees**: concurrent groups run in isolated `git worktree`s — no branch trampling.
@@ -132,6 +132,39 @@ aitm config list
 
 See [`docs/config.md`](docs/config.md) for the full schema.
 
+## 🔀 Providers & profiles
+
+`aitm` talks to **one OpenAI-compatible endpoint**. The default is [OpenRouter](https://openrouter.ai); override the base URL to run against any other OpenAI-compatible provider — [z.ai](https://z.ai)'s GLM coding plan, a self-hosted gateway, OpenAI, … One credential, no Anthropic SDK. The only hard requirement is OpenAI-style **function/tool calling** (OpenRouter, z.ai GLM, and OpenAI all support it).
+
+**Profiles** bundle the provider triple (key + base URL + per-tier models) under a name, so you switch the whole provider in one command — version-manager style (think `nvm use`):
+
+```bash
+# Create profiles from built-in presets (openrouter | zai), add your key:
+aitm profile add openrouter --preset openrouter --api-key "sk-or-..."
+aitm profile add z.ai       --preset zai        --api-key "<your z.ai key>"
+
+aitm profile use z.ai                  # switch the active provider…
+aitm start "add a /healthz endpoint with a test" --max-prs 1   # …now running on z.ai GLM
+aitm profile use openrouter            # …and back
+
+aitm profile list                      # '*' marks the active profile; keys shown masked
+```
+
+> ✅ **Verified end-to-end against z.ai GLM** — the Planner/Worker/Reviewer loop runs on `glm-4.6` / `glm-4.5-air` through the GLM coding endpoint (`https://api.z.ai/api/coding/paas/v4`).
+
+Prefer editing JSON? The same thing as plain config:
+
+```jsonc
+// ~/.aitm.json
+{
+  "openrouterApiKey": "<your z.ai key>",
+  "baseURL": "https://api.z.ai/api/coding/paas/v4",
+  "models": { "generic": "glm-4.6", "smart": "glm-4.6", "coding": "glm-4.6", "fast": "glm-4.5-air" }
+}
+```
+
+Full walkthrough in [`docs/providers.md`](docs/providers.md); profile command reference in [`docs/commands/profile.md`](docs/commands/profile.md).
+
 ## 🧪 Try it on a sandbox repo
 
 ```bash
@@ -155,6 +188,8 @@ A single PR opens, CI runs, it merges. Total wall-clock: a few minutes.
 | 🏗️ Architecture | [`docs/architecture.md`](docs/architecture.md) |
 | 🟢 `aitm start` | [`docs/commands/start.md`](docs/commands/start.md) |
 | 🟡 `aitm merge-pr` | [`docs/commands/merge-pr.md`](docs/commands/merge-pr.md) |
+| 🔀 `aitm profile` | [`docs/commands/profile.md`](docs/commands/profile.md) |
+| 🌐 Providers (OpenRouter / z.ai / generic) | [`docs/providers.md`](docs/providers.md) |
 | ⚙️ Config | [`docs/config.md`](docs/config.md) |
 | 📝 Agent config detection | [`docs/agent-config-detection.md`](docs/agent-config-detection.md) |
 | 🎨 Coding style | [`docs/coding-style.md`](docs/coding-style.md) |

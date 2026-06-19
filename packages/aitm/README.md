@@ -76,8 +76,18 @@ aitm config set autoMerge true --project
 aitm config list
 ```
 
-- **Provider**: OpenRouter only (`OPENROUTER_API_KEY`). Any OpenRouter-routed
-  model id works per role — no Anthropic SDK involved.
+- **Provider**: any OpenAI-compatible endpoint via one credential — OpenRouter by
+  default, or set `baseURL` to run on z.ai GLM, a self-hosted gateway, etc. No
+  Anthropic SDK. **Profiles** switch the whole provider in one command:
+
+  ```bash
+  aitm profile add z.ai --preset zai --api-key "<your z.ai key>"
+  aitm profile use z.ai     # ✅ verified end-to-end on z.ai GLM (glm-4.6 / glm-4.5-air)
+  aitm profile use openrouter
+  ```
+
+  See [providers](https://github.com/developerz-ai/ai-task-master/blob/main/packages/aitm/docs/providers.md)
+  and [`aitm profile`](https://github.com/developerz-ai/ai-task-master/blob/main/packages/aitm/docs/commands/profile.md).
 - **Coding style**: `aitm` reads your repo's `CLAUDE.md` / `AGENTS.md` and feeds
   it to subagents as a style signal (the provider stays OpenRouter).
 - **MCP**: `aitm` is an MCP **client** — declare `mcpServers` in config and their

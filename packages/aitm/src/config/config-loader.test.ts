@@ -549,7 +549,7 @@ test('profile: active profile supplies apiKey, baseURL, and models', async () =>
       'z.ai': {
         openrouterApiKey: 'sk-or-zai',
         baseURL: 'https://api.z.ai/api/coding/paas/v4',
-        models: { coding: 'glm-4.6' },
+        models: { coding: 'glm-5.2' },
       },
     },
   });
@@ -557,7 +557,7 @@ test('profile: active profile supplies apiKey, baseURL, and models', async () =>
   assert.equal(resolved.apiKeySource, 'profile');
   assert.equal(resolved.activeProfile, 'z.ai');
   assert.equal(resolved.baseURL, 'https://api.z.ai/api/coding/paas/v4');
-  assert.equal(resolved.models.coding, 'glm-4.6');
+  assert.equal(resolved.models.coding, 'glm-5.2');
   // tiers the profile didn't set fall back to defaults
   assert.equal(resolved.models.fast, DEFAULT_MODELS.fast);
 });

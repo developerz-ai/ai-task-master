@@ -82,7 +82,7 @@ aitm config list
 
   ```bash
   aitm profile add z.ai --preset zai --api-key "<your z.ai key>"
-  aitm profile use z.ai     # ✅ verified end-to-end on z.ai GLM (glm-4.6 / glm-4.5-air)
+  aitm profile use z.ai     # ✅ verified end-to-end on z.ai GLM (glm-5.2 / glm-5-turbo)
   aitm profile use openrouter
   ```
 

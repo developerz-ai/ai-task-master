@@ -13,15 +13,17 @@ export const PROVIDER_PRESETS: Readonly<Record<PresetName, Profile>> = {
   openrouter: {
     baseURL: 'https://openrouter.ai/api/v1',
   },
-  // z.ai GLM coding plan (OpenAI-compatible). GLM-4.6 for reasoning/coding, GLM-4.5-Air
-  // for cheap routing/summarization. Verified end-to-end against this endpoint.
+  // z.ai GLM coding plan (OpenAI-compatible). GLM-5.2 for reasoning/coding, GLM-5-Turbo for
+  // cheap routing/summarization. These are a current-as-of-release starting point — z.ai has
+  // no stable "latest" alias, so override `models.*` (or `aitm profile set z.ai models.<tier>`)
+  // when newer ids ship.
   zai: {
     baseURL: 'https://api.z.ai/api/coding/paas/v4',
     models: {
-      generic: 'glm-4.6',
-      smart: 'glm-4.6',
-      coding: 'glm-4.6',
-      fast: 'glm-4.5-air',
+      generic: 'glm-5.2',
+      smart: 'glm-5.2',
+      coding: 'glm-5.2',
+      fast: 'glm-5-turbo',
     },
   },
 };

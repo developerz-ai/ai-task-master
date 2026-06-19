@@ -150,7 +150,7 @@ aitm profile use openrouter            # …and back
 aitm profile list                      # '*' marks the active profile; keys shown masked
 ```
 
-> ✅ **Verified end-to-end against z.ai GLM** — the Planner/Worker/Reviewer loop runs on `glm-4.6` / `glm-4.5-air` through the GLM coding endpoint (`https://api.z.ai/api/coding/paas/v4`).
+> ✅ **Verified end-to-end against z.ai GLM** — the Planner/Worker/Reviewer loop runs on `glm-5.2` / `glm-5-turbo` through the GLM coding endpoint (`https://api.z.ai/api/coding/paas/v4`).
 
 Prefer editing JSON? The same thing as plain config:
 
@@ -159,7 +159,7 @@ Prefer editing JSON? The same thing as plain config:
 {
   "openrouterApiKey": "<your z.ai key>",
   "baseURL": "https://api.z.ai/api/coding/paas/v4",
-  "models": { "generic": "glm-4.6", "smart": "glm-4.6", "coding": "glm-4.6", "fast": "glm-4.5-air" }
+  "models": { "generic": "glm-5.2", "smart": "glm-5.2", "coding": "glm-5.2", "fast": "glm-5-turbo" }
 }
 ```
 

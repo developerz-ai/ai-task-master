@@ -19,8 +19,8 @@ test('no preset hardcodes an API key', () => {
 test('zai preset targets the GLM coding endpoint with glm models', () => {
   const zai = PROVIDER_PRESETS.zai;
   assert.equal(zai.baseURL, 'https://api.z.ai/api/coding/paas/v4');
-  assert.equal(zai.models?.coding, 'glm-4.6');
-  assert.equal(zai.models?.fast, 'glm-4.5-air');
+  assert.equal(zai.models?.coding, 'glm-5.2');
+  assert.equal(zai.models?.fast, 'glm-5-turbo');
 });
 
 test('openrouter preset is the provider default base URL with no pinned models', () => {

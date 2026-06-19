@@ -28,6 +28,8 @@ export const PROVIDER_PRESETS: Readonly<Record<PresetName, Profile>> = {
 
 export const PRESET_NAMES: readonly PresetName[] = Object.keys(PROVIDER_PRESETS) as PresetName[];
 
+// Own-property check (not `in`) so inherited names like `toString` don't pass the guard —
+// a false positive would flow a non-preset into `profile add` and crash on the missing entry.
 export function isPresetName(s: string): s is PresetName {
-  return s in PROVIDER_PRESETS;
+  return Object.hasOwn(PROVIDER_PRESETS, s);
 }

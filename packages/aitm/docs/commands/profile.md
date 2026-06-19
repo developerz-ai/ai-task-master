@@ -10,7 +10,7 @@ See [`../providers.md`](../providers.md) for the provider-switching walkthrough 
 
 ## Signature
 
-```
+```text
 aitm profile list
 aitm profile use <name>
 aitm profile add <name> [--preset openrouter|zai] [--base-url <url>] [--api-key <key>]
@@ -62,7 +62,7 @@ aitm profile use openrouter                                     # switch back
 The active profile supplies provider defaults that sit **between** explicit top-level/project
 config and env — precedence per provider field is:
 
-```
+```text
 project config  >  global top-level key  >  active profile  >  env
 models:  defaults < active profile < global < project < --model
 ```

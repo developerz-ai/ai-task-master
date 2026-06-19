@@ -186,13 +186,40 @@ function jsonClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+// Only these may be set/get on a profile (mirrors the documented surface). `models` is the
+// only nesting root and only one level deep (models.<tier>).
+const ALLOWED_PROFILE_ROOT_KEYS: ReadonlySet<string> = new Set([
+  'openrouterApiKey',
+  'baseURL',
+  'models',
+]);
+// Reserved object keys that would let a dotted path reach Object.prototype before the schema
+// runs — rejected outright to close a prototype-pollution vector in setDotted().
+const FORBIDDEN_KEY_SEGMENTS: ReadonlySet<string> = new Set([
+  '__proto__',
+  'prototype',
+  'constructor',
+]);
+
+const KEY_SURFACE_HINT = 'Allowed keys: openrouterApiKey, baseURL, models.<tier>.';
+
+// Parse and validate a profile key path. Enforces the documented key surface and rejects
+// dangerous segments, so neither `set` nor `get` can mutate prototypes or write off-schema.
 function splitKey(key: string): [string, ...string[]] {
   const parts = key.split('.');
   if (parts.length === 0 || parts.some((p) => p === '')) {
-    throw new Error(`Invalid profile key: "${key}"`);
+    throw new Error(`Invalid profile key: "${key}". ${KEY_SURFACE_HINT}`);
+  }
+  if (parts.some((p) => FORBIDDEN_KEY_SEGMENTS.has(p))) {
+    throw new Error(`Invalid profile key: "${key}" — reserved segment. ${KEY_SURFACE_HINT}`);
   }
   const [first, ...rest] = parts;
-  if (first === undefined) throw new Error(`Invalid profile key: "${key}"`);
+  if (first === undefined || !ALLOWED_PROFILE_ROOT_KEYS.has(first)) {
+    throw new Error(`Invalid profile key: "${key}". ${KEY_SURFACE_HINT}`);
+  }
+  if (first === 'models' ? rest.length !== 1 : rest.length !== 0) {
+    throw new Error(`Invalid profile key: "${key}". ${KEY_SURFACE_HINT}`);
+  }
   return [first, ...rest];
 }
 

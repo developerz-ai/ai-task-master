@@ -14,10 +14,12 @@ const GLOBAL_FILE = '.aitm.json';
 const PROJECT_DIR = '.ai-task-master';
 const PROJECT_FILE = 'config.json';
 
+// Keys owned by `aitm profile …`. Readable via `config list`/`get`, but the generic
+// `config set`/`unset` refuse them so profile state has a single write surface.
+const PROFILE_MANAGED_KEYS: ReadonlySet<string> = new Set(['activeProfile', 'profiles']);
+
 const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'openrouterApiKey',
-  'activeProfile',
-  'profiles',
   'baseURL',
   'models',
   'maxPrs',
@@ -39,6 +41,7 @@ export class ConfigWriter {
   async set(scope: ConfigScope, key: string, value: unknown): Promise<ConfigFile> {
     const parts = splitKey(key);
     const top = parts[0];
+    assertNotProfileManaged(top);
     if (!KNOWN_KEYS.has(top)) {
       throw new Error(unknownKeyMessage(top));
     }
@@ -49,6 +52,7 @@ export class ConfigWriter {
 
   async unset(scope: ConfigScope, key: string): Promise<ConfigFile> {
     const parts = splitKey(key);
+    assertNotProfileManaged(parts[0]);
     const file = await this.readRaw(scope);
     unsetDottedKey(file, parts);
     return this.validateAndPersist(scope, file);
@@ -179,6 +183,13 @@ function getDottedKey(obj: Record<string, unknown>, parts: readonly string[]): u
     cur = (cur as Record<string, unknown>)[p];
   }
   return cur;
+}
+
+// Guard the profile-management boundary: `config set/unset` must not mutate profile state.
+function assertNotProfileManaged(top: string): void {
+  if (PROFILE_MANAGED_KEYS.has(top)) {
+    throw new Error(`"${top}" is managed by \`aitm profile …\`. Use the profile commands instead.`);
+  }
 }
 
 function unknownKeyMessage(top: string): string {

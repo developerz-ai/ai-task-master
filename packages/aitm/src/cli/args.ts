@@ -269,12 +269,13 @@ function parseProfileAdd(tail: ReadonlyArray<string>): ParsedArgs {
       i += consumed(inlineValue !== null);
     } else if (flag === '--base-url') {
       const v = takeValue(tail, i, inlineValue);
-      if (v === null) return HELP;
+      // Reject a following flag-like token (`--base-url --api-key`) as a missing value.
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
       baseURL = v;
       i += consumed(inlineValue !== null);
     } else if (flag === '--api-key') {
       const v = takeValue(tail, i, inlineValue);
-      if (v === null) return HELP;
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
       apiKey = v;
       i += consumed(inlineValue !== null);
     } else if (raw.startsWith('--')) {

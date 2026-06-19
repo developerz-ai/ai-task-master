@@ -117,6 +117,28 @@ test('set rejects an unknown profile', async () => {
   });
 });
 
+test('set rejects prototype-polluting key paths and leaves Object.prototype intact', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    for (const key of ['__proto__.polluted', 'constructor.prototype.x', 'prototype.y']) {
+      await assert.rejects(() => manager.set('z.ai', key, 'boom'), /Invalid profile key/);
+    }
+    assert.equal(({} as Record<string, unknown>).polluted, undefined);
+  });
+});
+
+test('set rejects keys outside the documented surface', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    await assert.rejects(() => manager.set('z.ai', 'maxPrs', '9'), /Invalid profile key/);
+    await assert.rejects(
+      () => manager.set('z.ai', 'models.smart.deep', 'x'),
+      /Invalid profile key/,
+    );
+    await assert.rejects(() => manager.set('z.ai', 'models', 'x'), /Invalid profile key/);
+  });
+});
+
 test('remove deletes the profile and clears active when it was active', async () => {
   await withManager(async ({ manager }) => {
     await manager.add('z.ai', { preset: 'zai' });

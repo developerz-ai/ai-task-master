@@ -35,3 +35,9 @@ test('isPresetName narrows known names and rejects others', () => {
   assert.equal(isPresetName('anthropic'), false);
   assert.equal(isPresetName(''), false);
 });
+
+test('isPresetName rejects inherited Object.prototype names', () => {
+  assert.equal(isPresetName('toString'), false);
+  assert.equal(isPresetName('constructor'), false);
+  assert.equal(isPresetName('hasOwnProperty'), false);
+});

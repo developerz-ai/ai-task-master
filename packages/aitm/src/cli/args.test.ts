@@ -372,6 +372,11 @@ const profileCases: Case[] = [
     argv: ['profile', 'add', 'p', '--nope'],
     expected: { kind: 'help' },
   },
+  {
+    name: 'profile add: flag-like value is rejected as missing',
+    argv: ['profile', 'add', 'p', '--base-url', '--api-key', 'sk'],
+    expected: { kind: 'help' },
+  },
 ];
 
 for (const c of [...startCases, ...mergeCases, ...configCases, ...profileCases, ...helpCases]) {

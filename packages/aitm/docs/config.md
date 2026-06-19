@@ -67,7 +67,7 @@ targets `~/.aitm.json`).
 
 The active profile supplies provider defaults that sit between explicit top-level config and env:
 
-```
+```text
 apiKey / baseURL:  project > global top-level > active profile > env
 models:            defaults < active profile < global < project < --model
 ```

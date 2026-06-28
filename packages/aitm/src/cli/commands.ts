@@ -708,8 +708,6 @@ async function defaultRunLoop(input: RunLoopInput): Promise<WorkLoopResult> {
 // for the iteration shape (mirrors claude-task-master `merge_pr`).
 async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopResult> {
   const { runTakeOverFlow } = await import('../loop/take-over-flow.ts');
-  const { rebaseAndForcePush } = await import('../loop/ci-fix.ts');
-  const { defaultRunCmd } = await import('../github/github-client.ts');
   const { githubThreadTool } = await import('../tools/github-thread-tool.ts');
   const { PrContextStore } = await import('../state/pr-context-store.ts');
 
@@ -734,12 +732,8 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
     mergeMethod: input.runState.options.mergeMethod,
     ...(input.maxIterations !== undefined ? { maxIterations: input.maxIterations } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
-    // Rebase onto origin/<base> then `git push --force-with-lease` — never a plain push (which
-    // fails against a rebased remote) and never plain `--force`. Shares ci-fix's one push path.
-    push: async (cwd) => {
-      const res = await rebaseAndForcePush(defaultRunCmd, cwd, baseBranch, input.pr, undefined);
-      if (res.kind === 'blocked') throw new Error(res.reason);
-    },
+    // Pushes go through take-over-flow's shared rebaseAndForcePush helper (rebase onto
+    // origin/<base> → `git push --force-with-lease`); `runCmd` defaults to real git via execa.
     subagents: {
       reviewerModel: input.credentials.modelFor('reviewer'),
       reviewerTools: { ...workerTools, github },

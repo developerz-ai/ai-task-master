@@ -8,7 +8,8 @@
 //     threads  = listUnresolvedThreads(pr)
 //     if status == success and threads.empty: break
 //     if status == failure: runWorker (CI-fix path, optional)
-//     if threads.any: runReviewer per thread, push commits
+//     if threads.any: runReviewer per thread
+//     if anything changed: rebase onto origin/<base> + push --force-with-lease (shared ci-fix path)
 //     sleep(cooldown)  # let CI restart
 //   mergePr(pr)
 //
@@ -22,7 +23,12 @@
 import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel } from 'ai';
 import { CiFailed } from '../github/errors.ts';
-import type { CiResult, MergeMethod } from '../github/github-client.ts';
+import {
+  type CiResult,
+  defaultRunCmd,
+  type MergeMethod,
+  type RunCmd,
+} from '../github/github-client.ts';
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup } from '../state/schema.ts';
@@ -40,6 +46,7 @@ import {
   type WorkerResult,
   type WorkerTools,
 } from '../subagents/worker.ts';
+import { rebaseAndForcePush } from './ci-fix.ts';
 import { DEFAULT_MAX_ITERATIONS } from './constants.ts';
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
@@ -113,9 +120,11 @@ export type TakeOverFlowInput = {
   // after a push. Default 5s. Tests inject a 0-ms sleep.
   cooldownMs?: number;
   sleep?: (ms: number) => Promise<void>;
-  // Optional: bash callback to run `git push` after Reviewer/Worker commits. Defaults
-  // to a real git push via execa (in adapter wiring). Stubbed in unit tests.
-  push: (worktreePath: string) => Promise<void>;
+  // git/gh shim — defaults to execa. Stubbed in unit tests to assert command shape without
+  // spawning git. Every push after Reviewer/Worker commits goes through the shared
+  // rebaseAndForcePush helper (ci-fix.ts): fetch origin <base> → rebase → push --force-with-lease.
+  // Never a plain push (which fails against a rebased remote), never plain --force.
+  runCmd?: RunCmd;
   logger?: LoggerLike;
 };
 
@@ -130,6 +139,7 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   const maxIterations = input.maxIterations ?? DEFAULT_MAX_ITERATIONS;
   const cooldownMs = input.cooldownMs ?? DEFAULT_COOLDOWN_MS;
   const sleep = input.sleep ?? defaultSleep;
+  const runCmd = input.runCmd ?? defaultRunCmd;
   const log = input.logger;
 
   // Hoisted so the post-loop merge can report how many iterations actually ran: on an
@@ -207,8 +217,19 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
     }
 
     if (pushedSomething) {
-      await input.push(input.worktreePath);
-      log?.info('take-over: pushed fixes', { pr: input.pr });
+      // The one push path, shared with the ci-fix session: rebase onto origin/<base> then
+      // `git push --force-with-lease`. A rebase conflict here needs human resolution, so block
+      // the run cleanly (exit 1) rather than leaving a half-applied rebase.
+      const pushed = await rebaseAndForcePush(
+        runCmd,
+        input.worktreePath,
+        input.baseBranch,
+        input.pr,
+        log,
+      );
+      if (pushed.kind === 'blocked') {
+        return { kind: 'blocked', reason: pushed.reason, iterations: iteration };
+      }
     }
 
     // Sleep so the next iteration's waitForChecks sees fresh CI state, not the stale

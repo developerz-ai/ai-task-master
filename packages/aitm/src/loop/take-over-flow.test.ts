@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { CiFailed } from '../github/errors.ts';
-import type { CiResult } from '../github/github-client.ts';
+import type { CiResult, RunCmd, RunCmdResult } from '../github/github-client.ts';
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerResult } from '../subagents/worker.ts';
@@ -62,6 +62,22 @@ function fakeGithub(opts: {
   };
 }
 
+// Records every git invocation as a flat "file arg arg" string; `plan` decides each result so a
+// test can script a failing rebase without spawning git. Mirrors ci-fix.test.ts's helper — the
+// take-over loop now pushes through the same rebaseAndForcePush path.
+function recordingRunCmd(plan: (args: readonly string[]) => Partial<RunCmdResult> = () => ({})): {
+  runCmd: RunCmd;
+  commands: string[];
+} {
+  const commands: string[] = [];
+  const runCmd: RunCmd = async (file, args) => {
+    commands.push([file, ...args].join(' '));
+    const out = plan(args);
+    return { stdout: out.stdout ?? '', stderr: out.stderr ?? '', exitCode: out.exitCode ?? 0 };
+  };
+  return { runCmd, commands };
+}
+
 // Shared subagent stubs — neither model is invoked because we always pass *Override.
 const dummyModel = new MockLanguageModelV3();
 
@@ -75,7 +91,7 @@ function baseInput(
     baseBranch: 'main',
     github,
     mergeMethod: 'squash',
-    push: async () => {},
+    runCmd: recordingRunCmd().runCmd,
     cooldownMs: 0,
     sleep: async () => {},
     subagents: {
@@ -125,12 +141,10 @@ test('runTakeOverFlow: unresolved threads → invokes Reviewer, pushes, then mer
     checks: ['success', 'success', 'success'],
     threads: [threads, []],
   });
-  let pushed = 0;
+  const { runCmd, commands } = recordingRunCmd();
   let reviewerInvocations = 0;
   const input = baseInput(gh.github, {
-    push: async () => {
-      pushed++;
-    },
+    runCmd,
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
@@ -153,7 +167,13 @@ test('runTakeOverFlow: unresolved threads → invokes Reviewer, pushes, then mer
   // One fix iteration ran (threads → reviewer → push), then iteration 1 was clean → merge.
   if (result.kind === 'merged') assert.equal(result.iterations, 1);
   assert.equal(reviewerInvocations, 1);
-  assert.equal(pushed, 1, 'must push after Reviewer fixed something');
+  // Pushed once after Reviewer fixed something — through the shared rebase-first force-with-lease
+  // helper, never a plain push and never plain --force.
+  assert.deepEqual(commands, [
+    'git fetch origin main',
+    'git rebase origin/main',
+    'git push --force-with-lease',
+  ]);
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 1);
 });
 
@@ -275,5 +295,44 @@ test('runTakeOverFlow: Reviewer error → blocked, no merge', async () => {
   const result = await runTakeOverFlow(input);
   assert.equal(result.kind, 'blocked');
   if (result.kind === 'blocked') assert.match(result.reason, /reviewer error.*model exploded/i);
+  assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0);
+});
+
+test('runTakeOverFlow: rebase conflict on push → blocked, aborts, never force-pushes', async () => {
+  const threads: ReviewThread[] = [
+    {
+      id: 'TH_C',
+      isResolved: false,
+      path: 'src/a.ts',
+      comments: [{ id: 'C_C', body: 'fix', author: 'rabbit' }],
+    },
+  ];
+  const gh = fakeGithub({ checks: ['success'], threads: [threads] });
+  // Reviewer "fixes" → something to push → rebase onto origin/main conflicts. The flow must abort
+  // the half-applied rebase and block cleanly, never reaching the force-push or the merge.
+  const { runCmd, commands } = recordingRunCmd((args) =>
+    args[0] === 'rebase' && args[1]?.startsWith('origin/')
+      ? { exitCode: 1, stderr: 'CONFLICT (content): Merge conflict in src/a.ts' }
+      : {},
+  );
+  const input = baseInput(gh.github, {
+    runCmd,
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      workerModel: dummyModel,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runReviewerOverride: async () => ({
+        kind: 'ok',
+        resolutions: [{ threadId: 'TH_C', kind: 'fixed', commitSha: 'abc' }],
+      }),
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /conflict/i);
+  assert.ok(commands.includes('git rebase --abort'), 'aborts the half-applied rebase');
+  assert.ok(!commands.some((c) => c.includes('push')), 'never force-pushes after a failed rebase');
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0);
 });

@@ -62,7 +62,6 @@ test('StyleDistiller: prompt embeds style contents + test globs → returns clea
     const sent = prompt();
     assert.match(sent, /single quotes only/);
     assert.ok(sent.includes('**/*.test.ts'), 'prompt must surface the test globs');
-    assert.ok(sent.includes('test/integration/**'), 'prompt must surface the integration glob');
   } finally {
     await repo.cleanup();
   }

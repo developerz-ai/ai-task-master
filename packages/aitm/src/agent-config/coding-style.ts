@@ -20,9 +20,10 @@ export type DistillInput = {
   repoRoot: string;
 };
 
-// Test conventions claudetm globs for — surfaced verbatim in the prompt so the digest can describe
-// where tests live and how they are named.
-export const TEST_GLOBS = ['**/*.test.ts', 'test/integration/**'] as const;
+// Test conventions surfaced verbatim in the prompt so the digest can describe where tests live and
+// how they are named. Only the universal paired-`*.test.ts` convention is hardcoded; a fixed
+// directory layout would bias codegen for target repos that organize tests differently.
+export const TEST_GLOBS = ['**/*.test.ts'] as const;
 
 const COMPLETION_MARKER = 'CODING_STYLE_COMPLETE';
 

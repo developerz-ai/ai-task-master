@@ -14,6 +14,7 @@ import {
   type FixSessionInput,
   type FixSessionPrContext,
   type FixSessionSubagents,
+  rebaseAndForcePush,
   runFixSession,
 } from './ci-fix.ts';
 
@@ -251,6 +252,42 @@ test('runFixSession: rebase conflict → blocked, aborts the rebase, never force
   if (result.kind === 'blocked') assert.match(result.reason, /conflict/i);
   assert.ok(commands.includes('git rebase --abort'), 'must abort the half-applied rebase');
   assert.ok(!commands.some((c) => c.includes('push')), 'must not push after a failed rebase');
+});
+
+// rebaseAndForcePush is the shared push path (also used by the merge-pr take-over loop), so it has
+// its own focused coverage beyond the full runFixSession flow above.
+
+test('rebaseAndForcePush: fetch → rebase → push --force-with-lease in order, returns fixed', async () => {
+  const { runCmd, commands } = recordingRunCmd();
+  const result = await rebaseAndForcePush(runCmd, '/tmp/wt', 'main', 9, undefined);
+  assert.equal(result.kind, 'fixed');
+  assert.deepEqual(commands, [
+    'git fetch origin main',
+    'git rebase origin/main',
+    'git push --force-with-lease',
+  ]);
+});
+
+test('rebaseAndForcePush: rebase conflict → blocked, aborts, never pushes', async () => {
+  const { runCmd, commands } = recordingRunCmd((args) =>
+    args[0] === 'rebase' && args[1]?.startsWith('origin/')
+      ? { exitCode: 1, stderr: 'CONFLICT (content): Merge conflict in src/a.ts' }
+      : {},
+  );
+  const result = await rebaseAndForcePush(runCmd, '/tmp/wt', 'main', 9, undefined);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /conflict/i);
+  assert.ok(commands.includes('git rebase --abort'));
+  assert.ok(!commands.some((c) => c.includes('push')));
+});
+
+test('rebaseAndForcePush: push rejected → blocked, surfaces the git error', async () => {
+  const { runCmd } = recordingRunCmd((args) =>
+    args[0] === 'push' ? { exitCode: 1, stderr: 'stale info; remote moved' } : {},
+  );
+  const result = await rebaseAndForcePush(runCmd, '/tmp/wt', 'main', 9, undefined);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /force-with-lease.*stale/i);
 });
 
 test('runFixSession: builds the Worker on the coding-capability model (no hardcoded tier)', async () => {

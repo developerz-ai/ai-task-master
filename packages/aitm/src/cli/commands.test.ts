@@ -636,6 +636,58 @@ test('runMergePr: happy path with --pr override', async () => {
   }
 });
 
+test('runMergePr: threads --max-iterations through to the flow', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    let captured: RunMergeFlowInput | null = null;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 12, maxIterations: 7 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async (input) => {
+          captured = input;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(captured?.maxIterations, 7);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: flow cancelled → exit 2', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 5 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async () => ({ kind: 'cancelled', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 2);
+    assert.match(result.message ?? '', /cancel/i);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('runMergePr: falls back to state.currentPr when --pr absent', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();

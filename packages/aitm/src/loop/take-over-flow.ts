@@ -8,7 +8,8 @@
 //     threads  = listUnresolvedThreads(pr)
 //     if status == success and threads.empty: break
 //     if status == failure: runWorker (CI-fix path, optional)
-//     if threads.any: runReviewer per thread, push commits
+//     if threads.any: runReviewer per thread
+//     if anything changed: rebase onto origin/<base> + push --force-with-lease (shared ci-fix path)
 //     sleep(cooldown)  # let CI restart
 //   mergePr(pr)
 //
@@ -22,7 +23,12 @@
 import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel } from 'ai';
 import { CiFailed } from '../github/errors.ts';
-import type { CiResult, MergeMethod } from '../github/github-client.ts';
+import {
+  type CiResult,
+  defaultRunCmd,
+  type MergeMethod,
+  type RunCmd,
+} from '../github/github-client.ts';
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup } from '../state/schema.ts';
@@ -40,6 +46,8 @@ import {
   type WorkerResult,
   type WorkerTools,
 } from '../subagents/worker.ts';
+import { rebaseAndForcePush } from './ci-fix.ts';
+import { DEFAULT_MAX_ITERATIONS } from './constants.ts';
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
 export type TakeOverGithub = {
@@ -102,36 +110,46 @@ export type TakeOverFlowInput = {
   // full failed-CI logs under .ai-task-master/debugging/pr/<pr>/ and points the Worker at them.
   prContext?: PrContextPort;
   mergeMethod: MergeMethod;
-  // Cap on iterations of the CI-wait/fix loop. Default 10 — claude-task-master uses 30 but
-  // each iteration here is heavier (model calls per thread), so default lower.
+  // Cap on iterations of the CI-wait/fix loop. Default DEFAULT_MAX_ITERATIONS (30), matching
+  // claude-task-master's merge-pr loop. Threaded from `--max-iterations`; tests inject a small cap.
   maxIterations?: number;
+  // Abort handle. When aborted (e.g. SIGINT), the loop bails out to `{ kind: 'cancelled' }` →
+  // exit code 2, distinct from a `blocked` run (exit 1). Checked each iteration and before merge.
+  signal?: AbortSignal;
   // Sleep between iterations so the next `waitForChecks` actually sees fresh CI state
   // after a push. Default 5s. Tests inject a 0-ms sleep.
   cooldownMs?: number;
   sleep?: (ms: number) => Promise<void>;
-  // Optional: bash callback to run `git push` after Reviewer/Worker commits. Defaults
-  // to a real git push via execa (in adapter wiring). Stubbed in unit tests.
-  push: (worktreePath: string) => Promise<void>;
+  // git/gh shim — defaults to execa. Stubbed in unit tests to assert command shape without
+  // spawning git. Every push after Reviewer/Worker commits goes through the shared
+  // rebaseAndForcePush helper (ci-fix.ts): fetch origin <base> → rebase → push --force-with-lease.
+  // Never a plain push (which fails against a rebased remote), never plain --force.
+  runCmd?: RunCmd;
   logger?: LoggerLike;
 };
 
 export type TakeOverResult =
   | { kind: 'merged'; pr: number; iterations: number }
-  | { kind: 'blocked'; reason: string; iterations: number };
+  | { kind: 'blocked'; reason: string; iterations: number }
+  | { kind: 'cancelled'; iterations: number };
 
-const DEFAULT_MAX_ITERATIONS = 10;
 const DEFAULT_COOLDOWN_MS = 5_000;
 
 export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOverResult> {
   const maxIterations = input.maxIterations ?? DEFAULT_MAX_ITERATIONS;
   const cooldownMs = input.cooldownMs ?? DEFAULT_COOLDOWN_MS;
   const sleep = input.sleep ?? defaultSleep;
+  const runCmd = input.runCmd ?? defaultRunCmd;
   const log = input.logger;
 
   // Hoisted so the post-loop merge can report how many iterations actually ran: on an
   // early `break` it holds the break index, on natural exhaustion it equals maxIterations.
   let iteration = 0;
   for (; iteration < maxIterations; iteration++) {
+    if (input.signal?.aborted) {
+      log?.info('take-over: cancelled', { pr: input.pr, iteration });
+      return { kind: 'cancelled', iterations: iteration };
+    }
     log?.info('take-over: iteration start', { pr: input.pr, iteration });
 
     // 1. Wait for CI to settle. observeCheckStatus maps a CI failure (or a poll timeout) to
@@ -199,13 +217,29 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
     }
 
     if (pushedSomething) {
-      await input.push(input.worktreePath);
-      log?.info('take-over: pushed fixes', { pr: input.pr });
+      // The one push path, shared with the ci-fix session: rebase onto origin/<base> then
+      // `git push --force-with-lease`. A rebase conflict here needs human resolution, so block
+      // the run cleanly (exit 1) rather than leaving a half-applied rebase.
+      const pushed = await rebaseAndForcePush(
+        runCmd,
+        input.worktreePath,
+        input.baseBranch,
+        input.pr,
+        log,
+      );
+      if (pushed.kind === 'blocked') {
+        return { kind: 'blocked', reason: pushed.reason, iterations: iteration };
+      }
     }
 
     // Sleep so the next iteration's waitForChecks sees fresh CI state, not the stale
     // success/failure from before our push triggered a new run.
     if (cooldownMs > 0) await sleep(cooldownMs);
+  }
+
+  if (input.signal?.aborted) {
+    log?.info('take-over: cancelled', { pr: input.pr, iteration });
+    return { kind: 'cancelled', iterations: iteration };
   }
 
   // Final state check — make sure we didn't fall through the loop with a hung iteration.

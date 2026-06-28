@@ -14,15 +14,16 @@
 // the data IT produces — handlePrOpen records the PR number right after the side effect so a later
 // state-write failure never loses an opened PR (cf. WorkLoop's StateWriteAfterSuccess guard).
 //
-// ci-failed / addressing-reviews are stubbed here; their bodies (download logs/comments → fix
-// session / Reviewer → rebase+force-with-lease → re-poll) land in slice 04. Until then they block
-// the group rather than loop forever back into waiting-ci/waiting-reviews.
+// ci-failed and addressing-reviews drive the recovery loops: ci-failed delegates to the shared fix
+// session (download logs/comments → Worker → rebase + force-with-lease) and loops back to
+// waiting-ci; addressing-reviews runs the Reviewer over the not-yet-addressed threads and loops back
+// to waiting-reviews. The addressed-threads dedup (prContext) is what lets the waiting-reviews ⇄
+// addressing-reviews loop terminate instead of re-processing a replied-but-unresolved thread.
 
 import { CiFailed } from '../github/errors.ts';
 import type { CiResult } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { GroupStage, PrGroup, RunState } from '../state/schema.ts';
-import type { PrContextPort } from './take-over-flow.ts';
 
 // Subset of GitHubClient the stage machine drives. The merge method is a run option, not a
 // per-stage decision, so it's bound at construction and handleReadyToMerge just calls mergePr(pr).
@@ -44,6 +45,14 @@ export type StageOrchestrator = {
   work(group: PrGroup): Promise<StageWorkResult>;
   // Push the group branch and open its PR from the work() delivery; returns the new PR number.
   openPr(group: PrGroup): Promise<number>;
+  // ci-failed: download the failed CI logs + unresolved comments, run the shared fix session
+  // (Worker pass), then rebase onto origin/<base> and force-with-lease push so CI re-runs. ok →
+  // waiting-ci; blocked → the fix couldn't land (still red, or a rebase conflict needing a human).
+  fixCi(group: PrGroup): Promise<StageWorkResult>;
+  // addressing-reviews: run the Reviewer over these (already deduped) threads — it replies/resolves
+  // via its github tool and pushes any code fixes. ok → the threads were handled; blocked → it
+  // couldn't (agent error / failed push).
+  addressReviews(group: PrGroup, threads: ReviewThread[]): Promise<StageWorkResult>;
 };
 
 // Narrow state surface: handlers persist the data they produce. StateStore satisfies it.
@@ -51,13 +60,21 @@ export type StageState = {
   update(mutator: (s: RunState) => RunState): Promise<RunState>;
 };
 
+// Tracks review threads the addressing-reviews loop has already run the Reviewer over, so a re-poll
+// never re-processes a thread it merely replied to (those stay unresolved). PrContextStore satisfies
+// this. Optional on StageDeps: when omitted, no thread is considered addressed.
+export type AddressedThreadsStore = {
+  readAddressedThreads(pr: number): Promise<Set<string>>;
+  recordAddressedThreads(pr: number, ids: readonly string[]): Promise<void>;
+};
+
 export type StageDeps = {
   github: StageGithub;
   orchestrator: StageOrchestrator;
   state: StageState;
-  // Downloaded CI-log / review-comment store, consumed by the ci-failed / addressing-reviews
-  // handlers in slice 04. Unused by the stages implemented below.
-  prContext?: PrContextPort;
+  // Addressed-thread bookkeeping for the addressing-reviews loop. Optional — without it every
+  // unresolved thread is treated as fresh (the loop still terminates once threads get resolved).
+  prContext?: AddressedThreadsStore;
 };
 
 export type StageHandler = (deps: StageDeps, group: PrGroup) => Promise<GroupStage>;
@@ -93,11 +110,13 @@ export const handleWaitingCi: StageHandler = async (deps, group) => {
   }
 };
 
-// waiting-reviews: unresolved threads → address them; none → merge.
+// waiting-reviews: not-yet-addressed unresolved threads → address them; none → merge. Subtracting
+// the addressed set (not just checking listUnresolvedThreads) is what terminates the loop: a thread
+// the Reviewer replied to but left unresolved would otherwise route back here forever.
 export const handleWaitingReviews: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'waiting-reviews');
-  const threads = await deps.github.listUnresolvedThreads(pr);
-  return threads.length === 0 ? 'ready-to-merge' : 'addressing-reviews';
+  const fresh = await freshThreads(deps, pr);
+  return fresh.length === 0 ? 'ready-to-merge' : 'addressing-reviews';
 };
 
 // ready-to-merge: merge with the run's configured method, then terminal.
@@ -107,13 +126,30 @@ export const handleReadyToMerge: StageHandler = async (deps, group) => {
   return 'merged';
 };
 
-// ci-failed — slice 04: download failed CI logs (prContext) → shared fix session → rebase +
-// force-with-lease → back to waiting-ci. Until then, a CI failure blocks the group.
-export const handleCiFailed: StageHandler = async (_deps, _group) => 'blocked';
+// ci-failed: run the shared fix session via the orchestrator (download → Worker → rebase +
+// force-with-lease) and loop back to waiting-ci so the freshly-pushed commit re-runs CI. A fix that
+// can't land (still red, or a rebase conflict) blocks the group for a human.
+export const handleCiFailed: StageHandler = async (deps, group) => {
+  requirePr(group, 'ci-failed');
+  const result = await deps.orchestrator.fixCi(group);
+  return result.kind === 'ok' ? 'waiting-ci' : 'blocked';
+};
 
-// addressing-reviews — slice 04: download review comments (prContext) → Reviewer addresses each
-// thread → push → back to waiting-reviews. Until then, unresolved reviews block the group.
-export const handleAddressingReviews: StageHandler = async (_deps, _group) => 'blocked';
+// addressing-reviews: run the Reviewer over the not-yet-addressed threads, record them as addressed,
+// and loop back to waiting-reviews. When nothing is fresh (every unresolved thread was already
+// handled), hand straight back — waiting-reviews then sees no fresh threads and advances to merge.
+export const handleAddressingReviews: StageHandler = async (deps, group) => {
+  const pr = requirePr(group, 'addressing-reviews');
+  const fresh = await freshThreads(deps, pr);
+  if (fresh.length === 0) return 'waiting-reviews';
+  const result = await deps.orchestrator.addressReviews(group, fresh);
+  if (result.kind === 'blocked') return 'blocked';
+  await deps.prContext?.recordAddressedThreads(
+    pr,
+    fresh.map((t) => t.id),
+  );
+  return 'waiting-reviews';
+};
 
 // The post-working stages all operate on an open PR. A null pr here means the dispatcher routed a
 // group into a PR stage without one — a bug, not a recoverable state — so fail loudly.
@@ -122,4 +158,14 @@ function requirePr(group: PrGroup, stage: GroupStage): number {
     throw new Error(`group ${group.id} entered stage '${stage}' without an open PR`);
   }
   return group.pr;
+}
+
+// Unresolved threads the addressing loop hasn't run the Reviewer over yet: listUnresolvedThreads
+// minus readAddressedThreads. The dedup terminates the waiting-reviews ⇄ addressing-reviews loop —
+// a thread the Reviewer only replied to stays unresolved, so without subtracting the addressed set
+// it would be re-processed on every poll.
+async function freshThreads(deps: StageDeps, pr: number): Promise<ReviewThread[]> {
+  const unresolved = await deps.github.listUnresolvedThreads(pr);
+  const addressed = (await deps.prContext?.readAddressedThreads(pr)) ?? new Set<string>();
+  return unresolved.filter((t) => !addressed.has(t.id));
 }

@@ -91,6 +91,42 @@ test('read rejects state failing the schema', async () => {
   }
 });
 
+test('read: coerces legacy string[] tasks, leaves structured tasks intact', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+
+    // Older state.json stored prGroups[].tasks as a bare string[]. Mix in one already-structured
+    // task to prove coercion only rewrites strings.
+    const legacy: Record<string, unknown> = JSON.parse(JSON.stringify(baseState()));
+    legacy.prGroups = [
+      {
+        id: 'g1',
+        title: 'Group one',
+        tasks: [
+          'Add the login form',
+          { id: 'kept', text: 'Already structured', complexity: 'complex', done: true },
+        ],
+        dependsOn: [],
+        branch: null,
+        pr: null,
+        status: 'pending',
+      },
+    ];
+    await writeFile(join(dir, 'state.json'), JSON.stringify(legacy));
+
+    const read = await store.read();
+    assert.deepEqual(read.prGroups[0]?.tasks, [
+      { id: 'add-the-login-form', text: 'Add the login form', complexity: 'normal', done: false },
+      { id: 'kept', text: 'Already structured', complexity: 'complex', done: true },
+    ]);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('update bumps updatedAt and persists mutation', async () => {
   const repo = await makeTempRepo();
   try {

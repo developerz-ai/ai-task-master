@@ -206,6 +206,22 @@ test('buildSystemPrompt = agentConfig.contents + ORCHESTRATOR_ROLE_PREFIX + roll
   assert.ok(sys.indexOf(ORCHESTRATOR_ROLE_PREFIX) < sys.indexOf('prior PRs: 1, 2'));
 });
 
+test('buildSystemPrompt: styleDigest replaces agentConfig.contents as the style prefix', () => {
+  const o = new Orchestrator({
+    credentials: {} as never,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# raw style' },
+    styleDigest: '# distilled digest',
+    rollingContext: 'prior PRs: 1',
+    maxSessions: null,
+    github: {} as never,
+  });
+  const sys = o.buildSystemPrompt();
+  assert.ok(sys.includes('# distilled digest'), 'digest must be used as the style prefix');
+  assert.ok(!sys.includes('# raw style'), 'raw contents must be suppressed when digest present');
+  assert.ok(sys.includes(ORCHESTRATOR_ROLE_PREFIX), 'role prefix must be present');
+  assert.ok(sys.includes('prior PRs: 1'), 'rolling context must be present');
+});
+
 test('build composes planner/worker/reviewer tools and resolves orchestrator model', () => {
   const model = new MockLanguageModelV3();
   const { provider, roles } = recordingProvider(model);

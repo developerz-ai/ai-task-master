@@ -31,6 +31,8 @@ export type RunLoopInput = {
   resolved: ResolvedConfig;
   credentials: Credentials;
   agentConfig: AgentConfig;
+  // Distilled coding-style digest; when absent, subagents fall back to agentConfig.contents.
+  styleDigest?: string;
   state: StateStore;
   github: GitHubClient;
   goal: string;
@@ -44,6 +46,7 @@ export type RunMergeFlowInput = {
   resolved: ResolvedConfig;
   credentials: Credentials;
   agentConfig: AgentConfig;
+  styleDigest?: string;
   state: StateStore;
   runState: RunState;
   github: GitHubClient;
@@ -630,7 +633,7 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
 
   const worktreePath = input.cwd;
   const baseBranch = await input.github.defaultBranch();
-  const styleContents = input.agentConfig.contents;
+  const styleContents = input.styleDigest ?? input.agentConfig.contents;
   // Downloads full failed-CI logs + review comments under .ai-task-master/debugging/pr/<pr>/ so
   // the CI-fix Worker reads them off disk instead of guessing (issue #48).
   const prContext = new PrContextStore(resolvePath(input.cwd, '.ai-task-master'));

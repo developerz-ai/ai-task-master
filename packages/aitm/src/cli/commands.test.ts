@@ -28,6 +28,13 @@ function badAuth(): StartCtx['authStatus'] {
   return async () => ({ ok: false, scopes: [] });
 }
 
+const STUB_DIGEST = '# Coding Style\n\nstub digest\n';
+
+// Stub the coding-style seam so unit tests never make a real LLM call via the default distiller.
+function okStyle(): StartCtx['resolveStyle'] {
+  return async () => STUB_DIGEST;
+}
+
 // Writes a schema-valid state.json so `runStart` takes the resume branch (state.read()
 // succeeds). prGroups defaults to a single pre-populated group (a prior planning phase);
 // pass `prGroups: []` to mirror a run whose planning blocked before persisting any plan.
@@ -102,6 +109,7 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runLoop: async (input) => {
           loopCalls++;
           captured = input;
@@ -112,6 +120,7 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
     assert.equal(result.code, 0, result.message);
     assert.equal(loopCalls, 1);
     assert.ok(captured, 'runLoop received input');
+    assert.equal(captured?.styleDigest, STUB_DIGEST, 'resolved digest threaded to runLoop');
     const stateRaw = await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8');
     const persisted = JSON.parse(stateRaw) as { status: string; options: { autoMerge: boolean } };
     assert.equal(persisted.status, 'planning');
@@ -235,6 +244,7 @@ test('runStart: WorkLoopResult.blocked → exit 1 carrying reason', async () => 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runLoop: async () => ({
           kind: 'blocked',
           reason: 'planner refused',
@@ -261,6 +271,7 @@ test('runStart: awaiting-pr (--no-automerge) → exit 0 with merge-pr instructio
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runLoop: async () => ({ kind: 'awaiting-pr', prs: [17], outcomes: [] }),
       },
     );
@@ -284,6 +295,7 @@ test('runStart: session-cap → exit 0', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runLoop: async () => ({ kind: 'session-cap', outcomes: [] }),
       },
     );
@@ -312,6 +324,7 @@ test('runStart: CLI overrides reach the persisted run state', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -353,6 +366,7 @@ test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups +
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runPlanner: async (input) => {
           seq.push('plan');
           plannerInput = input;
@@ -396,6 +410,7 @@ test('runStart: resume (existing state.json) skips runPlanner, preserves prior p
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runPlanner: async () => {
           plannerCalls++;
           return { kind: 'ok', groups: [] };
@@ -440,6 +455,7 @@ test('runStart: resume with empty prGroups (prior planning blocked) re-runs runP
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runPlanner: async () => {
           plannerCalls++;
           return { kind: 'ok', groups };
@@ -479,6 +495,69 @@ test('runStart: runPlanner blocked → exit 1 with reason, runLoop not invoked',
     );
     assert.equal(result.code, 1);
     assert.match(result.message ?? '', /goal is not actionable/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+// ---- runStart: coding-style digest ------------------------------------------
+
+test('runStart: default resolveStyle reuses cached coding-style.md (no LLM call)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    // A prior run already distilled + cached the digest; resume must reuse it, not re-distill.
+    await seedStartState(repo.path);
+    const cached = '# Coding Style\n\ncached digest\n';
+    await writeFile(join(repo.path, '.ai-task-master', 'coding-style.md'), cached);
+    let captured: RunLoopInput | null = null;
+    const result = await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        // No resolveStyle stub → exercises defaultResolveStyle; the cache hit avoids any LLM call.
+        runLoop: async (input) => {
+          captured = input;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(captured?.styleDigest, cached, 'cached digest reused and threaded to runLoop');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: resolveStyle failure never blocks → falls back to raw agent-config contents', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const claudeMd = await readFile(join(repo.path, 'CLAUDE.md'), 'utf8');
+    let captured: RunLoopInput | null = null;
+    const result = await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: async () => {
+          throw new Error('distiller exploded');
+        },
+        runLoop: async (input) => {
+          captured = input;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(captured?.styleDigest, claudeMd, 'falls back to raw contents, run not blocked');
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -532,6 +611,7 @@ test('runMergePr: happy path with --pr override', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           captured = input;
           return { kind: 'success', outcomes: [] };
@@ -542,6 +622,7 @@ test('runMergePr: happy path with --pr override', async () => {
     assert.ok(captured, 'flow was called');
     assert.equal(captured?.pr, 99);
     assert.equal(captured?.resume, true);
+    assert.equal(captured?.styleDigest, STUB_DIGEST, 'resolved digest threaded to merge flow');
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -561,6 +642,7 @@ test('runMergePr: falls back to state.currentPr when --pr absent', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           prSeen = input.pr;
           return { kind: 'success', outcomes: [] };
@@ -590,6 +672,7 @@ test('runMergePr: no state file + --pr synthesizes state and runs the flow', asy
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           flowPr = input.pr;
           return { kind: 'success', outcomes: [] };

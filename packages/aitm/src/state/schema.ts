@@ -1,7 +1,20 @@
 // docs/state.md §"state.json schema" and §"PrGroup sub-schema"
-// Source of truth for run-state shape. Extended with PrGroup.dependsOn to support DAG planning.
+// Source of truth for run-state shape. Extended with PrGroup.dependsOn to support DAG planning
+// and PrGroup.tasks as structured Task[] (complexity + per-task completion) for task-by-task execution.
 
 import { z } from 'zod';
+
+export const TaskComplexitySchema = z.enum(['simple', 'normal', 'complex']);
+export type TaskComplexity = z.infer<typeof TaskComplexitySchema>;
+
+export const TaskSchema = z.object({
+  id: z.string(),
+  text: z.string(),
+  complexity: TaskComplexitySchema,
+  done: z.boolean(),
+  subtasks: z.array(z.string()).optional(),
+});
+export type Task = z.infer<typeof TaskSchema>;
 
 export const PrGroupStatusSchema = z.enum([
   'pending',
@@ -15,7 +28,7 @@ export type PrGroupStatus = z.infer<typeof PrGroupStatusSchema>;
 export const PrGroupSchema = z.object({
   id: z.string(),
   title: z.string(),
-  tasks: z.array(z.string()),
+  tasks: z.array(TaskSchema),
   // Group ids that must be merged before this group is runnable.
   // Empty array means the group is in the initial ready set. See src/plan/plan-graph.ts.
   dependsOn: z.array(z.string()).default([]),
@@ -51,6 +64,7 @@ export const RunStateSchema = z.object({
   updatedAt: z.string(),
   options: z.object({
     autoMerge: z.boolean(),
+    prPerTask: z.boolean().default(false),
     maxPrs: z.number().int().positive(),
     maxSessions: z.number().int().positive().nullable(),
     mergeMethod: z.enum(['squash', 'merge', 'rebase']),

@@ -299,6 +299,7 @@ async function runWorkerCiFix(
     branch: null,
     pr: input.pr,
     status: 'in-progress',
+    stage: 'waiting-ci',
   };
   if (input.subagents.runWorkerOverride) {
     return input.subagents.runWorkerOverride({

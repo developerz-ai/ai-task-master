@@ -58,6 +58,7 @@ import {
   type WorkerTools,
 } from '../subagents/worker.ts';
 import { WorktreePool } from '../workspace/worktree-pool.ts';
+import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
 import {
   WorkLoop,
   type WorkLoopGithub,
@@ -155,7 +156,18 @@ export async function runLoopAdapter(
     // ---- Plan (fresh) or resume (prior prGroups present) -------------------
     let groups: PrGroup[];
     if (current.prGroups.length > 0) {
-      groups = current.prGroups;
+      // Resume: a run interrupted mid-lifecycle persisted its groups as 'in-progress'/'awaiting-pr',
+      // which PlanGraph.ready() won't schedule. Normalize them back to 'pending' (preserving stage +
+      // pr) so they re-enter the loop and resume at their persisted stage instead of being stranded.
+      if (hasInterruptedGroup(current.prGroups)) {
+        const next = await state.update((s) => ({
+          ...s,
+          prGroups: normalizeResumeStatus(s.prGroups),
+        }));
+        groups = next.prGroups;
+      } else {
+        groups = current.prGroups;
+      }
     } else {
       const planFn = seams.planGroups ?? defaultPlanGroups;
       const outcome = await planFn(input, mcp);
@@ -243,6 +255,7 @@ export function planToPrGroups(plan: Plan): PrGroup[] {
     branch: `aitm/${g.id}`,
     pr: null,
     status: 'pending' as const,
+    stage: 'pending' as const,
   }));
 }
 

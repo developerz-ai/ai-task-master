@@ -387,6 +387,31 @@ test('resume: tasks already marked done are skipped', async () => {
   );
 });
 
+test('resume: group persisted at waiting-ci skips Worker and opens no new PR', async () => {
+  // A run that crashed after persisting waiting-ci resumes directly at CI polling.
+  // handleWorking and handlePrOpen must NOT be called again.
+  const resumed = group('resume-ci', {
+    stage: 'waiting-ci',
+    pr: 5,
+    status: 'awaiting-pr',
+    tasks: [{ id: 't1', text: 't', complexity: 'normal', done: true }],
+  });
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 5 });
+  const { github, calls: ghCalls } = makeGithub({ checks: ['success'], threads: [] });
+  const { state } = makeState([resumed]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, state, autoMerge: true }));
+  await loop.runGroup(resumed);
+
+  assert.equal(orchCalls.runWorker.length, 0, 'Worker not re-run on resume at waiting-ci');
+  assert.equal(orchCalls.openPr.length, 0, 'PR not re-opened on resume');
+  assert.deepEqual(ghCalls.waitForChecks, [5], 'CI checked once for the existing PR');
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [5],
+    'PR merged after CI passes',
+  );
+});
+
 test('group with all tasks already done and no delivery → blocked', async () => {
   const finished = group('finished', {
     tasks: [{ id: 'a', text: 'done', complexity: 'normal', done: true }],
@@ -460,6 +485,28 @@ test('prPerTask: resume skips done tasks and opens a PR only for the remaining o
   assert.equal(calls.openPr.length, 1, 'one PR for the single remaining task');
 });
 
+test('prPerTask: multi-task group is marked merged only after the final task', async () => {
+  // Regression: marking the whole group terminal after the FIRST task's PR strands the remaining
+  // tasks — a crash there leaves a 'merged' group PlanGraph.ready() won't reschedule. The group
+  // must stay schedulable (in-progress) until the last task lands.
+  const { orchestrator } = makeOrchestrator({ prNumber: 7 });
+  const { github } = makeGithub({ checks: ['success', 'success'], threads: [] });
+  const { state, updates } = makeState([twoTaskGroup()]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prPerTask: true }),
+  );
+  await loop.runGroup(twoTaskGroup());
+
+  const statusAt = (s: RunState): PrGroup['status'] | undefined =>
+    s.prGroups.find((g) => g.id === 'multi')?.status;
+  const mergedIdx = updates.findIndex((s) => statusAt(s) === 'merged');
+  assert.equal(mergedIdx, updates.length - 1, 'group reaches merged only on the final write');
+  assert.ok(
+    !updates.slice(0, -1).some((s) => statusAt(s) === 'merged'),
+    'group is never marked merged before the last task',
+  );
+});
+
 test('autoMerge: success path runs waitForChecks → mergePr and marks merged', async () => {
   const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 11 });
   const { github, calls: ghCalls } = makeGithub({ checks: ['success'], threads: [] });
@@ -483,27 +530,25 @@ test('autoMerge: success path runs waitForChecks → mergePr and marks merged', 
   assert.equal(last.prGroups.find((p) => p.id === 'gamma')?.status, 'merged');
 });
 
-test('autoMerge: CI failure triggers Worker fix then re-checks then merges', async () => {
-  const { orchestrator, calls: orchCalls } = makeOrchestrator({
-    prNumber: 33,
-    workerResults: [
-      { kind: 'ok', delivery: delivery() },
-      { kind: 'ok', delivery: delivery() },
-    ],
-  });
-  const { github, calls: ghCalls } = makeGithub({
-    checks: [new CiFailed('tests failed'), 'success'],
-  });
-  const loop = new WorkLoop(makeDeps({ orchestrator, github, autoMerge: true }));
+test('autoMerge: CI failure routes working→pr-open→waiting-ci→ci-failed and blocks (slice 04 fixes)', async () => {
+  // The ci-failed handler is stubbed in slice 03, so a red CI run blocks the group instead of
+  // triggering a Worker CI-fix pass + re-check + merge. Slice 04 wires the fix loop back in.
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 33 });
+  const { github, calls: ghCalls } = makeGithub({ checks: [new CiFailed('tests failed')] });
+  const { state, updates } = makeState([group('delta')]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, state, autoMerge: true }));
   await loop.runGroup(group('delta'));
 
-  assert.equal(orchCalls.runWorker.length, 2, 'worker invoked twice: initial + fix');
-  assert.equal(orchCalls.finalizeCommit.length, 2);
-  assert.deepEqual(ghCalls.waitForChecks, [33, 33]);
-  assert.deepEqual(ghCalls.mergePr, [{ pr: 33, method: 'squash' }]);
+  assert.equal(orchCalls.runWorker.length, 1, 'only the task pass; no CI-fix pass in slice 03');
+  assert.deepEqual(ghCalls.waitForChecks, [33], 'CI awaited once before blocking');
+  assert.equal(ghCalls.mergePr.length, 0, 'no merge while CI is red');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'delta')?.status, 'blocked');
 });
 
-test('autoMerge: unresolved threads invoke Reviewer before merging', async () => {
+test('autoMerge: unresolved threads route to addressing-reviews and block (slice 04 fixes)', async () => {
+  // The addressing-reviews handler is stubbed in slice 03: unresolved threads block the group
+  // rather than invoking the Reviewer + merging. Slice 04 restores the review-address loop.
   const thread: ReviewThread = {
     id: 't1',
     isResolved: false,
@@ -512,12 +557,14 @@ test('autoMerge: unresolved threads invoke Reviewer before merging', async () =>
   };
   const { orchestrator, calls } = makeOrchestrator({ prNumber: 5 });
   const { github, calls: ghCalls } = makeGithub({ threads: [thread] });
-  const loop = new WorkLoop(makeDeps({ orchestrator, github, autoMerge: true }));
+  const { state, updates } = makeState([group('epsilon')]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, state, autoMerge: true }));
   await loop.runGroup(group('epsilon'));
 
-  assert.equal(calls.runReviewer.length, 1);
-  assert.deepEqual(calls.runReviewer[0]?.threads, [thread]);
-  assert.deepEqual(ghCalls.mergePr, [{ pr: 5, method: 'squash' }]);
+  assert.equal(calls.runReviewer.length, 0, 'reviewer not driven by the stage machine yet');
+  assert.equal(ghCalls.mergePr.length, 0, 'no merge while threads are unresolved');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'epsilon')?.status, 'blocked');
 });
 
 test('autoMerge: custom mergeMethod is honoured', async () => {
@@ -763,8 +810,9 @@ test('state write failure after openPr → loop yields awaiting-pr outcome, not 
   const state: WorkLoopState = {
     update: async (mutator) => {
       callCount++;
-      // calls: 1 incrementSessionCount, 2 in-progress, 3 task-done, 4 awaiting-pr (fail here)
-      if (callCount === 4) throw new Error('disk full');
+      // Stage-dispatcher write order: 1 incrementSessionCount, 2 in-progress(+working),
+      // 3 task-done, 4 stage working→pr-open, 5 handlePrOpen's pr-persist after openPr (fail here).
+      if (callCount === 5) throw new Error('disk full');
       return mutator(baseState());
     },
   };
@@ -792,8 +840,10 @@ test('state write failure after mergePr → outcome stays merged', async () => {
   const state: WorkLoopState = {
     update: async (mutator) => {
       callCount++;
-      // calls: 1 sessionCount, 2 in-progress, 3 task-done, 4 awaiting-pr, 5 merged (fail here)
-      if (callCount === 5) throw new Error('disk full');
+      // Stage-dispatcher write order: 1 sessionCount, 2 in-progress(+working), 3 task-done,
+      // 4 working→pr-open, 5 pr-persist, 6 pr-open→waiting-ci, 7 waiting-ci→waiting-reviews,
+      // 8 waiting-reviews→ready-to-merge, 9 ready-to-merge→merged after mergePr (fail here).
+      if (callCount === 9) throw new Error('disk full');
       return mutator(baseState());
     },
   };

@@ -350,6 +350,67 @@ test('resume: prior prGroups in state skip planning entirely', async () => {
   assert.equal(result.kind, 'success');
 });
 
+test('resume: an interrupted waiting-ci group is rescheduled through the real adapter and merged', async () => {
+  // The production resume path, end-to-end through runLoopAdapter — no hand-reset of status. A run
+  // that crashed after pr-open persists the group at stage 'waiting-ci' with coarse status
+  // 'awaiting-pr', which PlanGraph.ready() will NOT schedule. The adapter must normalize it back to
+  // 'pending' (preserving stage + pr) so the loop resumes at waiting-ci, re-running neither the
+  // Worker nor openPr. This is the true coverage the resume-flow integration test could not give
+  // (it stubbed the loop and forced status itself).
+  const resuming = group('resuming', {
+    status: 'awaiting-pr',
+    stage: 'waiting-ci',
+    pr: 42,
+    tasks: [{ id: 'do-thing', text: 'do thing', complexity: 'normal', done: true }],
+  });
+  const { state, current } = makeState([resuming]);
+
+  let workerCalls = 0;
+  let openPrCalls = 0;
+  let waitForChecksCalls = 0;
+  const orchestrator: WorkLoopOrchestrator = {
+    runWorker: async () => {
+      workerCalls++;
+      return { kind: 'ok', delivery: delivery() };
+    },
+    finalizeCommit: async () => 'sha',
+    openPr: async () => {
+      openPrCalls++;
+      return pr(42);
+    },
+    runReviewer: async () => ({ kind: 'ok', resolutions: [] }),
+  };
+  const github: WorkLoopGithub = {
+    defaultBranch: async () => 'main',
+    waitForChecks: async () => {
+      waitForChecksCalls++;
+      return 'success';
+    },
+    listUnresolvedThreads: async (): Promise<ReviewThread[]> => [],
+    mergePr: async () => {},
+  };
+
+  const result = await runLoopAdapter(
+    makeInput({ autoMerge: true }),
+    seams({
+      state,
+      makeOrchestrator: () => orchestrator,
+      makeGithub: () => github,
+      planGroups: async () => {
+        throw new Error('planner must not run on resume');
+      },
+    }),
+  );
+
+  assert.equal(result.kind, 'success');
+  assert.equal(workerCalls, 0, 'Worker not re-run when resuming at waiting-ci');
+  assert.equal(openPrCalls, 0, 'openPr not re-called when resuming at waiting-ci');
+  assert.equal(waitForChecksCalls, 1, 'CI polled once for the persisted PR');
+  const s = current();
+  assert.equal(s.prGroups[0]?.status, 'merged', 'group advances to merged on resume');
+  assert.equal(s.prGroups[0]?.stage, 'merged');
+});
+
 // ---- Default orchestrator bridge: no MCP → local fs-tools fallback ----------
 
 test('localEditTools supplies worktree-scoped readFile/writeFile/bash (no-MCP fallback)', () => {

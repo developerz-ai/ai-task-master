@@ -4,6 +4,7 @@ import { CiFailed } from '../github/errors.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import {
+  type AddressedThreadsStore,
   handleAddressingReviews,
   handleCiFailed,
   handlePrOpen,
@@ -93,7 +94,26 @@ function makeOrchestrator(over: Partial<StageOrchestrator> = {}): StageOrchestra
   return {
     work: async () => ({ kind: 'ok' }),
     openPr: async () => 42,
+    fixCi: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok' }),
     ...over,
+  };
+}
+
+// In-memory addressed-threads store. `ids()` exposes what was recorded for assertions.
+function makeAddressed(initial: string[] = []): {
+  store: AddressedThreadsStore;
+  ids: () => string[];
+} {
+  const set = new Set(initial);
+  return {
+    store: {
+      readAddressedThreads: async () => new Set(set),
+      recordAddressedThreads: async (_pr, ids) => {
+        for (const id of ids) set.add(id);
+      },
+    },
+    ids: () => [...set].sort(),
   };
 }
 
@@ -229,6 +249,32 @@ test('handleWaitingReviews: unresolved threads → addressing-reviews', async ()
   );
 });
 
+test('handleWaitingReviews: every unresolved thread already addressed → ready-to-merge', async () => {
+  // A thread the Reviewer replied to (but did not resolve) stays unresolved; subtracting the
+  // addressed set is what lets the loop converge to merge instead of re-entering addressing-reviews.
+  const addressed = makeAddressed(['T1']);
+  const deps = makeDeps({
+    github: makeGithub({ listUnresolvedThreads: async () => [thread('T1')] }),
+    prContext: addressed.store,
+  });
+  assert.equal(
+    await handleWaitingReviews(deps, group({ stage: 'waiting-reviews', pr: 5 })),
+    'ready-to-merge',
+  );
+});
+
+test('handleWaitingReviews: a not-yet-addressed thread among addressed ones → addressing-reviews', async () => {
+  const addressed = makeAddressed(['T1']);
+  const deps = makeDeps({
+    github: makeGithub({ listUnresolvedThreads: async () => [thread('T1'), thread('T2')] }),
+    prContext: addressed.store,
+  });
+  assert.equal(
+    await handleWaitingReviews(deps, group({ stage: 'waiting-reviews', pr: 5 })),
+    'addressing-reviews',
+  );
+});
+
 // ---- ready-to-merge ------------------------------------------------------
 
 test('handleReadyToMerge: merges the PR → merged', async () => {
@@ -244,15 +290,120 @@ test('handleReadyToMerge: merges the PR → merged', async () => {
   assert.deepEqual(merged, [8]);
 });
 
-// ---- stubs (slice 04) ----------------------------------------------------
+// ---- ci-failed -----------------------------------------------------------
 
-test('handleCiFailed: stubbed → blocks until slice 04', async () => {
-  assert.equal(await handleCiFailed(makeDeps(), group({ stage: 'ci-failed', pr: 5 })), 'blocked');
+test('handleCiFailed: fix session ok → waiting-ci', async () => {
+  let fixed = 0;
+  const deps = makeDeps({
+    orchestrator: makeOrchestrator({
+      fixCi: async () => {
+        fixed += 1;
+        return { kind: 'ok' };
+      },
+    }),
+  });
+  assert.equal(await handleCiFailed(deps, group({ stage: 'ci-failed', pr: 5 })), 'waiting-ci');
+  assert.equal(fixed, 1);
 });
 
-test('handleAddressingReviews: stubbed → blocks until slice 04', async () => {
+test('handleCiFailed: fix session blocked → blocked', async () => {
+  const deps = makeDeps({
+    orchestrator: makeOrchestrator({
+      fixCi: async () => ({ kind: 'blocked', reason: 'rebase conflict' }),
+    }),
+  });
+  assert.equal(await handleCiFailed(deps, group({ stage: 'ci-failed', pr: 5 })), 'blocked');
+});
+
+test('handleCiFailed: missing PR throws', async () => {
+  await assert.rejects(
+    () => handleCiFailed(makeDeps(), group({ stage: 'ci-failed', pr: null })),
+    /without an open PR/,
+  );
+});
+
+// ---- addressing-reviews --------------------------------------------------
+
+test('handleAddressingReviews: runs Reviewer over fresh threads, records them → waiting-reviews', async () => {
+  const seen: string[][] = [];
+  const addressed = makeAddressed();
+  const deps = makeDeps({
+    github: makeGithub({ listUnresolvedThreads: async () => [thread('T1'), thread('T2')] }),
+    orchestrator: makeOrchestrator({
+      addressReviews: async (_g, threads) => {
+        seen.push(threads.map((t) => t.id));
+        return { kind: 'ok' };
+      },
+    }),
+    prContext: addressed.store,
+  });
   assert.equal(
-    await handleAddressingReviews(makeDeps(), group({ stage: 'addressing-reviews', pr: 5 })),
+    await handleAddressingReviews(deps, group({ stage: 'addressing-reviews', pr: 5 })),
+    'waiting-reviews',
+  );
+  assert.deepEqual(seen, [['T1', 'T2']]);
+  assert.deepEqual(addressed.ids(), ['T1', 'T2'], 'addressed threads recorded');
+});
+
+test('handleAddressingReviews: skips already-addressed threads', async () => {
+  const seen: string[][] = [];
+  const addressed = makeAddressed(['T1']);
+  const deps = makeDeps({
+    github: makeGithub({ listUnresolvedThreads: async () => [thread('T1'), thread('T2')] }),
+    orchestrator: makeOrchestrator({
+      addressReviews: async (_g, threads) => {
+        seen.push(threads.map((t) => t.id));
+        return { kind: 'ok' };
+      },
+    }),
+    prContext: addressed.store,
+  });
+  assert.equal(
+    await handleAddressingReviews(deps, group({ stage: 'addressing-reviews', pr: 5 })),
+    'waiting-reviews',
+  );
+  assert.deepEqual(seen, [['T2']], 'only the not-yet-addressed thread reaches the Reviewer');
+});
+
+test('handleAddressingReviews: nothing fresh → waiting-reviews without running the Reviewer', async () => {
+  let ran = 0;
+  const addressed = makeAddressed(['T1']);
+  const deps = makeDeps({
+    github: makeGithub({ listUnresolvedThreads: async () => [thread('T1')] }),
+    orchestrator: makeOrchestrator({
+      addressReviews: async () => {
+        ran += 1;
+        return { kind: 'ok' };
+      },
+    }),
+    prContext: addressed.store,
+  });
+  assert.equal(
+    await handleAddressingReviews(deps, group({ stage: 'addressing-reviews', pr: 5 })),
+    'waiting-reviews',
+  );
+  assert.equal(ran, 0);
+});
+
+test('handleAddressingReviews: Reviewer blocked → blocked, nothing recorded', async () => {
+  const addressed = makeAddressed();
+  const deps = makeDeps({
+    github: makeGithub({ listUnresolvedThreads: async () => [thread('T1')] }),
+    orchestrator: makeOrchestrator({
+      addressReviews: async () => ({ kind: 'blocked', reason: 'reviewer error' }),
+    }),
+    prContext: addressed.store,
+  });
+  assert.equal(
+    await handleAddressingReviews(deps, group({ stage: 'addressing-reviews', pr: 5 })),
     'blocked',
+  );
+  assert.deepEqual(addressed.ids(), [], 'threads not recorded when the Reviewer is blocked');
+});
+
+test('handleAddressingReviews: missing PR throws', async () => {
+  await assert.rejects(
+    () => handleAddressingReviews(makeDeps(), group({ stage: 'addressing-reviews', pr: null })),
+    /without an open PR/,
   );
 });

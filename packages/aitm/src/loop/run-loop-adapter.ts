@@ -36,6 +36,7 @@ import { Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { Plan } from '../plan/schema.ts';
+import { PrContextStore } from '../state/pr-context-store.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import {
   createPlannerAgent,
@@ -58,8 +59,10 @@ import {
   type WorkerTools,
 } from '../subagents/worker.ts';
 import { WorktreePool } from '../workspace/worktree-pool.ts';
+import { runFixSession } from './ci-fix.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
 import {
+  type ReviewerInvocation,
   WorkLoop,
   type WorkLoopGithub,
   type WorkLoopGraph,
@@ -224,6 +227,8 @@ export async function runLoopAdapter(
       state: workLoopState,
       pool,
       graph,
+      // Persist addressed review threads so the addressing-reviews loop dedups across re-polls.
+      prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
       concurrency: input.resolved.concurrency,
       autoMerge: input.resolved.autoMerge,
       prPerTask: current.options.prPerTask ?? false,
@@ -294,6 +299,24 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
     github: input.github,
   });
 
+  // Build + run the Reviewer over a thread set in the given worktree. Shared by the prPerTask
+  // autoMergeFlow (runReviewer) and the stage machine (addressReviews).
+  const runReviewerThreads = ({ pr, threads, worktree }: ReviewerInvocation) => {
+    const github = githubThreadTool(input.github);
+    const tools = resolveReviewerTools(mcp.toolsForRole('reviewer'), worktree.path, github);
+    const agent = createReviewerAgent({
+      model: input.credentials.modelFor('reviewer'),
+      tools,
+      systemPrompt: composeSystemPrompt(style, REVIEWER_SYSTEM_PREFIX, worktree.path),
+    });
+    return runReviewerSubagent(agent, {
+      pr,
+      threads,
+      worktreePath: worktree.path,
+      styleContents: style,
+    });
+  };
+
   return {
     runWorker: async ({ group, task, worktree, baseBranch }) => {
       // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
@@ -324,21 +347,41 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
       await execa('git', ['push', '-u', 'origin', head], { cwd: input.cwd });
       return orch.openPr(group, delivery, baseBranch);
     },
-    runReviewer: async ({ pr, threads, worktree }) => {
-      const github = githubThreadTool(input.github);
-      // Same partial-fill as the Worker, plus the local `github` thread tool.
-      const tools = resolveReviewerTools(mcp.toolsForRole('reviewer'), worktree.path, github);
-      const agent = createReviewerAgent({
-        model: input.credentials.modelFor('reviewer'),
-        tools,
-        systemPrompt: composeSystemPrompt(style, REVIEWER_SYSTEM_PREFIX, worktree.path),
-      });
-      return runReviewerSubagent(agent, {
+    runReviewer: runReviewerThreads,
+    // ci-failed stage → shared fix session: download failed logs + comments to the state dir, run
+    // the coding-capability Worker pointed at them, rebase onto origin/<base>, force-with-lease push.
+    runCiFix: async ({ group, pr, worktree, baseBranch }) => {
+      const result = await runFixSession({
+        github: input.github,
+        prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
+        subagents: {
+          credentials: input.credentials,
+          workerTools: resolveWorkerTools(mcp.toolsForRole('worker'), worktree.path),
+          styleContents: style,
+          ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
+        },
+        group,
         pr,
-        threads,
+        baseBranch,
         worktreePath: worktree.path,
-        styleContents: style,
       });
+      return result.kind === 'fixed' ? { kind: 'ok' } : { kind: 'blocked', reason: result.reason };
+    },
+    // addressing-reviews stage → run the Reviewer, then push its commits so the PR updates. The
+    // Reviewer commits code fixes locally (worker pattern); a plain push suffices (additive commits,
+    // no history rewrite). Replied/wontfix-only rounds make no commit, so there's nothing to push.
+    addressReviews: async ({ pr, threads, worktree }) => {
+      const result = await runReviewerThreads({ pr, threads, worktree });
+      if (result.kind !== 'ok') {
+        return {
+          kind: 'blocked',
+          reason: result.kind === 'blocked' ? result.reason : result.error,
+        };
+      }
+      if (result.resolutions.some((r) => r.kind === 'fixed')) {
+        await execa('git', ['push'], { cwd: worktree.path });
+      }
+      return { kind: 'ok' };
     },
   };
 }

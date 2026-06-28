@@ -32,6 +32,7 @@ import {
   type StageGithub,
   type StageHandler,
   type StageOrchestrator,
+  type StageWorkResult,
 } from './stage-handlers.ts';
 
 export type WorkerInvocation = {
@@ -49,11 +50,23 @@ export type ReviewerInvocation = {
   worktree: Worktree;
 };
 
+export type CiFixInvocation = {
+  group: PrGroup;
+  pr: number;
+  worktree: Worktree;
+  baseBranch: string;
+};
+
 export type WorkLoopOrchestrator = {
   runWorker(input: WorkerInvocation): Promise<WorkerResult>;
   finalizeCommit(group: PrGroup, delivery: WorkerDelivery, worktreePath: string): Promise<string>;
   openPr(group: PrGroup, delivery: WorkerDelivery, baseBranch: string): Promise<PullRequest>;
   runReviewer(input: ReviewerInvocation): Promise<ReviewerResult>;
+  // ci-failed stage: download failed logs + comments, run the Worker fix, rebase onto
+  // origin/<base> and force-with-lease push. ok → CI re-runs; blocked → couldn't land the fix.
+  runCiFix(input: CiFixInvocation): Promise<StageWorkResult>;
+  // addressing-reviews stage: run the Reviewer over the given threads and push its code fixes.
+  addressReviews(input: ReviewerInvocation): Promise<StageWorkResult>;
 };
 
 export type WorkLoopGithub = {
@@ -80,12 +93,23 @@ export type WorkLoopGraph = {
   isComplete(): boolean;
 };
 
+// Addressed-thread bookkeeping for the addressing-reviews stage so its loop terminates across
+// re-polls (a replied-but-unresolved thread isn't re-processed forever). PrContextStore satisfies
+// it. Optional on the deps: stubs that don't drive the review loop can omit it.
+export type WorkLoopPrContext = {
+  readAddressedThreads(pr: number): Promise<Set<string>>;
+  recordAddressedThreads(pr: number, ids: readonly string[]): Promise<void>;
+};
+
 export type WorkLoopDeps = {
   orchestrator: WorkLoopOrchestrator;
   github: WorkLoopGithub;
   state: WorkLoopState;
   pool: WorkLoopPool;
   graph: WorkLoopGraph;
+  // Drives the addressing-reviews dedup. Optional — without it the review loop still terminates
+  // once threads are resolved, but a replied-but-unresolved thread would be re-handled each poll.
+  prContext?: WorkLoopPrContext;
   concurrency: number;
   autoMerge: boolean;
   // When true, open (and, under autoMerge, merge) a PR after each task. Default (false/omitted)
@@ -341,13 +365,22 @@ export class WorkLoop {
         ctx.group = { ...ctx.group, pr: pr.number };
         return pr.number;
       },
+      fixCi: (group) =>
+        this.deps.orchestrator.runCiFix({ group, pr: prNumberOf(group), worktree, baseBranch }),
+      addressReviews: (group, threads) =>
+        this.deps.orchestrator.addressReviews({ pr: prNumberOf(group), threads, worktree }),
     };
     const github: StageGithub = {
       waitForChecks: (pr) => this.deps.github.waitForChecks(pr),
       listUnresolvedThreads: (pr) => this.deps.github.listUnresolvedThreads(pr),
       mergePr: (pr) => this.deps.github.mergePr(pr, this.deps.mergeMethod ?? DEFAULT_MERGE_METHOD),
     };
-    return { orchestrator, github, state: this.deps.state };
+    return {
+      orchestrator,
+      github,
+      state: this.deps.state,
+      ...(this.deps.prContext ? { prContext: this.deps.prContext } : {}),
+    };
   }
 
   // Run every not-yet-done task of the group to commits on its branch (no PR), returning the
@@ -636,14 +669,15 @@ function statusForStage(stage: GroupStage): PrGroupStatus {
   }
 }
 
-// Human reason a stage handler yielded 'blocked'. ci-failed/addressing-reviews are stubbed until
-// the CI-fix / review-address loops land (slice 04); until then they block rather than loop.
+// Human reason a stage handler yielded 'blocked'. A block at ci-failed/addressing-reviews means the
+// automated recovery itself couldn't finish — the fix didn't go green / hit a rebase conflict, or
+// the Reviewer errored — so the PR needs a human.
 function blockReasonFor(stage: GroupStage, group: PrGroup): string {
   switch (stage) {
     case 'ci-failed':
-      return `CI checks failed for PR #${group.pr ?? '?'}; automated CI-fix lands in a later slice`;
+      return `CI fix could not land for PR #${group.pr ?? '?'} (still failing, or a rebase conflict needs manual resolution)`;
     case 'addressing-reviews':
-      return `unresolved review threads on PR #${group.pr ?? '?'}; automated review handling lands in a later slice`;
+      return `could not address review threads on PR #${group.pr ?? '?'} (reviewer error or failed push)`;
     default:
       return `group ${group.id} blocked at stage '${stage}'`;
   }

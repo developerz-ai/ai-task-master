@@ -8,6 +8,7 @@ import type { PrGroup, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import type { Worktree } from '../workspace/worktree-pool.ts';
+import type { StageWorkResult } from './stage-handlers.ts';
 import {
   WorkLoop,
   type WorkLoopDeps,
@@ -15,6 +16,7 @@ import {
   type WorkLoopGraph,
   type WorkLoopOrchestrator,
   type WorkLoopPool,
+  type WorkLoopPrContext,
   type WorkLoopState,
 } from './work-loop.ts';
 
@@ -82,6 +84,8 @@ type OrchestratorCalls = {
   finalizeCommit: { group: PrGroup; worktreePath: string }[];
   openPr: { group: PrGroup; baseBranch: string }[];
   runReviewer: { pr: number; threads: ReviewThread[]; worktree: Worktree }[];
+  runCiFix: { group: PrGroup; pr: number; baseBranch: string }[];
+  addressReviews: { pr: number; threads: ReviewThread[] }[];
 };
 
 type WorkerInvocationCall = { group: PrGroup; task?: Task; worktree: Worktree; baseBranch: string };
@@ -90,6 +94,8 @@ function makeOrchestrator(
   config: {
     workerResults?: WorkerResult[];
     reviewerResult?: ReviewerResult;
+    ciFixResults?: StageWorkResult[];
+    addressReviewsResult?: StageWorkResult;
     prNumber?: number;
     headRefName?: string;
   } = {},
@@ -99,10 +105,13 @@ function makeOrchestrator(
     finalizeCommit: [],
     openPr: [],
     runReviewer: [],
+    runCiFix: [],
+    addressReviews: [],
   };
   const queue = (
     config.workerResults ?? [{ kind: 'ok', delivery: delivery() } as WorkerResult]
   ).slice();
+  const ciFixQueue = (config.ciFixResults ?? []).slice();
   const orchestrator: WorkLoopOrchestrator = {
     runWorker: async (input) => {
       calls.runWorker.push(input);
@@ -122,8 +131,30 @@ function makeOrchestrator(
       calls.runReviewer.push(input);
       return config.reviewerResult ?? ({ kind: 'ok', resolutions: [] } satisfies ReviewerResult);
     },
+    runCiFix: async ({ group, pr, baseBranch }) => {
+      calls.runCiFix.push({ group, pr, baseBranch });
+      return ciFixQueue.shift() ?? { kind: 'ok' };
+    },
+    addressReviews: async ({ pr, threads }) => {
+      calls.addressReviews.push({ pr, threads });
+      return config.addressReviewsResult ?? { kind: 'ok' };
+    },
   };
   return { orchestrator, calls };
+}
+
+// In-memory addressed-threads store so the addressing-reviews loop dedups (and thus terminates)
+// in tests that drive it. Mirrors PrContextStore's read/record semantics.
+function makeAddressedStore(): WorkLoopPrContext {
+  const byPr = new Map<number, Set<string>>();
+  return {
+    readAddressedThreads: async (pr) => new Set(byPr.get(pr) ?? []),
+    recordAddressedThreads: async (pr, ids) => {
+      const set = byPr.get(pr) ?? new Set<string>();
+      for (const id of ids) set.add(id);
+      byPr.set(pr, set);
+    },
+  };
 }
 
 type GithubCalls = {
@@ -268,6 +299,7 @@ function makeDeps(
     concurrency: overrides.concurrency ?? 1,
     autoMerge: overrides.autoMerge ?? true,
     maxSessions: overrides.maxSessions ?? null,
+    ...(overrides.prContext !== undefined ? { prContext: overrides.prContext } : {}),
     ...(overrides.prPerTask !== undefined ? { prPerTask: overrides.prPerTask } : {}),
     ...(overrides.mergeMethod !== undefined ? { mergeMethod: overrides.mergeMethod } : {}),
     ...(overrides.initialSessionCount !== undefined
@@ -536,25 +568,46 @@ test('autoMerge: success path runs waitForChecks → mergePr and marks merged', 
   assert.equal(last.prGroups.find((p) => p.id === 'gamma')?.status, 'merged');
 });
 
-test('autoMerge: CI failure routes working→pr-open→waiting-ci→ci-failed and blocks (slice 04 fixes)', async () => {
-  // The ci-failed handler is stubbed in slice 03, so a red CI run blocks the group instead of
-  // triggering a Worker CI-fix pass + re-check + merge. Slice 04 wires the fix loop back in.
+test('autoMerge: CI failure → ci-failed runs the fix session, re-polls green, merges', async () => {
+  // waiting-ci sees a red run → ci-failed delegates to runCiFix (shared fix session) → waiting-ci
+  // re-polls green → merge. Mirrors claudetm's handle_ci_failed_stage → waiting_ci loop.
   const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 33 });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciFailure, ciSuccess], threads: [] });
+  const { state, updates } = makeState([group('delta')]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, state, autoMerge: true }));
+  await loop.runGroup(group('delta'));
+
+  assert.equal(orchCalls.runCiFix.length, 1, 'fix session runs once on the red PR');
+  assert.equal(orchCalls.runCiFix[0]?.pr, 33);
+  assert.deepEqual(ghCalls.waitForChecks, [33, 33], 'CI polled before and after the fix');
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [33],
+    'PR merged after CI goes green',
+  );
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'delta')?.status, 'merged');
+});
+
+test('autoMerge: a CI fix that cannot land blocks the group', async () => {
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({
+    prNumber: 33,
+    ciFixResults: [{ kind: 'blocked', reason: 'rebase conflict' }],
+  });
   const { github, calls: ghCalls } = makeGithub({ checks: [ciFailure] });
   const { state, updates } = makeState([group('delta')]);
   const loop = new WorkLoop(makeDeps({ orchestrator, github, state, autoMerge: true }));
   await loop.runGroup(group('delta'));
 
-  assert.equal(orchCalls.runWorker.length, 1, 'only the task pass; no CI-fix pass in slice 03');
-  assert.deepEqual(ghCalls.waitForChecks, [33], 'CI awaited once before blocking');
-  assert.equal(ghCalls.mergePr.length, 0, 'no merge while CI is red');
+  assert.equal(orchCalls.runCiFix.length, 1);
+  assert.equal(ghCalls.mergePr.length, 0, 'no merge when the fix could not land');
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((p) => p.id === 'delta')?.status, 'blocked');
 });
 
-test('autoMerge: unresolved threads route to addressing-reviews and block (slice 04 fixes)', async () => {
-  // The addressing-reviews handler is stubbed in slice 03: unresolved threads block the group
-  // rather than invoking the Reviewer + merging. Slice 04 restores the review-address loop.
+test('autoMerge: unresolved threads → addressing-reviews runs the Reviewer, then merges', async () => {
+  // waiting-reviews sees a fresh unresolved thread → addressing-reviews runs the Reviewer over it
+  // and records it addressed → waiting-reviews sees nothing fresh → ready-to-merge → merge.
   const thread: ReviewThread = {
     id: 't1',
     isResolved: false,
@@ -564,11 +617,45 @@ test('autoMerge: unresolved threads route to addressing-reviews and block (slice
   const { orchestrator, calls } = makeOrchestrator({ prNumber: 5 });
   const { github, calls: ghCalls } = makeGithub({ threads: [thread] });
   const { state, updates } = makeState([group('epsilon')]);
-  const loop = new WorkLoop(makeDeps({ orchestrator, github, state, autoMerge: true }));
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prContext: makeAddressedStore() }),
+  );
   await loop.runGroup(group('epsilon'));
 
-  assert.equal(calls.runReviewer.length, 0, 'reviewer not driven by the stage machine yet');
-  assert.equal(ghCalls.mergePr.length, 0, 'no merge while threads are unresolved');
+  assert.equal(calls.addressReviews.length, 1, 'reviewer driven once over the fresh thread');
+  assert.deepEqual(
+    calls.addressReviews[0]?.threads.map((t) => t.id),
+    ['t1'],
+  );
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [5],
+    'PR merged after the thread is addressed',
+  );
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'epsilon')?.status, 'merged');
+});
+
+test('autoMerge: an unaddressable review thread blocks the group', async () => {
+  const thread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
+  };
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 5,
+    addressReviewsResult: { kind: 'blocked', reason: 'reviewer error' },
+  });
+  const { github, calls: ghCalls } = makeGithub({ threads: [thread] });
+  const { state, updates } = makeState([group('epsilon')]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prContext: makeAddressedStore() }),
+  );
+  await loop.runGroup(group('epsilon'));
+
+  assert.equal(calls.addressReviews.length, 1);
+  assert.equal(ghCalls.mergePr.length, 0, 'no merge while the thread is unaddressed');
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((p) => p.id === 'epsilon')?.status, 'blocked');
 });
@@ -636,6 +723,8 @@ test('pool.release fires even when orchestrator throws', async () => {
     finalizeCommit: async () => 'sha',
     openPr: async () => pullRequest(1),
     runReviewer: async () => ({ kind: 'ok', resolutions: [] }),
+    runCiFix: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok' }),
   };
   const { pool, calls } = makePool();
   const loop = new WorkLoop(makeDeps({ orchestrator, pool }));

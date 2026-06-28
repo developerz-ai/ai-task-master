@@ -40,6 +40,7 @@ import {
   type WorkerResult,
   type WorkerTools,
 } from '../subagents/worker.ts';
+import { DEFAULT_MAX_ITERATIONS } from './constants.ts';
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
 export type TakeOverGithub = {
@@ -102,9 +103,12 @@ export type TakeOverFlowInput = {
   // full failed-CI logs under .ai-task-master/debugging/pr/<pr>/ and points the Worker at them.
   prContext?: PrContextPort;
   mergeMethod: MergeMethod;
-  // Cap on iterations of the CI-wait/fix loop. Default 10 — claude-task-master uses 30 but
-  // each iteration here is heavier (model calls per thread), so default lower.
+  // Cap on iterations of the CI-wait/fix loop. Default DEFAULT_MAX_ITERATIONS (30), matching
+  // claude-task-master's merge-pr loop. Threaded from `--max-iterations`; tests inject a small cap.
   maxIterations?: number;
+  // Abort handle. When aborted (e.g. SIGINT), the loop bails out to `{ kind: 'cancelled' }` →
+  // exit code 2, distinct from a `blocked` run (exit 1). Checked each iteration and before merge.
+  signal?: AbortSignal;
   // Sleep between iterations so the next `waitForChecks` actually sees fresh CI state
   // after a push. Default 5s. Tests inject a 0-ms sleep.
   cooldownMs?: number;
@@ -117,9 +121,9 @@ export type TakeOverFlowInput = {
 
 export type TakeOverResult =
   | { kind: 'merged'; pr: number; iterations: number }
-  | { kind: 'blocked'; reason: string; iterations: number };
+  | { kind: 'blocked'; reason: string; iterations: number }
+  | { kind: 'cancelled'; iterations: number };
 
-const DEFAULT_MAX_ITERATIONS = 10;
 const DEFAULT_COOLDOWN_MS = 5_000;
 
 export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOverResult> {
@@ -132,6 +136,10 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   // early `break` it holds the break index, on natural exhaustion it equals maxIterations.
   let iteration = 0;
   for (; iteration < maxIterations; iteration++) {
+    if (input.signal?.aborted) {
+      log?.info('take-over: cancelled', { pr: input.pr, iteration });
+      return { kind: 'cancelled', iterations: iteration };
+    }
     log?.info('take-over: iteration start', { pr: input.pr, iteration });
 
     // 1. Wait for CI to settle. observeCheckStatus maps a CI failure (or a poll timeout) to
@@ -206,6 +214,11 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
     // Sleep so the next iteration's waitForChecks sees fresh CI state, not the stale
     // success/failure from before our push triggered a new run.
     if (cooldownMs > 0) await sleep(cooldownMs);
+  }
+
+  if (input.signal?.aborted) {
+    log?.info('take-over: cancelled', { pr: input.pr, iteration });
+    return { kind: 'cancelled', iterations: iteration };
   }
 
   // Final state check — make sure we didn't fall through the loop with a hung iteration.

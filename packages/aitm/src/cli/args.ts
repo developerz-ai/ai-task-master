@@ -20,6 +20,9 @@ export type MergePrArgs = {
   kind: 'merge-pr';
   pr?: number;
   resume: boolean;
+  // Cap on CI-wait/fix iterations before giving up. Parsed from `--max-iterations`; when absent the
+  // merge flow defaults to DEFAULT_MAX_ITERATIONS (30).
+  maxIterations?: number;
 };
 
 export type ConfigArgs =

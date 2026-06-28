@@ -51,6 +51,10 @@ export type RunMergeFlowInput = {
   state: StateStore;
   runState: RunState;
   github: GitHubClient;
+  // Cap on CI-wait/fix iterations before giving up. From `--max-iterations`; the flow defaults to 30.
+  maxIterations?: number;
+  // Abort handle so a SIGINT (or a test) cancels the take-over loop → exit code 2.
+  signal?: AbortSignal;
 };
 
 // Inputs for resolving the coding-style digest fed to subagent prompts. The digest is distilled
@@ -116,6 +120,9 @@ export type MergePrCtx = {
   github?: GitHubClient;
   // See StartCtx.resolveStyle — same read-or-distill-or-fallback contract for the merge flow.
   resolveStyle?: (input: ResolveStyleInput) => Promise<string>;
+  // Abort handle, threaded into the take-over loop. When aborted, the flow returns `cancelled`
+  // → exit code 2. The CLI can wire this to a SIGINT handler; tests drive it directly.
+  signal?: AbortSignal;
 };
 
 export type ConfigCtx = {
@@ -404,6 +411,8 @@ export async function runMergePr(
       state,
       runState,
       github,
+      ...(args.maxIterations !== undefined ? { maxIterations: args.maxIterations } : {}),
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
     });
   } catch (err) {
     return { code: 1, message: errMsg(err) };
@@ -542,6 +551,8 @@ function mapResultToExit(result: WorkLoopResult): CommandExit {
         code: 0,
         message: `PR(s) opened: ${result.prs.join(', ')}. Run \`aitm merge-pr\` to drive them to merge.`,
       };
+    case 'cancelled':
+      return { code: 2, message: 'Cancelled.' };
   }
 }
 
@@ -697,7 +708,8 @@ async function defaultRunLoop(input: RunLoopInput): Promise<WorkLoopResult> {
 // for the iteration shape (mirrors claude-task-master `merge_pr`).
 async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopResult> {
   const { runTakeOverFlow } = await import('../loop/take-over-flow.ts');
-  const { execa } = await import('execa');
+  const { rebaseAndForcePush } = await import('../loop/ci-fix.ts');
+  const { defaultRunCmd } = await import('../github/github-client.ts');
   const { githubThreadTool } = await import('../tools/github-thread-tool.ts');
   const { PrContextStore } = await import('../state/pr-context-store.ts');
 
@@ -720,11 +732,13 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
     github: input.github,
     prContext,
     mergeMethod: input.runState.options.mergeMethod,
+    ...(input.maxIterations !== undefined ? { maxIterations: input.maxIterations } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
+    // Rebase onto origin/<base> then `git push --force-with-lease` — never a plain push (which
+    // fails against a rebased remote) and never plain `--force`. Shares ci-fix's one push path.
     push: async (cwd) => {
-      const r = await execa('git', ['push'], { cwd });
-      if (r.exitCode !== 0) {
-        throw new Error(`git push failed: ${r.stderr || r.stdout}`);
-      }
+      const res = await rebaseAndForcePush(defaultRunCmd, cwd, baseBranch, input.pr, undefined);
+      if (res.kind === 'blocked') throw new Error(res.reason);
     },
     subagents: {
       reviewerModel: input.credentials.modelFor('reviewer'),
@@ -741,6 +755,9 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
       kind: 'success',
       outcomes: [{ groupId: `takeover-${result.pr}`, status: 'merged', pr: result.pr }],
     };
+  }
+  if (result.kind === 'cancelled') {
+    return { kind: 'cancelled', outcomes: [] };
   }
   return {
     kind: 'blocked',

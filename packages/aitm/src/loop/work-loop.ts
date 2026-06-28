@@ -131,7 +131,10 @@ export type WorkLoopResult =
   | { kind: 'success'; outcomes: GroupOutcome[] }
   | { kind: 'awaiting-pr'; prs: number[]; outcomes: GroupOutcome[] }
   | { kind: 'blocked'; reason: string; outcomes: GroupOutcome[] }
-  | { kind: 'session-cap'; outcomes: GroupOutcome[] };
+  | { kind: 'session-cap'; outcomes: GroupOutcome[] }
+  // User-cancelled (e.g. SIGINT) mid-flow. Maps to exit code 2 — distinct from a `blocked`
+  // run (exit 1). Currently produced only by the `merge-pr` take-over loop on an aborted signal.
+  | { kind: 'cancelled'; outcomes: GroupOutcome[] };
 
 const DEFAULT_MERGE_METHOD: MergeMethod = 'squash';
 

@@ -204,6 +204,54 @@ test('runTakeOverFlow: max iterations exhausted with threads remaining → block
   }
 });
 
+test('runTakeOverFlow: aborted signal → cancelled before any merge', async () => {
+  const gh = fakeGithub({ checks: ['success'], threads: [[]] });
+  const controller = new AbortController();
+  controller.abort();
+  const result = await runTakeOverFlow(baseInput(gh.github, { signal: controller.signal }));
+  assert.equal(result.kind, 'cancelled');
+  // Bailed on the very first iteration check → zero iterations, never polled CI or merged.
+  if (result.kind === 'cancelled') assert.equal(result.iterations, 0);
+  assert.deepEqual(gh.calls, [], 'no gh calls once cancelled up front');
+});
+
+test('runTakeOverFlow: signal aborted mid-flow → cancelled, no merge', async () => {
+  const threads: ReviewThread[] = [
+    {
+      id: 'TH_M',
+      isResolved: false,
+      path: 'src/a.ts',
+      comments: [{ id: 'C_M', body: 'fix', author: 'rabbit' }],
+    },
+  ];
+  // CI green but threads present → iteration 0 runs the Reviewer, pushes, then sleeps. The sleep
+  // aborts, so iteration 1's top-of-loop check bails to `cancelled` before any merge.
+  const gh = fakeGithub({ checks: ['success'], threads: [threads, []] });
+  const controller = new AbortController();
+  const input = baseInput(gh.github, {
+    signal: controller.signal,
+    cooldownMs: 1,
+    sleep: async () => {
+      controller.abort();
+    },
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      workerModel: dummyModel,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runReviewerOverride: async () => ({
+        kind: 'ok',
+        resolutions: [{ threadId: 'TH_M', kind: 'fixed', commitSha: 'abc' }],
+      }),
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'cancelled');
+  if (result.kind === 'cancelled') assert.equal(result.iterations, 1);
+  assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0);
+});
+
 test('runTakeOverFlow: Reviewer error → blocked, no merge', async () => {
   const threads: ReviewThread[] = [
     {

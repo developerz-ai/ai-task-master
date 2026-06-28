@@ -171,7 +171,11 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
   return runWorker(agent, workerInput);
 }
 
-async function rebaseAndForcePush(
+// The one push path for the whole repo: rebase onto origin/<base>, then `git push --force-with-lease`
+// (never plain `git push`, which fails against a rebased remote; never plain `--force`). On a rebase
+// conflict it aborts the half-applied rebase and blocks. Shared by `runFixSession` (WorkLoop) and the
+// `merge-pr` take-over loop so every force-push goes through the same rebase-first guard.
+export async function rebaseAndForcePush(
   runCmd: RunCmd,
   worktreePath: string,
   baseBranch: string,

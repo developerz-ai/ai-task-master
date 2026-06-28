@@ -1,0 +1,27 @@
+plan: 101-claudetm-start-mergepr-port
+title: Port claudetm start / merge-pr behavior to aitm
+status: not_started        # not_started | in_progress | blocked | complete | superseded
+created_by: sebi
+worked_by: ""              # executor fills with their git user.name
+owner: sebi
+percent: 0
+current_focus: ""
+slices:
+  - file: 01-coding-style-distillation.md
+    status: not_started
+    percent: 0
+  - file: 02-task-subtask-model.md
+    status: not_started
+    percent: 0
+  - file: 03-pr-lifecycle-stages.md
+    status: not_started
+    percent: 0
+  - file: 04-ci-fix-loop.md
+    status: not_started
+    percent: 0
+  - file: 05-tests.md
+    status: not_started
+    percent: 0
+evidence: []
+notes: "claudetm webhooks + mailbox are OUT OF SCOPE per CLAUDE.md — excluded. Budget/verification/release phases excluded from v1 unless requested. State dir stays .ai-task-master/. Per-group stage (not global) because aitm runs groups concurrently."
+last_updated: 2026-06-28

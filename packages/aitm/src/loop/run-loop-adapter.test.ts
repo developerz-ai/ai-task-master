@@ -114,7 +114,7 @@ function makeOrchestrator(
 function makeGithub(): WorkLoopGithub {
   return {
     defaultBranch: async () => 'main',
-    waitForChecks: async () => 'success',
+    waitForChecks: async () => ({ state: 'success', failedChecks: [] }),
     listUnresolvedThreads: async (): Promise<ReviewThread[]> => [],
     mergePr: async () => {},
   };
@@ -384,7 +384,7 @@ test('resume: an interrupted waiting-ci group is rescheduled through the real ad
     defaultBranch: async () => 'main',
     waitForChecks: async () => {
       waitForChecksCalls++;
-      return 'success';
+      return { state: 'success', failedChecks: [] };
     },
     listUnresolvedThreads: async (): Promise<ReviewThread[]> => [],
     mergePr: async () => {},

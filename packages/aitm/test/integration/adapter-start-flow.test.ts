@@ -71,7 +71,7 @@ function integrationSeams(mockModel: MockLanguageModelV3, defaultBranch: string)
       planGroups: async () => ({ kind: 'ok', groups: [PLAN_GROUP] }),
       makeGithub: (): WorkLoopGithub => ({
         defaultBranch: async () => defaultBranch,
-        waitForChecks: async () => 'success',
+        waitForChecks: async () => ({ state: 'success' as const, failedChecks: [] }),
         listUnresolvedThreads: async () => [],
         mergePr: async () => {},
       }),

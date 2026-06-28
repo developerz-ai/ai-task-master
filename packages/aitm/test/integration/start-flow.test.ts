@@ -159,7 +159,7 @@ function makeRunLoop(
 
     const github = {
       defaultBranch: async () => defaultBranch,
-      waitForChecks: async () => 'success' as const,
+      waitForChecks: async () => ({ state: 'success' as const, failedChecks: [] }),
       listUnresolvedThreads: async () => [],
       mergePr: async () => {},
     };
@@ -354,7 +354,7 @@ test('start-flow: 2-task group writes [x] per completed task in plan.md', async 
 
           const github = {
             defaultBranch: async () => defaultBranch,
-            waitForChecks: async () => 'success' as const,
+            waitForChecks: async () => ({ state: 'success' as const, failedChecks: [] }),
             listUnresolvedThreads: async () => [],
             mergePr: async () => {},
           };

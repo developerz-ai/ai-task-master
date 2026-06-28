@@ -85,6 +85,55 @@ test('saveComments writes one file per thread plus a summary', async () => {
   }
 });
 
+test('readAddressedThreads returns an empty set when nothing was recorded', async () => {
+  const dir = await tempDir();
+  try {
+    const store = new PrContextStore(dir.path);
+    const addressed = await store.readAddressedThreads(3);
+    assert.equal(addressed.size, 0);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('recordAddressedThreads persists ids that readAddressedThreads can read back', async () => {
+  const dir = await tempDir();
+  try {
+    const store = new PrContextStore(dir.path);
+    await store.recordAddressedThreads(3, ['t1', 't2']);
+    const addressed = await store.readAddressedThreads(3);
+    assert.deepEqual([...addressed].sort(), ['t1', 't2']);
+    const raw = await readFile(join(store.prDir(3), 'addressed_threads.json'), 'utf8');
+    assert.deepEqual(JSON.parse(raw), ['t1', 't2']);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('recordAddressedThreads merges across calls and de-dups', async () => {
+  const dir = await tempDir();
+  try {
+    const store = new PrContextStore(dir.path);
+    await store.recordAddressedThreads(3, ['t1', 't2']);
+    await store.recordAddressedThreads(3, ['t2', 't3']);
+    const addressed = await store.readAddressedThreads(3);
+    assert.deepEqual([...addressed].sort(), ['t1', 't2', 't3']);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('recordAddressedThreads writes nothing for an empty id list', async () => {
+  const dir = await tempDir();
+  try {
+    const store = new PrContextStore(dir.path);
+    await store.recordAddressedThreads(3, []);
+    await assert.rejects(() => readdir(store.prDir(3)));
+  } finally {
+    await dir.cleanup();
+  }
+});
+
 test('clear removes a PR context dir', async () => {
   const dir = await tempDir();
   try {

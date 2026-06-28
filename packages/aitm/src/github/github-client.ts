@@ -66,6 +66,18 @@ export const defaultSleep: Sleep = (ms) =>
 
 export const CHECKS_INITIAL_DELAY_MS = 1000;
 export const CHECKS_MAX_DELAY_MS = 60_000;
+// Hard ceiling on how long waitForChecks polls before giving up — ports claude-task-master's
+// wait_for_ci_complete 90-minute timeout. Reaching it is the only remaining throw path now that
+// failures are returned, not thrown (hence CiFailed is kept strictly for the timeout case).
+export const CHECKS_TIMEOUT_MS = 90 * 60_000;
+
+// waitForChecks collapses the per-check buckets into one of three states; callers branch on it
+// instead of catching a throw. failedChecks is populated only when state is 'failure' (one entry
+// per failed/cancelled check) for diagnostics — the fix loop re-downloads full logs via
+// getFailedCiLogs(pr) rather than relying on these names.
+export type CiState = 'success' | 'failure' | 'pending';
+export type FailedCheck = { name: string; status: 'failure' | 'cancelled' };
+export type CiResult = { state: CiState; failedChecks: FailedCheck[] };
 
 export class GitHubClient {
   // Capability matrix — docs/github-integration.md §"Capabilities".
@@ -158,8 +170,9 @@ export class GitHubClient {
     return pr;
   }
 
-  async waitForChecks(pr: number): Promise<CheckStatus> {
+  async waitForChecks(pr: number): Promise<CiResult> {
     let delay = CHECKS_INITIAL_DELAY_MS;
+    let waited = 0;
     while (true) {
       const r = await this.runCmd(
         'gh',
@@ -174,10 +187,14 @@ export class GitHubClient {
       }
       const status = aggregateChecks(rows);
       if (status === 'failure' || status === 'cancelled') {
-        throw new CiFailed(`PR #${pr} ${status}: ${summarizeFailures(rows)}`);
+        return { state: 'failure', failedChecks: collectFailedChecks(rows) };
       }
-      if (status !== 'pending') return status;
+      if (status !== 'pending') return { state: 'success', failedChecks: [] };
+      if (waited >= CHECKS_TIMEOUT_MS) {
+        throw new CiFailed(`PR #${pr} checks still pending after ${Math.round(waited / 1000)}s`);
+      }
       await this.sleep(delay);
+      waited += delay;
       delay = Math.min(delay * 2, CHECKS_MAX_DELAY_MS);
     }
   }
@@ -533,10 +550,13 @@ function aggregateChecks(rows: CheckRow[]): CheckStatus {
   return pending ? 'pending' : 'success';
 }
 
-function summarizeFailures(rows: CheckRow[]): string {
-  const bad = rows.filter((r) => r.bucket === 'fail' || r.bucket === 'cancel');
-  if (bad.length === 0) return 'unknown';
-  return bad.map((r) => `${r.name}=${r.bucket}`).join(', ');
+function collectFailedChecks(rows: CheckRow[]): FailedCheck[] {
+  const out: FailedCheck[] = [];
+  for (const row of rows) {
+    const status = BUCKET_TO_STATUS[row.bucket];
+    if (status === 'failure' || status === 'cancelled') out.push({ name: row.name, status });
+  }
+  return out;
 }
 
 // `gh repo view --json owner,name` returns `{ owner: { login }, name }`.

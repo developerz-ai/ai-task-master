@@ -6,11 +6,12 @@
 //     ci/summary.txt               which checks failed
 //     comments/NNN_<path>.txt      one file per unresolved review thread
 //     comments/summary.txt         counts + files touched
+//     addressed_threads.json       review-thread IDs already handled, so a re-poll never re-processes them
 //
 // SRP: this module only persists/clears the context. Fetching the logs is GitHubClient's job
 // (getFailedCiLogs + listUnresolvedThreads); wiring lives in the merge-pr flow.
 
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ReviewThread } from '../github/schema.ts';
 
@@ -87,6 +88,35 @@ export class PrContextStore {
       ].join('\n'),
     );
     return commentsDir;
+  }
+
+  // Review threads already replied to/resolved. The addressing-reviews loop subtracts these from
+  // the unresolved set so it never re-processes a thread across re-polls. Missing file → none yet.
+  async readAddressedThreads(pr: number): Promise<Set<string>> {
+    try {
+      const raw = await readFile(this.addressedThreadsFile(pr), 'utf8');
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return new Set();
+      return new Set(parsed.filter((id): id is string => typeof id === 'string'));
+    } catch {
+      return new Set();
+    }
+  }
+
+  // Additive: merges ids into whatever was recorded before, so iterations accumulate.
+  async recordAddressedThreads(pr: number, ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const merged = await this.readAddressedThreads(pr);
+    for (const id of ids) merged.add(id);
+    await mkdir(this.prDir(pr), { recursive: true });
+    await writeFile(
+      this.addressedThreadsFile(pr),
+      `${JSON.stringify([...merged].sort(), null, 2)}\n`,
+    );
+  }
+
+  private addressedThreadsFile(pr: number): string {
+    return join(this.prDir(pr), 'addressed_threads.json');
   }
 }
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { CiFailed } from '../github/errors.ts';
+import type { CiResult } from '../github/github-client.ts';
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerResult } from '../subagents/worker.ts';
@@ -13,6 +14,16 @@ type GhCall =
   | { method: 'mergePr' }
   | { method: 'reply'; threadId: string; body: string }
   | { method: 'resolve'; threadId: string };
+
+// The flow only reads CiResult.state, so collapse the scripted CheckStatus into the three CiState
+// values: any failed/cancelled status → 'failure', pending → 'pending', everything else → 'success'.
+function toCiResult(status: CheckStatus): CiResult {
+  if (status === 'failure' || status === 'cancelled') {
+    return { state: 'failure', failedChecks: [{ name: 'check', status }] };
+  }
+  if (status === 'pending') return { state: 'pending', failedChecks: [] };
+  return { state: 'success', failedChecks: [] };
+}
 
 // Build a github stub whose waitForChecks + listUnresolvedThreads cycle through a scripted
 // sequence per call. mergePr / replyToThread / resolveThread are recorded as-is.
@@ -31,7 +42,7 @@ function fakeGithub(opts: {
         calls.push({ method: 'waitForChecks' });
         const step = opts.checks[checkIdx++] ?? opts.checks[opts.checks.length - 1] ?? 'success';
         if (step === 'throw-cifailed') throw new CiFailed('CI fail');
-        return step;
+        return toCiResult(step);
       },
       listUnresolvedThreads: async () => {
         calls.push({ method: 'listUnresolvedThreads' });

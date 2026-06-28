@@ -173,6 +173,9 @@ function coerceLegacyStage(value: unknown): unknown {
 
 function inferStage(group: Record<string, unknown>): GroupStage {
   if (group.status === 'merged') return 'merged';
+  // A legacy terminal `blocked` group must stay blocked — otherwise it falls through to
+  // 'waiting-ci'/'pending' and becomes runnable again on resume, re-entering work it was halted on.
+  if (group.status === 'blocked') return 'blocked';
   if (group.pr != null) return 'waiting-ci';
   return 'pending';
 }

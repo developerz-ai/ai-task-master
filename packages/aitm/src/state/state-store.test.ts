@@ -170,6 +170,27 @@ test('read: infers a missing group stage from status/pr', async () => {
   }
 });
 
+test('read: a legacy blocked group stays blocked (not reclassified runnable)', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+
+    // A pre-stage-machine terminal `blocked` group: status blocked, and a pr set (which would
+    // otherwise infer 'waiting-ci'). It must stay blocked so resume doesn't re-run halted work.
+    const legacy: Record<string, unknown> = JSON.parse(JSON.stringify(baseState()));
+    legacy.prGroups = [legacyGroup({ id: 'stuck', status: 'blocked', pr: 7 })];
+    await writeFile(join(dir, 'state.json'), JSON.stringify(legacy));
+
+    const read = await store.read();
+    assert.equal(read.prGroups[0]?.stage, 'blocked');
+    assert.equal(read.prGroups[0]?.status, 'blocked');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('read: preserves an existing group stage instead of inferring', async () => {
   const repo = await makeTempRepo();
   try {

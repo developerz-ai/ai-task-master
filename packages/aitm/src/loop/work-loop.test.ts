@@ -485,6 +485,28 @@ test('prPerTask: resume skips done tasks and opens a PR only for the remaining o
   assert.equal(calls.openPr.length, 1, 'one PR for the single remaining task');
 });
 
+test('prPerTask: multi-task group is marked merged only after the final task', async () => {
+  // Regression: marking the whole group terminal after the FIRST task's PR strands the remaining
+  // tasks — a crash there leaves a 'merged' group PlanGraph.ready() won't reschedule. The group
+  // must stay schedulable (in-progress) until the last task lands.
+  const { orchestrator } = makeOrchestrator({ prNumber: 7 });
+  const { github } = makeGithub({ checks: ['success', 'success'], threads: [] });
+  const { state, updates } = makeState([twoTaskGroup()]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prPerTask: true }),
+  );
+  await loop.runGroup(twoTaskGroup());
+
+  const statusAt = (s: RunState): PrGroup['status'] | undefined =>
+    s.prGroups.find((g) => g.id === 'multi')?.status;
+  const mergedIdx = updates.findIndex((s) => statusAt(s) === 'merged');
+  assert.equal(mergedIdx, updates.length - 1, 'group reaches merged only on the final write');
+  assert.ok(
+    !updates.slice(0, -1).some((s) => statusAt(s) === 'merged'),
+    'group is never marked merged before the last task',
+  );
+});
+
 test('autoMerge: success path runs waitForChecks → mergePr and marks merged', async () => {
   const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 11 });
   const { github, calls: ghCalls } = makeGithub({ checks: ['success'], threads: [] });

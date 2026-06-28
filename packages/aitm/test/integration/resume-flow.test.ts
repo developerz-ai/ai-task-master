@@ -11,9 +11,11 @@
 //
 // Test 3 — mid-lifecycle interrupt (after pr-open), resume at waiting-ci:
 //   - First run completes working + pr-open, halts at waiting-ci (autoMerge:false).
-//   - Status reset to 'pending' (preserving stage:'waiting-ci' + pr) to simulate restart.
+//   - Restart simulated via the production normalizeResumeStatus (preserving stage:'waiting-ci' +
+//     pr), the same normalization runStart applies on resume — not an ad-hoc status reset.
 //   - Second run resumes at waiting-ci: worker and openPr are NOT called; waitForChecks IS called.
 //   - Group advances to merged. Stub pool skips real git worktree (not needed post-pr-open).
+//   The real adapter resume path is unit-tested in src/loop/run-loop-adapter.test.ts.
 
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
@@ -24,6 +26,7 @@ import { execa } from 'execa';
 import type { RunLoopInput } from '../../src/cli/commands.ts';
 import { runMergePr, runStart } from '../../src/cli/commands.ts';
 import type { PullRequest } from '../../src/github/schema.ts';
+import { normalizeResumeStatus } from '../../src/loop/resume-normalize.ts';
 import type {
   WorkLoopOrchestrator,
   WorkLoopPool,
@@ -385,13 +388,12 @@ test('resume-flow: interrupt after pr-open; resume picks up at waiting-ci withou
     assert.equal(grp1.stage, 'waiting-ci', 'stage must be waiting-ci after first run');
     assert.equal(grp1.pr, 1, 'pr must be 1 after first run');
 
-    // Simulate the "interrupted process restarted" scenario: reset the coarse status back to
-    // 'pending' so PlanGraph.ready() picks the group up on the next run. The fine-grained
-    // stage ('waiting-ci') and pr number are preserved — that is the resume contract.
-    await store.update((s) => ({
-      ...s,
-      prGroups: s.prGroups.map((g) => ({ ...g, status: 'pending' as const })),
-    }));
+    // Simulate the "interrupted process restarted" scenario using the SAME production normalizer
+    // runStart applies on resume (not an ad-hoc reset): it maps the interrupted coarse status back
+    // to 'pending' so PlanGraph.ready() schedules the group, while preserving the fine-grained
+    // stage ('waiting-ci') and pr number — the resume contract. The unit suite
+    // (src/loop/run-loop-adapter.test.ts) covers this normalization through the real adapter.
+    await store.update((s) => ({ ...s, prGroups: normalizeResumeStatus(s.prGroups) }));
 
     // ── Second run: resume at waiting-ci ─────────────────────────────────────
     let workerCalls = 0;

@@ -232,22 +232,8 @@ export class WorkLoop {
     worktree: Worktree,
     baseBranch: string,
   ): Promise<void> {
-    let worked = group;
-    let opened = false;
-    for (const task of group.tasks) {
-      if (task.done) continue;
-      const result = await this.runOneTask(worked, task, worktree, baseBranch);
-      if (result.kind === 'blocked') {
-        await this.markStatus(group.id, 'blocked');
-        this.outcomes.push({ groupId: group.id, status: 'blocked', reason: result.reason });
-        return;
-      }
-      worked = result.group;
-      await this.openAndMaybeMerge(worked, result.delivery, worktree, baseBranch);
-      opened = true;
-    }
-
-    if (!opened) {
+    let remaining = group.tasks.filter((t) => !t.done).length;
+    if (remaining === 0) {
       // Every task was already done on entry — a resumed group whose work finished in a prior
       // run but which never opened a PR. There's no fresh delivery to compose one from, so
       // surface it as blocked rather than fabricating an empty PR.
@@ -257,6 +243,25 @@ export class WorkLoop {
         status: 'blocked',
         reason: 'all tasks already complete but no pull request was opened',
       });
+      return;
+    }
+
+    let worked = group;
+    for (const task of group.tasks) {
+      if (task.done) continue;
+      const result = await this.runOneTask(worked, task, worktree, baseBranch);
+      if (result.kind === 'blocked') {
+        await this.markStatus(group.id, 'blocked');
+        this.outcomes.push({ groupId: group.id, status: 'blocked', reason: result.reason });
+        return;
+      }
+      worked = result.group;
+      remaining -= 1;
+      // Only the last task may mark the group terminal. Marking the whole group awaiting-pr/merged
+      // after an earlier task's PR would strand the still-undone tasks: a crash there leaves a
+      // terminal group PlanGraph.ready() won't reschedule. While tasks remain, the group stays
+      // in-progress (schedulable on resume).
+      await this.openAndMaybeMerge(worked, result.delivery, worktree, baseBranch, remaining === 0);
     }
   }
 
@@ -410,19 +415,22 @@ export class WorkLoop {
   }
 
   // Open the PR for one delivery, persist the outcome, and — under autoMerge — run the CI/review/
-  // merge flow. Invoked once per group (default) or once per task (`prPerTask`). External side
-  // effects (openPr/mergePr) are guarded by StateWriteAfterSuccess so a failed state write never
-  // rolls a landed PR back to 'blocked'.
+  // merge flow. Invoked once per task in `prPerTask` mode. `final` is true only for the last
+  // undone task: until then the group's persisted status stays 'in-progress' (schedulable) so a
+  // crash between per-task PRs leaves the remaining tasks runnable on resume. External side effects
+  // (openPr/mergePr) are guarded by StateWriteAfterSuccess so a failed state write never rolls a
+  // landed PR back to 'blocked'.
   private async openAndMaybeMerge(
     group: PrGroup,
     delivery: WorkerDelivery,
     worktree: Worktree,
     baseBranch: string,
+    final: boolean,
   ): Promise<void> {
     const pr = await this.deps.orchestrator.openPr(group, delivery, baseBranch);
     await this.persistAfterSideEffect(
       { groupId: group.id, status: 'awaiting-pr', pr: pr.number },
-      () => this.markStatus(group.id, 'awaiting-pr', { pr: pr.number }),
+      () => this.markStatus(group.id, final ? 'awaiting-pr' : 'in-progress', { pr: pr.number }),
     );
 
     if (!this.deps.autoMerge) {
@@ -432,7 +440,7 @@ export class WorkLoop {
 
     await this.autoMergeFlow(group, pr, worktree, baseBranch);
     await this.persistAfterSideEffect({ groupId: group.id, status: 'merged', pr: pr.number }, () =>
-      this.markStatus(group.id, 'merged'),
+      this.markStatus(group.id, final ? 'merged' : 'in-progress'),
     );
     this.outcomes.push({ groupId: group.id, status: 'merged', pr: pr.number });
   }

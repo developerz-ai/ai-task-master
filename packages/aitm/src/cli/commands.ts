@@ -522,6 +522,7 @@ function toCliOverrides(args: Extract<ParsedArgs, { kind: 'start' }>): CliOverri
   if (args.maxSessions !== undefined)
     out.maxSessions = args.maxSessions === 0 ? null : args.maxSessions;
   if (args.autoMerge !== undefined) out.autoMerge = args.autoMerge;
+  if (args.prPerTask !== undefined) out.prPerTask = args.prPerTask;
   if (args.stylePath !== undefined) out.stylePath = args.stylePath;
   if (args.model !== undefined) out.model = args.model;
   if (args.concurrency !== undefined && args.concurrency > 0) out.concurrency = args.concurrency;
@@ -570,7 +571,7 @@ function buildInitialRunState(input: {
     updatedAt: now,
     options: {
       autoMerge: input.resolved.autoMerge,
-      prPerTask: false,
+      prPerTask: input.resolved.prPerTask,
       maxPrs: input.resolved.maxPrs,
       maxSessions: input.resolved.maxSessions,
       mergeMethod: input.resolved.mergeMethod,
@@ -808,7 +809,7 @@ async function synthesizeTakeoverState(input: {
     updatedAt: now,
     options: {
       autoMerge: resolved.autoMerge,
-      prPerTask: false,
+      prPerTask: resolved.prPerTask,
       maxPrs: resolved.maxPrs,
       maxSessions: resolved.maxSessions,
       mergeMethod: resolved.mergeMethod,

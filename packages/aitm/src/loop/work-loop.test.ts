@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { CiFailed } from '../github/errors.ts';
 import type { MergeMethod } from '../github/github-client.ts';
 import type { CheckStatus, PullRequest, ReviewThread } from '../github/schema.ts';
-import type { PrGroup, RunState } from '../state/schema.ts';
+import type { PrGroup, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import type { Worktree } from '../workspace/worktree-pool.ts';
@@ -83,7 +83,7 @@ type OrchestratorCalls = {
   runReviewer: { pr: number; threads: ReviewThread[]; worktree: Worktree }[];
 };
 
-type WorkerInvocationCall = { group: PrGroup; worktree: Worktree; baseBranch: string };
+type WorkerInvocationCall = { group: PrGroup; task?: Task; worktree: Worktree; baseBranch: string };
 
 function makeOrchestrator(
   config: {
@@ -188,17 +188,25 @@ function makePool(): { pool: WorkLoopPool; calls: PoolCalls; live: () => number 
   return { pool, calls, live: () => live.size };
 }
 
-function makeState(): { state: WorkLoopState; updates: RunState[] } {
-  let current = baseState();
+function makeState(seed: PrGroup[] = []): {
+  state: WorkLoopState;
+  updates: RunState[];
+  plans: string[];
+} {
+  let current: RunState = { ...baseState(), prGroups: seed };
   const updates: RunState[] = [];
+  const plans: string[] = [];
   const state: WorkLoopState = {
     update: async (mutator) => {
       current = mutator(current);
       updates.push(current);
       return current;
     },
+    writePlan: async (markdown) => {
+      plans.push(markdown);
+    },
   };
-  return { state, updates };
+  return { state, updates, plans };
 }
 
 function makeGraph(
@@ -306,10 +314,90 @@ test('runGroup persists status transitions to state for the matching group id', 
   await loop.runGroup(group('beta'));
 
   const beta = (s: RunState): PrGroup | undefined => s.prGroups.find((p) => p.id === 'beta');
+  // The per-task completion write keeps status 'in-progress' while flipping task.done, so dedupe
+  // consecutive statuses to assert the transition sequence.
   const statuses = updates.map((s) => beta(s)?.status);
-  assert.deepEqual(statuses, ['in-progress', 'awaiting-pr']);
+  const transitions = statuses.filter((st, i) => st !== statuses[i - 1]);
+  assert.deepEqual(transitions, ['in-progress', 'awaiting-pr']);
   assert.equal(beta(updates[updates.length - 1] as RunState)?.pr, 9);
   assert.equal(beta(updates[updates.length - 1] as RunState)?.branch, 'aitm/beta');
+  assert.equal(beta(updates[updates.length - 1] as RunState)?.tasks[0]?.done, true);
+});
+
+test('processGroup runs each undone task in order, marks done, re-renders plan.md', async () => {
+  const multi = group('multi', {
+    tasks: [
+      { id: 'a', text: 'first task', complexity: 'normal', done: false },
+      { id: 'b', text: 'second task', complexity: 'complex', done: false },
+    ],
+  });
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
+  const { state, updates, plans } = makeState([multi]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(multi);
+
+  // One Worker pass per task, in order, each scoped to its own task.
+  assert.equal(calls.runWorker.length, 2);
+  assert.deepEqual(
+    calls.runWorker.map((c) => c.task?.id),
+    ['a', 'b'],
+  );
+  assert.equal(calls.finalizeCommit.length, 2);
+  // PR opens once, after the final task (group-as-PR default).
+  assert.equal(calls.openPr.length, 1);
+
+  // Both tasks marked done in persisted state.
+  const last = updates[updates.length - 1] as RunState;
+  assert.deepEqual(
+    last.prGroups.find((g) => g.id === 'multi')?.tasks.map((t) => t.done),
+    [true, true],
+  );
+
+  // plan.md re-rendered per task; the final render shows both tasks checked.
+  assert.ok(plans.length >= 2, 'plan.md re-rendered after each task');
+  const finalPlan = plans[plans.length - 1] as string;
+  assert.match(finalPlan, /## Group: multi/);
+  assert.match(finalPlan, /- \[x\] \[NORMAL\] first task/);
+  assert.match(finalPlan, /- \[x\] \[COMPLEX\] second task/);
+});
+
+test('resume: tasks already marked done are skipped', async () => {
+  const resumed = group('resume', {
+    tasks: [
+      { id: 'a', text: 'already done', complexity: 'normal', done: true },
+      { id: 'b', text: 'still pending', complexity: 'normal', done: false },
+    ],
+  });
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 5 });
+  const { state, updates } = makeState([resumed]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(resumed);
+
+  // Only the undone task runs.
+  assert.equal(calls.runWorker.length, 1);
+  assert.equal(calls.runWorker[0]?.task?.id, 'b');
+  assert.equal(calls.finalizeCommit.length, 1);
+
+  const last = updates[updates.length - 1] as RunState;
+  assert.deepEqual(
+    last.prGroups.find((g) => g.id === 'resume')?.tasks.map((t) => t.done),
+    [true, true],
+  );
+});
+
+test('group with all tasks already done and no delivery → blocked', async () => {
+  const finished = group('finished', {
+    tasks: [{ id: 'a', text: 'done', complexity: 'normal', done: true }],
+  });
+  const { orchestrator, calls } = makeOrchestrator();
+  const { state, updates } = makeState([finished]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(finished);
+
+  assert.equal(calls.runWorker.length, 0, 'no worker runs when every task is done');
+  assert.equal(calls.openPr.length, 0, 'no PR opened without a fresh delivery');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((g) => g.id === 'finished')?.status, 'blocked');
 });
 
 test('autoMerge: success path runs waitForChecks → mergePr and marks merged', async () => {
@@ -559,7 +647,7 @@ test('markStatus does not increment persisted sessionCount (status transitions a
   const { state, updates } = makeState();
   const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
   await loop.runGroup(group('m'));
-  // Three update calls in this path: in-progress, awaiting-pr — none should touch sessionCount.
+  // Update calls in this path: in-progress, task-done, awaiting-pr — none should touch sessionCount.
   for (const s of updates) {
     assert.equal(s.sessionCount, 0, 'markStatus must not bump sessionCount');
   }
@@ -615,8 +703,8 @@ test('state write failure after openPr → loop yields awaiting-pr outcome, not 
   const state: WorkLoopState = {
     update: async (mutator) => {
       callCount++;
-      // call 1: incrementSessionCount, call 2: in-progress, call 3: awaiting-pr (fail here)
-      if (callCount === 3) throw new Error('disk full');
+      // calls: 1 incrementSessionCount, 2 in-progress, 3 task-done, 4 awaiting-pr (fail here)
+      if (callCount === 4) throw new Error('disk full');
       return mutator(baseState());
     },
   };
@@ -644,8 +732,8 @@ test('state write failure after mergePr → outcome stays merged', async () => {
   const state: WorkLoopState = {
     update: async (mutator) => {
       callCount++;
-      // calls: 1 sessionCount, 2 in-progress, 3 awaiting-pr, 4 merged (fail here)
-      if (callCount === 4) throw new Error('disk full');
+      // calls: 1 sessionCount, 2 in-progress, 3 task-done, 4 awaiting-pr, 5 merged (fail here)
+      if (callCount === 5) throw new Error('disk full');
       return mutator(baseState());
     },
   };

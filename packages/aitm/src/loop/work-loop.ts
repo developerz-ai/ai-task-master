@@ -15,13 +15,17 @@
 import { CiFailed } from '../github/errors.ts';
 import type { MergeMethod } from '../github/github-client.ts';
 import type { CheckStatus, PullRequest, ReviewThread } from '../github/schema.ts';
-import type { PrGroup, RunState } from '../state/schema.ts';
+import { renderPlanMarkdown } from '../plan/plan-markdown.ts';
+import type { PrGroup, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import type { Worktree } from '../workspace/worktree-pool.ts';
 
 export type WorkerInvocation = {
   group: PrGroup;
+  // The specific task being worked this pass. Omitted by the CI-fix invocation in autoMergeFlow,
+  // which re-runs the Worker over the whole group rather than a single task.
+  task?: Task;
   worktree: Worktree;
   baseBranch: string;
 };
@@ -53,6 +57,9 @@ export type WorkLoopPool = {
 
 export type WorkLoopState = {
   update(mutator: (s: RunState) => RunState): Promise<RunState>;
+  // Re-render plan.md (checkbox markdown) after per-task completion. Optional: stubs that don't
+  // care about the on-disk plan can omit it; production wires it to StateStore.writePlan.
+  writePlan?(markdown: string): Promise<void>;
 };
 
 export type WorkLoopGraph = {
@@ -178,16 +185,41 @@ export class WorkLoop {
     baseBranch: string,
   ): Promise<void> {
     const { orchestrator } = this.deps;
-    const workerResult = await orchestrator.runWorker({ group, worktree, baseBranch });
-    if (workerResult.kind !== 'ok') {
-      const reason = workerResult.kind === 'blocked' ? workerResult.reason : workerResult.error;
+
+    // Execute the group task-by-task. Each not-yet-done task is one Worker pass → commit → mark
+    // done → persist → re-render plan.md. On resume, tasks already marked `done` in a prior run
+    // are skipped so landed work is never redone. The PR opens once, after the final task
+    // (aitm's group-as-PR default); per-task PR timing is layered on separately.
+    let worked = group;
+    let delivery: WorkerDelivery | undefined;
+    for (const task of group.tasks) {
+      if (task.done) continue;
+      const result = await orchestrator.runWorker({ group: worked, task, worktree, baseBranch });
+      if (result.kind !== 'ok') {
+        const reason = result.kind === 'blocked' ? result.reason : result.error;
+        await this.markStatus(group.id, 'blocked');
+        this.outcomes.push({ groupId: group.id, status: 'blocked', reason });
+        return;
+      }
+      delivery = result.delivery;
+      await orchestrator.finalizeCommit(worked, delivery, worktree.path);
+      worked = await this.completeTask(worked, task.id);
+    }
+
+    if (delivery === undefined) {
+      // Every task was already done on entry — a resumed group whose work finished in a prior
+      // run but which never opened a PR. There's no fresh delivery to compose one from, so
+      // surface it as blocked rather than fabricating an empty PR.
       await this.markStatus(group.id, 'blocked');
-      this.outcomes.push({ groupId: group.id, status: 'blocked', reason });
+      this.outcomes.push({
+        groupId: group.id,
+        status: 'blocked',
+        reason: 'all tasks already complete but no pull request was opened',
+      });
       return;
     }
-    const delivery = workerResult.delivery;
-    await orchestrator.finalizeCommit(group, delivery, worktree.path);
-    const pr = await orchestrator.openPr(group, delivery, baseBranch);
+
+    const pr = await orchestrator.openPr(worked, delivery, baseBranch);
     // openPr already landed externally; if persistence fails here, surface the real
     // outcome via StateWriteAfterSuccess so the outer catch doesn't flip us to 'blocked'.
     await this.persistAfterSideEffect(
@@ -200,12 +232,43 @@ export class WorkLoop {
       return;
     }
 
-    await this.autoMergeFlow(group, pr, worktree, baseBranch);
+    await this.autoMergeFlow(worked, pr, worktree, baseBranch);
     // mergePr already landed externally; same guard as above.
     await this.persistAfterSideEffect({ groupId: group.id, status: 'merged', pr: pr.number }, () =>
       this.markStatus(group.id, 'merged'),
     );
     this.outcomes.push({ groupId: group.id, status: 'merged', pr: pr.number });
+  }
+
+  // Mark one task complete: flip its `done` flag in persisted state (preserving the group's
+  // current status/branch/pr), re-render plan.md so the on-disk checkbox state matches, and
+  // return the group with the task marked done for the rest of this pass.
+  private async completeTask(group: PrGroup, taskId: string): Promise<PrGroup> {
+    const next = await this.deps.state.update((s) => ({
+      ...s,
+      prGroups: s.prGroups.map((g) =>
+        g.id === group.id
+          ? { ...g, tasks: g.tasks.map((t) => (t.id === taskId ? { ...t, done: true } : t)) }
+          : g,
+      ),
+    }));
+    await this.renderPlan(next.prGroups);
+    return {
+      ...group,
+      tasks: group.tasks.map((t) => (t.id === taskId ? { ...t, done: true } : t)),
+    };
+  }
+
+  // Re-render plan.md from the current PR groups so its checkboxes ([ ] / [x]) reflect per-task
+  // completion. No-op when the state port doesn't expose writePlan (some unit-test stubs).
+  private async renderPlan(groups: readonly PrGroup[]): Promise<void> {
+    const markdown = renderPlanMarkdown(
+      groups.map((g) => ({
+        title: g.title,
+        tasks: g.tasks.map((t) => ({ text: t.text, complexity: t.complexity, done: t.done })),
+      })),
+    );
+    await this.deps.state.writePlan?.(markdown);
   }
 
   // Run a state write that follows a successful external side effect. If the write throws,

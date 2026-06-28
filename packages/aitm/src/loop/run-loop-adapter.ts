@@ -99,6 +99,9 @@ export type AdapterStatePort = {
   read(): Promise<RunState>;
   update(mutator: (s: RunState) => RunState): Promise<RunState>;
   readContext?(): Promise<string | null>;
+  // Re-render plan.md as the loop marks tasks done. Optional so in-memory test stubs can omit it;
+  // StateStore supplies it in production.
+  writePlan?(plan: string): Promise<void>;
 };
 
 export type PlanGroupsOutcome =
@@ -181,6 +184,9 @@ export async function runLoopAdapter(
         const next = await state.update(mutator);
         liveGroups = next.prGroups;
         return next;
+      },
+      writePlan: async (markdown) => {
+        await state.writePlan?.(markdown);
       },
     };
 

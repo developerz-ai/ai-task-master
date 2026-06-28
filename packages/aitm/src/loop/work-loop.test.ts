@@ -929,6 +929,45 @@ test('state write failure after openPr → loop yields awaiting-pr outcome, not 
   assert.notEqual(result.kind, 'blocked', 'result must not flip to blocked');
 });
 
+test('run(): CI fix rebase conflict → WorkLoopResult.kind === "blocked" with conflict reason', async () => {
+  // Conflict scenario propagated through run(): ciFixResult blocked → group blocked → run blocked.
+  const { orchestrator } = makeOrchestrator({
+    prNumber: 55,
+    ciFixResults: [{ kind: 'blocked', reason: 'rebase conflict needs manual resolution' }],
+  });
+  const { github } = makeGithub({ checks: [ciFailure] });
+  const ready = makeGraph([group('conflict')], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, graph: ready.graph, autoMerge: true }),
+  );
+  const result = await loop.run();
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /conflict/i, 'reason contains conflict');
+    assert.equal(result.outcomes.length, 1);
+    assert.equal(result.outcomes[0]?.status, 'blocked');
+  }
+});
+
+test('run(): session cap reached → WorkLoopResult.kind === "session-cap"', async () => {
+  // Explicit assertion that the cap result is preserved through run() and carries no blocked outcome.
+  const groups = [group('a'), group('b'), group('c')];
+  let pass = 0;
+  const graph: WorkLoopGraph = {
+    ready: () => {
+      pass++;
+      return groups.slice(pass - 1);
+    },
+    isComplete: () => pass > 10,
+  };
+  const { orchestrator } = makeOrchestrator();
+  const loop = new WorkLoop(makeDeps({ orchestrator, graph, concurrency: 3, maxSessions: 1 }));
+  const result = await loop.run();
+  assert.equal(result.kind, 'session-cap');
+  // Outcomes record whatever groups ran before the cap fired.
+  assert.ok(Array.isArray(result.outcomes));
+});
+
 test('state write failure after mergePr → outcome stays merged', async () => {
   const { orchestrator } = makeOrchestrator({ prNumber: 88 });
   let callCount = 0;

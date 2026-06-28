@@ -284,6 +284,30 @@ test('runStart: awaiting-pr (--no-automerge) → exit 0 with merge-pr instructio
   }
 });
 
+test('runStart: loop cancelled → exit 2', async () => {
+  // cancel→exit2: WorkLoopResult.cancelled maps to exit code 2 for the start command too.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const result = await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async () => ({ kind: 'cancelled', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 2);
+    assert.match(result.message ?? '', /cancel/i);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('runStart: session-cap → exit 0', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();
@@ -682,6 +706,64 @@ test('runMergePr: flow cancelled → exit 2', async () => {
     );
     assert.equal(result.code, 2);
     assert.match(result.message ?? '', /cancel/i);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: flow blocked (iteration cap exhausted) → exit 1', async () => {
+  // cap→exit1: when the merge-pr take-over loop exhausts maxIterations, the flow returns blocked.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 5 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async () => ({
+          kind: 'blocked',
+          reason: 'iteration cap reached: 30 iterations without merge',
+          outcomes: [],
+        }),
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /iteration cap/i);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: flow blocked (rebase conflict) → exit 1', async () => {
+  // conflict→exit1: a git rebase conflict during force-push blocks the flow → exit 1.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 5 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async () => ({
+          kind: 'blocked',
+          reason: 'git rebase onto origin/main hit conflicts that need manual resolution',
+          outcomes: [],
+        }),
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /conflict|rebase/i);
   } finally {
     await repo.cleanup();
     await home.cleanup();

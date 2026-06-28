@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PlannedGroupSchema, PlanSchema } from './schema.ts';
+import { PlannedGroupSchema, PlannedTaskSchema, PlanSchema } from './schema.ts';
+
+test('PlannedTaskSchema defaults complexity to normal', () => {
+  const parsed = PlannedTaskSchema.parse({ description: 't1' });
+  assert.equal(parsed.complexity, 'normal');
+});
+
+test('PlannedTaskSchema accepts an explicit complexity', () => {
+  const parsed = PlannedTaskSchema.parse({ description: 't1', complexity: 'complex' });
+  assert.equal(parsed.complexity, 'complex');
+});
+
+test('PlannedTaskSchema rejects an unknown complexity', () => {
+  assert.throws(() => PlannedTaskSchema.parse({ description: 't1', complexity: 'huge' }));
+});
 
 test('PlannedGroupSchema defaults dependsOn to []', () => {
   const parsed = PlannedGroupSchema.parse({

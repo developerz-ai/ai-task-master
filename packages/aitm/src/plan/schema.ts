@@ -3,9 +3,13 @@
 // Planner returns to the Orchestrator before that persistence step.
 
 import { z } from 'zod';
+import { TaskComplexitySchema } from '../state/schema.ts';
 
 export const PlannedTaskSchema = z.object({
   description: z.string(),
+  // Mirrors Task.complexity in src/state/schema.ts — kept in sync so Planner
+  // output maps onto persisted PrGroup.tasks without a separate field.
+  complexity: TaskComplexitySchema.default('normal'),
   // Optional file hint helps Worker plan its parallel file-edit fanout.
   // See docs/vendor/ai-sdk/chunk-09.md §"Orchestrator-Worker" — Worker uses this
   // to emit a file manifest, then Promise.all over per-file editor subagents.

@@ -9,6 +9,7 @@
 import { homedir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import { type AgentConfig, AgentConfigDetector } from '../agent-config/agent-config-detector.ts';
+import { StyleDistiller } from '../agent-config/coding-style.ts';
 import { ConfigLoader } from '../config/config-loader.ts';
 import { ConfigWriter } from '../config/config-writer.ts';
 import { type AddProfileInput, ProfileManager } from '../config/profiles.ts';
@@ -31,6 +32,8 @@ export type RunLoopInput = {
   resolved: ResolvedConfig;
   credentials: Credentials;
   agentConfig: AgentConfig;
+  // Distilled coding-style digest; when absent, subagents fall back to agentConfig.contents.
+  styleDigest?: string;
   state: StateStore;
   github: GitHubClient;
   goal: string;
@@ -44,9 +47,20 @@ export type RunMergeFlowInput = {
   resolved: ResolvedConfig;
   credentials: Credentials;
   agentConfig: AgentConfig;
+  styleDigest?: string;
   state: StateStore;
   runState: RunState;
   github: GitHubClient;
+};
+
+// Inputs for resolving the coding-style digest fed to subagent prompts. The digest is distilled
+// once from AgentConfig + repo signals (StyleDistiller) and cached in the state dir; resume reuses
+// the cache. Bundled so the `resolveStyle` seam is stubbable in unit tests without a real LLM call.
+export type ResolveStyleInput = {
+  cwd: string;
+  credentials: Credentials;
+  agentConfig: AgentConfig;
+  state: StateStore;
 };
 
 // Inputs for the optional one-shot planning phase (issue #17). Mirrors the Planner's needs:
@@ -80,6 +94,10 @@ export type StartCtx = {
   // dispatch layer, which is what the start-flow tests exercise.
   runPlanner?: (input: RunPlannerInput) => Promise<RunPlannerOutcome>;
   runLoop?: (input: RunLoopInput) => Promise<WorkLoopResult>;
+  // Resolve the distilled coding-style digest threaded to subagents as `styleDigest`. Default:
+  // reuse the cached `coding-style.md`, else distill once and cache it — never blocking the run
+  // (degrades to raw AgentConfig.contents). Injected so unit tests skip the real LLM call.
+  resolveStyle?: (input: ResolveStyleInput) => Promise<string>;
 };
 
 // Minimal slice of GitHubClient used during the take-over precondition path (branch
@@ -96,6 +114,8 @@ export type MergePrCtx = {
   // Test seam: when omitted, a real GitHubClient(cwd) is constructed. Tests pass a
   // stub so the take-over flow does not actually shell out to git on a temp repo.
   github?: GitHubClient;
+  // See StartCtx.resolveStyle — same read-or-distill-or-fallback contract for the merge flow.
+  resolveStyle?: (input: ResolveStyleInput) => Promise<string>;
 };
 
 export type ConfigCtx = {
@@ -225,6 +245,17 @@ export async function runStart(
     }
   }
 
+  // Coding-style digest (plan slice 01): distilled once from AgentConfig + repo signals and cached
+  // in the state dir, reused on resume. Threaded into the loop so planner/worker/reviewer prompts
+  // carry the digest. Never blocks — a thrown seam degrades to raw AgentConfig.contents.
+  const resolveStyle = ctx.resolveStyle ?? defaultResolveStyle;
+  let styleDigest: string;
+  try {
+    styleDigest = await resolveStyle({ cwd, credentials, agentConfig, state });
+  } catch {
+    styleDigest = agentConfig.contents;
+  }
+
   const runLoop = ctx.runLoop ?? defaultRunLoop;
   let result: WorkLoopResult;
   try {
@@ -233,6 +264,7 @@ export async function runStart(
       resolved,
       credentials,
       agentConfig,
+      styleDigest,
       state,
       github,
       goal: args.goal,
@@ -348,6 +380,16 @@ export async function runMergePr(
     return { code: 1, message: 'gh CLI is not authenticated. Run `gh auth login`.' };
   }
 
+  // Same read-or-distill-or-fallback as runStart; reuses the cached digest a prior `aitm start`
+  // wrote, or distills once for a hand-built take-over PR. Never blocks the merge flow.
+  const resolveStyle = ctx.resolveStyle ?? defaultResolveStyle;
+  let styleDigest: string;
+  try {
+    styleDigest = await resolveStyle({ cwd, credentials, agentConfig, state });
+  } catch {
+    styleDigest = agentConfig.contents;
+  }
+
   const runMergeFlow = ctx.runMergeFlow ?? defaultRunMergeFlow;
   let result: WorkLoopResult;
   try {
@@ -358,6 +400,7 @@ export async function runMergePr(
       resolved,
       credentials,
       agentConfig,
+      styleDigest,
       state,
       runState,
       github,
@@ -612,6 +655,34 @@ function redactConfigKeys(file: ConfigFile): ConfigFile {
 
 const defaultAuthStatus: AuthStatusFn = (cwd) => new GitHubClient(cwd).authStatus();
 
+// Resolve the coding-style digest fed to subagent prompts: reuse the cached digest when present,
+// otherwise distill it once (smart-tier model) and cache it so resume reuses it. Never blocks the
+// run — an unreadable cache, a distill failure, or a cache-write failure all degrade to the raw
+// AgentConfig.contents. StyleDistiller.distill already degrades internally; the guards here cover
+// the surrounding cache IO so a flaky style step can't halt planning or merging.
+async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
+  const { cwd, credentials, agentConfig, state } = input;
+  try {
+    const cached = await state.readCodingStyle();
+    if (cached !== null && cached.trim() !== '') return cached;
+  } catch {
+    // Unreadable cache (non-ENOENT) — distill fresh rather than block the run.
+  }
+  let digest: string;
+  try {
+    const distiller = new StyleDistiller({ model: credentials.modelFor('planner') });
+    digest = await distiller.distill({ config: agentConfig, repoRoot: cwd });
+  } catch {
+    return agentConfig.contents;
+  }
+  try {
+    await state.writeCodingStyle(digest);
+  } catch {
+    // Cache write failed — use the in-memory digest; a later resume re-distills.
+  }
+  return digest;
+}
+
 // Default loop seam — production wiring of Planner → PlanGraph → WorktreePool → WorkLoop with
 // the Orchestrator/Worker/Reviewer subagents and MCP tools. Lives in run-loop-adapter.ts so this
 // module stays pure dispatch; the adapter exposes its own seams for unit + integration tests.
@@ -630,7 +701,7 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
 
   const worktreePath = input.cwd;
   const baseBranch = await input.github.defaultBranch();
-  const styleContents = input.agentConfig.contents;
+  const styleContents = input.styleDigest ?? input.agentConfig.contents;
   // Downloads full failed-CI logs + review comments under .ai-task-master/debugging/pr/<pr>/ so
   // the CI-fix Worker reads them off disk instead of guessing (issue #48).
   const prContext = new PrContextStore(resolvePath(input.cwd, '.ai-task-master'));

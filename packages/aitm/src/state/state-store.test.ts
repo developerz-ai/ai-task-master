@@ -225,6 +225,19 @@ test('writeContext + readContext round-trip', async () => {
   }
 });
 
+test('writeCodingStyle + readCodingStyle round-trip', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    assert.equal(await store.readCodingStyle(), null);
+    await store.writeCodingStyle('# Coding Style\n\nUse tabs');
+    assert.equal(await store.readCodingStyle(), '# Coding Style\n\nUse tabs\n');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('cleanupOnSuccess removes everything except logs/', async () => {
   const repo = await makeTempRepo();
   try {
@@ -235,6 +248,7 @@ test('cleanupOnSuccess removes everything except logs/', async () => {
     await store.writePlan('p');
     await store.appendProgress('progress entry');
     await store.writeContext('ctx');
+    await store.writeCodingStyle('# style');
     // Drop a log file so we can prove logs/ survives.
     await writeFile(join(dir, 'logs', 'run-x.log'), 'log line\n');
 

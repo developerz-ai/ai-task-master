@@ -13,6 +13,7 @@ const CRITERIA_FILE = 'criteria.txt';
 const PLAN_FILE = 'plan.md';
 const PROGRESS_FILE = 'progress.md';
 const CONTEXT_FILE = 'context.md';
+const CODING_STYLE_FILE = 'coding-style.md';
 const LOGS_DIR = 'logs';
 
 export class StateStore {
@@ -84,6 +85,20 @@ export class StateStore {
   async readContext(): Promise<string | null> {
     try {
       return await readFile(this.path(CONTEXT_FILE), 'utf8');
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
+    }
+  }
+
+  async writeCodingStyle(md: string): Promise<void> {
+    await mkdir(this.stateDir, { recursive: true });
+    await atomicWrite(this.path(CODING_STYLE_FILE), ensureTrailingNewline(md));
+  }
+
+  async readCodingStyle(): Promise<string | null> {
+    try {
+      return await readFile(this.path(CODING_STYLE_FILE), 'utf8');
     } catch (err) {
       if (isNotFound(err)) return null;
       throw err;

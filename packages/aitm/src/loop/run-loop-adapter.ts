@@ -237,7 +237,7 @@ async function defaultPlanGroups(
   input: RunLoopInput,
   mcp: McpClientManager,
 ): Promise<PlanGroupsOutcome> {
-  const style = input.agentConfig.contents;
+  const style = input.styleDigest ?? input.agentConfig.contents;
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
     tools: resolvePlannerTools(mcp.toolsForRole('planner'), input.cwd),
@@ -258,10 +258,11 @@ async function defaultPlanGroups(
 
 function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
   const { input, mcp, rollingContext } = ctx;
-  const style = input.agentConfig.contents;
+  const style = input.styleDigest ?? input.agentConfig.contents;
   const orch = new Orchestrator({
     credentials: input.credentials,
     agentConfig: input.agentConfig,
+    ...(input.styleDigest !== undefined ? { styleDigest: input.styleDigest } : {}),
     rollingContext,
     maxSessions: input.resolved.maxSessions,
     github: input.github,

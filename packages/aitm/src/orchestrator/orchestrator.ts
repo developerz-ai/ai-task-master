@@ -93,6 +93,9 @@ export type OrchestratorInit = {
   // `{ modelFor }` stub. The real Credentials instance satisfies the shape unchanged.
   credentials: ModelProvider;
   agentConfig: AgentConfig;
+  // Distilled coding-style digest. When present it replaces agentConfig.contents as the style
+  // prefix for the orchestrator prompt and every subagent tool; absent → raw contents.
+  styleDigest?: string;
   rollingContext: string;
   maxSessions: number | null;
   github: GhClient;
@@ -139,10 +142,15 @@ export function resolveMaxSteps(maxSessions: number | null): number {
 export class Orchestrator {
   constructor(private readonly init: OrchestratorInit) {}
 
+  // Distilled digest when available, else the raw agent-config contents.
+  private styleContents(): string {
+    return this.init.styleDigest ?? this.init.agentConfig.contents;
+  }
+
   build(context: OrchestratorBuildContext): ToolLoopAgent<never, OrchestratorTools> {
     const commonDeps = {
       credentials: this.init.credentials,
-      styleContents: this.init.agentConfig.contents,
+      styleContents: this.styleContents(),
       rollingContext: this.init.rollingContext,
     };
     const tools: OrchestratorTools = {
@@ -171,11 +179,7 @@ export class Orchestrator {
   }
 
   buildSystemPrompt(): string {
-    return [
-      this.init.agentConfig.contents,
-      ORCHESTRATOR_ROLE_PREFIX,
-      this.init.rollingContext,
-    ].join('\n');
+    return [this.styleContents(), ORCHESTRATOR_ROLE_PREFIX, this.init.rollingContext].join('\n');
   }
 
   // Re-write the Worker's draft commit message via the orchestrator model, then

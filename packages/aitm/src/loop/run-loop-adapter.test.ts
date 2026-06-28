@@ -32,7 +32,7 @@ function group(id: string, overrides: Partial<PrGroup> = {}): PrGroup {
   return {
     id,
     title: id,
-    tasks: ['do thing'],
+    tasks: [{ id: 'do-thing', text: 'do thing', complexity: 'normal', done: false }],
     dependsOn: [],
     branch: `aitm/${id}`,
     pr: null,
@@ -181,10 +181,18 @@ test('planToPrGroups maps plan groups to pending PrGroups with aitm/<id> branche
       {
         id: 'core',
         title: 'Core',
-        tasks: [{ description: 'a' }, { description: 'b' }],
+        tasks: [
+          { description: 'a', complexity: 'complex' },
+          { description: 'b', complexity: 'normal' },
+        ],
         dependsOn: [],
       },
-      { id: 'api', title: 'API', tasks: [{ description: 'c' }], dependsOn: ['core'] },
+      {
+        id: 'api',
+        title: 'API',
+        tasks: [{ description: 'c', complexity: 'simple' }],
+        dependsOn: ['core'],
+      },
     ],
   };
   const groups = planToPrGroups(plan);
@@ -197,8 +205,23 @@ test('planToPrGroups maps plan groups to pending PrGroups with aitm/<id> branche
       dependsOn: g.dependsOn,
     })),
     [
-      { id: 'core', branch: 'aitm/core', status: 'pending', tasks: ['a', 'b'], dependsOn: [] },
-      { id: 'api', branch: 'aitm/api', status: 'pending', tasks: ['c'], dependsOn: ['core'] },
+      {
+        id: 'core',
+        branch: 'aitm/core',
+        status: 'pending',
+        tasks: [
+          { id: 'core-1', text: 'a', complexity: 'complex', done: false },
+          { id: 'core-2', text: 'b', complexity: 'normal', done: false },
+        ],
+        dependsOn: [],
+      },
+      {
+        id: 'api',
+        branch: 'aitm/api',
+        status: 'pending',
+        tasks: [{ id: 'api-1', text: 'c', complexity: 'simple', done: false }],
+        dependsOn: ['core'],
+      },
     ],
   );
 });

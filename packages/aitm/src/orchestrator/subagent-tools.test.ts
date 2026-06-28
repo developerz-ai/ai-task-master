@@ -171,7 +171,7 @@ function baseGroup(): PrGroup {
   return {
     id: 'core',
     title: 'Core',
-    tasks: ['task A'],
+    tasks: [{ id: 'task-a', text: 'task A', complexity: 'normal', done: false }],
     dependsOn: [],
     branch: null,
     pr: null,

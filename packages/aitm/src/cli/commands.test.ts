@@ -51,7 +51,7 @@ async function seedStartState(
       {
         id: 'seeded',
         title: 'seeded group',
-        tasks: ['existing task'],
+        tasks: [{ id: 'existing-task', text: 'existing task', complexity: 'normal', done: false }],
         dependsOn: [],
         branch: 'aitm/seeded',
         pr: null,
@@ -352,7 +352,14 @@ test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups +
       {
         id: 'hello',
         title: 'add hello.txt',
-        tasks: ['create hello.txt with the word hi'],
+        tasks: [
+          {
+            id: 'create-hello',
+            text: 'create hello.txt with the word hi',
+            complexity: 'normal',
+            done: false,
+          },
+        ],
         dependsOn: [],
         branch: 'aitm/hello',
         pr: null,
@@ -441,7 +448,7 @@ test('runStart: resume with empty prGroups (prior planning blocked) re-runs runP
       {
         id: 'replanned',
         title: 'replanned group',
-        tasks: ['do the work'],
+        tasks: [{ id: 'do-the-work', text: 'do the work', complexity: 'normal', done: false }],
         dependsOn: [],
         branch: 'aitm/replanned',
         pr: null,

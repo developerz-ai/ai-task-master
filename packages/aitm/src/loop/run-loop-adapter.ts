@@ -225,7 +225,12 @@ export function planToPrGroups(plan: Plan): PrGroup[] {
   return plan.groups.map((g) => ({
     id: g.id,
     title: g.title,
-    tasks: g.tasks.map((t) => t.description),
+    tasks: g.tasks.map((t, i) => ({
+      id: `${g.id}-${i + 1}`,
+      text: t.description,
+      complexity: t.complexity,
+      done: false,
+    })),
     dependsOn: g.dependsOn,
     branch: `aitm/${g.id}`,
     pr: null,

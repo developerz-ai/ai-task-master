@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CiFailed } from '../github/errors.ts';
-import type { MergeMethod } from '../github/github-client.ts';
-import type { CheckStatus, PullRequest, ReviewThread } from '../github/schema.ts';
+import type { CiResult, MergeMethod } from '../github/github-client.ts';
+import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import { renderPlanMarkdown } from '../plan/plan-markdown.ts';
 import type { PrGroup, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
@@ -133,14 +133,20 @@ type GithubCalls = {
   mergePr: { pr: number; method: MergeMethod }[];
 };
 
+const ciSuccess: CiResult = { state: 'success', failedChecks: [] };
+const ciFailure: CiResult = {
+  state: 'failure',
+  failedChecks: [{ name: 'test', status: 'failure' }],
+};
+
 function makeGithub(
   config: {
     defaultBranch?: string;
-    checks?: Array<CheckStatus | CiFailed>;
+    checks?: Array<CiResult | CiFailed>;
     threads?: ReviewThread[];
   } = {},
 ): { github: WorkLoopGithub; calls: GithubCalls } {
-  const checks = (config.checks ?? ['success' as CheckStatus]).slice();
+  const checks = (config.checks ?? [ciSuccess]).slice();
   const calls: GithubCalls = {
     defaultBranch: 0,
     waitForChecks: [],
@@ -156,7 +162,7 @@ function makeGithub(
       calls.waitForChecks.push(pr);
       const next = checks.shift();
       if (next instanceof CiFailed) throw next;
-      return next ?? 'success';
+      return next ?? ciSuccess;
     },
     listUnresolvedThreads: async (pr) => {
       calls.listUnresolvedThreads.push(pr);
@@ -397,7 +403,7 @@ test('resume: group persisted at waiting-ci skips Worker and opens no new PR', a
     tasks: [{ id: 't1', text: 't', complexity: 'normal', done: true }],
   });
   const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 5 });
-  const { github, calls: ghCalls } = makeGithub({ checks: ['success'], threads: [] });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciSuccess], threads: [] });
   const { state } = makeState([resumed]);
   const loop = new WorkLoop(makeDeps({ orchestrator, github, state, autoMerge: true }));
   await loop.runGroup(resumed);
@@ -459,7 +465,7 @@ test('prPerTask: opens a PR after every task (autoMerge off)', async () => {
 
 test('prPerTask: each task PR runs CI then merges under autoMerge', async () => {
   const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
-  const { github, calls: ghCalls } = makeGithub({ checks: ['success', 'success'], threads: [] });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciSuccess, ciSuccess], threads: [] });
   const loop = new WorkLoop(makeDeps({ orchestrator, github, autoMerge: true, prPerTask: true }));
   await loop.runGroup(twoTaskGroup());
 
@@ -490,7 +496,7 @@ test('prPerTask: multi-task group is marked merged only after the final task', a
   // tasks — a crash there leaves a 'merged' group PlanGraph.ready() won't reschedule. The group
   // must stay schedulable (in-progress) until the last task lands.
   const { orchestrator } = makeOrchestrator({ prNumber: 7 });
-  const { github } = makeGithub({ checks: ['success', 'success'], threads: [] });
+  const { github } = makeGithub({ checks: [ciSuccess, ciSuccess], threads: [] });
   const { state, updates } = makeState([twoTaskGroup()]);
   const loop = new WorkLoop(
     makeDeps({ orchestrator, github, state, autoMerge: true, prPerTask: true }),
@@ -509,7 +515,7 @@ test('prPerTask: multi-task group is marked merged only after the final task', a
 
 test('autoMerge: success path runs waitForChecks → mergePr and marks merged', async () => {
   const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 11 });
-  const { github, calls: ghCalls } = makeGithub({ checks: ['success'], threads: [] });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciSuccess], threads: [] });
   const initial = { ...baseState(), prGroups: [group('gamma')] };
   let current = initial;
   const updates: RunState[] = [];
@@ -534,7 +540,7 @@ test('autoMerge: CI failure routes working→pr-open→waiting-ci→ci-failed an
   // The ci-failed handler is stubbed in slice 03, so a red CI run blocks the group instead of
   // triggering a Worker CI-fix pass + re-check + merge. Slice 04 wires the fix loop back in.
   const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 33 });
-  const { github, calls: ghCalls } = makeGithub({ checks: [new CiFailed('tests failed')] });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciFailure] });
   const { state, updates } = makeState([group('delta')]);
   const loop = new WorkLoop(makeDeps({ orchestrator, github, state, autoMerge: true }));
   await loop.runGroup(group('delta'));

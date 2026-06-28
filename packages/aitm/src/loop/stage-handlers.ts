@@ -19,15 +19,16 @@
 // the group rather than loop forever back into waiting-ci/waiting-reviews.
 
 import { CiFailed } from '../github/errors.ts';
-import type { CheckStatus, ReviewThread } from '../github/schema.ts';
+import type { CiResult } from '../github/github-client.ts';
+import type { ReviewThread } from '../github/schema.ts';
 import type { GroupStage, PrGroup, RunState } from '../state/schema.ts';
 import type { PrContextPort } from './take-over-flow.ts';
 
 // Subset of GitHubClient the stage machine drives. The merge method is a run option, not a
 // per-stage decision, so it's bound at construction and handleReadyToMerge just calls mergePr(pr).
 export type StageGithub = {
-  // Block until CI settles: returns the aggregate status, throws CiFailed on hard failure.
-  waitForChecks(pr: number): Promise<CheckStatus>;
+  // Block until CI settles: returns the aggregate CiResult; throws CiFailed only on poll timeout.
+  waitForChecks(pr: number): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
   mergePr(pr: number): Promise<void>;
 };
@@ -79,13 +80,13 @@ export const handlePrOpen: StageHandler = async (deps, group) => {
   return 'waiting-ci';
 };
 
-// waiting-ci: block on checks. Success → review; any failure (CiFailed throw, or a non-success
-// status defensively) → ci-failed for the fix loop.
+// waiting-ci: block on checks. Success → review; a 'failure'/'pending' state or a CiFailed timeout
+// → ci-failed for the fix loop.
 export const handleWaitingCi: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'waiting-ci');
   try {
-    const status = await deps.github.waitForChecks(pr);
-    return status === 'success' || status === 'skipped' ? 'waiting-reviews' : 'ci-failed';
+    const { state } = await deps.github.waitForChecks(pr);
+    return state === 'success' ? 'waiting-reviews' : 'ci-failed';
   } catch (err) {
     if (err instanceof CiFailed) return 'ci-failed';
     throw err;

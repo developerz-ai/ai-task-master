@@ -82,7 +82,7 @@ function makeState(initial: RunState): { state: StageState; snapshot: () => RunS
 
 function makeGithub(over: Partial<StageGithub> = {}): StageGithub {
   return {
-    waitForChecks: async () => 'success',
+    waitForChecks: async () => ({ state: 'success', failedChecks: [] }),
     listUnresolvedThreads: async () => [],
     mergePr: async () => {},
     ...over,
@@ -156,7 +156,9 @@ test('handlePrOpen: PR already open (resume) → waiting-ci, no reopen', async (
 // ---- waiting-ci ----------------------------------------------------------
 
 test('handleWaitingCi: checks succeed → waiting-reviews', async () => {
-  const deps = makeDeps({ github: makeGithub({ waitForChecks: async () => 'success' }) });
+  const deps = makeDeps({
+    github: makeGithub({ waitForChecks: async () => ({ state: 'success', failedChecks: [] }) }),
+  });
   assert.equal(
     await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })),
     'waiting-reviews',
@@ -175,7 +177,14 @@ test('handleWaitingCi: CiFailed → ci-failed', async () => {
 });
 
 test('handleWaitingCi: non-success status → ci-failed', async () => {
-  const deps = makeDeps({ github: makeGithub({ waitForChecks: async () => 'failure' }) });
+  const deps = makeDeps({
+    github: makeGithub({
+      waitForChecks: async () => ({
+        state: 'failure',
+        failedChecks: [{ name: 'test', status: 'failure' }],
+      }),
+    }),
+  });
   assert.equal(await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })), 'ci-failed');
 });
 

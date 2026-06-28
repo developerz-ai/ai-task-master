@@ -22,7 +22,7 @@
 import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel } from 'ai';
 import { CiFailed } from '../github/errors.ts';
-import type { MergeMethod } from '../github/github-client.ts';
+import type { CiResult, MergeMethod } from '../github/github-client.ts';
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup } from '../state/schema.ts';
@@ -43,7 +43,7 @@ import {
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
 export type TakeOverGithub = {
-  waitForChecks(pr: number): Promise<CheckStatus>;
+  waitForChecks(pr: number): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
   mergePr(pr: number, method: MergeMethod): Promise<void>;
   replyToThread(threadId: string, body: string): Promise<void>;
@@ -134,8 +134,8 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   for (; iteration < maxIterations; iteration++) {
     log?.info('take-over: iteration start', { pr: input.pr, iteration });
 
-    // 1. Wait for CI to settle. waitForChecks throws CiFailed on hard failure; we treat
-    //    that as "Worker should try to fix" rather than a fatal error.
+    // 1. Wait for CI to settle. observeCheckStatus maps a CI failure (or a poll timeout) to
+    //    'failure' so the loop treats it as "Worker should try to fix" rather than a fatal error.
     const ciStatus = await observeCheckStatus(input.github, input.pr);
     log?.info('take-over: ci status', { pr: input.pr, ciStatus });
 
@@ -231,11 +231,13 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   return { kind: 'merged', pr: input.pr, iterations: iteration };
 }
 
-// Convert waitForChecks' throw-on-failure semantics into a status return so the loop can
-// treat CI failure as a recoverable state.
+// Flatten waitForChecks' structured result (and its timeout throw) into a single CheckStatus the
+// loop branches on: a returned 'failure' state or a CiFailed timeout both surface as 'failure'
+// (recoverable — the Worker tries to fix); 'success'/'pending' pass through unchanged.
 async function observeCheckStatus(github: TakeOverGithub, pr: number): Promise<CheckStatus> {
   try {
-    return await github.waitForChecks(pr);
+    const { state } = await github.waitForChecks(pr);
+    return state;
   } catch (err) {
     if (err instanceof CiFailed) return 'failure';
     throw err;

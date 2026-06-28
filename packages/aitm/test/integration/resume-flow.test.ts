@@ -157,7 +157,7 @@ function makeRunLoop(
 
     const github = {
       defaultBranch: async () => defaultBranch,
-      waitForChecks: async () => 'success' as const,
+      waitForChecks: async () => ({ state: 'success' as const, failedChecks: [] }),
       listUnresolvedThreads: async () => [],
       mergePr: async () => {},
     };
@@ -456,7 +456,7 @@ test('resume-flow: interrupt after pr-open; resume picks up at waiting-ci withou
             defaultBranch: async () => rawBranch.trim(),
             waitForChecks: async (_pr: number) => {
               waitForChecksCalls++;
-              return 'success' as const;
+              return { state: 'success' as const, failedChecks: [] };
             },
             listUnresolvedThreads: async () => [],
             mergePr: async () => {},

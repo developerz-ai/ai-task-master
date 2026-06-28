@@ -13,8 +13,8 @@
 // WorktreePool, PlanGraph) satisfy them at runtime; tests pass literal stubs.
 
 import { CiFailed } from '../github/errors.ts';
-import type { MergeMethod } from '../github/github-client.ts';
-import type { CheckStatus, PullRequest, ReviewThread } from '../github/schema.ts';
+import type { CiResult, MergeMethod } from '../github/github-client.ts';
+import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
@@ -58,7 +58,7 @@ export type WorkLoopOrchestrator = {
 
 export type WorkLoopGithub = {
   defaultBranch(): Promise<string>;
-  waitForChecks(pr: number): Promise<CheckStatus>;
+  waitForChecks(pr: number): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
   mergePr(pr: number, method: MergeMethod): Promise<void>;
 };
@@ -496,18 +496,20 @@ export class WorkLoop {
   ): Promise<void> {
     const { orchestrator, github } = this.deps;
 
-    // CI: wait for checks. On failure, ask Worker to fix and re-check.
-    try {
-      await github.waitForChecks(pr.number);
-    } catch (err) {
-      if (!(err instanceof CiFailed)) throw err;
+    // CI: wait for checks. On failure, ask Worker to fix and re-check; a timeout (CiFailed)
+    // propagates. Still-red after the fix is fatal for this flow.
+    const ci = await github.waitForChecks(pr.number);
+    if (ci.state === 'failure') {
       const fix = await orchestrator.runWorker({ group, worktree, baseBranch });
       if (fix.kind !== 'ok') {
         const reason = fix.kind === 'blocked' ? fix.reason : fix.error;
         throw new Error(`worker CI fix failed: ${reason}`);
       }
       await orchestrator.finalizeCommit(group, fix.delivery, worktree.path);
-      await github.waitForChecks(pr.number);
+      const recheck = await github.waitForChecks(pr.number);
+      if (recheck.state === 'failure') {
+        throw new CiFailed(`PR #${pr.number} still failing after worker CI fix`);
+      }
     }
 
     // Review: resolve any unresolved threads via Reviewer.

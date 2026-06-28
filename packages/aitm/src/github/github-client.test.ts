@@ -4,6 +4,7 @@ import { CiFailed, GhAuthRequired, MergeConflict, PrNotFound } from './errors.ts
 import {
   CHECKS_INITIAL_DELAY_MS,
   CHECKS_MAX_DELAY_MS,
+  CHECKS_TIMEOUT_MS,
   DEFAULT_PR_LABEL,
   GitHubClient,
   type RunCmd,
@@ -307,8 +308,8 @@ test('waitForChecks returns success when all checks pass', async () => {
   ]);
   const { sleep, delays } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
-  const status = await g.waitForChecks(42);
-  assert.equal(status, 'success');
+  const result = await g.waitForChecks(42);
+  assert.deepEqual(result, { state: 'success', failedChecks: [] });
   assert.deepEqual(calls[0]?.args, ['pr', 'checks', '42', '--json', 'bucket,name,state']);
   assert.equal(delays.length, 0);
 });
@@ -317,7 +318,7 @@ test('waitForChecks returns success when there are no checks at all', async () =
   const { run } = makeRun([{ stdout: '[]' }]);
   const { sleep } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
-  assert.equal(await g.waitForChecks(1), 'success');
+  assert.deepEqual(await g.waitForChecks(1), { state: 'success', failedChecks: [] });
 });
 
 test('waitForChecks polls while pending with 1s→2s→4s backoff (60s cap)', async () => {
@@ -331,8 +332,8 @@ test('waitForChecks polls while pending with 1s→2s→4s backoff (60s cap)', as
   ]);
   const { sleep, delays } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
-  const status = await g.waitForChecks(7);
-  assert.equal(status, 'success');
+  const result = await g.waitForChecks(7);
+  assert.equal(result.state, 'success');
   assert.equal(calls.length, 4);
   assert.deepEqual(delays, [1000, 2000, 4000]);
 });
@@ -351,7 +352,7 @@ test('waitForChecks caps backoff at CHECKS_MAX_DELAY_MS', async () => {
   assert.equal(CHECKS_INITIAL_DELAY_MS, 1000);
 });
 
-test('waitForChecks throws CiFailed on any failure bucket', async () => {
+test('waitForChecks returns a failure CiResult (not a throw) for a failed bucket', async () => {
   const { run } = makeRun([
     {
       stdout: JSON.stringify([
@@ -363,20 +364,39 @@ test('waitForChecks throws CiFailed on any failure bucket', async () => {
   ]);
   const { sleep, delays } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
-  await assert.rejects(
-    () => g.waitForChecks(99),
-    (err) => err instanceof CiFailed && /test=fail/.test(err.message),
-  );
+  const result = await g.waitForChecks(99);
+  assert.deepEqual(result, {
+    state: 'failure',
+    failedChecks: [{ name: 'test', status: 'failure' }],
+  });
   assert.equal(delays.length, 0);
 });
 
-test('waitForChecks throws CiFailed on cancelled bucket', async () => {
+test('waitForChecks reports a cancelled bucket as a failure CiResult', async () => {
   const { run } = makeRun([
     { stdout: JSON.stringify([{ bucket: 'cancel', name: 'test', state: 'CANCELLED' }]) },
   ]);
   const { sleep } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
-  await assert.rejects(() => g.waitForChecks(99), CiFailed);
+  assert.deepEqual(await g.waitForChecks(99), {
+    state: 'failure',
+    failedChecks: [{ name: 'test', status: 'cancelled' }],
+  });
+});
+
+test('waitForChecks throws CiFailed once the poll timeout budget is exhausted', async () => {
+  // Feed only-pending replies so accumulated backoff crosses CHECKS_TIMEOUT_MS and the poll
+  // gives up. CiFailed is now reserved strictly for this terminal case.
+  const pending = JSON.stringify([{ bucket: 'pending', name: 'test', state: 'IN_PROGRESS' }]);
+  const count = Math.ceil(CHECKS_TIMEOUT_MS / CHECKS_MAX_DELAY_MS) + 10;
+  const { run } = makeRun(Array.from({ length: count }, () => ({ stdout: pending })));
+  const { sleep, delays } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  await assert.rejects(() => g.waitForChecks(1), CiFailed);
+  assert.ok(
+    delays.reduce((sum, d) => sum + d, 0) >= CHECKS_TIMEOUT_MS,
+    'gave up only after the timeout budget was spent',
+  );
 });
 
 test('waitForChecks throws on unparseable stdout', async () => {

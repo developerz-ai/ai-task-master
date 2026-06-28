@@ -34,6 +34,7 @@ import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
 import { Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
+import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import {
@@ -99,9 +100,9 @@ export type AdapterStatePort = {
   read(): Promise<RunState>;
   update(mutator: (s: RunState) => RunState): Promise<RunState>;
   readContext?(): Promise<string | null>;
-  // Re-render plan.md as the loop marks tasks done. Optional so in-memory test stubs can omit it;
-  // StateStore supplies it in production.
-  writePlan?(plan: string): Promise<void>;
+  // Persist plan groups as the loop marks tasks done; StateStore renders them to plan.md.
+  // Optional so in-memory test stubs can omit it; StateStore supplies it in production.
+  writePlan?(groups: readonly PlanMarkdownGroup[]): Promise<void>;
 };
 
 export type PlanGroupsOutcome =
@@ -185,8 +186,8 @@ export async function runLoopAdapter(
         liveGroups = next.prGroups;
         return next;
       },
-      writePlan: async (markdown) => {
-        await state.writePlan?.(markdown);
+      writePlan: async (groups) => {
+        await state.writePlan?.(groups);
       },
     };
 

@@ -15,7 +15,7 @@
 import { CiFailed } from '../github/errors.ts';
 import type { MergeMethod } from '../github/github-client.ts';
 import type { CheckStatus, PullRequest, ReviewThread } from '../github/schema.ts';
-import { renderPlanMarkdown } from '../plan/plan-markdown.ts';
+import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { PrGroup, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
@@ -57,9 +57,9 @@ export type WorkLoopPool = {
 
 export type WorkLoopState = {
   update(mutator: (s: RunState) => RunState): Promise<RunState>;
-  // Re-render plan.md (checkbox markdown) after per-task completion. Optional: stubs that don't
-  // care about the on-disk plan can omit it; production wires it to StateStore.writePlan.
-  writePlan?(markdown: string): Promise<void>;
+  // Persist the plan groups after per-task completion; StateStore renders them to plan.md
+  // (checkbox markdown). Optional: stubs that don't care about the on-disk plan can omit it.
+  writePlan?(groups: readonly PlanMarkdownGroup[]): Promise<void>;
 };
 
 export type WorkLoopGraph = {
@@ -277,16 +277,15 @@ export class WorkLoop {
     };
   }
 
-  // Re-render plan.md from the current PR groups so its checkboxes ([ ] / [x]) reflect per-task
-  // completion. No-op when the state port doesn't expose writePlan (some unit-test stubs).
+  // Persist the current PR groups so plan.md's checkboxes ([ ] / [x]) reflect per-task completion.
+  // StateStore.writePlan renders the markdown. No-op when the state port omits writePlan (stubs).
   private async renderPlan(groups: readonly PrGroup[]): Promise<void> {
-    const markdown = renderPlanMarkdown(
+    await this.deps.state.writePlan?.(
       groups.map((g) => ({
         title: g.title,
         tasks: g.tasks.map((t) => ({ text: t.text, complexity: t.complexity, done: t.done })),
       })),
     );
-    await this.deps.state.writePlan?.(markdown);
   }
 
   // Run a state write that follows a successful external side effect. If the write throws,

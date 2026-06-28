@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { CiFailed } from '../github/errors.ts';
 import type { MergeMethod } from '../github/github-client.ts';
 import type { CheckStatus, PullRequest, ReviewThread } from '../github/schema.ts';
+import { renderPlanMarkdown } from '../plan/plan-markdown.ts';
 import type { PrGroup, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
@@ -202,8 +203,8 @@ function makeState(seed: PrGroup[] = []): {
       updates.push(current);
       return current;
     },
-    writePlan: async (markdown) => {
-      plans.push(markdown);
+    writePlan: async (groups) => {
+      plans.push(renderPlanMarkdown(groups));
     },
   };
   return { state, updates, plans };

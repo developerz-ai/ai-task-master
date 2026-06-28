@@ -10,6 +10,7 @@ export type StartArgs = {
   maxPrs?: number;
   maxSessions?: number | null;
   autoMerge?: boolean;
+  prPerTask?: boolean;
   stylePath?: string | null;
   model?: string;
   concurrency?: number;
@@ -64,6 +65,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   let maxPrs: number | undefined;
   let maxSessions: number | undefined;
   let autoMerge: boolean | undefined;
+  let prPerTask: boolean | undefined;
   let stylePath: string | undefined;
   let model: string | undefined;
   let concurrency: number | undefined;
@@ -102,6 +104,12 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
       if (inlineValue !== null) return HELP;
       autoMerge = false;
       i += 1;
+    } else if (flag === '--pr-per-task') {
+      // Boolean flag rejects any inline value: `--pr-per-task=true` is a usage error,
+      // not silently treated as the boolean.
+      if (inlineValue !== null) return HELP;
+      prPerTask = true;
+      i += 1;
     } else if (flag === '--style') {
       const v = takeValue(args, i, inlineValue);
       if (v === null) return HELP;
@@ -128,6 +136,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   if (maxPrs !== undefined) out.maxPrs = maxPrs;
   if (maxSessions !== undefined) out.maxSessions = maxSessions;
   if (autoMerge !== undefined) out.autoMerge = autoMerge;
+  if (prPerTask !== undefined) out.prPerTask = prPerTask;
   if (stylePath !== undefined) out.stylePath = stylePath;
   if (model !== undefined) out.model = model;
   if (concurrency !== undefined) out.concurrency = concurrency;

@@ -223,13 +223,24 @@ test('writeGoal writes goal.txt and optional criteria.txt with trailing newline'
   }
 });
 
-test('writePlan writes plan.md', async () => {
+test('writePlan renders checkbox markdown with per-task state', async () => {
   const repo = await makeTempRepo();
   try {
     const dir = join(repo.path, '.ai-task-master');
     const store = new StateStore(dir);
-    await store.writePlan('# Plan\n\n- task 1');
-    assert.equal(await readFile(join(dir, 'plan.md'), 'utf8'), '# Plan\n\n- task 1\n');
+    await store.writePlan([
+      {
+        title: 'core',
+        tasks: [
+          { text: 'first task', complexity: 'normal', done: true },
+          { text: 'second task', complexity: 'complex', done: false },
+        ],
+      },
+    ]);
+    assert.equal(
+      await readFile(join(dir, 'plan.md'), 'utf8'),
+      '## Group: core\n- [x] [NORMAL] first task\n- [ ] [COMPLEX] second task\n',
+    );
   } finally {
     await repo.cleanup();
   }
@@ -281,7 +292,9 @@ test('cleanupOnSuccess removes everything except logs/', async () => {
     const store = new StateStore(dir);
     await store.init(baseState());
     await store.writeGoal('g', 'c');
-    await store.writePlan('p');
+    await store.writePlan([
+      { title: 'g', tasks: [{ text: 't', complexity: 'normal', done: false }] },
+    ]);
     await store.appendProgress('progress entry');
     await store.writeContext('ctx');
     await store.writeCodingStyle('# style');

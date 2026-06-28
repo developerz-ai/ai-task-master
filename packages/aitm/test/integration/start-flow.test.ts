@@ -13,7 +13,7 @@
 //   4. At least one commit with message "feat: add hello" exists on the branch
 
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve as resolvePath } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
@@ -234,6 +234,160 @@ test('start-flow: plan→work→PR open transitions prGroups[0].status to awaiti
     assert.ok(
       log.includes('feat: add hello'),
       `expected "feat: add hello" in git log, got:\n${log}`,
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('start-flow: 2-task group writes [x] per completed task in plan.md', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    await execa('git', ['add', 'CLAUDE.md'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'initial commit'], { cwd: repo.path });
+
+    const mockModel = makeMockModel();
+
+    const TASK_1_TEXT = 'create hello.ts with a simple export';
+    const TASK_2_TEXT = 'create world.ts with a simple export';
+
+    const result = await runStart(
+      { kind: 'start', goal: 'add hello and world' },
+      {
+        cwd: repo.path,
+        homeDir: repo.path,
+        env: { OPENROUTER_API_KEY: 'test-key-x' },
+        authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        runLoop: async (input: RunLoopInput): Promise<WorkLoopResult> => {
+          const stateDir = resolvePath(input.cwd, '.ai-task-master');
+
+          const planGroup: PrGroup = {
+            id: 'hello-world',
+            title: 'add hello and world',
+            tasks: [
+              { id: 'task-1', text: TASK_1_TEXT, complexity: 'normal', done: false },
+              { id: 'task-2', text: TASK_2_TEXT, complexity: 'normal', done: false },
+            ],
+            dependsOn: [],
+            branch: 'aitm/hello-world',
+            pr: null,
+            status: 'pending',
+          };
+
+          let liveGroups: readonly PrGroup[] = [planGroup];
+
+          await input.state.update((s) => ({
+            ...s,
+            status: 'working' as const,
+            prGroups: [planGroup],
+          }));
+
+          const graph = {
+            ready: () => new PlanGraph([...liveGroups]).ready(),
+            isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+          };
+
+          const workLoopState = {
+            update: async (mutator: (s: RunState) => RunState): Promise<RunState> => {
+              const next = await input.state.update(mutator);
+              liveGroups = next.prGroups;
+              return next;
+            },
+            // Wire writePlan so WorkLoop.completeTask re-renders plan.md after each task.
+            writePlan: (groups: Parameters<typeof input.state.writePlan>[0]) =>
+              input.state.writePlan(groups),
+          };
+
+          const { stdout: rawBranch } = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+            cwd: input.cwd,
+          });
+          const defaultBranch = rawBranch.trim();
+
+          const pool = new WorktreePool(input.cwd, stateDir, input.resolved.concurrency);
+
+          const orchForFinalize = new Orchestrator({
+            credentials: { modelFor: () => mockModel },
+            agentConfig: input.agentConfig,
+            rollingContext: '',
+            maxSessions: null,
+            github: {
+              createPr: async () => {
+                throw new Error('createPr must not be called from finalizeCommit');
+              },
+            },
+          });
+
+          // Track call count so each task writes a distinct file (hello.ts, world.ts).
+          let workerCallCount = 0;
+          const stubOrchestrator: WorkLoopOrchestrator = {
+            runWorker: async ({ worktree }) => {
+              const fileName = workerCallCount === 0 ? 'hello.ts' : 'world.ts';
+              workerCallCount++;
+              const exportName = fileName.replace('.ts', '');
+              await writeFile(
+                join(worktree.path, fileName),
+                `export const ${exportName} = '${exportName}';\n`,
+              );
+              await execa('git', ['add', fileName], { cwd: worktree.path });
+              await execa('git', ['commit', '-m', `wip: add ${fileName}`], { cwd: worktree.path });
+              const delivery: WorkerDelivery = {
+                branch: worktree.branch,
+                draftCommitMessage: `feat: add ${fileName}`,
+                changes: [
+                  { path: fileName, kind: 'create', summary: `creates ${exportName} export` },
+                ],
+                progressEntries: [`- created ${fileName}`],
+              };
+              return { kind: 'ok', delivery };
+            },
+            finalizeCommit: (group, delivery, worktreePath) =>
+              orchForFinalize.finalizeCommit(group, delivery, worktreePath),
+            openPr: async (group, _delivery, baseBranch): Promise<PullRequest> => ({
+              number: 2,
+              state: 'OPEN',
+              url: 'https://github.com/example/repo/pull/2',
+              headRefName: group.branch ?? `aitm/${group.id}`,
+              baseRefName: baseBranch,
+            }),
+            runReviewer: async () => ({ kind: 'ok', resolutions: [] }),
+          };
+
+          const github = {
+            defaultBranch: async () => defaultBranch,
+            waitForChecks: async () => 'success' as const,
+            listUnresolvedThreads: async () => [],
+            mergePr: async () => {},
+          };
+
+          const loop = new WorkLoop({
+            orchestrator: stubOrchestrator,
+            github,
+            state: workLoopState,
+            pool,
+            graph,
+            concurrency: input.resolved.concurrency,
+            autoMerge: false,
+            maxSessions: null,
+          });
+
+          return loop.run();
+        },
+      },
+    );
+
+    assert.equal(result.code, 0, `unexpected exit code: ${result.message ?? ''}`);
+
+    // Both tasks must be marked [x] in plan.md after completion.
+    const planPath = join(repo.path, '.ai-task-master', 'plan.md');
+    const planMd = await readFile(planPath, 'utf8');
+
+    assert.ok(
+      planMd.includes(`- [x] [NORMAL] ${TASK_1_TEXT}`),
+      `expected task 1 checked in plan.md, got:\n${planMd}`,
+    );
+    assert.ok(
+      planMd.includes(`- [x] [NORMAL] ${TASK_2_TEXT}`),
+      `expected task 2 checked in plan.md, got:\n${planMd}`,
     );
   } finally {
     await repo.cleanup();

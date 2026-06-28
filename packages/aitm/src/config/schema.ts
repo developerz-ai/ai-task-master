@@ -78,6 +78,7 @@ export type CliOverrides = {
   maxPrs?: number;
   maxSessions?: number | null;
   autoMerge?: boolean;
+  prPerTask?: boolean;
   mergeMethod?: 'squash' | 'merge' | 'rebase';
   stylePath?: string | null;
   model?: string;
@@ -97,6 +98,7 @@ export type ResolvedConfig = {
   maxPrs: number;
   maxSessions: number | null;
   autoMerge: boolean;
+  prPerTask: boolean;
   mergeMethod: 'squash' | 'merge' | 'rebase';
   stylePath: string | null;
   formatCommand: string | null;

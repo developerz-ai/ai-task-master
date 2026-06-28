@@ -5,6 +5,7 @@ import { appendFile, mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ZodError } from 'zod';
 import { atomicWrite } from '../fs/atomic-write.ts';
+import { type PlanMarkdownGroup, renderPlanMarkdown } from '../plan/plan-markdown.ts';
 import { type RunState, RunStateSchema, type Task } from './schema.ts';
 
 const STATE_FILE = 'state.json';
@@ -67,9 +68,11 @@ export class StateStore {
     }
   }
 
-  async writePlan(plan: string): Promise<void> {
+  // Render the PR groups through plan-markdown so plan.md carries per-task checkbox state
+  // ([ ] / [x]) — the on-disk source of truth claudetm parity expects.
+  async writePlan(groups: readonly PlanMarkdownGroup[]): Promise<void> {
     await mkdir(this.stateDir, { recursive: true });
-    await atomicWrite(this.path(PLAN_FILE), ensureTrailingNewline(plan));
+    await atomicWrite(this.path(PLAN_FILE), ensureTrailingNewline(renderPlanMarkdown(groups)));
   }
 
   async appendProgress(entry: string): Promise<void> {

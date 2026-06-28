@@ -49,6 +49,7 @@ const DEFAULTS = {
   maxPrs: 5,
   maxSessions: null as number | null,
   autoMerge: true,
+  prPerTask: false,
   mergeMethod: 'squash' as const,
   stylePath: null as string | null,
   formatCommand: null as string | null,
@@ -121,6 +122,7 @@ export class ConfigLoader {
         global?.autoMerge,
         DEFAULTS.autoMerge,
       ),
+      prPerTask: pick(cliOverrides.prPerTask, undefined, undefined, DEFAULTS.prPerTask),
       mergeMethod: pick(
         cliOverrides.mergeMethod,
         project?.mergeMethod,

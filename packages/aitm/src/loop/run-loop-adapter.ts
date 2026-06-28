@@ -34,6 +34,7 @@ import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
 import { Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
+import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import {
@@ -99,6 +100,9 @@ export type AdapterStatePort = {
   read(): Promise<RunState>;
   update(mutator: (s: RunState) => RunState): Promise<RunState>;
   readContext?(): Promise<string | null>;
+  // Persist plan groups as the loop marks tasks done; StateStore renders them to plan.md.
+  // Optional so in-memory test stubs can omit it; StateStore supplies it in production.
+  writePlan?(groups: readonly PlanMarkdownGroup[]): Promise<void>;
 };
 
 export type PlanGroupsOutcome =
@@ -182,6 +186,9 @@ export async function runLoopAdapter(
         liveGroups = next.prGroups;
         return next;
       },
+      writePlan: async (groups) => {
+        await state.writePlan?.(groups);
+      },
     };
 
     // ---- Remaining deps ----------------------------------------------------
@@ -207,6 +214,7 @@ export async function runLoopAdapter(
       graph,
       concurrency: input.resolved.concurrency,
       autoMerge: input.resolved.autoMerge,
+      prPerTask: current.options.prPerTask ?? false,
       maxSessions: input.resolved.maxSessions,
       mergeMethod: input.resolved.mergeMethod,
       initialSessionCount: current.sessionCount,
@@ -274,7 +282,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
   });
 
   return {
-    runWorker: async ({ group, worktree, baseBranch }) => {
+    runWorker: async ({ group, task, worktree, baseBranch }) => {
       // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
       // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
       const tools = resolveWorkerTools(mcp.toolsForRole('worker'), worktree.path);
@@ -285,6 +293,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
       });
       return runWorkerSubagent(agent, {
         group,
+        ...(task ? { task } : {}),
         worktreePath: worktree.path,
         baseBranch,
         styleContents: style,

@@ -243,6 +243,7 @@ export function planToPrGroups(plan: Plan): PrGroup[] {
     branch: `aitm/${g.id}`,
     pr: null,
     status: 'pending' as const,
+    stage: 'pending' as const,
   }));
 }
 

@@ -25,6 +25,23 @@ export const PrGroupStatusSchema = z.enum([
 ]);
 export type PrGroupStatus = z.infer<typeof PrGroupStatusSchema>;
 
+// Per-group persisted position in the PR lifecycle so a crashed/paused run resumes mid-PR
+// without redoing prior stages. Per-group (not global) because aitm runs groups concurrently.
+// Drives WorkLoop.runGroup's stage dispatcher (slice 03). See docs/plans .../03-pr-lifecycle-stages.md.
+export const GroupStageSchema = z.enum([
+  'pending',
+  'working',
+  'pr-open',
+  'waiting-ci',
+  'ci-failed',
+  'waiting-reviews',
+  'addressing-reviews',
+  'ready-to-merge',
+  'merged',
+  'blocked',
+]);
+export type GroupStage = z.infer<typeof GroupStageSchema>;
+
 export const PrGroupSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -35,6 +52,7 @@ export const PrGroupSchema = z.object({
   branch: z.string().nullable(),
   pr: z.number().int().positive().nullable(),
   status: PrGroupStatusSchema,
+  stage: GroupStageSchema.default('pending'),
 });
 export type PrGroup = z.infer<typeof PrGroupSchema>;
 

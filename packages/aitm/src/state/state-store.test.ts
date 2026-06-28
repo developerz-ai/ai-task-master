@@ -32,6 +32,23 @@ function baseState(overrides: Partial<RunState> = {}): RunState {
   });
 }
 
+// A pre-stage-machine PrGroup as it appears on disk: structured tasks but no `stage` field.
+function legacyGroup(props: {
+  id: string;
+  status: string;
+  pr: number | null;
+}): Record<string, unknown> {
+  return {
+    id: props.id,
+    title: props.id,
+    tasks: [],
+    dependsOn: [],
+    branch: null,
+    pr: props.pr,
+    status: props.status,
+  };
+}
+
 test('StateStore is constructible', () => {
   const s = new StateStore('/tmp/repo/.ai-task-master');
   assert.ok(s instanceof StateStore);
@@ -122,6 +139,53 @@ test('read: coerces legacy string[] tasks, leaves structured tasks intact', asyn
       { id: 'add-the-login-form', text: 'Add the login form', complexity: 'normal', done: false },
       { id: 'kept', text: 'Already structured', complexity: 'complex', done: true },
     ]);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('read: infers a missing group stage from status/pr', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+
+    // Pre-stage-machine state.json carried no PrGroup.stage. On read it must be inferred:
+    // merged → merged, open PR → waiting-ci, otherwise → pending.
+    const legacy: Record<string, unknown> = JSON.parse(JSON.stringify(baseState()));
+    legacy.prGroups = [
+      legacyGroup({ id: 'done', status: 'merged', pr: 5 }),
+      legacyGroup({ id: 'open', status: 'in-progress', pr: 9 }),
+      legacyGroup({ id: 'fresh', status: 'pending', pr: null }),
+    ];
+    await writeFile(join(dir, 'state.json'), JSON.stringify(legacy));
+
+    const read = await store.read();
+    assert.equal(read.prGroups[0]?.stage, 'merged');
+    assert.equal(read.prGroups[1]?.stage, 'waiting-ci');
+    assert.equal(read.prGroups[2]?.stage, 'pending');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('read: preserves an existing group stage instead of inferring', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+
+    const legacy: Record<string, unknown> = JSON.parse(JSON.stringify(baseState()));
+    // pr is set (would infer waiting-ci) but an explicit stage must win.
+    legacy.prGroups = [
+      { ...legacyGroup({ id: 'g', status: 'in-progress', pr: 3 }), stage: 'ready-to-merge' },
+    ];
+    await writeFile(join(dir, 'state.json'), JSON.stringify(legacy));
+
+    const read = await store.read();
+    assert.equal(read.prGroups[0]?.stage, 'ready-to-merge');
   } finally {
     await repo.cleanup();
   }

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { ZodError } from 'zod';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { type PlanMarkdownGroup, renderPlanMarkdown } from '../plan/plan-markdown.ts';
-import { type RunState, RunStateSchema, type Task } from './schema.ts';
+import { type GroupStage, type RunState, RunStateSchema, type Task } from './schema.ts';
 
 const STATE_FILE = 'state.json';
 const GOAL_FILE = 'goal.txt';
@@ -129,7 +129,7 @@ export class StateStore {
 
 function parseState(value: unknown, path: string): RunState {
   try {
-    return RunStateSchema.parse(coerceLegacyTasks(value));
+    return RunStateSchema.parse(coerceLegacyStage(coerceLegacyTasks(value)));
   } catch (err) {
     if (err instanceof ZodError) {
       throw new Error(`${path}: ${formatZodError(err)}`);
@@ -156,6 +156,25 @@ function coerceLegacyTasks(value: unknown): unknown {
 
 function legacyTask(text: string, index: number): Task {
   return { id: slugify(text) || `task-${index + 1}`, text, complexity: 'normal', done: false };
+}
+
+// Legacy state.json (pre stage-machine) had no PrGroup.stage. Infer one on read so a paused run
+// resumes at the right lifecycle point instead of restarting: a merged group stays merged, a group
+// with an open PR resumes at waiting-ci, everything else starts at pending. The schema's
+// default('pending') alone would discard the status/pr signal a non-pending group needs.
+function coerceLegacyStage(value: unknown): unknown {
+  if (!isRecord(value) || !Array.isArray(value.prGroups)) return value;
+  const prGroups = value.prGroups.map((group) => {
+    if (!isRecord(group) || 'stage' in group) return group;
+    return { ...group, stage: inferStage(group) };
+  });
+  return { ...value, prGroups };
+}
+
+function inferStage(group: Record<string, unknown>): GroupStage {
+  if (group.status === 'merged') return 'merged';
+  if (group.pr != null) return 'waiting-ci';
+  return 'pending';
 }
 
 function slugify(text: string): string {

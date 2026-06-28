@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PrGroupSchema, RunStateSchema, TaskSchema } from './schema.ts';
+import { GroupStageSchema, PrGroupSchema, RunStateSchema, TaskSchema } from './schema.ts';
 
 test('PrGroupSchema defaults dependsOn to []', () => {
   const parsed = PrGroupSchema.parse({
@@ -25,6 +25,35 @@ test('PrGroupSchema accepts dependsOn with ids', () => {
     status: 'pending',
   });
   assert.deepEqual(parsed.dependsOn, ['auth-models']);
+});
+
+test('PrGroupSchema defaults stage to pending', () => {
+  const parsed = PrGroupSchema.parse({
+    id: 'auth-models',
+    title: 'auth models',
+    tasks: [],
+    branch: null,
+    pr: null,
+    status: 'pending',
+  });
+  assert.equal(parsed.stage, 'pending');
+});
+
+test('PrGroupSchema accepts an explicit stage', () => {
+  const parsed = PrGroupSchema.parse({
+    id: 'auth-models',
+    title: 'auth models',
+    tasks: [],
+    branch: null,
+    pr: 7,
+    status: 'in-progress',
+    stage: 'waiting-ci',
+  });
+  assert.equal(parsed.stage, 'waiting-ci');
+});
+
+test('GroupStageSchema rejects an unknown stage', () => {
+  assert.throws(() => GroupStageSchema.parse('deploying'));
 });
 
 test('TaskSchema accepts a full task with subtasks', () => {

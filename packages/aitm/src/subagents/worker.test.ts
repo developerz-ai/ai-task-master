@@ -115,6 +115,7 @@ function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {
     branch: null,
     pr: null,
     status: 'pending',
+    stage: 'pending',
     ...overrides,
   };
 }

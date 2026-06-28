@@ -104,6 +104,21 @@ const mergeCases: Case[] = [
     argv: ['merge-pr', '--pr=42'],
     expected: { kind: 'merge-pr', resume: true, pr: 42 },
   },
+  {
+    name: 'merge-pr: --max-iterations',
+    argv: ['merge-pr', '--max-iterations', '30'],
+    expected: { kind: 'merge-pr', resume: true, maxIterations: 30 },
+  },
+  {
+    name: 'merge-pr: --max-iterations=N inline form',
+    argv: ['merge-pr', '--max-iterations=50'],
+    expected: { kind: 'merge-pr', resume: true, maxIterations: 50 },
+  },
+  {
+    name: 'merge-pr: all flags',
+    argv: ['merge-pr', '--pr', '7', '--max-iterations', '25', '--no-resume'],
+    expected: { kind: 'merge-pr', resume: false, pr: 7, maxIterations: 25 },
+  },
 ];
 
 const configCases: Case[] = [
@@ -259,6 +274,26 @@ const helpCases: Case[] = [
   {
     name: 'merge-pr: stray positional',
     argv: ['merge-pr', 'foo'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'merge-pr: bad --max-iterations (non-numeric)',
+    argv: ['merge-pr', '--max-iterations', 'abc'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'merge-pr: bad --max-iterations (zero)',
+    argv: ['merge-pr', '--max-iterations', '0'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'merge-pr: bad --max-iterations (negative)',
+    argv: ['merge-pr', '--max-iterations', '-5'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'merge-pr: --max-iterations without value',
+    argv: ['merge-pr', '--max-iterations'],
     expected: { kind: 'help' },
   },
   { name: 'config: no subcommand', argv: ['config'], expected: { kind: 'help' } },

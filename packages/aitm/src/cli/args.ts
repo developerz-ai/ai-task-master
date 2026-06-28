@@ -148,6 +148,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
 
 function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {
   let pr: number | undefined;
+  let maxIterations: number | undefined;
   let resume = true;
   let i = 0;
   while (i < args.length) {
@@ -160,6 +161,12 @@ function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {
       if (n === null) return HELP;
       pr = n;
       i += consumed(inlineValue !== null);
+    } else if (flag === '--max-iterations') {
+      const v = takeValue(args, i, inlineValue);
+      const n = parsePositiveInt(v);
+      if (n === null) return HELP;
+      maxIterations = n;
+      i += consumed(inlineValue !== null);
     } else if (flag === '--no-resume') {
       if (inlineValue !== null) return HELP;
       resume = false;
@@ -170,6 +177,7 @@ function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {
   }
   const out: MergePrArgs = { kind: 'merge-pr', resume };
   if (pr !== undefined) out.pr = pr;
+  if (maxIterations !== undefined) out.maxIterations = maxIterations;
   return out;
 }
 

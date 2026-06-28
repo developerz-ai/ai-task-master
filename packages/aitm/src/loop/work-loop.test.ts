@@ -387,6 +387,31 @@ test('resume: tasks already marked done are skipped', async () => {
   );
 });
 
+test('resume: group persisted at waiting-ci skips Worker and opens no new PR', async () => {
+  // A run that crashed after persisting waiting-ci resumes directly at CI polling.
+  // handleWorking and handlePrOpen must NOT be called again.
+  const resumed = group('resume-ci', {
+    stage: 'waiting-ci',
+    pr: 5,
+    status: 'awaiting-pr',
+    tasks: [{ id: 't1', text: 't', complexity: 'normal', done: true }],
+  });
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 5 });
+  const { github, calls: ghCalls } = makeGithub({ checks: ['success'], threads: [] });
+  const { state } = makeState([resumed]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, state, autoMerge: true }));
+  await loop.runGroup(resumed);
+
+  assert.equal(orchCalls.runWorker.length, 0, 'Worker not re-run on resume at waiting-ci');
+  assert.equal(orchCalls.openPr.length, 0, 'PR not re-opened on resume');
+  assert.deepEqual(ghCalls.waitForChecks, [5], 'CI checked once for the existing PR');
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [5],
+    'PR merged after CI passes',
+  );
+});
+
 test('group with all tasks already done and no delivery → blocked', async () => {
   const finished = group('finished', {
     tasks: [{ id: 'a', text: 'done', complexity: 'normal', done: true }],

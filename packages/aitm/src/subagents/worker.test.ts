@@ -107,7 +107,10 @@ function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {
   return {
     id: 'core',
     title: 'Core features',
-    tasks: ['task A', 'task B'],
+    tasks: [
+      { id: 'task-a', text: 'task A', complexity: 'normal', done: false },
+      { id: 'task-b', text: 'task B', complexity: 'normal', done: false },
+    ],
     dependsOn: [],
     branch: null,
     pr: null,

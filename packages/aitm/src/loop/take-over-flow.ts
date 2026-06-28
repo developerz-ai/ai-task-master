@@ -286,7 +286,15 @@ async function runWorkerCiFix(
   const group: PrGroup = {
     id: `takeover-ci-${input.pr}`,
     title: `Fix CI failures on PR #${input.pr}`,
-    tasks: [readTask, 'Run the project test/lint commands locally to verify, then stage fixes.'],
+    tasks: [
+      { id: `takeover-ci-${input.pr}-1`, text: readTask, complexity: 'normal', done: false },
+      {
+        id: `takeover-ci-${input.pr}-2`,
+        text: 'Run the project test/lint commands locally to verify, then stage fixes.',
+        complexity: 'normal',
+        done: false,
+      },
+    ],
     dependsOn: [],
     branch: null,
     pr: input.pr,

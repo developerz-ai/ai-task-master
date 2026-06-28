@@ -5,7 +5,7 @@ import { appendFile, mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ZodError } from 'zod';
 import { atomicWrite } from '../fs/atomic-write.ts';
-import { type RunState, RunStateSchema } from './schema.ts';
+import { type RunState, RunStateSchema, type Task } from './schema.ts';
 
 const STATE_FILE = 'state.json';
 const GOAL_FILE = 'goal.txt';
@@ -126,13 +126,46 @@ export class StateStore {
 
 function parseState(value: unknown, path: string): RunState {
   try {
-    return RunStateSchema.parse(value);
+    return RunStateSchema.parse(coerceLegacyTasks(value));
   } catch (err) {
     if (err instanceof ZodError) {
       throw new Error(`${path}: ${formatZodError(err)}`);
     }
     throw err;
   }
+}
+
+// Legacy state.json (pre Task[] migration) stored prGroups[].tasks as a bare string[].
+// There's no migration framework, so coerce on read: a string task becomes a structured
+// Task with a slug id, default complexity, and not-done. Idempotent — structured tasks
+// (and any non-legacy shape) pass through untouched for RunStateSchema.parse to validate.
+function coerceLegacyTasks(value: unknown): unknown {
+  if (!isRecord(value) || !Array.isArray(value.prGroups)) return value;
+  const prGroups = value.prGroups.map((group) => {
+    if (!isRecord(group) || !Array.isArray(group.tasks)) return group;
+    const tasks = group.tasks.map((task, index) =>
+      typeof task === 'string' ? legacyTask(task, index) : task,
+    );
+    return { ...group, tasks };
+  });
+  return { ...value, prGroups };
+}
+
+function legacyTask(text: string, index: number): Task {
+  return { id: slugify(text) || `task-${index + 1}`, text, complexity: 'normal', done: false };
+}
+
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60)
+    .replace(/-+$/, '');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function ensureTrailingNewline(s: string): string {

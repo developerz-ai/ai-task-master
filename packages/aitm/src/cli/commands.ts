@@ -570,6 +570,7 @@ function buildInitialRunState(input: {
     updatedAt: now,
     options: {
       autoMerge: input.resolved.autoMerge,
+      prPerTask: false,
       maxPrs: input.resolved.maxPrs,
       maxSessions: input.resolved.maxSessions,
       mergeMethod: input.resolved.mergeMethod,
@@ -807,6 +808,7 @@ async function synthesizeTakeoverState(input: {
     updatedAt: now,
     options: {
       autoMerge: resolved.autoMerge,
+      prPerTask: false,
       maxPrs: resolved.maxPrs,
       maxSessions: resolved.maxSessions,
       mergeMethod: resolved.mergeMethod,

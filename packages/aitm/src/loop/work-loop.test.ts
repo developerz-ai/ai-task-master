@@ -23,7 +23,7 @@ function group(id: string, overrides: Partial<PrGroup> = {}): PrGroup {
   return {
     id,
     title: id,
-    tasks: ['t'],
+    tasks: [{ id: 't1', text: 't', complexity: 'normal', done: false }],
     dependsOn: [],
     branch: null,
     pr: null,

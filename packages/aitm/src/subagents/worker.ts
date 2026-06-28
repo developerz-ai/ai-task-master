@@ -202,7 +202,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
         branch,
         draftCommitMessage: manifest.draftCommitMessage,
         changes,
-        progressEntries: input.group.tasks.map((task) => `- ${task}`),
+        progressEntries: input.group.tasks.map((task) => `- ${task.text}`),
       },
     };
   } catch (err) {
@@ -225,7 +225,7 @@ function buildManifestPrompt(input: WorkerInput): string {
     `Worktree: ${input.worktreePath}`,
     '',
     'Tasks in this PR group:',
-    ...input.group.tasks.map((task, i) => `  ${i + 1}. ${task}`),
+    ...input.group.tasks.map((task, i) => `  ${i + 1}. ${task.text}`),
   ];
   if (input.rollingContext.trim()) {
     lines.push('', 'Rolling context from prior PRs:', input.rollingContext);

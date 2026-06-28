@@ -110,6 +110,7 @@ function capGroups(plan: Plan, maxPrs: number): Plan {
   if (!lastKept) return plan;
   const remainder: PlannedTask = {
     description: `remainder: ${overflow.map(summarizeGroup).join('; ')}`,
+    complexity: 'normal',
   };
   const merged: PlannedGroup = { ...lastKept, tasks: [...lastKept.tasks, remainder] };
   const newGroups = [...kept.slice(0, maxPrs - 1), merged];

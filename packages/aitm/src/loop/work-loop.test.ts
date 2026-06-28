@@ -261,6 +261,7 @@ function makeDeps(
     concurrency: overrides.concurrency ?? 1,
     autoMerge: overrides.autoMerge ?? true,
     maxSessions: overrides.maxSessions ?? null,
+    ...(overrides.prPerTask !== undefined ? { prPerTask: overrides.prPerTask } : {}),
     ...(overrides.mergeMethod !== undefined ? { mergeMethod: overrides.mergeMethod } : {}),
     ...(overrides.initialSessionCount !== undefined
       ? { initialSessionCount: overrides.initialSessionCount }
@@ -398,6 +399,64 @@ test('group with all tasks already done and no delivery → blocked', async () =
   assert.equal(calls.openPr.length, 0, 'no PR opened without a fresh delivery');
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((g) => g.id === 'finished')?.status, 'blocked');
+});
+
+function twoTaskGroup(): PrGroup {
+  return group('multi', {
+    tasks: [
+      { id: 'a', text: 'first task', complexity: 'normal', done: false },
+      { id: 'b', text: 'second task', complexity: 'complex', done: false },
+    ],
+  });
+}
+
+test('group mode (default): a multi-task group opens exactly one PR after the final task', async () => {
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
+  const { state } = makeState([twoTaskGroup()]);
+  // prPerTask omitted → group-as-PR default.
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(twoTaskGroup());
+
+  assert.equal(calls.runWorker.length, 2, 'one Worker pass per task');
+  assert.equal(calls.openPr.length, 1, 'single group PR, opened after the last task');
+});
+
+test('prPerTask: opens a PR after every task (autoMerge off)', async () => {
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
+  const { state } = makeState([twoTaskGroup()]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false, prPerTask: true }));
+  await loop.runGroup(twoTaskGroup());
+
+  assert.equal(calls.runWorker.length, 2);
+  assert.equal(calls.openPr.length, 2, 'one PR per task under prPerTask');
+});
+
+test('prPerTask: each task PR runs CI then merges under autoMerge', async () => {
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
+  const { github, calls: ghCalls } = makeGithub({ checks: ['success', 'success'], threads: [] });
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, autoMerge: true, prPerTask: true }));
+  await loop.runGroup(twoTaskGroup());
+
+  assert.equal(calls.openPr.length, 2, 'one PR per task');
+  assert.equal(ghCalls.waitForChecks.length, 2, 'CI awaited per task PR');
+  assert.equal(ghCalls.mergePr.length, 2, 'each task PR merged');
+});
+
+test('prPerTask: resume skips done tasks and opens a PR only for the remaining one', async () => {
+  const resumed = group('multi', {
+    tasks: [
+      { id: 'a', text: 'already done', complexity: 'normal', done: true },
+      { id: 'b', text: 'still pending', complexity: 'normal', done: false },
+    ],
+  });
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 4 });
+  const { state } = makeState([resumed]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false, prPerTask: true }));
+  await loop.runGroup(resumed);
+
+  assert.equal(calls.runWorker.length, 1, 'only the undone task runs');
+  assert.equal(calls.runWorker[0]?.task?.id, 'b');
+  assert.equal(calls.openPr.length, 1, 'one PR for the single remaining task');
 });
 
 test('autoMerge: success path runs waitForChecks → mergePr and marks merged', async () => {

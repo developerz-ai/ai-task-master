@@ -75,6 +75,9 @@ export type WorkLoopDeps = {
   graph: WorkLoopGraph;
   concurrency: number;
   autoMerge: boolean;
+  // When true, open (and, under autoMerge, merge) a PR after each task. Default (false/omitted)
+  // is aitm's group-as-PR mode: a single PR per group, opened after the final task lands.
+  prPerTask?: boolean;
   maxSessions: number | null;
   mergeMethod?: MergeMethod;
   // Seed for resume: when WorkLoop is constructed after a previous run, pass
@@ -185,14 +188,17 @@ export class WorkLoop {
     baseBranch: string,
   ): Promise<void> {
     const { orchestrator } = this.deps;
+    const { tasks } = group;
 
     // Execute the group task-by-task. Each not-yet-done task is one Worker pass → commit → mark
     // done → persist → re-render plan.md. On resume, tasks already marked `done` in a prior run
-    // are skipped so landed work is never redone. The PR opens once, after the final task
-    // (aitm's group-as-PR default); per-task PR timing is layered on separately.
+    // are skipped so landed work is never redone. A PR opens after each task when `prPerTask` is
+    // set, otherwise once after the final task (aitm's group-as-PR default). Because tasks are
+    // completed in order, done tasks form a contiguous prefix, so the last array element is the
+    // last task this pass processes.
     let worked = group;
-    let delivery: WorkerDelivery | undefined;
-    for (const task of group.tasks) {
+    let opened = false;
+    for (const [i, task] of tasks.entries()) {
       if (task.done) continue;
       const result = await orchestrator.runWorker({ group: worked, task, worktree, baseBranch });
       if (result.kind !== 'ok') {
@@ -201,12 +207,17 @@ export class WorkLoop {
         this.outcomes.push({ groupId: group.id, status: 'blocked', reason });
         return;
       }
-      delivery = result.delivery;
+      const delivery = result.delivery;
       await orchestrator.finalizeCommit(worked, delivery, worktree.path);
       worked = await this.completeTask(worked, task.id);
+
+      if (this.deps.prPerTask || i === tasks.length - 1) {
+        await this.openAndMaybeMerge(worked, delivery, worktree, baseBranch);
+        opened = true;
+      }
     }
 
-    if (delivery === undefined) {
+    if (!opened) {
       // Every task was already done on entry — a resumed group whose work finished in a prior
       // run but which never opened a PR. There's no fresh delivery to compose one from, so
       // surface it as blocked rather than fabricating an empty PR.
@@ -216,12 +227,20 @@ export class WorkLoop {
         status: 'blocked',
         reason: 'all tasks already complete but no pull request was opened',
       });
-      return;
     }
+  }
 
-    const pr = await orchestrator.openPr(worked, delivery, baseBranch);
-    // openPr already landed externally; if persistence fails here, surface the real
-    // outcome via StateWriteAfterSuccess so the outer catch doesn't flip us to 'blocked'.
+  // Open the PR for one delivery, persist the outcome, and — under autoMerge — run the CI/review/
+  // merge flow. Invoked once per group (default) or once per task (`prPerTask`). External side
+  // effects (openPr/mergePr) are guarded by StateWriteAfterSuccess so a failed state write never
+  // rolls a landed PR back to 'blocked'.
+  private async openAndMaybeMerge(
+    group: PrGroup,
+    delivery: WorkerDelivery,
+    worktree: Worktree,
+    baseBranch: string,
+  ): Promise<void> {
+    const pr = await this.deps.orchestrator.openPr(group, delivery, baseBranch);
     await this.persistAfterSideEffect(
       { groupId: group.id, status: 'awaiting-pr', pr: pr.number },
       () => this.markStatus(group.id, 'awaiting-pr', { pr: pr.number }),
@@ -232,8 +251,7 @@ export class WorkLoop {
       return;
     }
 
-    await this.autoMergeFlow(worked, pr, worktree, baseBranch);
-    // mergePr already landed externally; same guard as above.
+    await this.autoMergeFlow(group, pr, worktree, baseBranch);
     await this.persistAfterSideEffect({ groupId: group.id, status: 'merged', pr: pr.number }, () =>
       this.markStatus(group.id, 'merged'),
     );

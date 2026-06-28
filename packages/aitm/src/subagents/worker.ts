@@ -44,7 +44,7 @@ import {
 } from '@developerz.ai/ai-claude-compat';
 import { generateText, stepCountIs, type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
-import type { PrGroup } from '../state/schema.ts';
+import type { PrGroup, Task } from '../state/schema.ts';
 import type { SubagentInit } from './factory.ts';
 
 // The Claude-Code-style tool surface (from @developerz.ai/ai-claude-compat) the Worker drives:
@@ -79,6 +79,10 @@ export type WorkerAgent = ToolLoopAgent<never, WorkerTools>;
 
 export type WorkerInput = {
   group: PrGroup;
+  // The specific task this pass focuses on. When set, the manifest prompt and progress entries
+  // scope to this single task; when omitted (the CI-fix / orchestrator-as-tool path) the Worker
+  // plans across the whole group. The two-phase manifest/editor flow is unchanged either way.
+  task?: Task;
   worktreePath: string;
   baseBranch: string;
   styleContents: string;
@@ -202,7 +206,9 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
         branch,
         draftCommitMessage: manifest.draftCommitMessage,
         changes,
-        progressEntries: input.group.tasks.map((task) => `- ${task.text}`),
+        progressEntries: input.task
+          ? [`- ${input.task.text}`]
+          : input.group.tasks.map((task) => `- ${task.text}`),
       },
     };
   } catch (err) {
@@ -224,9 +230,18 @@ function buildManifestPrompt(input: WorkerInput): string {
     `Base branch: ${input.baseBranch}`,
     `Worktree: ${input.worktreePath}`,
     '',
-    'Tasks in this PR group:',
-    ...input.group.tasks.map((task, i) => `  ${i + 1}. ${task.text}`),
   ];
+  if (input.task) {
+    lines.push(`Current task [${input.task.complexity}]: ${input.task.text}`);
+    if (input.task.subtasks && input.task.subtasks.length > 0) {
+      lines.push('Subtasks:', ...input.task.subtasks.map((s) => `  - ${s}`));
+    }
+  } else {
+    lines.push(
+      'Tasks in this PR group:',
+      ...input.group.tasks.map((task, i) => `  ${i + 1}. ${task.text}`),
+    );
+  }
   if (input.rollingContext.trim()) {
     lines.push('', 'Rolling context from prior PRs:', input.rollingContext);
   }

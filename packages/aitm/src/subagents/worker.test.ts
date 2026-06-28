@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
-import type { PrGroup } from '../state/schema.ts';
+import type { PrGroup, Task } from '../state/schema.ts';
 import {
   type BashInput,
   type BashOutput,
@@ -179,6 +179,57 @@ test('runWorker: manifest → per-file edits → commit sequence', async () => {
   assert.match(cmds[0] ?? '', /git -C '\/tmp\/wt' checkout -B 'aitm\/core'/);
   assert.match(cmds[1] ?? '', /git -C '\/tmp\/wt' add -A/);
   assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' commit -m 'feat: add a \+ fix b'/);
+});
+
+test('runWorker: scopes the manifest prompt and progress to the current Task slice', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  const { tools } = makeTools();
+  let manifestPrompt = '';
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      const idx = call++;
+      if (idx === 0) {
+        manifestPrompt = JSON.stringify(options.prompt);
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      return {
+        content: [{ type: 'text', text: 'created a' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  // baseGroup carries task A + task B; focus the pass on a single task slice.
+  const task: Task = { id: 'task-b', text: 'task B only', complexity: 'complex', done: false };
+  const result = await runWorker(agent, { ...baseInput(), task });
+  assert.equal(result.kind, 'ok');
+  if (result.kind === 'ok') {
+    // Progress reflects only the focused task, not every task in the group.
+    assert.deepEqual(result.delivery.progressEntries, ['- task B only']);
+  }
+  // The manifest prompt centers on the current task (text + complexity) and drops the sibling.
+  assert.match(manifestPrompt, /task B only/);
+  assert.match(manifestPrompt, /complex/);
+  assert.equal(manifestPrompt.includes('task A'), false, 'sibling task omitted in task mode');
 });
 
 test('runWorker runs formatCommand in the worktree before staging when set (issue #48)', async () => {

@@ -213,6 +213,7 @@ export async function runLoopAdapter(
       graph,
       concurrency: input.resolved.concurrency,
       autoMerge: input.resolved.autoMerge,
+      prPerTask: current.options.prPerTask ?? false,
       maxSessions: input.resolved.maxSessions,
       mergeMethod: input.resolved.mergeMethod,
       initialSessionCount: current.sessionCount,
@@ -280,7 +281,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
   });
 
   return {
-    runWorker: async ({ group, worktree, baseBranch }) => {
+    runWorker: async ({ group, task, worktree, baseBranch }) => {
       // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
       // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
       const tools = resolveWorkerTools(mcp.toolsForRole('worker'), worktree.path);
@@ -291,6 +292,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
       });
       return runWorkerSubagent(agent, {
         group,
+        ...(task ? { task } : {}),
         worktreePath: worktree.path,
         baseBranch,
         styleContents: style,

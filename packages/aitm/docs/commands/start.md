@@ -61,6 +61,24 @@ No final verification phase. No release phase. The merge of the last PR is the t
 
 `Planner` chooses group boundaries by cohesion (same feature, same file area) and reviewability (target ~ 300 changed lines per PR, soft).
 
+## PR descriptions
+
+Every PR `aitm` opens uses a consistent body, composed by the `Orchestrator` from the worker's
+delivery (see `PR_BODY_GUIDE` in `orchestrator.ts`):
+
+```
+## Summary
+<1-2 sentences: what changed and why>
+
+## Changes
+- <notable file/area changes>
+
+## Testing
+<how it was verified — tests, lint — or a note that it wasn't>
+```
+
+Titles are conventional-commit style, ≤72 chars.
+
 ## Coding style
 
 `AgentConfigDetector` reads `CLAUDE.md` or `AGENTS.md` and produces a coding-style payload. That payload is prepended to every subagent system prompt. `--style <path>` overrides both. See `../coding-style.md`.

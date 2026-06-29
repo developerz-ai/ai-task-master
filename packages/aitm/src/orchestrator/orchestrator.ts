@@ -123,12 +123,26 @@ export type OrchestratorTools = {
 };
 
 // Structured-output schema for PR composition. Title cap reinforces conventional-commit
-// brevity; body is free-form markdown.
+// brevity; body is markdown following PR_BODY_GUIDE's fixed sections.
 const PrCompositionSchema = z.object({
   title: z.string().min(1).max(72),
   body: z.string().min(1),
 });
 type PrComposition = z.infer<typeof PrCompositionSchema>;
+
+// Standard PR body every aitm-opened PR follows, so reviewers get a consistent shape. The
+// Orchestrator model fills these sections from the worker delivery; exported so the format is
+// unit-testable and documented in one place.
+export const PR_BODY_GUIDE = [
+  'body: GitHub-flavored markdown with exactly these three sections, in order, each with its',
+  'heading verbatim:',
+  '  ## Summary',
+  '    1-2 sentences on what changed and why.',
+  '  ## Changes',
+  '    Bulleted list of the notable file/area changes.',
+  '  ## Testing',
+  '    How the change was verified (tests, lint). If not verified, say so explicitly.',
+].join('\n');
 
 // Fallback session cap when caller passes null / 0 / negative `maxSessions`.
 export const DEFAULT_MAX_STEPS = 50;
@@ -263,7 +277,7 @@ export class Orchestrator {
       '',
       'Compose the pull-request title and body for this PR group, then call the submit tool with it.',
       '- title: conventional-commit style, ≤72 chars',
-      '- body: short summary + bulleted file changes + relevant rolling context',
+      PR_BODY_GUIDE,
       '',
       `PR group: ${group.id} — ${group.title}`,
       `Worker draft message: ${delivery.draftCommitMessage}`,

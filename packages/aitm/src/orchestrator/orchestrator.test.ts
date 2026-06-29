@@ -24,6 +24,7 @@ import {
   ORCHESTRATOR_ROLE_PREFIX,
   Orchestrator,
   type OrchestratorBuildContext,
+  PR_BODY_GUIDE,
   type RunCmd,
   resolveMaxSteps,
 } from './orchestrator.ts';
@@ -333,6 +334,46 @@ test('openPr composes title + body via the orchestrator model and calls github.c
   });
   // Composition uses the orchestrator-tier model handle.
   assert.deepEqual(roles, ['orchestrator']);
+});
+
+test('PR_BODY_GUIDE defines the standard Summary/Changes/Testing sections', () => {
+  for (const heading of ['## Summary', '## Changes', '## Testing']) {
+    assert.ok(PR_BODY_GUIDE.includes(heading), `expected guide to mention ${heading}`);
+  }
+});
+
+test('openPr prompt instructs the standard PR body template', async () => {
+  let capturedPrompt = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      capturedPrompt = JSON.stringify(options.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify({ title: 't', body: 'b' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSessions: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await o.openPr(baseGroup(), baseDelivery(), 'main');
+  assert.match(capturedPrompt, /## Summary/);
+  assert.match(capturedPrompt, /## Changes/);
+  assert.match(capturedPrompt, /## Testing/);
 });
 
 test('openPr uses group.branch when set, otherwise aitm/<id>', async () => {

@@ -12,7 +12,17 @@ aitm start "<goal>"
   [--no-automerge]         # default: automerge on
   [--style <path>]         # default: detected CLAUDE.md or AGENTS.md
   [--model <id>]           # default: provider default
+  [--branch <name>]        # default: aitm/<group-id>
 ```
+
+### `--branch`
+
+By default each PR group gets an `aitm/<group-id>` branch. Pass `--branch <name>` to control it:
+
+- **Single-group plan** (e.g. `--max-prs 1`): the branch is used **verbatim** — the PR lands on exactly `<name>`.
+- **Multi-group plan**: `<name>` becomes a **prefix** (`<name>/<group-id>`) so concurrent worktrees and their PRs never collide on one branch.
+
+The name is validated as a git ref (no whitespace, leading `-`, `..`, control/special chars); an invalid name is a usage error.
 
 ## Preconditions
 
@@ -46,7 +56,7 @@ No final verification phase. No release phase. The merge of the last PR is the t
 | --- | --- | --- |
 | Group | `Planner` | `state.json.prGroups[i]` |
 | Tasks within a group | `Planner` | `state.json.prGroups[i].tasks` |
-| Branch for a group | `Worker` | `state.json.prGroups[i].branch` |
+| Branch for a group | `branchFor()` in `run-loop-adapter.ts` (from `--branch` or default `aitm/<id>`) | `state.json.prGroups[i].branch` |
 | PR number for a group | `Worker` | `state.json.prGroups[i].pr` |
 
 `Planner` chooses group boundaries by cohesion (same feature, same file area) and reviewability (target ~ 300 changed lines per PR, soft).

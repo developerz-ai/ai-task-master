@@ -14,6 +14,10 @@ export type StartArgs = {
   stylePath?: string | null;
   model?: string;
   concurrency?: number;
+  // Caller-specified branch for the PR(s). When the plan yields a single group it is used
+  // verbatim; with multiple groups it becomes a prefix (`<branch>/<group-id>`) so concurrent
+  // worktrees don't collide. When absent, branches default to `aitm/<group-id>`.
+  branch?: string;
 };
 
 export type MergePrArgs = {
@@ -72,6 +76,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   let stylePath: string | undefined;
   let model: string | undefined;
   let concurrency: number | undefined;
+  let branch: string | undefined;
 
   let i = 0;
   while (i < args.length) {
@@ -123,6 +128,11 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
       if (v === null) return HELP;
       model = v;
       i += consumed(inlineValue !== null);
+    } else if (flag === '--branch') {
+      const v = takeValue(args, i, inlineValue);
+      if (v === null || !isValidBranchName(v)) return HELP;
+      branch = v;
+      i += consumed(inlineValue !== null);
     } else if (raw.startsWith('--')) {
       return HELP;
     } else {
@@ -143,7 +153,26 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   if (stylePath !== undefined) out.stylePath = stylePath;
   if (model !== undefined) out.model = model;
   if (concurrency !== undefined) out.concurrency = concurrency;
+  if (branch !== undefined) out.branch = branch;
   return out;
+}
+
+// Git ref-name check that mirrors the component rules `git check-ref-format --branch` enforces,
+// so an invalid `--branch` is rejected up front instead of failing later at `git worktree add -b`.
+export function isValidBranchName(name: string): boolean {
+  if (name.length === 0 || name.length > 255) return false;
+  if (name.startsWith('-')) return false;
+  // Whole-ref forbidden sequences: range/reflog syntax, empty path segments.
+  if (name.includes('..') || name.includes('@{') || name.includes('//')) return false;
+  // No whitespace, control chars, or the special chars git forbids anywhere in a ref.
+  if (/[\s~^:?*[\\]/.test(name)) return false;
+  // Per-component rules: a slash-separated component may not be empty, start with '.', or end
+  // with '.' or '.lock' (covers leading/trailing slash via empty components).
+  for (const part of name.split('/')) {
+    if (part.length === 0) return false;
+    if (part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock')) return false;
+  }
+  return true;
 }
 
 function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {

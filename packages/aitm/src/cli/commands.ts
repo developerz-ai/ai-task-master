@@ -38,6 +38,9 @@ export type RunLoopInput = {
   github: GitHubClient;
   goal: string;
   criteria: string | undefined;
+  // Caller-specified PR branch (from `--branch`). Used verbatim for a single-group plan,
+  // prefixed per group otherwise. Undefined falls back to `aitm/<group-id>`.
+  branch: string | undefined;
 };
 
 export type RunMergeFlowInput = {
@@ -276,6 +279,7 @@ export async function runStart(
       github,
       goal: args.goal,
       criteria: args.criteria,
+      branch: args.branch,
     });
   } catch (err) {
     return { code: 1, message: errMsg(err) };

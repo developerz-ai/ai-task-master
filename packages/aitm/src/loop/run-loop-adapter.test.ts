@@ -17,12 +17,14 @@ import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import {
   type AdapterStatePort,
+  branchFor,
   githubThreadTool,
   localEditTools,
   type PlanGroupsOutcome,
   planToPrGroups,
   type RunLoopAdapterSeams,
   runLoopAdapter,
+  sanitizeBranchComponent,
 } from './run-loop-adapter.ts';
 import type { WorkLoopGithub, WorkLoopOrchestrator, WorkLoopPool } from './work-loop.ts';
 
@@ -225,6 +227,103 @@ test('planToPrGroups maps plan groups to pending PrGroups with aitm/<id> branche
         dependsOn: ['core'],
       },
     ],
+  );
+});
+
+// ---- branchFor / caller-specified branch -----------------------------------
+
+test('branchFor: no requested branch defaults to aitm/<id>', () => {
+  assert.equal(branchFor('core', undefined, 1), 'aitm/core');
+  assert.equal(branchFor('core', undefined, 3), 'aitm/core');
+});
+
+test('branchFor: single group uses the requested branch verbatim', () => {
+  assert.equal(branchFor('core', 'feature/login', 1), 'feature/login');
+});
+
+test('branchFor: multiple groups prefix the requested branch per group', () => {
+  assert.equal(branchFor('core', 'feature/login', 2), 'feature/login/core');
+  assert.equal(branchFor('api', 'feature/login', 2), 'feature/login/api');
+});
+
+test('sanitizeBranchComponent: maps unsafe Planner ids to valid ref components', () => {
+  assert.equal(sanitizeBranchComponent('core'), 'core');
+  assert.equal(sanitizeBranchComponent('.hidden'), 'hidden');
+  assert.equal(sanitizeBranchComponent('foo.lock'), 'foo');
+  assert.equal(sanitizeBranchComponent('a b:c'), 'a-b-c');
+  assert.equal(sanitizeBranchComponent('trailing.'), 'trailing');
+  assert.equal(sanitizeBranchComponent('...'), 'group');
+});
+
+test('branchFor: sanitizes an unsafe group id in default and prefixed forms', () => {
+  // A Planner id that would otherwise produce an invalid ref (leading dot).
+  assert.equal(branchFor('.weird', undefined, 1), 'aitm/weird');
+  assert.equal(branchFor('.weird', 'feature/x', 2), 'feature/x/weird');
+});
+
+test('planToPrGroups: composes a valid ref even when the Planner id is unsafe', () => {
+  const plan: Plan = {
+    goal: 'g',
+    groups: [
+      {
+        id: 'core',
+        title: 'Core',
+        tasks: [{ description: 'a', complexity: 'normal' }],
+        dependsOn: [],
+      },
+      {
+        id: 'api.lock',
+        title: 'API',
+        tasks: [{ description: 'b', complexity: 'simple' }],
+        dependsOn: [],
+      },
+    ],
+  };
+  const groups = planToPrGroups(plan, 'release/v2');
+  assert.deepEqual(
+    groups.map((g) => g.branch),
+    ['release/v2/core', 'release/v2/api'],
+  );
+});
+
+test('planToPrGroups: requested branch applied verbatim for a single-group plan', () => {
+  const plan: Plan = {
+    goal: 'g',
+    groups: [
+      {
+        id: 'core',
+        title: 'Core',
+        tasks: [{ description: 'a', complexity: 'normal' }],
+        dependsOn: [],
+      },
+    ],
+  };
+  const groups = planToPrGroups(plan, 'release/v2');
+  assert.equal(groups[0]?.branch, 'release/v2');
+});
+
+test('planToPrGroups: requested branch prefixes each group in a multi-group plan', () => {
+  const plan: Plan = {
+    goal: 'g',
+    groups: [
+      {
+        id: 'core',
+        title: 'Core',
+        tasks: [{ description: 'a', complexity: 'normal' }],
+        dependsOn: [],
+      },
+      {
+        id: 'api',
+        title: 'API',
+        tasks: [{ description: 'b', complexity: 'simple' }],
+        dependsOn: ['core'],
+      },
+    ],
+  };
+  const groups = planToPrGroups(plan, 'release/v2');
+  assert.deepEqual(
+    groups.map((g) => g.branch),
+    ['release/v2/core', 'release/v2/api'],
   );
 });
 

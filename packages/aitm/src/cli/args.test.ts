@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { type ParsedArgs, parseArgs } from './args.ts';
+import { isValidBranchName, type ParsedArgs, parseArgs } from './args.ts';
 
 type Case = { name: string; argv: string[]; expected: ParsedArgs };
 
@@ -70,6 +70,31 @@ const startCases: Case[] = [
     name: 'start: --model=anthropic/claude inline',
     argv: ['start', 'goal', '--model=anthropic/claude-opus-4.7'],
     expected: { kind: 'start', goal: 'goal', model: 'anthropic/claude-opus-4.7' },
+  },
+  {
+    name: 'start: --branch two-token form',
+    argv: ['start', 'goal', '--branch', 'feature/login'],
+    expected: { kind: 'start', goal: 'goal', branch: 'feature/login' },
+  },
+  {
+    name: 'start: --branch=NAME inline form',
+    argv: ['start', 'goal', '--branch=release/v2'],
+    expected: { kind: 'start', goal: 'goal', branch: 'release/v2' },
+  },
+  {
+    name: 'start: invalid --branch (whitespace) rejected',
+    argv: ['start', 'goal', '--branch', 'bad name'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: invalid --branch (leading dash) rejected',
+    argv: ['start', 'goal', '--branch=-x'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: --branch without value',
+    argv: ['start', 'g', '--branch'],
+    expected: { kind: 'help' },
   },
   {
     name: 'start: mix of inline and two-token flags',
@@ -419,3 +444,46 @@ for (const c of [...startCases, ...mergeCases, ...configCases, ...profileCases, 
     assert.deepEqual(parseArgs(c.argv), c.expected);
   });
 }
+
+test('isValidBranchName: accepts normal ref names', () => {
+  // Mirrors `git check-ref-format --branch`: '@' and 'a.b' are valid; per-component dots are fine.
+  for (const ok of [
+    'main',
+    'feature/login',
+    'release/v2',
+    'fix-123',
+    'a/b/c',
+    '@',
+    'a.b',
+    'UPPER/Case',
+  ]) {
+    assert.equal(isValidBranchName(ok), true, ok);
+  }
+});
+
+test('isValidBranchName: rejects unsafe ref names', () => {
+  for (const bad of [
+    '',
+    '-x',
+    '/leading',
+    'trailing/',
+    'a..b',
+    'a//b',
+    'with space',
+    'tilde~1',
+    'caret^',
+    'colon:x',
+    'q?',
+    'star*',
+    'a@{0}',
+    'ends.lock',
+    'ends.',
+    // Component-level rules git enforces but a naive whole-string check misses.
+    'foo/.bar', // component starts with '.'
+    'foo.lock/bar', // component ends with '.lock'
+    'a./b', // component ends with '.'
+    '.hidden', // leading '.'
+  ]) {
+    assert.equal(isValidBranchName(bad), false, bad);
+  }
+});

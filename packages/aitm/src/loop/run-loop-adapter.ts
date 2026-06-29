@@ -246,7 +246,38 @@ export async function runLoopAdapter(
 
 // ---- Plan ------------------------------------------------------------------
 
-export function planToPrGroups(plan: Plan): PrGroup[] {
+// Normalize a Planner-supplied group id into a safe git ref component. The id is only
+// `z.string()` in the plan schema, so it can carry characters (leading '.', '.lock', spaces,
+// ':' …) that would make `aitm/<id>` or `<branch>/<id>` an invalid ref and fail at worktree
+// creation. Map unsafe chars to '-', strip the component-level footguns, never return empty.
+export function sanitizeBranchComponent(id: string): string {
+  let s = id.replace(/[^A-Za-z0-9._-]/g, '-');
+  s = s.replace(/\.\.+/g, '.'); // collapse '..' (forbidden in refs)
+  s = s.replace(/^[.-]+/, ''); // no leading '.' or '-'
+  s = s.replace(/(?:\.lock)+$/i, ''); // no trailing '.lock'
+  s = s.replace(/[.-]+$/, ''); // no trailing '.' or '-'
+  return s.length > 0 ? s : 'group';
+}
+
+// Resolve a group's branch name, honoring a caller-specified `--branch`.
+//   - no branch requested        → `aitm/<group-id>` (default)
+//   - requested, single group    → the requested name verbatim (already validated by the CLI)
+//   - requested, multiple groups → `<requested>/<group-id>` so concurrent worktrees
+//     (and the PRs they open) don't collide on one branch name.
+// The group-id segment is always sanitized so the composed ref is valid regardless of what the
+// Planner emitted.
+export function branchFor(
+  groupId: string,
+  requested: string | undefined,
+  totalGroups: number,
+): string {
+  const safeId = sanitizeBranchComponent(groupId);
+  if (requested === undefined) return `aitm/${safeId}`;
+  return totalGroups <= 1 ? requested : `${requested}/${safeId}`;
+}
+
+export function planToPrGroups(plan: Plan, branch?: string): PrGroup[] {
+  const total = plan.groups.length;
   return plan.groups.map((g) => ({
     id: g.id,
     title: g.title,
@@ -257,7 +288,7 @@ export function planToPrGroups(plan: Plan): PrGroup[] {
       done: false,
     })),
     dependsOn: g.dependsOn,
-    branch: `aitm/${g.id}`,
+    branch: branchFor(g.id, branch, total),
     pr: null,
     status: 'pending' as const,
     stage: 'pending' as const,
@@ -280,7 +311,8 @@ async function defaultPlanGroups(
     maxPrs: input.resolved.maxPrs,
     ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
   });
-  if (result.kind === 'ok') return { kind: 'ok', groups: planToPrGroups(result.plan) };
+  if (result.kind === 'ok')
+    return { kind: 'ok', groups: planToPrGroups(result.plan, input.branch) };
   if (result.kind === 'blocked') return { kind: 'blocked', reason: result.reason };
   return { kind: 'error', error: result.error };
 }

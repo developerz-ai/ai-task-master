@@ -24,6 +24,7 @@ import {
   planToPrGroups,
   type RunLoopAdapterSeams,
   runLoopAdapter,
+  sanitizeBranchComponent,
 } from './run-loop-adapter.ts';
 import type { WorkLoopGithub, WorkLoopOrchestrator, WorkLoopPool } from './work-loop.ts';
 
@@ -243,6 +244,46 @@ test('branchFor: single group uses the requested branch verbatim', () => {
 test('branchFor: multiple groups prefix the requested branch per group', () => {
   assert.equal(branchFor('core', 'feature/login', 2), 'feature/login/core');
   assert.equal(branchFor('api', 'feature/login', 2), 'feature/login/api');
+});
+
+test('sanitizeBranchComponent: maps unsafe Planner ids to valid ref components', () => {
+  assert.equal(sanitizeBranchComponent('core'), 'core');
+  assert.equal(sanitizeBranchComponent('.hidden'), 'hidden');
+  assert.equal(sanitizeBranchComponent('foo.lock'), 'foo');
+  assert.equal(sanitizeBranchComponent('a b:c'), 'a-b-c');
+  assert.equal(sanitizeBranchComponent('trailing.'), 'trailing');
+  assert.equal(sanitizeBranchComponent('...'), 'group');
+});
+
+test('branchFor: sanitizes an unsafe group id in default and prefixed forms', () => {
+  // A Planner id that would otherwise produce an invalid ref (leading dot).
+  assert.equal(branchFor('.weird', undefined, 1), 'aitm/weird');
+  assert.equal(branchFor('.weird', 'feature/x', 2), 'feature/x/weird');
+});
+
+test('planToPrGroups: composes a valid ref even when the Planner id is unsafe', () => {
+  const plan: Plan = {
+    goal: 'g',
+    groups: [
+      {
+        id: 'core',
+        title: 'Core',
+        tasks: [{ description: 'a', complexity: 'normal' }],
+        dependsOn: [],
+      },
+      {
+        id: 'api.lock',
+        title: 'API',
+        tasks: [{ description: 'b', complexity: 'simple' }],
+        dependsOn: [],
+      },
+    ],
+  };
+  const groups = planToPrGroups(plan, 'release/v2');
+  assert.deepEqual(
+    groups.map((g) => g.branch),
+    ['release/v2/core', 'release/v2/api'],
+  );
 });
 
 test('planToPrGroups: requested branch applied verbatim for a single-group plan', () => {

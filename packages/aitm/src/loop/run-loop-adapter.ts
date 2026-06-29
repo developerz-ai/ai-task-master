@@ -246,18 +246,34 @@ export async function runLoopAdapter(
 
 // ---- Plan ------------------------------------------------------------------
 
+// Normalize a Planner-supplied group id into a safe git ref component. The id is only
+// `z.string()` in the plan schema, so it can carry characters (leading '.', '.lock', spaces,
+// ':' …) that would make `aitm/<id>` or `<branch>/<id>` an invalid ref and fail at worktree
+// creation. Map unsafe chars to '-', strip the component-level footguns, never return empty.
+export function sanitizeBranchComponent(id: string): string {
+  let s = id.replace(/[^A-Za-z0-9._-]/g, '-');
+  s = s.replace(/\.\.+/g, '.'); // collapse '..' (forbidden in refs)
+  s = s.replace(/^[.-]+/, ''); // no leading '.' or '-'
+  s = s.replace(/(?:\.lock)+$/i, ''); // no trailing '.lock'
+  s = s.replace(/[.-]+$/, ''); // no trailing '.' or '-'
+  return s.length > 0 ? s : 'group';
+}
+
 // Resolve a group's branch name, honoring a caller-specified `--branch`.
 //   - no branch requested        → `aitm/<group-id>` (default)
-//   - requested, single group    → the requested name verbatim
+//   - requested, single group    → the requested name verbatim (already validated by the CLI)
 //   - requested, multiple groups → `<requested>/<group-id>` so concurrent worktrees
 //     (and the PRs they open) don't collide on one branch name.
+// The group-id segment is always sanitized so the composed ref is valid regardless of what the
+// Planner emitted.
 export function branchFor(
   groupId: string,
   requested: string | undefined,
   totalGroups: number,
 ): string {
-  if (requested === undefined) return `aitm/${groupId}`;
-  return totalGroups <= 1 ? requested : `${requested}/${groupId}`;
+  const safeId = sanitizeBranchComponent(groupId);
+  if (requested === undefined) return `aitm/${safeId}`;
+  return totalGroups <= 1 ? requested : `${requested}/${safeId}`;
 }
 
 export function planToPrGroups(plan: Plan, branch?: string): PrGroup[] {

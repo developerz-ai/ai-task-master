@@ -56,7 +56,7 @@ No final verification phase. No release phase. The merge of the last PR is the t
 | --- | --- | --- |
 | Group | `Planner` | `state.json.prGroups[i]` |
 | Tasks within a group | `Planner` | `state.json.prGroups[i].tasks` |
-| Branch for a group | `CLI` (`--branch`) or default `aitm/<id>` | `state.json.prGroups[i].branch` |
+| Branch for a group | `branchFor()` in `run-loop-adapter.ts` (from `--branch` or default `aitm/<id>`) | `state.json.prGroups[i].branch` |
 | PR number for a group | `Worker` | `state.json.prGroups[i].pr` |
 
 `Planner` chooses group boundaries by cohesion (same feature, same file area) and reviewability (target ~ 300 changed lines per PR, soft).

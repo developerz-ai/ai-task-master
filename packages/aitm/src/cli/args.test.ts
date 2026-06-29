@@ -446,7 +446,17 @@ for (const c of [...startCases, ...mergeCases, ...configCases, ...profileCases, 
 }
 
 test('isValidBranchName: accepts normal ref names', () => {
-  for (const ok of ['main', 'feature/login', 'release/v2', 'fix-123', 'a/b/c']) {
+  // Mirrors `git check-ref-format --branch`: '@' and 'a.b' are valid; per-component dots are fine.
+  for (const ok of [
+    'main',
+    'feature/login',
+    'release/v2',
+    'fix-123',
+    'a/b/c',
+    '@',
+    'a.b',
+    'UPPER/Case',
+  ]) {
     assert.equal(isValidBranchName(ok), true, ok);
   }
 });
@@ -468,6 +478,11 @@ test('isValidBranchName: rejects unsafe ref names', () => {
     'a@{0}',
     'ends.lock',
     'ends.',
+    // Component-level rules git enforces but a naive whole-string check misses.
+    'foo/.bar', // component starts with '.'
+    'foo.lock/bar', // component ends with '.lock'
+    'a./b', // component ends with '.'
+    '.hidden', // leading '.'
   ]) {
     assert.equal(isValidBranchName(bad), false, bad);
   }

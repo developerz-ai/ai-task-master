@@ -157,15 +157,22 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   return out;
 }
 
-// Conservative git ref-name check: reject the cases that would make `git worktree add -b`
-// fail or behave surprisingly. Not a full git-check-ref-format, just the common footguns.
+// Git ref-name check that mirrors the component rules `git check-ref-format --branch` enforces,
+// so an invalid `--branch` is rejected up front instead of failing later at `git worktree add -b`.
 export function isValidBranchName(name: string): boolean {
   if (name.length === 0 || name.length > 255) return false;
-  if (name.startsWith('-') || name.startsWith('/') || name.endsWith('/')) return false;
-  if (name.endsWith('.') || name.endsWith('.lock')) return false;
-  if (name.includes('..') || name.includes('//') || name.includes('@{')) return false;
-  // No whitespace, control chars, or the special chars git forbids in ref names.
-  return !/[\s~^:?*[\\]/.test(name);
+  if (name.startsWith('-')) return false;
+  // Whole-ref forbidden sequences: range/reflog syntax, empty path segments.
+  if (name.includes('..') || name.includes('@{') || name.includes('//')) return false;
+  // No whitespace, control chars, or the special chars git forbids anywhere in a ref.
+  if (/[\s~^:?*[\\]/.test(name)) return false;
+  // Per-component rules: a slash-separated component may not be empty, start with '.', or end
+  // with '.' or '.lock' (covers leading/trailing slash via empty components).
+  for (const part of name.split('/')) {
+    if (part.length === 0) return false;
+    if (part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock')) return false;
+  }
+  return true;
 }
 
 function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {

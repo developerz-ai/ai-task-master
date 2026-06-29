@@ -20,20 +20,18 @@ function isForceFlag(arg: string): boolean {
   return arg === '--force' || arg === '-f' || arg.startsWith('--force=');
 }
 
-function isLeaseFlag(arg: string): boolean {
-  return arg === '--force-with-lease' || arg.startsWith('--force-with-lease=');
-}
-
 // Throw if the git invocation violates policy. Pure (no IO) so it is trivially unit-testable.
 // Only `git push` is constrained; `git worktree remove --force` and friends are unaffected
 // because the rule keys off the `push` subcommand, not the `--force` token alone.
+//
+// Any `--force` / `-f` on a push is rejected outright — even alongside `--force-with-lease`,
+// because git lets a trailing `--force` override the lease (`push --force-with-lease --force`
+// is a plain force-push). `--force-with-lease` on its own is the only sanctioned force path.
 export function assertGitAllowed(args: readonly string[]): void {
   if (args[0] !== 'push') return;
-  const hasLease = args.some(isLeaseFlag);
-  const hasForce = args.some(isForceFlag);
-  if (hasForce && !hasLease) {
+  if (args.some(isForceFlag)) {
     throw new GitGuardError(
-      'Refusing `git push --force`: force-push must use --force-with-lease (rebase first).',
+      'Refusing `git push --force` / -f: the only sanctioned force-push is --force-with-lease (rebase first).',
     );
   }
 }

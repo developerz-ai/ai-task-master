@@ -9,11 +9,14 @@ test('assertGitAllowed: rejects plain force-push', () => {
   assert.throws(() => assertGitAllowed(['push', '-u', 'origin', 'br', '--force']), GitGuardError);
 });
 
-test('assertGitAllowed: allows --force-with-lease', () => {
+test('assertGitAllowed: rejects --force even alongside --force-with-lease', () => {
+  // A trailing --force overrides the lease in git, so this is really a plain force-push.
+  assert.throws(() => assertGitAllowed(['push', '--force-with-lease', '--force']), GitGuardError);
+});
+
+test('assertGitAllowed: allows --force-with-lease on its own', () => {
   assert.doesNotThrow(() => assertGitAllowed(['push', '--force-with-lease']));
   assert.doesNotThrow(() => assertGitAllowed(['push', '--force-with-lease=br']));
-  // Lease wins even if a bare --force token is also present.
-  assert.doesNotThrow(() => assertGitAllowed(['push', '--force-with-lease', '--force']));
 });
 
 test('assertGitAllowed: allows ordinary pushes', () => {

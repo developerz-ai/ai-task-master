@@ -126,16 +126,21 @@ export type OrchestratorTools = {
 // guidance (PR_BODY_GUIDE) and the post-composition contract check (assertPrBodySections).
 export const PR_BODY_SECTIONS = ['## Summary', '## Changes', '## Testing'] as const;
 
-// Enforce the PR body contract: the three sections must all be present and in order. Throws a
-// descriptive error otherwise, so a malformed body is rejected before the PR is opened rather
-// than published. Exported for unit testing.
+// Enforce the PR body contract: the three sections must all be present, as real markdown heading
+// lines, and in order. Throws a descriptive error otherwise, so a malformed body is rejected before
+// the PR is opened. Matches against actual `## …` heading lines (not arbitrary substrings) so a
+// section name mentioned in prose can't satisfy the check. Exported for unit testing.
 export function assertPrBodySections(body: string): void {
+  const headingLines = body
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('## '));
   let cursor = -1;
   for (const heading of PR_BODY_SECTIONS) {
-    const idx = body.indexOf(heading, cursor + 1);
+    const idx = headingLines.indexOf(heading, cursor + 1);
     if (idx === -1) {
       throw new Error(
-        `PR body must contain sections ${PR_BODY_SECTIONS.join(', ')} in order; ` +
+        `PR body must contain heading lines ${PR_BODY_SECTIONS.join(', ')} in order; ` +
           `missing or misordered: ${heading}`,
       );
     }

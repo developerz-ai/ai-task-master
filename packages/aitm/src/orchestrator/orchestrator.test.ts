@@ -361,6 +361,12 @@ test('assertPrBodySections: rejects out-of-order sections', () => {
   assert.throws(() => assertPrBodySections(reordered), /in order/);
 });
 
+test('assertPrBodySections: a section name in prose is not a heading', () => {
+  // "## Testing" appears only inside Summary prose, not as its own heading line.
+  const body = '## Summary\nSee `## Changes` and ## Testing notes inline.\n\n## Changes\n- a';
+  assert.throws(() => assertPrBodySections(body), /Testing/);
+});
+
 test('openPr prompt instructs the standard PR body template', async () => {
   let capturedPrompt = '';
   const model = new MockLanguageModelV3({

@@ -246,7 +246,22 @@ export async function runLoopAdapter(
 
 // ---- Plan ------------------------------------------------------------------
 
-export function planToPrGroups(plan: Plan): PrGroup[] {
+// Resolve a group's branch name, honoring a caller-specified `--branch`.
+//   - no branch requested        → `aitm/<group-id>` (default)
+//   - requested, single group    → the requested name verbatim
+//   - requested, multiple groups → `<requested>/<group-id>` so concurrent worktrees
+//     (and the PRs they open) don't collide on one branch name.
+export function branchFor(
+  groupId: string,
+  requested: string | undefined,
+  totalGroups: number,
+): string {
+  if (requested === undefined) return `aitm/${groupId}`;
+  return totalGroups <= 1 ? requested : `${requested}/${groupId}`;
+}
+
+export function planToPrGroups(plan: Plan, branch?: string): PrGroup[] {
+  const total = plan.groups.length;
   return plan.groups.map((g) => ({
     id: g.id,
     title: g.title,
@@ -257,7 +272,7 @@ export function planToPrGroups(plan: Plan): PrGroup[] {
       done: false,
     })),
     dependsOn: g.dependsOn,
-    branch: `aitm/${g.id}`,
+    branch: branchFor(g.id, branch, total),
     pr: null,
     status: 'pending' as const,
     stage: 'pending' as const,
@@ -280,7 +295,8 @@ async function defaultPlanGroups(
     maxPrs: input.resolved.maxPrs,
     ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
   });
-  if (result.kind === 'ok') return { kind: 'ok', groups: planToPrGroups(result.plan) };
+  if (result.kind === 'ok')
+    return { kind: 'ok', groups: planToPrGroups(result.plan, input.branch) };
   if (result.kind === 'blocked') return { kind: 'blocked', reason: result.reason };
   return { kind: 'error', error: result.error };
 }

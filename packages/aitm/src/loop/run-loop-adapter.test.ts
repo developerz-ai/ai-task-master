@@ -17,6 +17,7 @@ import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import {
   type AdapterStatePort,
+  branchFor,
   githubThreadTool,
   localEditTools,
   type PlanGroupsOutcome,
@@ -225,6 +226,63 @@ test('planToPrGroups maps plan groups to pending PrGroups with aitm/<id> branche
         dependsOn: ['core'],
       },
     ],
+  );
+});
+
+// ---- branchFor / caller-specified branch -----------------------------------
+
+test('branchFor: no requested branch defaults to aitm/<id>', () => {
+  assert.equal(branchFor('core', undefined, 1), 'aitm/core');
+  assert.equal(branchFor('core', undefined, 3), 'aitm/core');
+});
+
+test('branchFor: single group uses the requested branch verbatim', () => {
+  assert.equal(branchFor('core', 'feature/login', 1), 'feature/login');
+});
+
+test('branchFor: multiple groups prefix the requested branch per group', () => {
+  assert.equal(branchFor('core', 'feature/login', 2), 'feature/login/core');
+  assert.equal(branchFor('api', 'feature/login', 2), 'feature/login/api');
+});
+
+test('planToPrGroups: requested branch applied verbatim for a single-group plan', () => {
+  const plan: Plan = {
+    goal: 'g',
+    groups: [
+      {
+        id: 'core',
+        title: 'Core',
+        tasks: [{ description: 'a', complexity: 'normal' }],
+        dependsOn: [],
+      },
+    ],
+  };
+  const groups = planToPrGroups(plan, 'release/v2');
+  assert.equal(groups[0]?.branch, 'release/v2');
+});
+
+test('planToPrGroups: requested branch prefixes each group in a multi-group plan', () => {
+  const plan: Plan = {
+    goal: 'g',
+    groups: [
+      {
+        id: 'core',
+        title: 'Core',
+        tasks: [{ description: 'a', complexity: 'normal' }],
+        dependsOn: [],
+      },
+      {
+        id: 'api',
+        title: 'API',
+        tasks: [{ description: 'b', complexity: 'simple' }],
+        dependsOn: ['core'],
+      },
+    ],
+  };
+  const groups = planToPrGroups(plan, 'release/v2');
+  assert.deepEqual(
+    groups.map((g) => g.branch),
+    ['release/v2/core', 'release/v2/api'],
   );
 });
 

@@ -14,6 +14,10 @@ export type StartArgs = {
   stylePath?: string | null;
   model?: string;
   concurrency?: number;
+  // Caller-specified branch for the PR(s). When the plan yields a single group it is used
+  // verbatim; with multiple groups it becomes a prefix (`<branch>/<group-id>`) so concurrent
+  // worktrees don't collide. When absent, branches default to `aitm/<group-id>`.
+  branch?: string;
 };
 
 export type MergePrArgs = {
@@ -72,6 +76,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   let stylePath: string | undefined;
   let model: string | undefined;
   let concurrency: number | undefined;
+  let branch: string | undefined;
 
   let i = 0;
   while (i < args.length) {
@@ -123,6 +128,11 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
       if (v === null) return HELP;
       model = v;
       i += consumed(inlineValue !== null);
+    } else if (flag === '--branch') {
+      const v = takeValue(args, i, inlineValue);
+      if (v === null || !isValidBranchName(v)) return HELP;
+      branch = v;
+      i += consumed(inlineValue !== null);
     } else if (raw.startsWith('--')) {
       return HELP;
     } else {
@@ -143,7 +153,19 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   if (stylePath !== undefined) out.stylePath = stylePath;
   if (model !== undefined) out.model = model;
   if (concurrency !== undefined) out.concurrency = concurrency;
+  if (branch !== undefined) out.branch = branch;
   return out;
+}
+
+// Conservative git ref-name check: reject the cases that would make `git worktree add -b`
+// fail or behave surprisingly. Not a full git-check-ref-format, just the common footguns.
+export function isValidBranchName(name: string): boolean {
+  if (name.length === 0 || name.length > 255) return false;
+  if (name.startsWith('-') || name.startsWith('/') || name.endsWith('/')) return false;
+  if (name.endsWith('.') || name.endsWith('.lock')) return false;
+  if (name.includes('..') || name.includes('//') || name.includes('@{')) return false;
+  // No whitespace, control chars, or the special chars git forbids in ref names.
+  return !/[\s~^:?*[\\]/.test(name);
 }
 
 function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {

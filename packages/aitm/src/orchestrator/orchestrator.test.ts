@@ -19,15 +19,22 @@ import type {
   WriteFileOutput,
 } from '../subagents/worker.ts';
 import {
+  assertPrBodySections,
   DEFAULT_MAX_STEPS,
   type GhClient,
   ORCHESTRATOR_ROLE_PREFIX,
   Orchestrator,
   type OrchestratorBuildContext,
+  PR_BODY_GUIDE,
+  PR_BODY_SECTIONS,
   type RunCmd,
   resolveMaxSteps,
 } from './orchestrator.ts';
 import type { ModelProvider } from './subagent-tools.ts';
+
+// A PR body that satisfies the section contract (assertPrBodySections), reused by openPr tests.
+const COMPLIANT_BODY =
+  '## Summary\nDid the thing.\n\n## Changes\n- a.ts: added\n\n## Testing\n- ran tests';
 
 function emptyUsage() {
   return {
@@ -303,7 +310,7 @@ test('finalizeCommit throws when git amend fails', async () => {
 });
 
 test('openPr composes title + body via the orchestrator model and calls github.createPr', async () => {
-  const composition = { title: 'feat: core — add a', body: 'Adds module a; fixes module b.' };
+  const composition = { title: 'feat: core — add a', body: COMPLIANT_BODY };
   const model = modelSubmitting(composition);
   const { provider, roles } = recordingProvider(model);
 
@@ -335,8 +342,67 @@ test('openPr composes title + body via the orchestrator model and calls github.c
   assert.deepEqual(roles, ['orchestrator']);
 });
 
+test('PR_BODY_GUIDE defines the standard Summary/Changes/Testing sections', () => {
+  for (const heading of PR_BODY_SECTIONS) {
+    assert.ok(PR_BODY_GUIDE.includes(heading), `expected guide to mention ${heading}`);
+  }
+});
+
+test('assertPrBodySections: accepts a body with all sections in order', () => {
+  assert.doesNotThrow(() => assertPrBodySections(COMPLIANT_BODY));
+});
+
+test('assertPrBodySections: rejects a missing section', () => {
+  assert.throws(() => assertPrBodySections('## Summary\nx\n\n## Changes\n- a'), /Testing/);
+});
+
+test('assertPrBodySections: rejects out-of-order sections', () => {
+  const reordered = '## Changes\n- a\n\n## Summary\nx\n\n## Testing\n- t';
+  assert.throws(() => assertPrBodySections(reordered), /in order/);
+});
+
+test('assertPrBodySections: a section name in prose is not a heading', () => {
+  // "## Testing" appears only inside Summary prose, not as its own heading line.
+  const body = '## Summary\nSee `## Changes` and ## Testing notes inline.\n\n## Changes\n- a';
+  assert.throws(() => assertPrBodySections(body), /Testing/);
+});
+
+test('openPr prompt instructs the standard PR body template', async () => {
+  let capturedPrompt = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      capturedPrompt = JSON.stringify(options.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify({ title: 't', body: COMPLIANT_BODY }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSessions: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await o.openPr(baseGroup(), baseDelivery(), 'main');
+  assert.match(capturedPrompt, /## Summary/);
+  assert.match(capturedPrompt, /## Changes/);
+  assert.match(capturedPrompt, /## Testing/);
+});
+
 test('openPr uses group.branch when set, otherwise aitm/<id>', async () => {
-  const composition = { title: 't', body: 'b' };
+  const composition = { title: 't', body: COMPLIANT_BODY };
   const model = modelSubmitting(composition);
   const { provider } = recordingProvider(model);
 

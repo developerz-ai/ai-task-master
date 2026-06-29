@@ -122,13 +122,53 @@ export type OrchestratorTools = {
   reviewer: ReturnType<typeof makeReviewerTool>;
 };
 
+// The required PR body section headings, in order. Single source of truth for both the model
+// guidance (PR_BODY_GUIDE) and the post-composition contract check (assertPrBodySections).
+export const PR_BODY_SECTIONS = ['## Summary', '## Changes', '## Testing'] as const;
+
+// Enforce the PR body contract: the three sections must all be present, as real markdown heading
+// lines, and in order. Throws a descriptive error otherwise, so a malformed body is rejected before
+// the PR is opened. Matches against actual `## …` heading lines (not arbitrary substrings) so a
+// section name mentioned in prose can't satisfy the check. Exported for unit testing.
+export function assertPrBodySections(body: string): void {
+  const headingLines = body
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('## '));
+  let cursor = -1;
+  for (const heading of PR_BODY_SECTIONS) {
+    const idx = headingLines.indexOf(heading, cursor + 1);
+    if (idx === -1) {
+      throw new Error(
+        `PR body must contain heading lines ${PR_BODY_SECTIONS.join(', ')} in order; ` +
+          `missing or misordered: ${heading}`,
+      );
+    }
+    cursor = idx;
+  }
+}
+
 // Structured-output schema for PR composition. Title cap reinforces conventional-commit
-// brevity; body is free-form markdown.
+// brevity; the body's section contract is enforced by assertPrBodySections after submission.
 const PrCompositionSchema = z.object({
   title: z.string().min(1).max(72),
   body: z.string().min(1),
 });
 type PrComposition = z.infer<typeof PrCompositionSchema>;
+
+// Standard PR body every aitm-opened PR follows, so reviewers get a consistent shape. The
+// Orchestrator model fills these sections from the worker delivery; exported so the format is
+// unit-testable and documented in one place.
+export const PR_BODY_GUIDE = [
+  'body: GitHub-flavored markdown with exactly these three sections, in order, each with its',
+  'heading verbatim:',
+  `  ${PR_BODY_SECTIONS[0]}`,
+  '    1-2 sentences on what changed and why.',
+  `  ${PR_BODY_SECTIONS[1]}`,
+  '    Bulleted list of the notable file/area changes.',
+  `  ${PR_BODY_SECTIONS[2]}`,
+  '    How the change was verified (tests, lint). If not verified, say so explicitly.',
+].join('\n');
 
 // Fallback session cap when caller passes null / 0 / negative `maxSessions`.
 export const DEFAULT_MAX_STEPS = 50;
@@ -254,6 +294,7 @@ export class Orchestrator {
     if (!out) {
       throw new Error('orchestrator did not submit a PR composition');
     }
+    assertPrBodySections(out.body);
     return out;
   }
 
@@ -263,7 +304,7 @@ export class Orchestrator {
       '',
       'Compose the pull-request title and body for this PR group, then call the submit tool with it.',
       '- title: conventional-commit style, ≤72 chars',
-      '- body: short summary + bulleted file changes + relevant rolling context',
+      PR_BODY_GUIDE,
       '',
       `PR group: ${group.id} — ${group.title}`,
       `Worker draft message: ${delivery.draftCommitMessage}`,

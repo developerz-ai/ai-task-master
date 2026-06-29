@@ -26,7 +26,6 @@ import {
   writeFileTool,
 } from '@developerz.ai/ai-claude-compat';
 import { type Tool, type ToolSet, tool } from 'ai';
-import { execa } from 'execa';
 import { z } from 'zod';
 // Type-only import — no runtime cycle with commands.ts, which imports this module's value.
 import type { RunLoopInput } from '../cli/commands.ts';
@@ -58,6 +57,7 @@ import {
   WORKER_SYSTEM_PREFIX,
   type WorkerTools,
 } from '../subagents/worker.ts';
+import { runGit } from '../workspace/git-exec.ts';
 import { WorktreePool } from '../workspace/worktree-pool.ts';
 import { runFixSession } from './ci-fix.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
@@ -376,7 +376,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
       // store). Push it to origin first — `gh pr create` won't open a PR for a branch that
       // isn't on the remote ("No commits between … / Head ref must be a branch").
       const head = group.branch ?? `aitm/${group.id}`;
-      await execa('git', ['push', '-u', 'origin', head], { cwd: input.cwd });
+      await runGit(['push', '-u', 'origin', head], { cwd: input.cwd });
       return orch.openPr(group, delivery, baseBranch);
     },
     runReviewer: runReviewerThreads,
@@ -411,7 +411,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
         };
       }
       if (result.resolutions.some((r) => r.kind === 'fixed')) {
-        await execa('git', ['push'], { cwd: worktree.path });
+        await runGit(['push'], { cwd: worktree.path });
       }
       return { kind: 'ok' };
     },

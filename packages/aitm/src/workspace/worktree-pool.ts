@@ -8,7 +8,7 @@
 
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { execa } from 'execa';
+import { runGit } from './git-exec.ts';
 
 export type Worktree = {
   groupId: string;
@@ -56,7 +56,7 @@ export class WorktreePool {
     const path = join(worktreesDir, groupId);
     try {
       await mkdir(worktreesDir, { recursive: true });
-      await execa('git', ['worktree', 'add', path, '-b', branch, baseBranch], {
+      await runGit(['worktree', 'add', path, '-b', branch, baseBranch], {
         cwd: this.repoRoot,
       });
       const wt: Worktree = { groupId, branch, path };
@@ -76,7 +76,7 @@ export class WorktreePool {
     // Don't drop tracking until `git worktree remove` succeeds: a failed cleanup must
     // remain re-tryable via `release(groupId)`, and the slot must stay reserved so the
     // pool doesn't overbook after an untracked worktree is left on disk.
-    await execa('git', ['worktree', 'remove', '--force', wt.path], { cwd: this.repoRoot });
+    await runGit(['worktree', 'remove', '--force', wt.path], { cwd: this.repoRoot });
     this.worktrees.delete(groupId);
     this.freeSlot();
   }

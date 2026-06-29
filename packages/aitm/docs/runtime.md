@@ -26,6 +26,14 @@ Bun is a convenience, not a dependency.
 
 Bun-only APIs are allowed in `scripts/` and in test setup gated behind `if (process.versions.bun)`. They are never allowed in `src/`.
 
+## Git safety
+
+aitm shells out to `git` directly rather than running inside a sandbox, so git mutations route
+through `runGit()` (`src/workspace/git-exec.ts`), the one guarded chokepoint. Its policy refuses a
+plain `git push --force` / `-f`; the only sanctioned force-push is `--force-with-lease` (used by the
+CI-fix flow, which always rebases first). Self-merge is governed separately by `--no-automerge`
+(the WorkLoop only merges when automerge is on).
+
 ## Packaging
 
 | Concern | Choice |

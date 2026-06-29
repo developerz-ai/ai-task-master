@@ -122,8 +122,29 @@ export type OrchestratorTools = {
   reviewer: ReturnType<typeof makeReviewerTool>;
 };
 
+// The required PR body section headings, in order. Single source of truth for both the model
+// guidance (PR_BODY_GUIDE) and the post-composition contract check (assertPrBodySections).
+export const PR_BODY_SECTIONS = ['## Summary', '## Changes', '## Testing'] as const;
+
+// Enforce the PR body contract: the three sections must all be present and in order. Throws a
+// descriptive error otherwise, so a malformed body is rejected before the PR is opened rather
+// than published. Exported for unit testing.
+export function assertPrBodySections(body: string): void {
+  let cursor = -1;
+  for (const heading of PR_BODY_SECTIONS) {
+    const idx = body.indexOf(heading, cursor + 1);
+    if (idx === -1) {
+      throw new Error(
+        `PR body must contain sections ${PR_BODY_SECTIONS.join(', ')} in order; ` +
+          `missing or misordered: ${heading}`,
+      );
+    }
+    cursor = idx;
+  }
+}
+
 // Structured-output schema for PR composition. Title cap reinforces conventional-commit
-// brevity; body is markdown following PR_BODY_GUIDE's fixed sections.
+// brevity; the body's section contract is enforced by assertPrBodySections after submission.
 const PrCompositionSchema = z.object({
   title: z.string().min(1).max(72),
   body: z.string().min(1),
@@ -136,11 +157,11 @@ type PrComposition = z.infer<typeof PrCompositionSchema>;
 export const PR_BODY_GUIDE = [
   'body: GitHub-flavored markdown with exactly these three sections, in order, each with its',
   'heading verbatim:',
-  '  ## Summary',
+  `  ${PR_BODY_SECTIONS[0]}`,
   '    1-2 sentences on what changed and why.',
-  '  ## Changes',
+  `  ${PR_BODY_SECTIONS[1]}`,
   '    Bulleted list of the notable file/area changes.',
-  '  ## Testing',
+  `  ${PR_BODY_SECTIONS[2]}`,
   '    How the change was verified (tests, lint). If not verified, say so explicitly.',
 ].join('\n');
 
@@ -268,6 +289,7 @@ export class Orchestrator {
     if (!out) {
       throw new Error('orchestrator did not submit a PR composition');
     }
+    assertPrBodySections(out.body);
     return out;
   }
 

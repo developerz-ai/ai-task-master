@@ -66,7 +66,7 @@ No final verification phase. No release phase. The merge of the last PR is the t
 Every PR `aitm` opens uses a consistent body, composed by the `Orchestrator` from the worker's
 delivery (see `PR_BODY_GUIDE` in `orchestrator.ts`):
 
-```
+```md
 ## Summary
 <1-2 sentences: what changed and why>
 

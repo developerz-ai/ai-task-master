@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { execa } from 'execa';
@@ -39,6 +40,33 @@ test('acquire creates an isolated worktree on disk + tracks it as active', async
 
     const branches = await execa('git', ['branch', '--list'], { cwd: repo.path });
     assert.match(branches.stdout, /aitm\/r1\/g1/);
+  } finally {
+    await pool.releaseAll();
+    await repo.cleanup();
+  }
+});
+
+test('acquire reuses an existing group branch (resume) and keeps its prior commits', async () => {
+  const repo = await seedRepo();
+  const stateDir = join(repo.path, '.ai-task-master');
+  // Simulate a prior run: create the group branch with a committed file, then remove that
+  // worktree. The branch ref (and its commit) persists, mirroring a crash before the PR opened.
+  const priorWt = join(repo.path, '.prior-wt');
+  await execa('git', ['worktree', 'add', priorWt, '-b', 'aitm/r1/g1', 'main'], { cwd: repo.path });
+  await writeFile(join(priorWt, 'prior.txt'), 'committed but unpushed\n');
+  await execa('git', ['add', '.'], { cwd: priorWt });
+  await execa('git', ['commit', '-m', 'prior task'], { cwd: priorWt });
+  await execa('git', ['worktree', 'remove', '--force', priorWt], { cwd: repo.path });
+
+  const pool = new WorktreePool(repo.path, stateDir, 2);
+  try {
+    const wt = await pool.acquire('g1', 'aitm/r1/g1', 'main');
+    // The reused branch is checked out at its prior tip → the committed work is present, not lost
+    // to a fresh branch from base.
+    assert.ok(existsSync(join(wt.path, 'prior.txt')), 'prior committed work must be checked out');
+    assert.equal(await readFile(join(wt.path, 'prior.txt'), 'utf8'), 'committed but unpushed\n');
+    const head = await execa('git', ['log', '-1', '--pretty=%s'], { cwd: wt.path });
+    assert.equal(head.stdout.trim(), 'prior task');
   } finally {
     await pool.releaseAll();
     await repo.cleanup();

@@ -27,6 +27,18 @@ function assertSafeGroupId(groupId: string): void {
   }
 }
 
+// True when a local branch ref already exists — e.g. a resumed run whose group branch (and its
+// committed-but-unpushed work) survived the removal of the prior worktree. `git rev-parse --verify
+// --quiet` exits non-zero when the ref is absent, which runGit surfaces as a throw.
+async function branchExists(repoRoot: string, branch: string): Promise<boolean> {
+  try {
+    await runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoRoot });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class WorktreePool {
   private readonly worktrees = new Map<string, Worktree>();
   // `pendingGroupIds` covers acquires that have passed the duplicate check but not yet
@@ -56,9 +68,14 @@ export class WorktreePool {
     const path = join(worktreesDir, groupId);
     try {
       await mkdir(worktreesDir, { recursive: true });
-      await runGit(['worktree', 'add', path, '-b', branch, baseBranch], {
-        cwd: this.repoRoot,
-      });
+      // Reuse an existing group branch (a resumed run whose prior worktree was removed but whose
+      // branch ref — and its committed-but-unpushed work — persists) rather than recreating it from
+      // base: `git worktree add -b <branch> <base>` would fail outright on an existing branch, and a
+      // fresh branch from base would drop the prior commits. A brand-new group still branches off base.
+      const addArgs = (await branchExists(this.repoRoot, branch))
+        ? ['worktree', 'add', path, branch]
+        : ['worktree', 'add', path, '-b', branch, baseBranch];
+      await runGit(addArgs, { cwd: this.repoRoot });
       const wt: Worktree = { groupId, branch, path };
       this.worktrees.set(groupId, wt);
       return wt;

@@ -33,11 +33,12 @@ is active:
 
 ```text
 ⚠ auto-merge is ON — every PR will be merged automatically when CI passes.
-  Pass --no-automerge to open PRs without merging.
+  PR merges run via `gh`, outside Claude Code's tool boundary, so host git-guard hooks cannot intercept them.
+  Pass --no-automerge for this run, or `aitm config set autoMerge false` to disable it by default.
 ```
 
-Pass `--no-automerge` (or set `autoMerge: false` in `.ai-task-master/config.json`) to open PRs
-without merging them; finish each with `aitm merge-pr`.
+Pass `--no-automerge` (or run `aitm config set autoMerge false`, or set `autoMerge: false` in
+`.ai-task-master/config.json`) to open PRs without merging them; finish each with `aitm merge-pr`.
 
 ## Preconditions
 

@@ -139,11 +139,16 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
   }
 });
 
-test('autoMergeNotice: banner when on, null when off', () => {
+test('autoMergeNotice: full warning when on, null when off', () => {
   const on = autoMergeNotice(true);
   assert.ok(on, 'notice present when auto-merge on');
   assert.match(on, /auto-merge is ON/);
+  // The core surprise: merges run via gh, outside the tool boundary, bypassing git-guard.
+  assert.match(on, /gh/);
+  assert.match(on, /git-guard/);
+  // Both the per-run flag and the persistent disable are offered.
   assert.match(on, /--no-automerge/);
+  assert.match(on, /config set autoMerge false/);
   assert.equal(autoMergeNotice(false), null);
 });
 

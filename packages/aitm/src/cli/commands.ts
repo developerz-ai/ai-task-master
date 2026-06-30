@@ -149,7 +149,8 @@ export function autoMergeNotice(autoMerge: boolean): string | null {
   if (!autoMerge) return null;
   return [
     '⚠ auto-merge is ON — every PR will be merged automatically when CI passes.',
-    '  Pass --no-automerge to open PRs without merging.',
+    "  PR merges run via `gh`, outside Claude Code's tool boundary, so host git-guard hooks cannot intercept them.",
+    '  Pass --no-automerge for this run, or `aitm config set autoMerge false` to disable it by default.',
     '',
   ].join('\n');
 }

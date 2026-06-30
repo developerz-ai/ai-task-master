@@ -401,6 +401,42 @@ test('openPr prompt instructs the standard PR body template', async () => {
   assert.match(capturedPrompt, /## Testing/);
 });
 
+test('openPr prompt anchors the title on the group goal, not the worker draft message', async () => {
+  let capturedPrompt = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      capturedPrompt = JSON.stringify(options.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify({ title: 't', body: COMPLIANT_BODY }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSessions: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await o.openPr(baseGroup(), baseDelivery(), 'main');
+
+  // Title must come from the group goal, with the worker draft demoted to body-only context.
+  assert.match(capturedPrompt, /PR group goal/);
+  assert.match(capturedPrompt, /Do NOT copy a single commit message/);
+  assert.match(capturedPrompt, /context for the body only/);
+});
+
 test('openPr uses group.branch when set, otherwise aitm/<id>', async () => {
   const composition = { title: 't', body: COMPLIANT_BODY };
   const model = modelSubmitting(composition);

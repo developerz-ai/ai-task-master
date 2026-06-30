@@ -10,6 +10,7 @@ import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import type { Worktree } from '../workspace/worktree-pool.ts';
 import type { StageWorkResult } from './stage-handlers.ts';
 import {
+  mergeDeliveries,
   WorkLoop,
   type WorkLoopDeps,
   type WorkLoopGithub,
@@ -82,7 +83,7 @@ function baseState(): RunState {
 type OrchestratorCalls = {
   runWorker: WorkerInvocationCall[];
   finalizeCommit: { group: PrGroup; worktreePath: string }[];
-  openPr: { group: PrGroup; baseBranch: string }[];
+  openPr: { group: PrGroup; baseBranch: string; delivery: WorkerDelivery }[];
   runReviewer: { pr: number; threads: ReviewThread[]; worktree: Worktree }[];
   runCiFix: { group: PrGroup; pr: number; baseBranch: string }[];
   addressReviews: { pr: number; threads: ReviewThread[] }[];
@@ -123,8 +124,8 @@ function makeOrchestrator(
       calls.finalizeCommit.push({ group: g, worktreePath });
       return `sha-${g.id}`;
     },
-    openPr: async (g, _d, baseBranch) => {
-      calls.openPr.push({ group: g, baseBranch });
+    openPr: async (g, d, baseBranch) => {
+      calls.openPr.push({ group: g, baseBranch, delivery: d });
       return pullRequest(config.prNumber ?? 42, config.headRefName ?? `aitm/${g.id}`);
     },
     runReviewer: async (input) => {
@@ -483,6 +484,75 @@ test('group mode (default): a multi-task group opens exactly one PR after the fi
 
   assert.equal(calls.runWorker.length, 2, 'one Worker pass per task');
   assert.equal(calls.openPr.length, 1, 'single group PR, opened after the last task');
+});
+
+test('mergeDeliveries: a single delivery is returned unchanged', () => {
+  const d = delivery();
+  assert.equal(mergeDeliveries([d]), d);
+});
+
+test('mergeDeliveries: unions changes (first-touch kind, latest summary), joins messages', () => {
+  const a: WorkerDelivery = {
+    branch: 'aitm/multi',
+    draftCommitMessage: 'feat: a',
+    changes: [{ path: 'a.ts', kind: 'create', summary: 'created a' }],
+    progressEntries: ['- did a'],
+  };
+  const b: WorkerDelivery = {
+    branch: 'aitm/multi',
+    draftCommitMessage: 'feat: b',
+    changes: [
+      { path: 'b.ts', kind: 'create', summary: 'created b' },
+      { path: 'a.ts', kind: 'modify', summary: 'extended a' },
+    ],
+    progressEntries: ['- did b'],
+  };
+  const merged = mergeDeliveries([a, b]);
+  assert.equal(merged.branch, 'aitm/multi');
+  assert.equal(merged.draftCommitMessage, 'feat: a\n\nfeat: b');
+  assert.deepEqual(merged.progressEntries, ['- did a', '- did b']);
+  assert.deepEqual(
+    merged.changes.map((c) => c.path).sort(),
+    ['a.ts', 'b.ts'],
+    'every changed path appears once',
+  );
+  // a.ts is touched by both tasks: keep the first-touch kind (create), take the latest summary.
+  assert.deepEqual(
+    merged.changes.find((c) => c.path === 'a.ts'),
+    { path: 'a.ts', kind: 'create', summary: 'extended a' },
+  );
+});
+
+test("multi-task group: openPr receives a delivery merging every task's changes", async () => {
+  const da: WorkerDelivery = {
+    branch: 'aitm/multi',
+    draftCommitMessage: 'feat: a',
+    changes: [{ path: 'a.ts', kind: 'create', summary: 'created a' }],
+    progressEntries: ['- a'],
+  };
+  const db: WorkerDelivery = {
+    branch: 'aitm/multi',
+    draftCommitMessage: 'feat: b',
+    changes: [{ path: 'b.ts', kind: 'create', summary: 'created b' }],
+    progressEntries: ['- b'],
+  };
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 7,
+    workerResults: [
+      { kind: 'ok', delivery: da },
+      { kind: 'ok', delivery: db },
+    ],
+  });
+  const { state } = makeState([twoTaskGroup()]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(twoTaskGroup());
+
+  assert.equal(calls.openPr.length, 1, 'single group PR');
+  assert.deepEqual(
+    calls.openPr[0]?.delivery.changes.map((c) => c.path).sort(),
+    ['a.ts', 'b.ts'],
+    "the PR delivery covers both tasks' changes, not just the last",
+  );
 });
 
 test('multi-task group: a later task blocked after earlier commits → PR opens for the committed work', async () => {

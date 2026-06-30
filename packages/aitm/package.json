@@ -48,6 +48,9 @@
     "execa": "^9.6.1",
     "zod": "^4.4.3"
   },
+  "optionalDependencies": {
+    "@sentry/node": "^10.62.0"
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",
     "@types/node": "^25.7.0",

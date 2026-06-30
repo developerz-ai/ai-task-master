@@ -4,6 +4,7 @@
 
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { initErrorReporter } from '../observability/error-reporter.ts';
 import { parseArgs } from './args.ts';
 import type { MergePrCtx, ProfileCtx, StartCtx } from './commands.ts';
 import { runConfig, runMergePr, runProfile, runStart } from './commands.ts';
@@ -121,17 +122,22 @@ Exit codes:
 Docs: docs/commands/start.md, docs/commands/merge-pr.md, docs/commands/config.md, docs/commands/profile.md`;
 
 // Entry-point: when invoked as a script (via the `aitm` bin), parse process.argv
-// and propagate the exit code. When imported (e.g. from tests), this is skipped.
+// and propagate the exit code. When imported (e.g. from tests), this is skipped. A crash is
+// reported to GlitchTip when a DSN is configured (no-op otherwise), then flushed before exit.
 if (isEntrypoint(import.meta.url, process.argv[1])) {
-  main(process.argv.slice(2)).then(
-    (code) => {
+  void (async () => {
+    const reporter = await initErrorReporter();
+    try {
+      const code = await main(process.argv.slice(2));
+      await reporter.flush();
       process.exit(code);
-    },
-    (err: unknown) => {
+    } catch (err: unknown) {
+      reporter.captureException(err);
+      await reporter.flush();
       process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
       process.exit(1);
-    },
-  );
+    }
+  })();
 }
 
 // Exported for unit-test coverage of the symlink case (global installs put a symlink at

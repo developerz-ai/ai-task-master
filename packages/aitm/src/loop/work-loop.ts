@@ -387,7 +387,9 @@ export class WorkLoop {
   }
 
   // Run every not-yet-done task of the group to commits on its branch (no PR), returning the
-  // last Worker delivery for openPr. Idempotent on resume: tasks already `done` are skipped.
+  // last Worker delivery for openPr. Idempotent on resume: tasks already `done` are skipped. If a
+  // task blocks after earlier tasks already committed this pass, the committed work still opens a
+  // PR (the block is not propagated); blocking is reserved for when nothing has been committed.
   private async workTasks(
     group: PrGroup,
     worktree: Worktree,
@@ -401,7 +403,13 @@ export class WorkLoop {
     for (const task of group.tasks) {
       if (task.done) continue;
       const result = await this.runOneTask(worked, task, worktree, baseBranch);
-      if (result.kind === 'blocked') return result;
+      if (result.kind === 'blocked') {
+        // A task couldn't complete. If earlier tasks in this group already committed work on this
+        // pass, don't discard it: open a PR for what landed instead of stranding those commits on
+        // the branch with no PR. Block outright only when nothing has been committed yet.
+        if (delivery !== null) return { kind: 'ok', group: worked, delivery };
+        return result;
+      }
       worked = result.group;
       delivery = result.delivery;
     }

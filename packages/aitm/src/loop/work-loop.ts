@@ -18,7 +18,7 @@ import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
-import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
+import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import type { Worktree } from '../workspace/worktree-pool.ts';
 import {
   handleAddressingReviews,
@@ -138,11 +138,35 @@ export type WorkLoopResult =
 
 const DEFAULT_MERGE_METHOD: MergeMethod = 'squash';
 
+// Merge every task's delivery in a group into one, so PR composition (openPr → composePr) sees the
+// whole group's changes, not just the last task's. All tasks share the group branch; `changes` are
+// unioned per path (first touch keeps its `kind` — a create stays a create even if a later task
+// modifies the file — while the latest `summary` wins); messages and progress entries concatenate
+// in task order. A single delivery is returned unchanged. Exported for unit testing.
+export function mergeDeliveries(deliveries: readonly WorkerDelivery[]): WorkerDelivery {
+  const [first] = deliveries;
+  if (first === undefined) throw new Error('mergeDeliveries requires at least one delivery');
+  if (deliveries.length === 1) return first;
+  const byPath = new Map<string, FileChange>();
+  for (const delivery of deliveries) {
+    for (const change of delivery.changes) {
+      const prior = byPath.get(change.path);
+      byPath.set(change.path, prior ? { ...change, kind: prior.kind } : change);
+    }
+  }
+  return {
+    branch: first.branch,
+    draftCommitMessage: deliveries.map((d) => d.draftCommitMessage).join('\n\n'),
+    changes: [...byPath.values()],
+    progressEntries: deliveries.flatMap((d) => d.progressEntries),
+  };
+}
+
 // Mutable scratch the stage dispatcher threads through one group-run. `group` is the authoritative
 // in-memory copy the bridges keep current (tasks marked done by work(), pr set by openPr()); the
-// persisted GroupStage is the dispatcher's job. `delivery` is the last Worker delivery work()
-// produced, consumed by openPr(). `blockedReason` carries the human reason a handler yielded
-// 'blocked' (lost otherwise, since handlers return only the next stage).
+// persisted GroupStage is the dispatcher's job. `delivery` is the merged Worker delivery work()
+// produced (every task's changes), consumed by openPr(). `blockedReason` carries the human reason a
+// handler yielded 'blocked' (lost otherwise, since handlers return only the next stage).
 type StageCtx = {
   group: PrGroup;
   delivery: WorkerDelivery | null;
@@ -386,10 +410,12 @@ export class WorkLoop {
     };
   }
 
-  // Run every not-yet-done task of the group to commits on its branch (no PR), returning the
-  // last Worker delivery for openPr. Idempotent on resume: tasks already `done` are skipped. If a
-  // task blocks after earlier tasks already committed this pass, the committed work still opens a
-  // PR (the block is not propagated); blocking is reserved for when nothing has been committed.
+  // Run every not-yet-done task of the group to commits on its branch (no PR), returning a single
+  // delivery — the merge of every task's delivery — for openPr, so the composed PR body reflects the
+  // whole group's changes rather than only the last task's. Idempotent on resume: tasks already
+  // `done` are skipped. If a task blocks after earlier tasks already committed this pass, the
+  // committed work still opens a PR (the block is not propagated); blocking is reserved for when
+  // nothing has been committed.
   private async workTasks(
     group: PrGroup,
     worktree: Worktree,
@@ -399,7 +425,7 @@ export class WorkLoop {
     | { kind: 'blocked'; reason: string }
   > {
     let worked = group;
-    let delivery: WorkerDelivery | null = null;
+    const deliveries: WorkerDelivery[] = [];
     for (const task of group.tasks) {
       if (task.done) continue;
       const result = await this.runOneTask(worked, task, worktree, baseBranch);
@@ -407,13 +433,19 @@ export class WorkLoop {
         // A task couldn't complete. If earlier tasks in this group already committed work on this
         // pass, don't discard it: open a PR for what landed instead of stranding those commits on
         // the branch with no PR. Block outright only when nothing has been committed yet.
-        if (delivery !== null) return { kind: 'ok', group: worked, delivery };
+        if (deliveries.length > 0) {
+          return { kind: 'ok', group: worked, delivery: mergeDeliveries(deliveries) };
+        }
         return result;
       }
       worked = result.group;
-      delivery = result.delivery;
+      deliveries.push(result.delivery);
     }
-    return { kind: 'ok', group: worked, delivery };
+    return {
+      kind: 'ok',
+      group: worked,
+      delivery: deliveries.length > 0 ? mergeDeliveries(deliveries) : null,
+    };
   }
 
   // One task: Worker pass → finalize commit → mark done → persist → re-render plan.md.

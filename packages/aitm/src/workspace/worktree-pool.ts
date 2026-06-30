@@ -8,6 +8,7 @@
 
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { ExecaError } from 'execa';
 import { runGit } from './git-exec.ts';
 
 export type Worktree = {
@@ -29,13 +30,15 @@ function assertSafeGroupId(groupId: string): void {
 
 // True when a local branch ref already exists — e.g. a resumed run whose group branch (and its
 // committed-but-unpushed work) survived the removal of the prior worktree. `git rev-parse --verify
-// --quiet` exits non-zero when the ref is absent, which runGit surfaces as a throw.
+// --quiet` exits 1 with no output when (and only when) the ref is absent; any other failure (not a
+// repo, permissions, git missing) is a real error and must propagate, not be read as "no branch".
 async function branchExists(repoRoot: string, branch: string): Promise<boolean> {
   try {
     await runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoRoot });
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    if (err instanceof ExecaError && err.exitCode === 1) return false;
+    throw err;
   }
 }
 

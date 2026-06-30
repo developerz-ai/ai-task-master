@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { execa } from 'execa';
@@ -70,6 +71,18 @@ test('acquire reuses an existing group branch (resume) and keeps its prior commi
   } finally {
     await pool.releaseAll();
     await repo.cleanup();
+  }
+});
+
+test('acquire surfaces a real git failure instead of mislabeling it as a missing branch', async () => {
+  // A non-git directory makes `git rev-parse` fail with a non-1 exit (not "ref absent"). That
+  // error must propagate from acquire, not be swallowed by branchExists as "no such branch".
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-nongit-'));
+  const pool = new WorktreePool(dir, join(dir, '.ai-task-master'), 2);
+  try {
+    await assert.rejects(() => pool.acquire('g1', 'aitm/r1/g1', 'main'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

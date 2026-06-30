@@ -485,6 +485,31 @@ test('group mode (default): a multi-task group opens exactly one PR after the fi
   assert.equal(calls.openPr.length, 1, 'single group PR, opened after the last task');
 });
 
+test('multi-task group: a later task blocked after earlier commits → PR opens for the committed work', async () => {
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 7,
+    workerResults: [
+      { kind: 'ok', delivery: delivery() },
+      { kind: 'blocked', reason: 'empty file manifest' },
+    ],
+  });
+  const { state, updates } = makeState([twoTaskGroup()]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(twoTaskGroup());
+
+  assert.equal(calls.runWorker.length, 2, 'both tasks attempted');
+  assert.equal(calls.finalizeCommit.length, 1, 'only the first task committed');
+  assert.equal(calls.openPr.length, 1, 'PR opened for the committed work, not blocked');
+  const last = updates[updates.length - 1] as RunState;
+  const g = last.prGroups.find((p) => p.id === 'multi');
+  assert.equal(g?.status, 'awaiting-pr', 'group surfaced as a PR, not stranded as blocked');
+  assert.deepEqual(
+    g?.tasks.map((t) => t.done),
+    [true, false],
+    'first task marked done, the blocked task left undone',
+  );
+});
+
 test('prPerTask: opens a PR after every task (autoMerge off)', async () => {
   const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
   const { state } = makeState([twoTaskGroup()]);

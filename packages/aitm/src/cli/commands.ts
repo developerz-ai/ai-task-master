@@ -101,6 +101,8 @@ export type StartCtx = {
   // dispatch layer, which is what the start-flow tests exercise.
   runPlanner?: (input: RunPlannerInput) => Promise<RunPlannerOutcome>;
   runLoop?: (input: RunLoopInput) => Promise<WorkLoopResult>;
+  // Sink for the pre-run notice (e.g. the auto-merge banner). Defaults to process.stdout.
+  stdout?: (chunk: string) => void;
   // Resolve the distilled coding-style digest threaded to subagents as `styleDigest`. Default:
   // reuse the cached `coding-style.md`, else distill once and cache it — never blocking the run
   // (degrades to raw AgentConfig.contents). Injected so unit tests skip the real LLM call.
@@ -138,6 +140,20 @@ export type ProfileCtx = {
   homeDir?: string;
   stdout?: (chunk: string) => void;
 };
+
+// Pre-run banner shown when auto-merge is active. aitm merges its own PRs via a `gh` subprocess,
+// outside Claude Code's tool boundary — so a host repo's git-guard hook can't intercept it. Make
+// the default behaviour explicit and point at the off switch. Returns null when auto-merge is off.
+// Exported for unit testing.
+export function autoMergeNotice(autoMerge: boolean): string | null {
+  if (!autoMerge) return null;
+  return [
+    '⚠ auto-merge is ON — every PR will be merged automatically when CI passes.',
+    "  PR merges run via `gh`, outside Claude Code's tool boundary, so host git-guard hooks cannot intercept them.",
+    '  Pass --no-automerge for this run, or `aitm config set autoMerge false` to disable it by default.',
+    '',
+  ].join('\n');
+}
 
 export async function runStart(
   args: Extract<ParsedArgs, { kind: 'start' }>,
@@ -265,6 +281,9 @@ export async function runStart(
   } catch {
     styleDigest = agentConfig.contents;
   }
+
+  const notice = autoMergeNotice(resolved.autoMerge);
+  if (notice) (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(notice);
 
   const runLoop = ctx.runLoop ?? defaultRunLoop;
   let result: WorkLoopResult;

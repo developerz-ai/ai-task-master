@@ -162,6 +162,26 @@ export function mergeDeliveries(deliveries: readonly WorkerDelivery[]): WorkerDe
   };
 }
 
+// Synthesize a delivery for work recovered from a prior run: some tasks are already `done` — their
+// commits persist on the branch the WorktreePool reuses on resume — but no PR was opened and this
+// pass produced no fresh delivery (it blocked, or every task was already done). A done task only
+// reaches that state after its commit is finalized, so `done` is a reliable proxy for "committed";
+// this lets openPr surface the recovered work instead of stranding it. Returns null when a PR
+// already exists or nothing has been committed (a genuinely fresh, first-task-blocked run). The
+// changed-file list is empty — the commits exist on the branch, but this pass didn't produce the
+// per-file detail — so composePr titles/bodies from the group goal. Exported for unit testing.
+export function recoveredDelivery(group: PrGroup): WorkerDelivery | null {
+  if (group.pr !== null) return null;
+  const done = group.tasks.filter((task) => task.done);
+  if (done.length === 0) return null;
+  return {
+    branch: group.branch ?? `aitm/${group.id}`,
+    draftCommitMessage: group.title,
+    changes: [],
+    progressEntries: done.map((task) => `- ${task.text}`),
+  };
+}
+
 // Mutable scratch the stage dispatcher threads through one group-run. `group` is the authoritative
 // in-memory copy the bridges keep current (tasks marked done by work(), pr set by openPr()); the
 // persisted GroupStage is the dispatcher's job. `delivery` is the merged Worker delivery work()
@@ -371,13 +391,28 @@ export class WorkLoop {
       work: async () => {
         const result = await this.workTasks(ctx.group, worktree, baseBranch);
         if (result.kind === 'blocked') {
+          // A task couldn't complete this pass and nothing was committed this pass. If a prior run
+          // already committed earlier tasks on the (reused) branch, open a PR for that recovered
+          // work instead of stranding it; only block when there is genuinely nothing committed.
+          const recovered = recoveredDelivery(ctx.group);
+          if (recovered) {
+            ctx.delivery = recovered;
+            return { kind: 'ok' };
+          }
           ctx.blockedReason = result.reason;
           return result;
         }
         ctx.group = result.group;
         ctx.delivery = result.delivery;
         if (result.delivery === null && ctx.group.pr === null) {
-          // Every task was already done on entry and no PR exists — nothing to open from.
+          // No new work this pass and no PR. If earlier tasks were already committed by a prior run,
+          // open a PR for that recovered work rather than blocking; otherwise there is nothing to
+          // open from.
+          const recovered = recoveredDelivery(ctx.group);
+          if (recovered) {
+            ctx.delivery = recovered;
+            return { kind: 'ok' };
+          }
           const reason = 'all tasks already complete but no pull request was opened';
           ctx.blockedReason = reason;
           return { kind: 'blocked', reason };

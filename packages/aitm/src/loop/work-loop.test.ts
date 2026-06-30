@@ -11,6 +11,7 @@ import type { Worktree } from '../workspace/worktree-pool.ts';
 import type { StageWorkResult } from './stage-handlers.ts';
 import {
   mergeDeliveries,
+  recoveredDelivery,
   WorkLoop,
   type WorkLoopDeps,
   type WorkLoopGithub,
@@ -451,19 +452,89 @@ test('resume: group persisted at waiting-ci skips Worker and opens no new PR', a
   );
 });
 
-test('group with all tasks already done and no delivery → blocked', async () => {
+test('resume: every task already done but no PR → recovers by opening a PR (not blocked)', async () => {
+  // A prior run committed the task and crashed before opening the PR. The branch (reused on resume)
+  // carries that commit, so the group recovers it into a PR instead of stranding it as blocked.
   const finished = group('finished', {
+    branch: 'aitm/finished',
     tasks: [{ id: 'a', text: 'done', complexity: 'normal', done: true }],
   });
-  const { orchestrator, calls } = makeOrchestrator();
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
   const { state, updates } = makeState([finished]);
   const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
   await loop.runGroup(finished);
 
   assert.equal(calls.runWorker.length, 0, 'no worker runs when every task is done');
-  assert.equal(calls.openPr.length, 0, 'no PR opened without a fresh delivery');
+  assert.equal(calls.openPr.length, 1, 'recovers the committed work into a PR');
+  assert.equal(calls.openPr[0]?.delivery.branch, 'aitm/finished');
   const last = updates[updates.length - 1] as RunState;
-  assert.equal(last.prGroups.find((g) => g.id === 'finished')?.status, 'blocked');
+  assert.equal(last.prGroups.find((g) => g.id === 'finished')?.status, 'awaiting-pr');
+});
+
+test('a fresh group whose only task is undone and not yet committed still blocks (nothing to recover)', async () => {
+  // No task is `done`, so there is no recovered work — a genuine block must still block.
+  const fresh = group('fresh', {
+    tasks: [{ id: 'a', text: 'todo', complexity: 'normal', done: false }],
+  });
+  const { orchestrator, calls } = makeOrchestrator({
+    workerResults: [{ kind: 'blocked', reason: 'no plan' }],
+  });
+  const { state, updates } = makeState([fresh]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(fresh);
+
+  assert.equal(calls.openPr.length, 0, 'nothing committed → no PR');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((g) => g.id === 'fresh')?.status, 'blocked');
+});
+
+test('resume: an undone task blocks but a prior task was committed → recovers into a PR', async () => {
+  // Task A was committed by a prior run (done), task B is undone and blocks this pass. The recovered
+  // work (A's commit on the reused branch) opens a PR rather than being stranded as blocked.
+  const resumed = group('multi', {
+    branch: 'aitm/multi',
+    tasks: [
+      { id: 'a', text: 'first', complexity: 'normal', done: true },
+      { id: 'b', text: 'second', complexity: 'complex', done: false },
+    ],
+  });
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 7,
+    workerResults: [{ kind: 'blocked', reason: 'empty file manifest' }],
+  });
+  const { state, updates } = makeState([resumed]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(resumed);
+
+  assert.equal(calls.runWorker.length, 1, 'only the undone task B is attempted');
+  assert.equal(calls.openPr.length, 1, 'recovered work opens a PR, not blocked');
+  assert.equal(calls.openPr[0]?.delivery.branch, 'aitm/multi');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((g) => g.id === 'multi')?.status, 'awaiting-pr');
+});
+
+test('recoveredDelivery: done tasks + no PR → delivery; else null', () => {
+  const base = group('g', { branch: 'aitm/g' });
+  // No done tasks → nothing to recover.
+  assert.equal(recoveredDelivery(base), null);
+  // A PR already exists → nothing to recover.
+  assert.equal(
+    recoveredDelivery({
+      ...base,
+      pr: 5,
+      tasks: [{ id: 'a', text: 'first', complexity: 'normal', done: true }],
+    }),
+    null,
+  );
+  // Done task, no PR → a delivery anchored on the group branch + title.
+  const d = recoveredDelivery({
+    ...base,
+    tasks: [{ id: 'a', text: 'first', complexity: 'normal', done: true }],
+  });
+  assert.ok(d);
+  assert.equal(d.branch, 'aitm/g');
+  assert.deepEqual(d.changes, []);
+  assert.deepEqual(d.progressEntries, ['- first']);
 });
 
 function twoTaskGroup(): PrGroup {

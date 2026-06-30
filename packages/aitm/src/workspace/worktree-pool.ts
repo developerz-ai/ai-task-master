@@ -8,6 +8,7 @@
 
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { ExecaError } from 'execa';
 import { runGit } from './git-exec.ts';
 
 export type Worktree = {
@@ -24,6 +25,20 @@ const SAFE_GROUP_ID = /^[A-Za-z0-9._-]+$/;
 function assertSafeGroupId(groupId: string): void {
   if (!SAFE_GROUP_ID.test(groupId) || groupId === '.' || groupId === '..') {
     throw new Error(`invalid groupId: ${groupId}`);
+  }
+}
+
+// True when a local branch ref already exists — e.g. a resumed run whose group branch (and its
+// committed-but-unpushed work) survived the removal of the prior worktree. `git rev-parse --verify
+// --quiet` exits 1 with no output when (and only when) the ref is absent; any other failure (not a
+// repo, permissions, git missing) is a real error and must propagate, not be read as "no branch".
+async function branchExists(repoRoot: string, branch: string): Promise<boolean> {
+  try {
+    await runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoRoot });
+    return true;
+  } catch (err) {
+    if (err instanceof ExecaError && err.exitCode === 1) return false;
+    throw err;
   }
 }
 
@@ -56,9 +71,14 @@ export class WorktreePool {
     const path = join(worktreesDir, groupId);
     try {
       await mkdir(worktreesDir, { recursive: true });
-      await runGit(['worktree', 'add', path, '-b', branch, baseBranch], {
-        cwd: this.repoRoot,
-      });
+      // Reuse an existing group branch (a resumed run whose prior worktree was removed but whose
+      // branch ref — and its committed-but-unpushed work — persists) rather than recreating it from
+      // base: `git worktree add -b <branch> <base>` would fail outright on an existing branch, and a
+      // fresh branch from base would drop the prior commits. A brand-new group still branches off base.
+      const addArgs = (await branchExists(this.repoRoot, branch))
+        ? ['worktree', 'add', path, branch]
+        : ['worktree', 'add', path, '-b', branch, baseBranch];
+      await runGit(addArgs, { cwd: this.repoRoot });
       const wt: Worktree = { groupId, branch, path };
       this.worktrees.set(groupId, wt);
       return wt;

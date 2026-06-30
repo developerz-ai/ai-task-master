@@ -42,11 +42,21 @@ export async function initErrorReporter(
       tracesSampleRate: 0,
     });
     return {
+      // Swallow any SDK error here so reporting can never affect the run — including its exit code:
+      // a failing capture/flush must not surface to the CLI's exit path.
       captureException: (error) => {
-        Sentry.captureException(error);
+        try {
+          Sentry.captureException(error);
+        } catch {
+          // ignore — observability must never break the run
+        }
       },
       flush: async () => {
-        await Sentry.flush(2000);
+        try {
+          await Sentry.flush(2000);
+        } catch {
+          // ignore — observability must never break the run
+        }
       },
     };
   } catch {

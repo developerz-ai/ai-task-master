@@ -11,7 +11,7 @@ import type {
   RunPlannerInput,
   StartCtx,
 } from './commands.ts';
-import { runConfig, runMergePr, runProfile, runStart } from './commands.ts';
+import { autoMergeNotice, runConfig, runMergePr, runProfile, runStart } from './commands.ts';
 
 const FAKE_KEY = 'sk-or-fake-test-key';
 
@@ -133,6 +133,68 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
       await readFile(join(repo.path, '.ai-task-master', 'config.snapshot.json'), 'utf8'),
     ) as { openrouterApiKey: string };
     assert.match(snapshot.openrouterApiKey, /<from env>/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('autoMergeNotice: banner when on, null when off', () => {
+  const on = autoMergeNotice(true);
+  assert.ok(on, 'notice present when auto-merge on');
+  assert.match(on, /auto-merge is ON/);
+  assert.match(on, /--no-automerge/);
+  assert.equal(autoMergeNotice(false), null);
+});
+
+test('runStart: prints the auto-merge banner to stdout when auto-merge is on (default)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let out = '';
+    const result = await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        stdout: (chunk) => {
+          out += chunk;
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.match(out, /auto-merge is ON/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: --no-automerge suppresses the banner', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let out = '';
+    const result = await runStart(
+      { kind: 'start', goal: 'g', autoMerge: false },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        stdout: (chunk) => {
+          out += chunk;
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(out, '');
   } finally {
     await repo.cleanup();
     await home.cleanup();

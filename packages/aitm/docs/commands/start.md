@@ -24,6 +24,21 @@ By default each PR group gets an `aitm/<group-id>` branch. Pass `--branch <name>
 
 The name is validated as a git ref (no whitespace, leading `-`, `..`, control/special chars); an invalid name is a usage error.
 
+### Auto-merge
+
+Auto-merge is **on by default** — `aitm` merges every PR it opens once CI passes, via a `gh`
+subprocess. Because that merge runs outside Claude Code's tool boundary, a host repo's Claude Code
+git-guard hook cannot intercept it. To make this explicit, `start` prints a banner when auto-merge
+is active:
+
+```text
+⚠ auto-merge is ON — every PR will be merged automatically when CI passes.
+  Pass --no-automerge to open PRs without merging.
+```
+
+Pass `--no-automerge` (or set `autoMerge: false` in `.ai-task-master/config.json`) to open PRs
+without merging them; finish each with `aitm merge-pr`.
+
 ## Preconditions
 
 Checked by `CLI` before launching `WorkLoop`.

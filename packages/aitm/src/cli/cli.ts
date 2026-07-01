@@ -99,7 +99,7 @@ const HELP_TEXT = `aitm — autonomous task orchestrator
 Usage:
   aitm start "<goal>" [--criteria "..."] [--max-prs N] [--max-sessions N]
                       [--no-automerge] [--style <path>] [--model <id>]
-                      [--concurrency N]
+                      [--concurrency N] [--branch <name>]
   aitm merge-pr [--pr N] [--no-resume]
   aitm config set <key> <value> [--project]
   aitm config unset <key>       [--project]

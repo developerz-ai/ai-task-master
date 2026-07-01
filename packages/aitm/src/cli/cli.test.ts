@@ -59,6 +59,12 @@ test('main: help command → exit 0, usage on stdout', async () => {
   assert.match(cap.out.join(''), /Usage:/);
 });
 
+test('main: help lists the --branch flag', async () => {
+  const cap = capture();
+  await main(['help'], cap.ctx);
+  assert.match(cap.out.join(''), /--branch/);
+});
+
 for (const flag of ['--help', '-h']) {
   test(`main: ${flag} → exit 0, usage on stdout`, async () => {
     const cap = capture();

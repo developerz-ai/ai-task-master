@@ -33,7 +33,10 @@ export class AgentConfigDetector {
         }
       }
       const raw = await readFile(path, 'utf8');
-      const contents = await expandImports(raw, dirname(path), { root: this.repoRoot });
+      const contents = await expandImports(raw, dirname(path), {
+        root: this.repoRoot,
+        sourcePath: path,
+      });
       return { flavor: 'custom', path, contents };
     }
 
@@ -44,7 +47,10 @@ export class AgentConfigDetector {
 
     const picked = pick(options.prefer, claudePath, claude, agentsPath, agents);
     if (picked === null) return null;
-    const contents = await expandImports(picked.raw, this.repoRoot, { root: this.repoRoot });
+    const contents = await expandImports(picked.raw, this.repoRoot, {
+      root: this.repoRoot,
+      sourcePath: picked.path,
+    });
     return { flavor: picked.flavor, path: picked.path, contents };
   }
 }

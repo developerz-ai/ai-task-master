@@ -4,11 +4,11 @@
 // seen by the model instead of being fed through as an inert `@core/AGENTS.md` string.
 //
 // Faithful subset of Claude Code's behavior, with one deliberate hardening: imports are
-// contained to `root` (the target repo). Absolute paths, `..` escapes, and `~`-home
-// imports are refused (left as literal text) — aitm processes untrusted target repos, so
-// an @-import must never read outside the repo.
+// contained to `root` (the target repo). Absolute paths, `..` escapes, `~`-home imports,
+// and symlinks that resolve outside root are refused (left as literal text) — aitm
+// processes untrusted target repos, so an @-import must never read outside the repo.
 
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 const DEFAULT_MAX_DEPTH = 5;
@@ -19,6 +19,9 @@ export type ExpandImportsOptions = {
   root?: string;
   // Maximum nesting levels of @-imports to follow. Defaults to 5.
   maxDepth?: number;
+  // Path of the file `contents` was read from. Seeded into the cycle guard so the entry
+  // file cannot re-inline itself (e.g. a CLAUDE.md that contains `@./CLAUDE.md`).
+  sourcePath?: string;
 };
 
 export async function expandImports(
@@ -26,9 +29,29 @@ export async function expandImports(
   baseDir: string,
   options: ExpandImportsOptions = {},
 ): Promise<string> {
-  const root = options.root ?? baseDir;
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
-  return expand(contents, baseDir, root, maxDepth, new Set());
+  // Containment is enforced against the REAL path of root, so a symlinked root does not
+  // reject its own children and — together with the realpath check in inlineImport — a
+  // symlinked child cannot escape it.
+  const root = await realpathOrResolve(options.root ?? baseDir);
+  const visited = new Set<string>();
+  if (options.sourcePath !== undefined) {
+    const real = await realpathOrNull(options.sourcePath);
+    if (real !== null) visited.add(real);
+  }
+  return expand(contents, baseDir, root, maxDepth, visited);
+}
+
+async function realpathOrResolve(p: string): Promise<string> {
+  return (await realpathOrNull(p)) ?? resolve(p);
+}
+
+async function realpathOrNull(p: string): Promise<string | null> {
+  try {
+    return await realpath(p);
+  } catch {
+    return null;
+  }
 }
 
 async function expand(
@@ -129,22 +152,29 @@ async function inlineImport(
   if (depthLeft <= 0) return null;
   const abs = resolveWithinRoot(rawPath, baseDir, root);
   if (abs === null) return null;
-  if (visited.has(abs)) return null;
+  // Re-check containment on the REAL path: a repo-local symlink can be lexically inside
+  // root yet point outside it. realpath also serves as the existence check.
+  const real = await realpathOrNull(abs);
+  if (real === null || !withinRoot(real, root)) return null;
+  if (visited.has(real)) return null;
   let fileContents: string;
   try {
-    fileContents = await readFile(abs, 'utf8');
+    fileContents = await readFile(real, 'utf8');
   } catch {
     return null;
   }
   const nextVisited = new Set(visited);
-  nextVisited.add(abs);
-  return expand(fileContents, dirname(abs), root, depthLeft - 1, nextVisited);
+  nextVisited.add(real);
+  return expand(fileContents, dirname(real), root, depthLeft - 1, nextVisited);
 }
 
 function resolveWithinRoot(rawPath: string, baseDir: string, root: string): string | null {
   if (rawPath.startsWith('~')) return null;
   const abs = isAbsolute(rawPath) ? rawPath : resolve(baseDir, rawPath);
+  return withinRoot(abs, root) ? abs : null;
+}
+
+function withinRoot(abs: string, root: string): boolean {
   const rel = relative(root, abs);
-  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
-  return abs;
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }

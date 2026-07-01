@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -114,6 +114,30 @@ test('~-home imports are refused (left literal)', async () => {
   await withDir(async (dir) => {
     const out = await expandImports('@~/.ssh/id_rsa\n', dir, { root: dir });
     assert.equal(out, '@~/.ssh/id_rsa\n');
+  });
+});
+
+test('a symlink lexically inside root but pointing outside is refused', async () => {
+  await withDir(async (dir) => {
+    const root = join(dir, 'repo');
+    await mkdir(root, { recursive: true });
+    await writeFile(join(dir, 'secret.md'), 'SECRET\n');
+    // link.md lives inside root, but its target is outside root.
+    await symlink(join(dir, 'secret.md'), join(root, 'link.md'));
+    const out = await expandImports('@link.md\n', root, { root });
+    assert.equal(out, '@link.md\n');
+    assert.doesNotMatch(out, /SECRET/);
+  });
+});
+
+test('the source file is seeded into the cycle guard (self-import blocked)', async () => {
+  await withDir(async (dir) => {
+    const self = join(dir, 'CLAUDE.md');
+    await writeFile(self, 'SELF-CONTENT\n');
+    // `contents` is CLAUDE.md's own text referencing itself; the seed must block re-inlining.
+    const out = await expandImports('top @CLAUDE.md bottom\n', dir, { sourcePath: self });
+    assert.equal(out, 'top @CLAUDE.md bottom\n');
+    assert.doesNotMatch(out, /SELF-CONTENT/);
   });
 });
 

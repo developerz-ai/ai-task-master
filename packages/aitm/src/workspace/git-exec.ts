@@ -20,6 +20,13 @@ function isForceFlag(arg: string): boolean {
   return arg === '--force' || arg === '-f' || arg.startsWith('--force=');
 }
 
+// A leading `+` on a push refspec (`git push origin +main`, `+src:dst`) is git's plain-force
+// form — a history rewrite with no lease, as dangerous as `--force`. Flags start with `-`, so a
+// `+`-prefixed token can only be a force refspec.
+function isForceRefspec(arg: string): boolean {
+  return arg.startsWith('+');
+}
+
 function isForceWithLeaseFlag(arg: string): boolean {
   return arg === '--force-with-lease' || arg.startsWith('--force-with-lease=');
 }
@@ -38,9 +45,9 @@ export type GitPolicy = { allowForcePush?: boolean };
 // UNLESS `allowForcePush` is false, in which case it too is rejected.
 export function assertGitAllowed(args: readonly string[], policy?: GitPolicy): void {
   if (args[0] !== 'push') return;
-  if (args.some(isForceFlag)) {
+  if (args.some(isForceFlag) || args.some(isForceRefspec)) {
     throw new GitGuardError(
-      'Refusing `git push --force` / -f: the only sanctioned force-push is --force-with-lease (rebase first).',
+      'Refusing `git push --force` / -f / +refspec: the only sanctioned force-push is --force-with-lease (rebase first).',
     );
   }
   if (policy?.allowForcePush === false && args.some(isForceWithLeaseFlag)) {

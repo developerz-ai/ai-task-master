@@ -199,8 +199,8 @@ export async function rebaseAndForcePush(
     return {
       kind: 'blocked',
       reason:
-        'force-push is disabled by policy (allowForcePush=false); the CI fix cannot be ' +
-        'rebased-and-pushed — rebase onto the base and push it manually.',
+        'force-push is disabled by policy (allowForcePush=false); aitm will not rebase-and-' +
+        'force-push the CI fix. The fix is committed on the branch locally — land the PR manually.',
     };
   }
   const cwd = { cwd: worktreePath };

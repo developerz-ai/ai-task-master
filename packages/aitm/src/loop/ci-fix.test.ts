@@ -272,7 +272,11 @@ test('rebaseAndForcePush: allowForcePush=false → blocks without running any gi
   const { runCmd, commands } = recordingRunCmd();
   const result = await rebaseAndForcePush(runCmd, '/tmp/wt', 'main', 9, undefined, false);
   assert.equal(result.kind, 'blocked');
-  if (result.kind === 'blocked') assert.match(result.reason, /force-push is disabled by policy/);
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /force-push is disabled by policy/);
+    // Must not tell the operator to do the very thing policy forbids (a manual rebase/force-push).
+    assert.doesNotMatch(result.reason, /rebase onto the base and push/i);
+  }
   assert.deepEqual(commands, [], 'must not fetch/rebase/push when force-push is forbidden');
 });
 

@@ -407,7 +407,22 @@ const profileCases: Case[] = [
     argv: ['profile', 'add', 'p', '--base-url=https://x.dev/v1'],
     expected: { kind: 'profile-add', name: 'p', baseURL: 'https://x.dev/v1' },
   },
+  {
+    name: 'profile add: --api-key-stdin sets the flag, no key on argv',
+    argv: ['profile', 'add', 'z.ai', '--preset', 'zai', '--api-key-stdin'],
+    expected: { kind: 'profile-add', name: 'z.ai', preset: 'zai', apiKeyStdin: true },
+  },
   // error / HELP cases
+  {
+    name: 'profile add: --api-key and --api-key-stdin are mutually exclusive',
+    argv: ['profile', 'add', 'p', '--api-key', 'sk', '--api-key-stdin'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'profile add: --api-key-stdin with an inline value is rejected',
+    argv: ['profile', 'add', 'p', '--api-key-stdin=sk'],
+    expected: { kind: 'help' },
+  },
   { name: 'profile: no subcommand', argv: ['profile'], expected: { kind: 'help' } },
   { name: 'profile: unknown subcommand', argv: ['profile', 'nope'], expected: { kind: 'help' } },
   { name: 'profile list: extra arg', argv: ['profile', 'list', 'x'], expected: { kind: 'help' } },

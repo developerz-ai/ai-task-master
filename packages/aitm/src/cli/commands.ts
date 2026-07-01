@@ -139,7 +139,18 @@ export type ConfigCtx = {
 export type ProfileCtx = {
   homeDir?: string;
   stdout?: (chunk: string) => void;
+  stderr?: (chunk: string) => void;
+  // Reads the API key from stdin for `profile add --api-key-stdin`. Defaults to draining
+  // process.stdin. Injectable so the stdin path is unit-testable.
+  readStdin?: () => Promise<string>;
 };
+
+async function drainStdin(): Promise<string> {
+  let data = '';
+  process.stdin.setEncoding('utf8');
+  for await (const chunk of process.stdin) data += chunk;
+  return data;
+}
 
 // Pre-run banner shown when auto-merge is active. aitm merges its own PRs via a `gh` subprocess,
 // outside Claude Code's tool boundary — so a host repo's git-guard hook can't intercept it. Make
@@ -489,6 +500,7 @@ export async function runProfile(
 ): Promise<CommandExit> {
   const homeDir = ctx.homeDir ?? homedir();
   const stdout = ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk));
+  const stderr = ctx.stderr ?? ((chunk: string) => process.stderr.write(chunk));
   const manager = new ProfileManager(homeDir);
 
   try {
@@ -507,7 +519,17 @@ export async function runProfile(
         const input: AddProfileInput = {};
         if (args.preset !== undefined) input.preset = args.preset;
         if (args.baseURL !== undefined) input.baseURL = args.baseURL;
-        if (args.apiKey !== undefined) input.apiKey = args.apiKey;
+        if (args.apiKeyStdin) {
+          const key = (await (ctx.readStdin ?? drainStdin)()).trim();
+          if (key === '') return { code: 1, message: 'no API key received on stdin' };
+          input.apiKey = key;
+        } else if (args.apiKey !== undefined) {
+          stderr(
+            'warning: --api-key on the command line is visible in process listings and shell ' +
+              'history; prefer --api-key-stdin (pipe the key) or the OPENROUTER_API_KEY env var.\n',
+          );
+          input.apiKey = args.apiKey;
+        }
         await manager.add(args.name, input);
         // The first profile auto-activates; later ones don't — tailor the hint accordingly.
         const activated = (await manager.list()).activeProfile === args.name;

@@ -66,6 +66,9 @@ export const ConfigFileSchema = z
     // How many PR groups may have a Worker running at the same time. Default 1 = sequential.
     // See src/loop/work-loop.ts and src/workspace/worktree-pool.ts.
     concurrency: z.number().int().positive().optional(),
+    // Per-repo PR body section headings (each a `## ` heading, in order). Unset → the default
+    // Summary/Changes/Testing. See src/orchestrator/orchestrator.ts §resolvePrBodySections.
+    prBodySections: z.array(z.string()).optional(),
     // External MCP servers to mount into subagent tool surfaces (client only — aitm is never
     // exposed as an MCP server). See docs/mcp.md and src/mcp/schema.ts.
     mcpServers: McpServersSchema.optional(),
@@ -104,6 +107,8 @@ export type ResolvedConfig = {
   formatCommand: string | null;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   concurrency: number;
+  // Per-repo PR body section headings. Undefined → orchestrator uses its default set.
+  prBodySections?: readonly string[] | undefined;
   // Merged MCP server map across all discovered sources (see ConfigLoader.resolve for
   // precedence). Empty object when nothing was found — never undefined, so callers can
   // iterate without null-checks.

@@ -48,7 +48,8 @@ The merged result is what every other module sees. A frozen snapshot is written 
   "mergeMethod": "squash",
   "stylePath": null,
   "formatCommand": null,              // optional; run in the worktree before the Worker commits
-  "logLevel": "info"
+  "logLevel": "info",
+  "prBodySections": ["## Summary", "## Changes", "## Testing"]  // optional; per-repo PR body headings
 }
 ```
 
@@ -77,6 +78,10 @@ So an explicit key/baseURL in a config file still wins, but the active profile b
 before profiles existed (full back-compat). A dangling `activeProfile` (named but absent from
 `profiles`) warns and falls back rather than failing the run. Full command reference and presets:
 [`commands/profile.md`](./commands/profile.md).
+
+## prBodySections
+
+Every aitm-opened PR follows a fixed body shape so reviewers get a consistent layout. By default that is `## Summary`, `## Changes`, `## Testing`. Set `prBodySections` to a list of `## ` headings (in order) to match a repo whose convention differs — e.g. `["## What", "## Why", "## Changes", "## Verification"]`. The list drives both the model guidance (what the composer is told to produce) and the post-composition contract check (`assertPrBodySections`) from one source, so they never drift. Every entry must be a real `## ` heading; an empty list or any malformed entry falls back to the default. Project/global config only — not a CLI flag.
 
 ## formatCommand
 

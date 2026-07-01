@@ -27,8 +27,10 @@ import {
   type OrchestratorBuildContext,
   PR_BODY_GUIDE,
   PR_BODY_SECTIONS,
+  prBodyGuideFor,
   type RunCmd,
   resolveMaxSteps,
+  resolvePrBodySections,
 } from './orchestrator.ts';
 import type { ModelProvider } from './subagent-tools.ts';
 
@@ -346,6 +348,38 @@ test('PR_BODY_GUIDE defines the standard Summary/Changes/Testing sections', () =
   for (const heading of PR_BODY_SECTIONS) {
     assert.ok(PR_BODY_GUIDE.includes(heading), `expected guide to mention ${heading}`);
   }
+});
+
+test('resolvePrBodySections: undefined/empty → default set', () => {
+  assert.deepEqual(resolvePrBodySections(undefined), PR_BODY_SECTIONS);
+  assert.deepEqual(resolvePrBodySections([]), PR_BODY_SECTIONS);
+});
+
+test('resolvePrBodySections: valid custom headings are used verbatim', () => {
+  const custom = ['## What', '## Why', '## Changes', '## Verification'];
+  assert.deepEqual(resolvePrBodySections(custom), custom);
+});
+
+test('resolvePrBodySections: any malformed heading falls back to default', () => {
+  assert.deepEqual(resolvePrBodySections(['## What', 'Why']), PR_BODY_SECTIONS);
+  assert.deepEqual(resolvePrBodySections(['##NoSpace']), PR_BODY_SECTIONS);
+});
+
+test('prBodyGuideFor: default set returns the bespoke guide', () => {
+  assert.equal(prBodyGuideFor(PR_BODY_SECTIONS), PR_BODY_GUIDE);
+});
+
+test('prBodyGuideFor: custom set lists each heading verbatim', () => {
+  const custom = ['## What', '## Why', '## Verification'];
+  const guide = prBodyGuideFor(custom);
+  for (const heading of custom) assert.ok(guide.includes(heading), `missing ${heading}`);
+  assert.ok(guide.includes('3 sections'));
+});
+
+test('assertPrBodySections: enforces a custom section set', () => {
+  const custom = ['## What', '## Why'];
+  assert.doesNotThrow(() => assertPrBodySections('## What\nx\n\n## Why\ny', custom));
+  assert.throws(() => assertPrBodySections('## Summary\nx', custom), /What/);
 });
 
 test('assertPrBodySections: accepts a body with all sections in order', () => {

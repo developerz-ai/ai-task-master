@@ -81,6 +81,9 @@ export type FixSessionInput = {
   // git/gh shim — defaults to execa. Stubbed in unit tests to assert command shape (fetch/rebase/
   // push --force-with-lease) without spawning processes.
   runCmd?: RunCmd;
+  // Force-push policy (from config allowForcePush). Default true. When false, the CI-fix rebase+
+  // force-with-lease push is refused and the session blocks instead of pushing.
+  allowForcePush?: boolean;
   logger?: LoggerLike;
 };
 
@@ -117,7 +120,14 @@ export async function runFixSession(input: FixSessionInput): Promise<FixSessionR
   }
 
   // 3. Rebase onto the latest base, then force-with-lease push so CI re-runs on fresh ground.
-  return rebaseAndForcePush(runCmd, worktreePath, baseBranch, pr, log);
+  return rebaseAndForcePush(
+    runCmd,
+    worktreePath,
+    baseBranch,
+    pr,
+    log,
+    input.allowForcePush ?? true,
+  );
 }
 
 // The fix task: read the on-disk context (when present), fix every failure, verify locally. Scoped
@@ -181,7 +191,18 @@ export async function rebaseAndForcePush(
   baseBranch: string,
   pr: number,
   log: LoggerLike | undefined,
+  allowForcePush = true,
 ): Promise<FixSessionResult> {
+  // This is the only force-push path. When policy forbids it, don't rebase — block cleanly so a
+  // human lands the fix, rather than leaving a rebased branch that can't be pushed.
+  if (!allowForcePush) {
+    return {
+      kind: 'blocked',
+      reason:
+        'force-push is disabled by policy (allowForcePush=false); aitm will not rebase-and-' +
+        'force-push the CI fix. The fix is committed on the branch locally — land the PR manually.',
+    };
+  }
   const cwd = { cwd: worktreePath };
   const fetch = await runCmd('git', ['fetch', 'origin', baseBranch], cwd);
   if (fetch.exitCode !== 0) {

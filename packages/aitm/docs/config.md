@@ -49,6 +49,7 @@ The merged result is what every other module sees. A frozen snapshot is written 
   "stylePath": null,
   "formatCommand": null,              // optional; run in the worktree before the Worker commits
   "logLevel": "info",
+  "allowForcePush": true,             // optional; false forbids all force-push (incl. --force-with-lease)
   "prBodySections": ["## Summary", "## Changes", "## Testing"]  // optional; per-repo PR body headings
 }
 ```
@@ -78,6 +79,10 @@ So an explicit key/baseURL in a config file still wins, but the active profile b
 before profiles existed (full back-compat). A dangling `activeProfile` (named but absent from
 `profiles`) warns and falls back rather than failing the run. Full command reference and presets:
 [`commands/profile.md`](./commands/profile.md).
+
+## allowForcePush
+
+`true` by default. aitm's git guard already refuses a raw `git push --force` / `-f` (even alongside `--force-with-lease`, which git lets override the lease); the only sanctioned force-push is a bare `--force-with-lease`, used by the CI-fix flow after rebasing onto the latest base. Set `allowForcePush: false` on a repo whose policy forbids **all** force-pushes: the guard then also rejects `--force-with-lease`, and the CI-fix rebase-and-push path blocks cleanly (a human lands the rebased fix) instead of pushing. Project/global config only — not a CLI flag.
 
 ## prBodySections
 

@@ -14,9 +14,40 @@ test('assertGitAllowed: rejects --force even alongside --force-with-lease', () =
   assert.throws(() => assertGitAllowed(['push', '--force-with-lease', '--force']), GitGuardError);
 });
 
+test('assertGitAllowed: rejects a leading-+ force refspec (plain force, always)', () => {
+  // `git push origin +main` / `+src:dst` is git's plain-force form — rejected even by default.
+  assert.throws(() => assertGitAllowed(['push', 'origin', '+main']), GitGuardError);
+  assert.throws(
+    () => assertGitAllowed(['push', 'origin', '+refs/heads/x:refs/heads/x']),
+    GitGuardError,
+  );
+});
+
 test('assertGitAllowed: allows --force-with-lease on its own', () => {
   assert.doesNotThrow(() => assertGitAllowed(['push', '--force-with-lease']));
   assert.doesNotThrow(() => assertGitAllowed(['push', '--force-with-lease=br']));
+});
+
+test('assertGitAllowed: allowForcePush=false rejects --force-with-lease too', () => {
+  assert.throws(
+    () => assertGitAllowed(['push', '--force-with-lease'], { allowForcePush: false }),
+    GitGuardError,
+  );
+  assert.throws(
+    () => assertGitAllowed(['push', '--force-with-lease=br'], { allowForcePush: false }),
+    GitGuardError,
+  );
+  // Default / explicit-true policy still permits it.
+  assert.doesNotThrow(() =>
+    assertGitAllowed(['push', '--force-with-lease'], { allowForcePush: true }),
+  );
+  assert.doesNotThrow(() => assertGitAllowed(['push', '--force-with-lease']));
+});
+
+test('assertGitAllowed: allowForcePush=false leaves ordinary pushes alone', () => {
+  assert.doesNotThrow(() =>
+    assertGitAllowed(['push', '-u', 'origin', 'x'], { allowForcePush: false }),
+  );
 });
 
 test('assertGitAllowed: allows ordinary pushes', () => {

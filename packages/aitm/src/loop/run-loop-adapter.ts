@@ -399,6 +399,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
         pr,
         baseBranch,
         worktreePath: worktree.path,
+        allowForcePush: input.resolved.allowForcePush,
       });
       return result.kind === 'fixed' ? { kind: 'ok' } : { kind: 'blocked', reason: result.reason };
     },

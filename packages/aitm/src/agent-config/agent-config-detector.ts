@@ -2,7 +2,8 @@
 // Style signal only — never selects a provider. Prefer CLAUDE.md over AGENTS.md when both exist.
 
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { expandImports } from './expand-imports.ts';
 
 export type AgentConfigFlavor = 'claude' | 'agents' | 'custom';
 
@@ -31,7 +32,8 @@ export class AgentConfigDetector {
           throw new Error(`stylePath must remain within repoRoot: ${options.stylePath}`);
         }
       }
-      const contents = await readFile(path, 'utf8');
+      const raw = await readFile(path, 'utf8');
+      const contents = await expandImports(raw, dirname(path), { root: this.repoRoot });
       return { flavor: 'custom', path, contents };
     }
 
@@ -40,15 +42,28 @@ export class AgentConfigDetector {
     const claude = await readIfExists(claudePath);
     const agents = await readIfExists(agentsPath);
 
-    if (claude !== null && agents !== null) {
-      return options.prefer === 'agents'
-        ? { flavor: 'agents', path: agentsPath, contents: agents }
-        : { flavor: 'claude', path: claudePath, contents: claude };
-    }
-    if (claude !== null) return { flavor: 'claude', path: claudePath, contents: claude };
-    if (agents !== null) return { flavor: 'agents', path: agentsPath, contents: agents };
-    return null;
+    const picked = pick(options.prefer, claudePath, claude, agentsPath, agents);
+    if (picked === null) return null;
+    const contents = await expandImports(picked.raw, this.repoRoot, { root: this.repoRoot });
+    return { flavor: picked.flavor, path: picked.path, contents };
   }
+}
+
+function pick(
+  prefer: 'claude' | 'agents' | undefined,
+  claudePath: string,
+  claude: string | null,
+  agentsPath: string,
+  agents: string | null,
+): { flavor: AgentConfigFlavor; path: string; raw: string } | null {
+  if (claude !== null && agents !== null) {
+    return prefer === 'agents'
+      ? { flavor: 'agents', path: agentsPath, raw: agents }
+      : { flavor: 'claude', path: claudePath, raw: claude };
+  }
+  if (claude !== null) return { flavor: 'claude', path: claudePath, raw: claude };
+  if (agents !== null) return { flavor: 'agents', path: agentsPath, raw: agents };
+  return null;
 }
 
 async function readIfExists(path: string): Promise<string | null> {

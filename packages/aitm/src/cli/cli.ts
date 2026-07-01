@@ -107,7 +107,8 @@ Usage:
   aitm config list              [--project]
   aitm profile list
   aitm profile use <name>
-  aitm profile add <name> [--preset openrouter|zai] [--base-url <url>] [--api-key <key>]
+  aitm profile add <name> [--preset openrouter|zai] [--base-url <url>]
+                          [--api-key <key> | --api-key-stdin]
   aitm profile set <name> <key> <value>
   aitm profile get <name> <key>
   aitm profile remove <name>

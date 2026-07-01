@@ -1194,6 +1194,60 @@ test('runProfile: add then list shows the profile with a masked key', async () =
   }
 });
 
+test('runProfile: add --api-key-stdin reads the key from stdin (never argv)', async () => {
+  const home = await tempHome();
+  try {
+    const err = collectStdout();
+    const add = await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai', apiKeyStdin: true },
+      {
+        homeDir: home.path,
+        stdout: () => {},
+        stderr: err.out,
+        readStdin: async () => 'sk-or-fromstdin-9999\n',
+      },
+    );
+    assert.equal(add.code, 0);
+    assert.equal(err.text(), '', 'stdin path must not emit the argv warning');
+    const cfg = JSON.parse(await readFile(join(home.path, '.aitm.json'), 'utf8')) as {
+      profiles?: Record<string, { openrouterApiKey?: string }>;
+    };
+    assert.equal(cfg.profiles?.['z.ai']?.openrouterApiKey, 'sk-or-fromstdin-9999');
+  } finally {
+    await home.cleanup();
+  }
+});
+
+test('runProfile: add --api-key on argv still works but warns about exposure', async () => {
+  const home = await tempHome();
+  try {
+    const err = collectStdout();
+    const add = await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai', apiKey: 'sk-or-argv-1234' },
+      { homeDir: home.path, stdout: () => {}, stderr: err.out },
+    );
+    assert.equal(add.code, 0);
+    assert.match(err.text(), /--api-key-stdin/);
+    assert.match(err.text(), /process listings|shell history/);
+  } finally {
+    await home.cleanup();
+  }
+});
+
+test('runProfile: add --api-key-stdin with empty stdin exits 1', async () => {
+  const home = await tempHome();
+  try {
+    const res = await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai', apiKeyStdin: true },
+      { homeDir: home.path, stdout: () => {}, readStdin: async () => '  \n' },
+    );
+    assert.equal(res.code, 1);
+    assert.match(res.message ?? '', /stdin/);
+  } finally {
+    await home.cleanup();
+  }
+});
+
 test('runProfile: use on an unknown profile exits 1 with a helpful message', async () => {
   const home = await tempHome();
   try {

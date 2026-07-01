@@ -13,7 +13,8 @@ See [`../providers.md`](../providers.md) for the provider-switching walkthrough 
 ```text
 aitm profile list
 aitm profile use <name>
-aitm profile add <name> [--preset openrouter|zai] [--base-url <url>] [--api-key <key>]
+aitm profile add <name> [--preset openrouter|zai] [--base-url <url>]
+                        [--api-key <key> | --api-key-stdin]
 aitm profile set <name> <key> <value>
 aitm profile get <name> <key>
 aitm profile remove <name>
@@ -29,7 +30,7 @@ selector. `<key>` for `set`/`get` is `openrouterApiKey`, `baseURL`, or `models.<
 | --- | --- |
 | `list` | List every profile. `*` marks the active one; shows base URL + a **masked** key hint. |
 | `use <name>` | Make `<name>` the active profile. Errors if the profile doesn't exist (no dangling pointer). |
-| `add <name>` | Create a profile. `--preset` seeds base URL + models; `--base-url` / `--api-key` override. The **first** profile created auto-activates. |
+| `add <name>` | Create a profile. `--preset` seeds base URL + models; `--base-url` / `--api-key` override. The **first** profile created auto-activates. Prefer `--api-key-stdin` (pipe the key) for scripts/CI — a key passed as `--api-key` is visible in process listings and shell history, so aitm warns when you use it. |
 | `set <name> <key> <value>` | Set one field. Value is JSON-parsed (bare strings stay literal), like `config set`. |
 | `get <name> <key>` | Print one field's value. |
 | `remove <name>` | Delete the profile. If it was active, `activeProfile` is cleared. |

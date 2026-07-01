@@ -38,7 +38,14 @@ export type ConfigArgs =
 export type ProfileArgs =
   | { kind: 'profile-list' }
   | { kind: 'profile-use'; name: string }
-  | { kind: 'profile-add'; name: string; preset?: PresetName; baseURL?: string; apiKey?: string }
+  | {
+      kind: 'profile-add';
+      name: string;
+      preset?: PresetName;
+      baseURL?: string;
+      apiKey?: string;
+      apiKeyStdin?: boolean;
+    }
   | { kind: 'profile-set'; name: string; key: string; value: string }
   | { kind: 'profile-get'; name: string; key: string }
   | { kind: 'profile-remove'; name: string }
@@ -306,6 +313,7 @@ function parseProfileAdd(tail: ReadonlyArray<string>): ParsedArgs {
   let preset: PresetName | undefined;
   let baseURL: string | undefined;
   let apiKey: string | undefined;
+  let apiKeyStdin = false;
   let i = 0;
   while (i < tail.length) {
     const raw = tail[i];
@@ -327,6 +335,11 @@ function parseProfileAdd(tail: ReadonlyArray<string>): ParsedArgs {
       if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
       apiKey = v;
       i += consumed(inlineValue !== null);
+    } else if (flag === '--api-key-stdin') {
+      // Boolean flag — read the secret from stdin, never argv. An inline value is a usage error.
+      if (inlineValue !== null) return HELP;
+      apiKeyStdin = true;
+      i += 1;
     } else if (raw.startsWith('--')) {
       return HELP;
     } else {
@@ -336,10 +349,13 @@ function parseProfileAdd(tail: ReadonlyArray<string>): ParsedArgs {
   }
   const name = positionals[0];
   if (name === undefined || positionals.length > 1) return HELP;
+  // --api-key and --api-key-stdin are mutually exclusive: one source for the secret.
+  if (apiKey !== undefined && apiKeyStdin) return HELP;
   const out: ProfileArgs = { kind: 'profile-add', name };
   if (preset !== undefined) out.preset = preset;
   if (baseURL !== undefined) out.baseURL = baseURL;
   if (apiKey !== undefined) out.apiKey = apiKey;
+  if (apiKeyStdin) out.apiKeyStdin = true;
   return out;
 }
 

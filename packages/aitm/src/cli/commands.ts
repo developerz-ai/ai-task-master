@@ -753,6 +753,7 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
     github: input.github,
     prContext,
     mergeMethod: input.runState.options.mergeMethod,
+    allowForcePush: input.resolved.allowForcePush,
     ...(input.maxIterations !== undefined ? { maxIterations: input.maxIterations } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
     // Pushes go through take-over-flow's shared rebaseAndForcePush helper (rebase onto

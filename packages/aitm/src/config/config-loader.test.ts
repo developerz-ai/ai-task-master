@@ -49,6 +49,7 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     assert.equal(resolved.formatCommand, null);
     assert.equal(resolved.logLevel, 'info');
     assert.equal(resolved.concurrency, 1);
+    assert.equal(resolved.allowForcePush, true);
     assert.deepEqual(resolved.models, DEFAULT_MODELS);
   } finally {
     await home.cleanup();
@@ -217,7 +218,7 @@ test('resolve: CLI overrides beat project + global', async () => {
       maxPrs: 2,
       concurrency: 3,
     });
-    await writeProjectConfig(cwd.path, { maxPrs: 4, autoMerge: false });
+    await writeProjectConfig(cwd.path, { maxPrs: 4, autoMerge: false, allowForcePush: false });
     const loader = new ConfigLoader(cwd.path, home.path, {});
     const resolved = await loader.resolve({
       maxPrs: 11,
@@ -229,6 +230,8 @@ test('resolve: CLI overrides beat project + global', async () => {
     assert.equal(resolved.autoMerge, true);
     assert.equal(resolved.mergeMethod, 'rebase');
     assert.equal(resolved.concurrency, 7);
+    // allowForcePush has no CLI override → project value (false) wins over the default.
+    assert.equal(resolved.allowForcePush, false);
   } finally {
     await home.cleanup();
     await cwd.cleanup();

@@ -125,6 +125,9 @@ export type TakeOverFlowInput = {
   // rebaseAndForcePush helper (ci-fix.ts): fetch origin <base> → rebase → push --force-with-lease.
   // Never a plain push (which fails against a rebased remote), never plain --force.
   runCmd?: RunCmd;
+  // Force-push policy (from config allowForcePush). Default true. When false, the shared
+  // rebaseAndForcePush refuses to push and the take-over blocks.
+  allowForcePush?: boolean;
   logger?: LoggerLike;
 };
 
@@ -226,6 +229,7 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
         input.baseBranch,
         input.pr,
         log,
+        input.allowForcePush ?? true,
       );
       if (pushed.kind === 'blocked') {
         return { kind: 'blocked', reason: pushed.reason, iterations: iteration };

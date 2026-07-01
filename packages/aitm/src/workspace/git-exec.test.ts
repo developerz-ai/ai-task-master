@@ -19,6 +19,28 @@ test('assertGitAllowed: allows --force-with-lease on its own', () => {
   assert.doesNotThrow(() => assertGitAllowed(['push', '--force-with-lease=br']));
 });
 
+test('assertGitAllowed: allowForcePush=false rejects --force-with-lease too', () => {
+  assert.throws(
+    () => assertGitAllowed(['push', '--force-with-lease'], { allowForcePush: false }),
+    GitGuardError,
+  );
+  assert.throws(
+    () => assertGitAllowed(['push', '--force-with-lease=br'], { allowForcePush: false }),
+    GitGuardError,
+  );
+  // Default / explicit-true policy still permits it.
+  assert.doesNotThrow(() =>
+    assertGitAllowed(['push', '--force-with-lease'], { allowForcePush: true }),
+  );
+  assert.doesNotThrow(() => assertGitAllowed(['push', '--force-with-lease']));
+});
+
+test('assertGitAllowed: allowForcePush=false leaves ordinary pushes alone', () => {
+  assert.doesNotThrow(() =>
+    assertGitAllowed(['push', '-u', 'origin', 'x'], { allowForcePush: false }),
+  );
+});
+
 test('assertGitAllowed: allows ordinary pushes', () => {
   assert.doesNotThrow(() => assertGitAllowed(['push']));
   assert.doesNotThrow(() => assertGitAllowed(['push', '-u', 'origin', 'feature/x']));

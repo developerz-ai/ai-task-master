@@ -55,6 +55,7 @@ const DEFAULTS = {
   formatCommand: null as string | null,
   logLevel: 'info' as const,
   concurrency: 1,
+  allowForcePush: true,
 };
 
 type WarnFn = (msg: string) => void;
@@ -152,6 +153,13 @@ export class ConfigLoader {
         project?.concurrency,
         global?.concurrency,
         DEFAULTS.concurrency,
+      ),
+      // allowForcePush is not exposed via CliOverrides — project/global only.
+      allowForcePush: pick(
+        undefined,
+        project?.allowForcePush,
+        global?.allowForcePush,
+        DEFAULTS.allowForcePush,
       ),
       ...(prBodySections !== undefined ? { prBodySections } : {}),
       mcpServers,

@@ -66,6 +66,9 @@ export const ConfigFileSchema = z
     // How many PR groups may have a Worker running at the same time. Default 1 = sequential.
     // See src/loop/work-loop.ts and src/workspace/worktree-pool.ts.
     concurrency: z.number().int().positive().optional(),
+    // Whether aitm may force-push (`--force-with-lease`, used by the CI-fix rebase flow). Default
+    // true. Set false on repos that forbid all force-pushes; the CI-fix push then blocks instead.
+    allowForcePush: z.boolean().optional(),
     // Per-repo PR body section headings (each a `## ` heading, in order). Unset → the default
     // Summary/Changes/Testing. See src/orchestrator/orchestrator.ts §resolvePrBodySections.
     prBodySections: z.array(z.string()).optional(),
@@ -107,6 +110,8 @@ export type ResolvedConfig = {
   formatCommand: string | null;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   concurrency: number;
+  // Whether aitm may force-push (`--force-with-lease`). Default true.
+  allowForcePush: boolean;
   // Per-repo PR body section headings. Undefined → orchestrator uses its default set.
   prBodySections?: readonly string[] | undefined;
   // Merged MCP server map across all discovered sources (see ConfigLoader.resolve for

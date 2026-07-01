@@ -179,6 +179,8 @@ test('runWorker: manifest → per-file edits → commit sequence', async () => {
   const cmds = calls.bashes.map((b) => b.command);
   assert.match(cmds[0] ?? '', /git -C '\/tmp\/wt' checkout -B 'aitm\/core'/);
   assert.match(cmds[1] ?? '', /git -C '\/tmp\/wt' add -A/);
+  // Never stage aitm's own state dir into the target-repo commit (issue #89).
+  assert.match(cmds[1] ?? '', /add -A -- ':!\.ai-task-master'/);
   assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' commit -m 'feat: add a \+ fix b'/);
 });
 

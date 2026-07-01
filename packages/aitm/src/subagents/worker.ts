@@ -297,7 +297,11 @@ async function commitOnBranch(
   if (input.formatCommand) {
     await runBash(exec, `cd ${wt} && ${input.formatCommand}`);
   }
-  await runBash(exec, `git -C ${wt} add -A`);
+  // Exclude aitm's own state dir: if `.ai-task-master/` sits in the worktree and the target
+  // repo does not gitignore it, `git add -A` would otherwise commit our state.json/goal into
+  // the PR. The `:!` pathspec keeps the target repo's tracked files (incl. its .gitignore)
+  // untouched while guaranteeing the state dir is never staged.
+  await runBash(exec, `git -C ${wt} add -A -- ${shQuote(':!.ai-task-master')}`);
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
 }
 

@@ -99,6 +99,9 @@ export type OrchestratorInit = {
   rollingContext: string;
   maxSessions: number | null;
   github: GhClient;
+  // Optional per-repo PR body section headings (each a `## ` heading). Undefined/empty/malformed
+  // falls back to the default Summary/Changes/Testing. See resolvePrBodySections.
+  prBodySections?: readonly string[];
   // Defaults to execa-backed runner. Tests inject a recorder.
   runCmd?: RunCmd;
 };
@@ -122,25 +125,37 @@ export type OrchestratorTools = {
   reviewer: ReturnType<typeof makeReviewerTool>;
 };
 
-// The required PR body section headings, in order. Single source of truth for both the model
-// guidance (PR_BODY_GUIDE) and the post-composition contract check (assertPrBodySections).
+// The default PR body section headings, in order. Used when a repo does not configure its own
+// via `prBodySections`. Single source of truth for both the model guidance and the assertion.
 export const PR_BODY_SECTIONS = ['## Summary', '## Changes', '## Testing'] as const;
 
-// Enforce the PR body contract: the three sections must all be present, as real markdown heading
-// lines, and in order. Throws a descriptive error otherwise, so a malformed body is rejected before
-// the PR is opened. Matches against actual `## …` heading lines (not arbitrary substrings) so a
+// Resolve the effective section list from optional config. Every entry must be a real `## `
+// heading; if the config is empty or any entry is malformed, fall back to the default so a bad
+// config never blocks a run. Exported for unit testing.
+export function resolvePrBodySections(raw: readonly string[] | undefined): readonly string[] {
+  if (raw === undefined || raw.length === 0) return PR_BODY_SECTIONS;
+  const cleaned = raw.map((s) => s.trim());
+  return cleaned.every((s) => /^##\s+\S/.test(s)) ? cleaned : PR_BODY_SECTIONS;
+}
+
+// Enforce the PR body contract: every section must be present, as a real markdown heading line,
+// and in order. Throws a descriptive error otherwise, so a malformed body is rejected before the
+// PR is opened. Matches against actual `## …` heading lines (not arbitrary substrings) so a
 // section name mentioned in prose can't satisfy the check. Exported for unit testing.
-export function assertPrBodySections(body: string): void {
+export function assertPrBodySections(
+  body: string,
+  sections: readonly string[] = PR_BODY_SECTIONS,
+): void {
   const headingLines = body
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.startsWith('## '));
   let cursor = -1;
-  for (const heading of PR_BODY_SECTIONS) {
+  for (const heading of sections) {
     const idx = headingLines.indexOf(heading, cursor + 1);
     if (idx === -1) {
       throw new Error(
-        `PR body must contain heading lines ${PR_BODY_SECTIONS.join(', ')} in order; ` +
+        `PR body must contain heading lines ${sections.join(', ')} in order; ` +
           `missing or misordered: ${heading}`,
       );
     }
@@ -170,6 +185,21 @@ export const PR_BODY_GUIDE = [
   '    How the change was verified (tests, lint). If not verified, say so explicitly.',
 ].join('\n');
 
+// Model guidance for the configured section set. The default set keeps its bespoke per-section
+// descriptions (PR_BODY_GUIDE); a custom set gets a generic heading-by-heading instruction.
+export function prBodyGuideFor(sections: readonly string[]): string {
+  if (sameSections(sections, PR_BODY_SECTIONS)) return PR_BODY_GUIDE;
+  return [
+    `body: GitHub-flavored markdown with exactly these ${sections.length} sections, in order,`,
+    'each as a verbatim heading line followed by the relevant content:',
+    ...sections.map((s) => `  ${s}`),
+  ].join('\n');
+}
+
+function sameSections(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((s, i) => s === b[i]);
+}
+
 // Fallback session cap when caller passes null / 0 / negative `maxSessions`.
 export const DEFAULT_MAX_STEPS = 50;
 
@@ -185,6 +215,11 @@ export class Orchestrator {
   // Distilled digest when available, else the raw agent-config contents.
   private styleContents(): string {
     return this.init.styleDigest ?? this.init.agentConfig.contents;
+  }
+
+  // Effective PR body sections for this run (configured or default).
+  private prBodySections(): readonly string[] {
+    return resolvePrBodySections(this.init.prBodySections);
   }
 
   build(context: OrchestratorBuildContext): ToolLoopAgent<never, OrchestratorTools> {
@@ -294,7 +329,7 @@ export class Orchestrator {
     if (!out) {
       throw new Error('orchestrator did not submit a PR composition');
     }
-    assertPrBodySections(out.body);
+    assertPrBodySections(out.body, this.prBodySections());
     return out;
   }
 
@@ -305,7 +340,7 @@ export class Orchestrator {
       'Compose the pull-request title and body for this PR group, then call the submit tool with it.',
       '- title: conventional-commit style, ≤72 chars, summarizing the PR group goal below.',
       '  Do NOT copy a single commit message — the title describes the whole group, not one task.',
-      PR_BODY_GUIDE,
+      prBodyGuideFor(this.prBodySections()),
       '',
       `PR group goal (use this as the title's subject): ${group.id} — ${group.title}`,
       `Worker draft message (context for the body only — not the title): ${delivery.draftCommitMessage}`,

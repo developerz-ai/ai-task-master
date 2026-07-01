@@ -329,6 +329,9 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
     rollingContext,
     maxSessions: input.resolved.maxSessions,
     github: input.github,
+    ...(input.resolved.prBodySections !== undefined
+      ? { prBodySections: input.resolved.prBodySections }
+      : {}),
   });
 
   // Build + run the Reviewer over a thread set in the given worktree. Shared by the prPerTask

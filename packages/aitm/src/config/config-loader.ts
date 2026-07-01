@@ -103,6 +103,9 @@ export class ConfigLoader {
       claudeProject,
     });
 
+    // Optional per-repo PR body sections (project > global). Undefined when neither sets it.
+    const prBodySections = project?.prBodySections ?? global?.prBodySections;
+
     return {
       openrouterApiKey: apiKey,
       apiKeySource,
@@ -150,6 +153,7 @@ export class ConfigLoader {
         global?.concurrency,
         DEFAULTS.concurrency,
       ),
+      ...(prBodySections !== undefined ? { prBodySections } : {}),
       mcpServers,
       mcpServerSources,
     };

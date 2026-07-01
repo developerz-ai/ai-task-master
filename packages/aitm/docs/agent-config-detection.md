@@ -20,17 +20,27 @@ The chosen file path and flavor are persisted to `state.json.agentConfigFile` so
 type AgentConfig = {
   flavor: "claude" | "agents" | "custom";
   path: string;
-  contents: string;       // raw markdown of the chosen file
+  contents: string;       // markdown of the chosen file, with @-imports expanded
 };
 ```
 
 `Orchestrator` prepends `contents` to every subagent system prompt, then layers the role-specific prefix (`planner-system.md`, `worker-system.md`, `reviewer-system.md`) on top.
 
+## `@`-import expansion
+
+The chosen file's contents are passed through `expandImports` before being returned, so Claude Code's `@path` import syntax is honored. A line like `@core/AGENTS.md` is replaced with the referenced file's contents inline — otherwise governance that lives in an `@`-imported file would reach the model as an inert `@core/AGENTS.md` string and its rules would never be seen.
+
+- **Resolution** — `@path` is expanded when `@` starts a line or follows whitespace. Paths resolve relative to the **importing file's** directory.
+- **Recursion** — imported files may themselves import, up to a depth cap (default 5). Cycles are detected and stop (the repeated reference is left as literal text).
+- **Not expanded** — `@` inside fenced code blocks or inline code spans, email-like `me@host`, escaped `@@`, and any import that does not resolve to a readable file (left as literal text).
+- **Containment (hardening)** — imports are confined to the target repo root. Absolute paths, `..` escapes, and `~`-home imports are refused (left literal). `aitm` runs against untrusted target repos, so an `@`-import must never pull a file from outside the repo into the prompt.
+
 ## SRP
 
 | Module | Owns | Does NOT |
 | --- | --- | --- |
-| `AgentConfigDetector` | Filesystem search + return typed `AgentConfig`. | Parse beyond reading file contents. Choose a model. Touch credentials. |
+| `AgentConfigDetector` | Filesystem search + return typed `AgentConfig`. | Interpret contents beyond `@`-import expansion. Choose a model. Touch credentials. |
+| `expandImports` | Expand `@path` imports within the repo root. | Filesystem search. Know about flavors or `--style`. |
 | `Orchestrator` | Compose the final system prompt per subagent. | Re-read the file. |
 
 ## Why `CLAUDE.md` does not imply Anthropic

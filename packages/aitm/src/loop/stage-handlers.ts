@@ -21,9 +21,10 @@
 // addressing-reviews loop terminate instead of re-processing a replied-but-unresolved thread.
 
 import { CiFailed } from '../github/errors.ts';
-import type { CiResult } from '../github/github-client.ts';
+import { type CiResult, defaultSleep, type Sleep } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { GroupStage, PrGroup, RunState } from '../state/schema.ts';
+import { REVIEW_COMMENTS_GRACE } from './constants.ts';
 
 // Subset of GitHubClient the stage machine drives. The merge method is a run option, not a
 // per-stage decision, so it's bound at construction and handleReadyToMerge just calls mergePr(pr).
@@ -75,6 +76,9 @@ export type StageDeps = {
   // Addressed-thread bookkeeping for the addressing-reviews loop. Optional — without it every
   // unresolved thread is treated as fresh (the loop still terminates once threads get resolved).
   prContext?: AddressedThreadsStore;
+  // Delay primitive for the post-CI review grace. Optional — defaults to a real timer; tests inject
+  // a no-op so they don't block on the 2-minute wait.
+  sleep?: Sleep;
 };
 
 export type StageHandler = (deps: StageDeps, group: PrGroup) => Promise<GroupStage>;
@@ -103,7 +107,12 @@ export const handleWaitingCi: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'waiting-ci');
   try {
     const { state } = await deps.github.waitForChecks(pr);
-    return state === 'success' ? 'waiting-reviews' : 'ci-failed';
+    if (state !== 'success') return 'ci-failed';
+    // Review bots (CodeRabbit) post their comments a little *after* CI completes rather than as a
+    // blocking status check. Give them a grace window to land before waiting-reviews reads the
+    // unresolved threads — otherwise we'd advance to merge ahead of the review.
+    await (deps.sleep ?? defaultSleep)(REVIEW_COMMENTS_GRACE);
+    return 'waiting-reviews';
   } catch (err) {
     if (err instanceof CiFailed) return 'ci-failed';
     throw err;

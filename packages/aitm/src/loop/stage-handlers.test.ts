@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { CiFailed } from '../github/errors.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
+import { REVIEW_COMMENTS_GRACE } from './constants.ts';
 import {
   type AddressedThreadsStore,
   handleAddressingReviews,
@@ -122,6 +123,8 @@ function makeDeps(over: Partial<StageDeps> = {}): StageDeps {
     github: makeGithub(),
     orchestrator: makeOrchestrator(),
     state: makeState(baseState([])).state,
+    // No-op sleep so the post-CI review grace doesn't block tests on a real 2-minute timer.
+    sleep: async () => {},
     ...over,
   };
 }
@@ -183,6 +186,35 @@ test('handleWaitingCi: checks succeed → waiting-reviews', async () => {
     await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })),
     'waiting-reviews',
   );
+});
+
+test('handleWaitingCi: waits the review grace before advancing on success', async () => {
+  const slept: number[] = [];
+  const deps = makeDeps({
+    github: makeGithub({ waitForChecks: async () => ({ state: 'success', failedChecks: [] }) }),
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+  await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 }));
+  assert.deepEqual(slept, [REVIEW_COMMENTS_GRACE]);
+});
+
+test('handleWaitingCi: does not wait the review grace when CI is not success', async () => {
+  const slept: number[] = [];
+  const deps = makeDeps({
+    github: makeGithub({
+      waitForChecks: async () => ({
+        state: 'failure',
+        failedChecks: [{ name: 'build', status: 'failure' }],
+      }),
+    }),
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+  assert.equal(await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })), 'ci-failed');
+  assert.deepEqual(slept, []);
 });
 
 test('handleWaitingCi: CiFailed → ci-failed', async () => {

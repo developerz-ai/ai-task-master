@@ -13,7 +13,7 @@
 // WorktreePool, PlanGraph) satisfy them at runtime; tests pass literal stubs.
 
 import { CiFailed } from '../github/errors.ts';
-import type { CiResult, MergeMethod } from '../github/github-client.ts';
+import type { CiResult, MergeMethod, Sleep } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../state/schema.ts';
@@ -120,6 +120,9 @@ export type WorkLoopDeps = {
   // Seed for resume: when WorkLoop is constructed after a previous run, pass
   // RunState.sessionCount so the in-memory counter and the persisted counter agree.
   initialSessionCount?: number;
+  // Delay primitive for the post-CI review grace (handleWaitingCi). Optional — defaults to a real
+  // timer in production; tests inject a no-op so they don't block on the 2-minute wait.
+  sleep?: Sleep;
 };
 
 export type GroupOutcome =
@@ -442,6 +445,7 @@ export class WorkLoop {
       github,
       state: this.deps.state,
       ...(this.deps.prContext ? { prContext: this.deps.prContext } : {}),
+      ...(this.deps.sleep ? { sleep: this.deps.sleep } : {}),
     };
   }
 

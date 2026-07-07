@@ -301,6 +301,8 @@ function makeDeps(
     concurrency: overrides.concurrency ?? 1,
     autoMerge: overrides.autoMerge ?? true,
     maxSessions: overrides.maxSessions ?? null,
+    // No-op sleep so the post-CI review grace (handleWaitingCi) doesn't block on a real 2-min timer.
+    sleep: overrides.sleep ?? (async () => {}),
     ...(overrides.prContext !== undefined ? { prContext: overrides.prContext } : {}),
     ...(overrides.prPerTask !== undefined ? { prPerTask: overrides.prPerTask } : {}),
     ...(overrides.mergeMethod !== undefined ? { mergeMethod: overrides.mergeMethod } : {}),

@@ -47,7 +47,7 @@ import {
   type WorkerTools,
 } from '../subagents/worker.ts';
 import { rebaseAndForcePush } from './ci-fix.ts';
-import { DEFAULT_MAX_ITERATIONS } from './constants.ts';
+import { DEFAULT_MAX_ITERATIONS, REVIEW_COMMENTS_GRACE } from './constants.ts';
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
 export type TakeOverGithub = {
@@ -148,6 +148,8 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   // Hoisted so the post-loop merge can report how many iterations actually ran: on an
   // early `break` it holds the break index, on natural exhaustion it equals maxIterations.
   let iteration = 0;
+  // Fire the review-bot grace exactly once, the first time CI comes back green.
+  let reviewGraceDone = false;
   for (; iteration < maxIterations; iteration++) {
     if (input.signal?.aborted) {
       log?.info('take-over: cancelled', { pr: input.pr, iteration });
@@ -159,6 +161,18 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
     //    'failure' so the loop treats it as "Worker should try to fix" rather than a fatal error.
     const ciStatus = await observeCheckStatus(input.github, input.pr);
     log?.info('take-over: ci status', { pr: input.pr, ciStatus });
+
+    // 1a. Review bots (CodeRabbit) post their comments a little *after* CI completes rather than
+    //     as a blocking status check. The first time CI is green, wait a grace window before
+    //     reading the threads below, so a late-posted review isn't missed and merged past.
+    if (ciStatus === 'success' && !reviewGraceDone) {
+      reviewGraceDone = true;
+      log?.info('take-over: grace for review bots to post comments', {
+        pr: input.pr,
+        graceMs: REVIEW_COMMENTS_GRACE,
+      });
+      await sleep(REVIEW_COMMENTS_GRACE);
+    }
 
     // 2. Pull review threads. Always runs — even on CI failure, threads may exist and
     //    fixing them might happen to fix CI too.

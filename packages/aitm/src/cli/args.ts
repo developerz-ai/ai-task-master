@@ -10,6 +10,8 @@ export type StartArgs = {
   maxPrs?: number;
   maxSessions?: number | null;
   autoMerge?: boolean;
+  // Force-merge past base-branch protection via `gh pr merge --admin`. From `--admin`.
+  adminMerge?: boolean;
   prPerTask?: boolean;
   stylePath?: string | null;
   model?: string;
@@ -27,6 +29,8 @@ export type MergePrArgs = {
   // Cap on CI-wait/fix iterations before giving up. Parsed from `--max-iterations`; when absent the
   // merge flow defaults to DEFAULT_MAX_ITERATIONS (30).
   maxIterations?: number;
+  // Force-merge past base-branch protection via `gh pr merge --admin`. From `--admin`.
+  adminMerge?: boolean;
 };
 
 export type ConfigArgs =
@@ -79,6 +83,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   let maxPrs: number | undefined;
   let maxSessions: number | undefined;
   let autoMerge: boolean | undefined;
+  let adminMerge: boolean | undefined;
   let prPerTask: boolean | undefined;
   let stylePath: string | undefined;
   let model: string | undefined;
@@ -119,6 +124,11 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
       if (inlineValue !== null) return HELP;
       autoMerge = false;
       i += 1;
+    } else if (flag === '--admin') {
+      // Boolean flag: force-merge past base-branch policy. Rejects inline values.
+      if (inlineValue !== null) return HELP;
+      adminMerge = true;
+      i += 1;
     } else if (flag === '--pr-per-task') {
       // Boolean flag rejects any inline value: `--pr-per-task=true` is a usage error,
       // not silently treated as the boolean.
@@ -156,6 +166,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   if (maxPrs !== undefined) out.maxPrs = maxPrs;
   if (maxSessions !== undefined) out.maxSessions = maxSessions;
   if (autoMerge !== undefined) out.autoMerge = autoMerge;
+  if (adminMerge !== undefined) out.adminMerge = adminMerge;
   if (prPerTask !== undefined) out.prPerTask = prPerTask;
   if (stylePath !== undefined) out.stylePath = stylePath;
   if (model !== undefined) out.model = model;
@@ -186,6 +197,7 @@ function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {
   let pr: number | undefined;
   let maxIterations: number | undefined;
   let resume = true;
+  let adminMerge: boolean | undefined;
   let i = 0;
   while (i < args.length) {
     const raw = args[i];
@@ -207,6 +219,10 @@ function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {
       if (inlineValue !== null) return HELP;
       resume = false;
       i += 1;
+    } else if (flag === '--admin') {
+      if (inlineValue !== null) return HELP;
+      adminMerge = true;
+      i += 1;
     } else {
       return HELP;
     }
@@ -214,6 +230,7 @@ function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {
   const out: MergePrArgs = { kind: 'merge-pr', resume };
   if (pr !== undefined) out.pr = pr;
   if (maxIterations !== undefined) out.maxIterations = maxIterations;
+  if (adminMerge !== undefined) out.adminMerge = adminMerge;
   return out;
 }
 

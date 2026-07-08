@@ -428,8 +428,12 @@ export class GitHubClient {
     return { owner: parsed.owner.login, name: parsed.name };
   }
 
-  async mergePr(pr: number, method: MergeMethod): Promise<void> {
-    const r = await this.runCmd('gh', ['pr', 'merge', String(pr), `--${method}`], {
+  async mergePr(pr: number, method: MergeMethod, opts?: { admin?: boolean }): Promise<void> {
+    // `--admin` overrides the base-branch protection policy (e.g. "base branch policy prohibits
+    // the merge") when the caller has admin rights on the repo. Off by default.
+    const ghArgs = ['pr', 'merge', String(pr), `--${method}`];
+    if (opts?.admin) ghArgs.push('--admin');
+    const r = await this.runCmd('gh', ghArgs, {
       cwd: this.cwd,
     });
     if (r.exitCode === 0) return;

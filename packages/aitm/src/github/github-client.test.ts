@@ -247,6 +247,22 @@ test('mergePr passes pr number and method flag', async () => {
   assert.deepEqual(calls[0]?.args, ['pr', 'merge', '123', '--squash']);
 });
 
+test('mergePr appends --admin when admin option is set', async () => {
+  const { run, calls } = makeRun([{ stdout: 'merged' }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await g.mergePr(332, 'squash', { admin: true });
+  assert.deepEqual(calls[0]?.args, ['pr', 'merge', '332', '--squash', '--admin']);
+});
+
+test('mergePr omits --admin by default and when admin is false', async () => {
+  const { run, calls } = makeRun([{ stdout: '' }, { stdout: '' }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await g.mergePr(1, 'squash');
+  await g.mergePr(2, 'squash', { admin: false });
+  assert.ok(!calls[0]?.args.includes('--admin'));
+  assert.ok(!calls[1]?.args.includes('--admin'));
+});
+
 test('mergePr supports rebase and merge methods', async () => {
   const { run, calls } = makeRun([{ stdout: '' }, { stdout: '' }]);
   const g = new GitHubClient('/tmp/repo', run);

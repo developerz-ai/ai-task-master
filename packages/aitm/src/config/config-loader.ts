@@ -51,6 +51,7 @@ const DEFAULTS = {
   autoMerge: true,
   prPerTask: false,
   mergeMethod: 'squash' as const,
+  adminMerge: false,
   stylePath: null as string | null,
   formatCommand: null as string | null,
   logLevel: 'info' as const,
@@ -133,6 +134,8 @@ export class ConfigLoader {
         global?.mergeMethod,
         DEFAULTS.mergeMethod,
       ),
+      // CLI-only (per run): not read from config files, so no project/global layer.
+      adminMerge: pick(cliOverrides.adminMerge, undefined, undefined, DEFAULTS.adminMerge),
       stylePath: pickNullable(
         cliOverrides.stylePath,
         project?.stylePath,

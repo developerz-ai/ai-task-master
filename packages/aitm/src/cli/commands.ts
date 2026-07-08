@@ -343,7 +343,11 @@ export async function runMergePr(
   const loader = new ConfigLoader(cwd, homeDir, env);
   let resolved: ResolvedConfig;
   try {
-    resolved = await loader.resolve({});
+    // `--admin` on merge-pr is a per-run override that forces the final merge past base-branch
+    // policy, independent of any persisted run state.
+    resolved = await loader.resolve(
+      args.adminMerge !== undefined ? { adminMerge: args.adminMerge } : {},
+    );
   } catch (err) {
     return { code: 1, message: errMsg(err) };
   }
@@ -576,6 +580,7 @@ function toCliOverrides(args: Extract<ParsedArgs, { kind: 'start' }>): CliOverri
   if (args.maxSessions !== undefined)
     out.maxSessions = args.maxSessions === 0 ? null : args.maxSessions;
   if (args.autoMerge !== undefined) out.autoMerge = args.autoMerge;
+  if (args.adminMerge !== undefined) out.adminMerge = args.adminMerge;
   if (args.prPerTask !== undefined) out.prPerTask = args.prPerTask;
   if (args.stylePath !== undefined) out.stylePath = args.stylePath;
   if (args.model !== undefined) out.model = args.model;
@@ -775,6 +780,7 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
     github: input.github,
     prContext,
     mergeMethod: input.runState.options.mergeMethod,
+    adminMerge: input.resolved.adminMerge ?? false,
     allowForcePush: input.resolved.allowForcePush,
     ...(input.maxIterations !== undefined ? { maxIterations: input.maxIterations } : {}),
     ...(input.signal ? { signal: input.signal } : {}),

@@ -112,6 +112,7 @@ Everything else — planning, task grouping, branch management, retries, review-
 | `--max-sessions N` | unlimited | Hard cap on subagent sessions per run. |
 | `--concurrency N` | 1 | How many groups to run in parallel (isolated worktrees). |
 | `--no-automerge` | off | Stop after each PR opens; require manual `aitm merge-pr`. |
+| `--admin` | off | Merge via `gh pr merge --admin` to override base-branch protection (requires repo-admin rights). Also accepted by `aitm merge-pr`. |
 | `--style <path>` | `CLAUDE.md` / `AGENTS.md` | Override the coding-style file fed to subagents. |
 | `--model <id>` | provider default | Pin the model (e.g. `anthropic/claude-opus-4.7`). |
 | `--criteria <text>` | — | Acceptance criteria appended to the goal. |

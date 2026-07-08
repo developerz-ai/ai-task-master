@@ -86,6 +86,9 @@ export type CliOverrides = {
   autoMerge?: boolean;
   prPerTask?: boolean;
   mergeMethod?: 'squash' | 'merge' | 'rebase';
+  // Force-merge past base-branch protection via `gh pr merge --admin`. CLI-only (per run),
+  // not a persisted config-file key. Default false.
+  adminMerge?: boolean;
   stylePath?: string | null;
   model?: string;
   concurrency?: number;
@@ -106,6 +109,9 @@ export type ResolvedConfig = {
   autoMerge: boolean;
   prPerTask: boolean;
   mergeMethod: 'squash' | 'merge' | 'rebase';
+  // Whether merges pass `gh pr merge --admin` to override base-branch policy. CLI-only, default
+  // false. Optional so existing test fixtures that build ResolvedConfig literals stay valid.
+  adminMerge?: boolean;
   stylePath: string | null;
   formatCommand: string | null;
   logLevel: 'debug' | 'info' | 'warn' | 'error';

@@ -53,7 +53,7 @@ import { DEFAULT_MAX_ITERATIONS, REVIEW_COMMENTS_GRACE } from './constants.ts';
 export type TakeOverGithub = {
   waitForChecks(pr: number): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
-  mergePr(pr: number, method: MergeMethod): Promise<void>;
+  mergePr(pr: number, method: MergeMethod, opts?: { admin?: boolean }): Promise<void>;
   replyToThread(threadId: string, body: string): Promise<void>;
   resolveThread(threadId: string): Promise<void>;
   // Optional — present on the real GitHubClient. When available, the flow downloads the full
@@ -110,6 +110,9 @@ export type TakeOverFlowInput = {
   // full failed-CI logs under .ai-task-master/debugging/pr/<pr>/ and points the Worker at them.
   prContext?: PrContextPort;
   mergeMethod: MergeMethod;
+  // When true, the final merge passes `gh pr merge --admin` to override base-branch policy
+  // (e.g. "base branch policy prohibits the merge"). Default false. Threaded from `--admin`.
+  adminMerge?: boolean;
   // Cap on iterations of the CI-wait/fix loop. Default DEFAULT_MAX_ITERATIONS (30), matching
   // claude-task-master's merge-pr loop. Threaded from `--max-iterations`; tests inject a small cap.
   maxIterations?: number;
@@ -278,7 +281,7 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
     };
   }
 
-  await input.github.mergePr(input.pr, input.mergeMethod);
+  await input.github.mergePr(input.pr, input.mergeMethod, { admin: input.adminMerge ?? false });
   log?.info('take-over: merged', { pr: input.pr });
   return { kind: 'merged', pr: input.pr, iterations: iteration };
 }

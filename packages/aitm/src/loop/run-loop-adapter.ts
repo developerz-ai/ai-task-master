@@ -234,6 +234,7 @@ export async function runLoopAdapter(
       prPerTask: current.options.prPerTask ?? false,
       maxSessions: input.resolved.maxSessions,
       mergeMethod: input.resolved.mergeMethod,
+      adminMerge: input.resolved.adminMerge ?? false,
       initialSessionCount: current.sessionCount,
     });
     return await loop.run();

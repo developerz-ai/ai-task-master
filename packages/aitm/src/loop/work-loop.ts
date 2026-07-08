@@ -73,7 +73,7 @@ export type WorkLoopGithub = {
   defaultBranch(): Promise<string>;
   waitForChecks(pr: number): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
-  mergePr(pr: number, method: MergeMethod): Promise<void>;
+  mergePr(pr: number, method: MergeMethod, opts?: { admin?: boolean }): Promise<void>;
 };
 
 export type WorkLoopPool = {
@@ -117,6 +117,8 @@ export type WorkLoopDeps = {
   prPerTask?: boolean;
   maxSessions: number | null;
   mergeMethod?: MergeMethod;
+  // When true, merges pass `gh pr merge --admin` to override base-branch policy. Default false.
+  adminMerge?: boolean;
   // Seed for resume: when WorkLoop is constructed after a previous run, pass
   // RunState.sessionCount so the in-memory counter and the persisted counter agree.
   initialSessionCount?: number;
@@ -438,7 +440,10 @@ export class WorkLoop {
     const github: StageGithub = {
       waitForChecks: (pr) => this.deps.github.waitForChecks(pr),
       listUnresolvedThreads: (pr) => this.deps.github.listUnresolvedThreads(pr),
-      mergePr: (pr) => this.deps.github.mergePr(pr, this.deps.mergeMethod ?? DEFAULT_MERGE_METHOD),
+      mergePr: (pr) =>
+        this.deps.github.mergePr(pr, this.deps.mergeMethod ?? DEFAULT_MERGE_METHOD, {
+          admin: this.deps.adminMerge ?? false,
+        }),
     };
     return {
       orchestrator,
@@ -637,7 +642,9 @@ export class WorkLoop {
       }
     }
 
-    await github.mergePr(pr.number, this.deps.mergeMethod ?? DEFAULT_MERGE_METHOD);
+    await github.mergePr(pr.number, this.deps.mergeMethod ?? DEFAULT_MERGE_METHOD, {
+      admin: this.deps.adminMerge ?? false,
+    });
   }
 
   private sessionCapReached(maxSessions: number | null): boolean {

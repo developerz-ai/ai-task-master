@@ -47,6 +47,16 @@ const startCases: Case[] = [
     expected: { kind: 'start', goal: 'ship the thing', maxPrs: 4 },
   },
   {
+    name: 'start: --admin',
+    argv: ['start', 'goal', '--admin'],
+    expected: { kind: 'start', goal: 'goal', adminMerge: true },
+  },
+  {
+    name: 'start: --admin rejects inline value',
+    argv: ['start', 'goal', '--admin=true'],
+    expected: { kind: 'help' },
+  },
+  {
     name: 'start: zero is valid for numeric flag',
     argv: ['start', 'goal', '--max-sessions', '0'],
     expected: { kind: 'start', goal: 'goal', maxSessions: 0 },
@@ -128,6 +138,16 @@ const mergeCases: Case[] = [
     name: 'merge-pr: --pr=N inline form',
     argv: ['merge-pr', '--pr=42'],
     expected: { kind: 'merge-pr', resume: true, pr: 42 },
+  },
+  {
+    name: 'merge-pr: --admin',
+    argv: ['merge-pr', '--pr', '332', '--admin'],
+    expected: { kind: 'merge-pr', resume: true, pr: 332, adminMerge: true },
+  },
+  {
+    name: 'merge-pr: --admin rejects inline value',
+    argv: ['merge-pr', '--admin=true'],
+    expected: { kind: 'help' },
   },
   {
     name: 'merge-pr: --max-iterations',

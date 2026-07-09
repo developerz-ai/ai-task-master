@@ -585,6 +585,7 @@ function toCliOverrides(args: Extract<ParsedArgs, { kind: 'start' }>): CliOverri
   if (args.stylePath !== undefined) out.stylePath = args.stylePath;
   if (args.model !== undefined) out.model = args.model;
   if (args.concurrency !== undefined && args.concurrency > 0) out.concurrency = args.concurrency;
+  if (args.maxFixAttempts !== undefined) out.maxCiFixAttempts = args.maxFixAttempts;
   return out;
 }
 

@@ -55,6 +55,9 @@ export const ConfigFileSchema = z
     models: CapabilityModelsSchema.optional(),
     maxPrs: z.number().int().positive().optional(),
     maxSessions: z.number().int().positive().nullable().optional(),
+    // Cap on CI-fix passes per PR group before it blocks for a human (issue #128). Bounds the
+    // waiting-ci ⇄ ci-failed recovery loop on an unfixable red PR. See src/loop/work-loop.ts.
+    maxCiFixAttempts: z.number().int().positive().optional(),
     autoMerge: z.boolean().optional(),
     mergeMethod: MergeMethodSchema.optional(),
     stylePath: z.string().nullable().optional(),
@@ -88,6 +91,7 @@ export type ConfigFile = z.infer<typeof ConfigFileSchema>;
 export type CliOverrides = {
   maxPrs?: number;
   maxSessions?: number | null;
+  maxCiFixAttempts?: number;
   autoMerge?: boolean;
   prPerTask?: boolean;
   mergeMethod?: 'squash' | 'merge' | 'rebase';
@@ -111,6 +115,8 @@ export type ResolvedConfig = {
   models: Required<Pick<CapabilityModels, 'generic' | 'smart' | 'coding' | 'fast'>>;
   maxPrs: number;
   maxSessions: number | null;
+  // Cap on CI-fix passes per PR group before it blocks. Default DEFAULT_MAX_CI_FIX_ATTEMPTS. #128.
+  maxCiFixAttempts: number;
   autoMerge: boolean;
   prPerTask: boolean;
   mergeMethod: 'squash' | 'merge' | 'rebase';

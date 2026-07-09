@@ -8,6 +8,7 @@ import type { PrGroup, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import type { Worktree } from '../workspace/worktree-pool.ts';
+import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
 import type { StageWorkResult } from './stage-handlers.ts';
 import {
   mergeDeliveries,
@@ -301,6 +302,9 @@ function makeDeps(
     concurrency: overrides.concurrency ?? 1,
     autoMerge: overrides.autoMerge ?? true,
     maxSessions: overrides.maxSessions ?? null,
+    ...(overrides.maxCiFixAttempts !== undefined
+      ? { maxCiFixAttempts: overrides.maxCiFixAttempts }
+      : {}),
     // No-op sleep so the post-CI review grace (handleWaitingCi) doesn't block on a real 2-min timer.
     sleep: overrides.sleep ?? (async () => {}),
     ...(overrides.prContext !== undefined ? { prContext: overrides.prContext } : {}),
@@ -771,6 +775,122 @@ test('autoMerge: a CI fix that cannot land blocks the group', async () => {
   assert.equal(ghCalls.mergePr.length, 0, 'no merge when the fix could not land');
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((p) => p.id === 'delta')?.status, 'blocked');
+});
+
+// A red PR whose fix session keeps "succeeding" (pushes a commit) but never turns CI green would
+// cycle waiting-ci ⇄ ci-failed forever. The cap bounds that recovery loop (issue #128).
+function redCiGroup(id: string, pr: number): PrGroup {
+  return {
+    ...group(id, { stage: 'waiting-ci', pr, status: 'awaiting-pr' }),
+    tasks: [{ id: 't1', text: 't', complexity: 'normal', done: true }],
+  };
+}
+
+test('CI-fix cap: an unfixable red PR blocks after exactly maxCiFixAttempts fix passes (issue #128)', async () => {
+  // fixCi always reports 'ok' (a commit landed) but CI stays red, so waiting-ci re-routes to
+  // ci-failed each pass. With the cap at 2, the 3rd ci-failed entry blocks WITHOUT a 3rd fixCi.
+  const g = redCiGroup('cap', 7);
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 7 });
+  const { github, calls: ghCalls } = makeGithub({ checks: Array(5).fill(ciFailure), threads: [] });
+  const ready = makeGraph([g], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, graph: ready.graph, autoMerge: true, maxCiFixAttempts: 2 }),
+  );
+  const result = await loop.run();
+
+  assert.equal(orchCalls.runCiFix.length, 2, 'fixCi runs exactly maxCiFixAttempts times');
+  assert.equal(
+    ghCalls.waitForChecks.length,
+    3,
+    'CI polled once before each ci-failed, cap + 1 times',
+  );
+  assert.equal(ghCalls.mergePr.length, 0, 'a still-red PR is never merged');
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /CI fix attempts exhausted after 2 passes/);
+    assert.match(result.reason, /#7/);
+  }
+});
+
+test('CI-fix cap: a CiFailed poll timeout consumes an attempt just like a red status (issue #128)', async () => {
+  // The other route into ci-failed is waitForChecks throwing CiFailed (checks never settled). It
+  // must count against the cap too, else a perpetually-timing-out PR loops forever.
+  const g = redCiGroup('cap-timeout', 9);
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 9 });
+  const { github } = makeGithub({
+    checks: Array(5)
+      .fill(null)
+      .map(() => new CiFailed('checks did not settle')),
+    threads: [],
+  });
+  const ready = makeGraph([g], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, graph: ready.graph, autoMerge: true, maxCiFixAttempts: 2 }),
+  );
+  const result = await loop.run();
+
+  assert.equal(orchCalls.runCiFix.length, 2, 'a CiFailed timeout counts against the cap');
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /CI fix attempts exhausted after 2 passes/);
+  }
+});
+
+test('CI-fix cap: defaults to DEFAULT_MAX_CI_FIX_ATTEMPTS when unset', async () => {
+  const g = redCiGroup('cap-default', 11);
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 11 });
+  const { github } = makeGithub({ checks: Array(8).fill(ciFailure), threads: [] });
+  const ready = makeGraph([g], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, graph: ready.graph, autoMerge: true }),
+  );
+  const result = await loop.run();
+
+  assert.equal(
+    orchCalls.runCiFix.length,
+    DEFAULT_MAX_CI_FIX_ATTEMPTS,
+    'without an override the default cap governs',
+  );
+  assert.equal(result.kind, 'blocked');
+});
+
+test('CI-fix cap: a fix that lands green on the last allowed attempt merges, does not block (issue #128)', async () => {
+  // Boundary: with the cap at 2 a PR that goes green on the 2nd fix must merge — the cap allows N
+  // fixes, not N − 1. Guards against an off-by-one that would strand a recoverable PR.
+  const g = redCiGroup('cap-boundary', 13);
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 13 });
+  const { github, calls: ghCalls } = makeGithub({
+    checks: [ciFailure, ciFailure, ciSuccess],
+    threads: [],
+  });
+  const ready = makeGraph([g], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, graph: ready.graph, autoMerge: true, maxCiFixAttempts: 2 }),
+  );
+  const result = await loop.run();
+
+  assert.equal(orchCalls.runCiFix.length, 2, 'both allowed fixes run');
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [13],
+    'the recovered PR merges on the last allowed attempt',
+  );
+  assert.equal(result.kind, 'success');
+});
+
+test('CI-fix cap: the budget is per driveStages run — a resumed run starts fresh (issue #128)', async () => {
+  // The counter is in-memory per invocation: a later run (resume) is not permanently barred from
+  // retrying. Two separate loops over the same red group each get their own N-fix budget.
+  const g = redCiGroup('cap-resume', 15);
+  for (const _pass of [1, 2]) {
+    const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 15 });
+    const { github } = makeGithub({ checks: Array(4).fill(ciFailure), threads: [] });
+    const loop = new WorkLoop(
+      makeDeps({ orchestrator, github, autoMerge: true, maxCiFixAttempts: 1 }),
+    );
+    await loop.runGroup(g);
+    assert.equal(orchCalls.runCiFix.length, 1, 'each run gets a fresh single-attempt budget');
+  }
 });
 
 test('autoMerge: unresolved threads → addressing-reviews runs the Reviewer, then merges', async () => {

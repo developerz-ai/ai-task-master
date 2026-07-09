@@ -431,6 +431,58 @@ test('runStart: CLI overrides reach the persisted run state', async () => {
   }
 });
 
+test('runStart: --max-fix-attempts reaches the resolved config handed to the loop (issue #128)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let seen: number | undefined;
+    await runStart(
+      { kind: 'start', goal: 'g', maxFixAttempts: 2 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async (input) => {
+          seen = input.resolved.maxCiFixAttempts;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(seen, 2);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: without --max-fix-attempts the loop gets the default cap (issue #128)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let seen: number | undefined;
+    await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async (input) => {
+          seen = input.resolved.maxCiFixAttempts;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(seen, 3);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 // ---- runStart: planning phase (issue #17) -----------------------------------
 
 test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups + status working', async () => {

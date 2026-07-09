@@ -20,6 +20,7 @@ import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../stat
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import type { Worktree } from '../workspace/worktree-pool.ts';
+import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
 import {
   handleAddressingReviews,
   handleCiFailed,
@@ -116,6 +117,9 @@ export type WorkLoopDeps = {
   // is aitm's group-as-PR mode: a single PR per group, opened after the final task lands.
   prPerTask?: boolean;
   maxSessions: number | null;
+  // Cap on CI-fix passes per group per driveStages run. Optional so existing test stubs keep
+  // compiling; the class applies DEFAULT_MAX_CI_FIX_ATTEMPTS when omitted. See issue #128.
+  maxCiFixAttempts?: number;
   mergeMethod?: MergeMethod;
   // When true, merges pass `gh pr merge --admin` to override base-branch policy. Default false.
   adminMerge?: boolean;
@@ -196,6 +200,10 @@ type StageCtx = {
   group: PrGroup;
   delivery: WorkerDelivery | null;
   blockedReason: string | undefined;
+  // CI-fix passes dispatched this driveStages run. Per group per invocation, in-memory: a
+  // crash-resumed group re-enters at its persisted stage with a fresh budget (durable cross-resume
+  // counting would need a state-schema change — out of scope, issue #128).
+  fixAttempts: number;
 };
 
 // Thrown when a state-write fails *after* an external side effect (openPr/mergePr) already
@@ -215,9 +223,11 @@ class StateWriteAfterSuccess extends Error {
 export class WorkLoop {
   private readonly outcomes: GroupOutcome[] = [];
   private sessionCount: number;
+  private readonly maxCiFixAttempts: number;
 
   constructor(private readonly deps: WorkLoopDeps) {
     this.sessionCount = deps.initialSessionCount ?? 0;
+    this.maxCiFixAttempts = deps.maxCiFixAttempts ?? DEFAULT_MAX_CI_FIX_ATTEMPTS;
   }
 
   async run(): Promise<WorkLoopResult> {
@@ -351,7 +361,7 @@ export class WorkLoop {
     worktree: Worktree,
     baseBranch: string,
   ): Promise<GroupOutcome> {
-    const ctx: StageCtx = { group, delivery: null, blockedReason: undefined };
+    const ctx: StageCtx = { group, delivery: null, blockedReason: undefined, fixAttempts: 0 };
     const deps = this.buildStageDeps(ctx, worktree, baseBranch);
     let stage: GroupStage = group.stage;
 
@@ -366,6 +376,22 @@ export class WorkLoop {
       }
       // autoMerge off: stop once the PR is open; runMergePr (or a follow-up run) finishes it.
       if (!this.deps.autoMerge && stage === 'waiting-ci') return this.awaitingPrOutcome(ctx);
+
+      // Cap the CI-fix recovery loop: count each ci-failed dispatch, and once the cap is exceeded
+      // block WITHOUT running the fix session (no LLM call, no push) so an unfixable red PR ends
+      // for a human instead of cycling forever (issue #128). Both entry routes into 'ci-failed'
+      // (a non-success waitForChecks and a CiFailed poll timeout) consume an attempt.
+      if (stage === 'ci-failed') {
+        ctx.fixAttempts += 1;
+        if (ctx.fixAttempts > this.maxCiFixAttempts) {
+          ctx.blockedReason = `CI fix attempts exhausted after ${this.maxCiFixAttempts} passes for PR #${ctx.group.pr} — needs human attention`;
+          const next: GroupStage = 'blocked';
+          ctx.group = { ...ctx.group, stage: next };
+          await this.persistStageAfter(stage, next, ctx);
+          stage = next;
+          continue;
+        }
+      }
 
       const handler = handlerFor(stage);
       const prBefore = ctx.group.pr;

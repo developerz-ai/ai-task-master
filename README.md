@@ -110,6 +110,7 @@ Everything else — planning, task grouping, branch management, retries, review-
 | --- | --- | --- |
 | `--max-prs N` | 5 | Hard cap on PR groups Planner may emit. |
 | `--max-sessions N` | unlimited | Hard cap on subagent sessions per run. |
+| `--max-fix-attempts N` | 3 | Cap on CI-fix passes per PR before it blocks for a human. Bounds the retry loop on an unfixable red PR. |
 | `--concurrency N` | 1 | How many groups to run in parallel (isolated worktrees). |
 | `--no-automerge` | off | Stop after each PR opens; require manual `aitm merge-pr`. |
 | `--admin` | off | Merge via `gh pr merge --admin` to override base-branch protection (requires repo-admin rights). Also accepted by `aitm merge-pr`. |

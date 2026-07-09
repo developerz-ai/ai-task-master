@@ -32,6 +32,14 @@ test('ConfigFileSchema rejects bad types', () => {
   assert.throws(() => ConfigFileSchema.parse({ verifyCommand: 123 }));
 });
 
+test('ConfigFileSchema accepts a positive maxCiFixAttempts and rejects non-positive/non-int (issue #128)', () => {
+  assert.equal(ConfigFileSchema.parse({ maxCiFixAttempts: 2 }).maxCiFixAttempts, 2);
+  assert.throws(() => ConfigFileSchema.parse({ maxCiFixAttempts: 0 }));
+  assert.throws(() => ConfigFileSchema.parse({ maxCiFixAttempts: -1 }));
+  assert.throws(() => ConfigFileSchema.parse({ maxCiFixAttempts: 1.5 }));
+  assert.throws(() => ConfigFileSchema.parse({ maxCiFixAttempts: 'three' }));
+});
+
 test('ConfigFileSchema accepts formatCommand + verifyCommand as strings (issue #122)', () => {
   const parsed = ConfigFileSchema.parse({
     formatCommand: 'bun run lint:fix',

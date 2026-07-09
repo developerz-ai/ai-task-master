@@ -111,6 +111,16 @@ const startCases: Case[] = [
     argv: ['start', '--max-prs=2', 'goal', '--concurrency', '3'],
     expected: { kind: 'start', goal: 'goal', maxPrs: 2, concurrency: 3 },
   },
+  {
+    name: 'start: --max-fix-attempts two-token form (issue #128)',
+    argv: ['start', 'goal', '--max-fix-attempts', '2'],
+    expected: { kind: 'start', goal: 'goal', maxFixAttempts: 2 },
+  },
+  {
+    name: 'start: --max-fix-attempts=N inline form (issue #128)',
+    argv: ['start', 'goal', '--max-fix-attempts=5'],
+    expected: { kind: 'start', goal: 'goal', maxFixAttempts: 5 },
+  },
 ];
 
 const mergeCases: Case[] = [
@@ -249,6 +259,16 @@ const helpCases: Case[] = [
   {
     name: 'start: bad --max-sessions',
     argv: ['start', 'g', '--max-sessions', 'inf'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: --max-fix-attempts zero rejected (issue #128)',
+    argv: ['start', 'g', '--max-fix-attempts', '0'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: bad --max-fix-attempts (non-numeric)',
+    argv: ['start', 'g', '--max-fix-attempts', 'abc'],
     expected: { kind: 'help' },
   },
   {

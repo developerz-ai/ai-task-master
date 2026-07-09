@@ -242,6 +242,7 @@ export async function runLoopAdapter(
       autoMerge: input.resolved.autoMerge,
       prPerTask: current.options.prPerTask ?? false,
       maxSessions: input.resolved.maxSessions,
+      maxCiFixAttempts: input.resolved.maxCiFixAttempts,
       mergeMethod: input.resolved.mergeMethod,
       adminMerge: input.resolved.adminMerge ?? false,
       initialSessionCount: current.sessionCount,

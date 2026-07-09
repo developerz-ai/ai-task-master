@@ -450,7 +450,7 @@ async function runVerify(
 ): Promise<BashOutput> {
   const command = `cd ${shQuote(input.worktreePath)} && ${input.verifyCommand}`;
   const out = await exec(
-    { command, timeoutMs: VERIFY_TIMEOUT_MS },
+    { command, description: 'run the configured verify command', timeoutMs: VERIFY_TIMEOUT_MS },
     { toolCallId: `worker-verify-${Date.now()}`, messages: [] },
   );
   if (isAsyncIterable(out)) {
@@ -511,7 +511,10 @@ async function runBash(
   exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
   command: string,
 ): Promise<void> {
-  const out = await exec({ command }, { toolCallId: `worker-bash-${Date.now()}`, messages: [] });
+  const out = await exec(
+    { command, description: 'worker commit-phase git/format step' },
+    { toolCallId: `worker-bash-${Date.now()}`, messages: [] },
+  );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');
   }

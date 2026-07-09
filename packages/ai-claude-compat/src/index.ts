@@ -23,6 +23,7 @@ export {
   type BashOutput,
   type BashToolInit,
   bashTool,
+  MAX_BASH_OUTPUT_CHARS,
   type MultiBashInput,
   type MultiBashOutput,
   multiBashTool,

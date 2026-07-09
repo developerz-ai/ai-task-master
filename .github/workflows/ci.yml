@@ -35,9 +35,8 @@ jobs:
       # node:test shim mis-handles it when many files run together — an async test
       # in one file leaks context into the next, so Bun throws "test() inside
       # another test()" on top-level tests (oven-sh/bun#5090). It's ordering-
-      # dependent and unfixable from our side. The `node` job below is the
-      # authoritative test runner (full suite: src + test/integration). Bun still
-      # guards install + lint + typecheck.
+      # dependent and unfixable from our side. The `node` + `integration` jobs are
+      # the authoritative test runners. Bun still guards install + lint + typecheck.
 
   node:
     name: node (test + lint)
@@ -61,5 +60,27 @@ jobs:
       - name: typecheck
         run: npm run typecheck --workspaces
 
+      # Unit tests only (src/**). The slower real-git integration suite runs in
+      # the separate `integration` job below so unit failures surface fast and
+      # neither job crowds the other's timeout budget.
       - name: test
         run: npm run test:node --workspaces
+
+  integration:
+    name: integration (node, real git)
+    runs-on: blacksmith-2vcpu-ubuntu-2204
+    # Drives real git worktrees/pools end-to-end — slower than unit tests, so a
+    # roomier budget than the 10-min unit jobs. e2e-smoke self-skips without secrets.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: install
+        run: npm install
+
+      - name: integration tests
+        run: npm run test:integration -w @developerz.ai/aitm

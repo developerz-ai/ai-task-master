@@ -44,6 +44,7 @@ import {
   createWorkerAgent,
   runWorker,
   WORKER_SYSTEM_PREFIX,
+  type WorkerInput,
   type WorkerResult,
   type WorkerTools,
 } from '../subagents/worker.ts';
@@ -85,6 +86,9 @@ export type TakeOverSubagents = {
   styleContents: string;
   // Optional formatter command the CI-fix Worker runs before committing (issue #48).
   formatCommand?: string;
+  // Optional verify command the CI-fix Worker runs before staging; a fix pass whose result still
+  // fails verify blocks instead of rebasing and force-pushing a red commit (issue #122).
+  verifyCommand?: string;
   // Injection seam — bypass the real subagent agents in tests.
   runReviewerOverride?: (input: {
     pr: number;
@@ -92,13 +96,9 @@ export type TakeOverSubagents = {
     worktreePath: string;
     styleContents: string;
   }) => Promise<ReviewerResult>;
-  runWorkerOverride?: (input: {
-    group: PrGroup;
-    worktreePath: string;
-    baseBranch: string;
-    styleContents: string;
-    rollingContext: string;
-  }) => Promise<WorkerResult>;
+  // Receives the full WorkerInput the real path would build (incl. formatCommand/verifyCommand/
+  // logger), mirroring ci-fix.ts's FixSessionSubagents.runWorkerOverride.
+  runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
 
 export type TakeOverFlowInput = {
@@ -359,14 +359,18 @@ async function runWorkerCiFix(
     status: 'in-progress',
     stage: 'waiting-ci',
   };
+  const workerInput: WorkerInput = {
+    group,
+    worktreePath: input.worktreePath,
+    baseBranch: input.baseBranch,
+    styleContents: input.subagents.styleContents,
+    rollingContext: '',
+    ...(input.subagents.formatCommand ? { formatCommand: input.subagents.formatCommand } : {}),
+    ...(input.subagents.verifyCommand ? { verifyCommand: input.subagents.verifyCommand } : {}),
+    ...(input.logger ? { logger: input.logger } : {}),
+  };
   if (input.subagents.runWorkerOverride) {
-    return input.subagents.runWorkerOverride({
-      group,
-      worktreePath: input.worktreePath,
-      baseBranch: input.baseBranch,
-      styleContents: input.subagents.styleContents,
-      rollingContext: '',
-    });
+    return input.subagents.runWorkerOverride(workerInput);
   }
   const agent = createWorkerAgent({
     model: input.subagents.workerModel,
@@ -377,12 +381,5 @@ async function runWorkerCiFix(
       input.worktreePath,
     ),
   });
-  return runWorker(agent, {
-    group,
-    worktreePath: input.worktreePath,
-    baseBranch: input.baseBranch,
-    styleContents: input.subagents.styleContents,
-    rollingContext: '',
-    ...(input.subagents.formatCommand ? { formatCommand: input.subagents.formatCommand } : {}),
-  });
+  return runWorker(agent, workerInput);
 }

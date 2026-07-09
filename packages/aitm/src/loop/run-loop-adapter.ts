@@ -371,6 +371,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
         styleContents: style,
         rollingContext,
         ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
+        ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
       });
     },
     finalizeCommit: (group, delivery, worktreePath) =>
@@ -395,6 +396,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
           workerTools: resolveWorkerTools(mcp.toolsForRole('worker'), worktree.path),
           styleContents: style,
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
+          ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
         },
         group,
         pr,

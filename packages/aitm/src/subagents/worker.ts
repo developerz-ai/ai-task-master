@@ -44,6 +44,7 @@ import {
 } from '@developerz.ai/ai-claude-compat';
 import { generateText, stepCountIs, type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
+import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
 import type { SubagentInit } from './factory.ts';
 
@@ -91,6 +92,15 @@ export type WorkerInput = {
   // the project's formatter (LLM output rarely is byte-identical to biome/prettier/gofmt). When
   // unset, no format step runs. See issue #48.
   formatCommand?: string;
+  // Optional shell command run in the worktree after the editor fanout and after formatCommand,
+  // before any `git add`/`commit`. A non-zero exit triggers exactly one bounded local fix pass
+  // (a task-scoped manifest+editor re-run fed the verify output); if it still fails the Worker
+  // returns `blocked` without committing, so a red diff never reaches the remote. Unset → no
+  // verify step (byte-identical to today). See issue #122.
+  verifyCommand?: string;
+  // Optional structured logger. When set, one event is emitted per verify invocation (command,
+  // exit code, duration, whether a fix pass followed). Mirrors FixSessionInput.logger (issue #122).
+  logger?: LoggerLike;
 };
 
 // Per-file outcome from the parallel editor fanout. Useful to the Orchestrator
@@ -176,6 +186,18 @@ export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent 
   return agent;
 }
 
+// The empty-manifest guidance (surfaced as a `blocked`). Extracted so the first pass and the
+// verify fix pass share one message — weak/cheap coding models routinely return zero files here.
+const EMPTY_MANIFEST_REASON =
+  'The Worker returned an empty file manifest — the configured coding model produced no files to change for this PR group. This usually means the model is not capable enough to plan the work; try a more capable coding model (set `models.coding` in .ai-task-master/config.json or pass a stronger --model).';
+
+// Hard ceiling for the verify call, matching the bash tool's MAX_BASH_TIMEOUT_MS (600s): a real
+// test suite needs far longer than the tool's 60s default, and 600s is the largest it honors.
+const VERIFY_TIMEOUT_MS = 600_000;
+// Cap the verify output fed inline into the fix task / block reason so a megabyte of test output
+// can't blow the fix-pass prompt or the WorkerResult reason.
+const VERIFY_TAIL_MAX = 4000;
+
 export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise<WorkerResult> {
   const init = workerInitRegistry.get(agent);
   if (!init) {
@@ -186,26 +208,24 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
   }
   const branch = input.group.branch ?? `aitm/${input.group.id}`;
   try {
-    const manifest = await planManifest(agent, input);
-    if (manifest.files.length === 0) {
-      // A degenerate (empty) manifest almost always means the configured `coding` model wasn't
-      // strong enough to plan this PR group into a structured FileManifest — weak/cheap models
-      // routinely return zero files here. Surface that as actionable guidance instead of a bare
-      // block, so the user reaches for a more capable model rather than re-running blindly.
-      return {
-        kind: 'blocked',
-        reason:
-          'The Worker returned an empty file manifest — the configured coding model produced no files to change for this PR group. This usually means the model is not capable enough to plan the work; try a more capable coding model (set `models.coding` in .ai-task-master/config.json or pass a stronger --model).',
-      };
+    const planned = await planAndEdit(agent, init, input);
+    if (planned.kind === 'blocked') return { kind: 'blocked', reason: planned.reason };
+
+    if (input.verifyCommand) {
+      // Verify gate: format + verify, one bounded fix pass, commit only when green. A red diff
+      // never reaches the remote when the operator has configured a verify command (issue #122).
+      const gated = await commitWithVerify(agent, init, input, branch, planned.draftCommitMessage);
+      if (gated.kind === 'blocked') return { kind: 'blocked', reason: gated.reason };
+    } else {
+      await commitOnBranch(init.tools.bash, input, branch, planned.draftCommitMessage);
     }
-    const changes = await Promise.all(manifest.files.map((file) => runEditor(init, file, input)));
-    await commitOnBranch(init.tools.bash, input, branch, manifest.draftCommitMessage);
+
     return {
       kind: 'ok',
       delivery: {
         branch,
-        draftCommitMessage: manifest.draftCommitMessage,
-        changes,
+        draftCommitMessage: planned.draftCommitMessage,
+        changes: planned.changes,
         progressEntries: input.task
           ? [`- ${input.task.text}`]
           : input.group.tasks.map((task) => `- ${task.text}`),
@@ -214,6 +234,63 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
   } catch (err) {
     return { kind: 'error', error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+type PlanEditResult =
+  | { kind: 'ok'; changes: FileChange[]; draftCommitMessage: string }
+  | { kind: 'blocked'; reason: string };
+
+// Phase 1 + Phase 2 only: plan the file manifest, then fan editors out over it. No verify, no
+// commit. Shared by the main pass and the single bounded verify fix pass — because the fix pass
+// runs through here (which never verifies), it can never trigger a second fix pass.
+async function planAndEdit(
+  agent: WorkerAgent,
+  init: SubagentInit<WorkerTools>,
+  input: WorkerInput,
+): Promise<PlanEditResult> {
+  const manifest = await planManifest(agent, input);
+  if (manifest.files.length === 0) {
+    return { kind: 'blocked', reason: EMPTY_MANIFEST_REASON };
+  }
+  const changes = await Promise.all(manifest.files.map((file) => runEditor(init, file, input)));
+  return { kind: 'ok', changes, draftCommitMessage: manifest.draftCommitMessage };
+}
+
+// Gate committing on `verifyCommand`. Branch checkout + format run first (verify must see the
+// formatted files); then verify in the worktree. On a non-zero exit: exactly ONE bounded fix pass
+// (a task-scoped manifest+editor re-run fed the verify output) + re-format + re-verify. Still red →
+// `blocked` carrying the verify tail; nothing is staged or committed. Green → stage + commit.
+async function commitWithVerify(
+  agent: WorkerAgent,
+  init: SubagentInit<WorkerTools>,
+  input: WorkerInput,
+  branch: string,
+  message: string,
+): Promise<{ kind: 'ok' } | { kind: 'blocked'; reason: string }> {
+  const exec = requireExec(init.tools.bash);
+  const wt = shQuote(input.worktreePath);
+  await runBash(exec, `git -C ${wt} checkout -B ${shQuote(branch)}`);
+  await runFormat(exec, input);
+
+  let started = Date.now();
+  let out = await runVerify(exec, input);
+  logVerify(input, out, Date.now() - started, out.exitCode !== 0);
+
+  if (out.exitCode !== 0) {
+    // One bounded fix pass. planAndEdit never verifies, so this cannot recurse.
+    await planAndEdit(agent, init, { ...input, task: buildVerifyFixTask(input.group.id, out) });
+    await runFormat(exec, input);
+    started = Date.now();
+    out = await runVerify(exec, input);
+    logVerify(input, out, Date.now() - started, false);
+    if (out.exitCode !== 0) {
+      return { kind: 'blocked', reason: verifyBlockedReason(input.verifyCommand ?? '', out) };
+    }
+  }
+
+  await runBash(exec, `git -C ${wt} add -A -- ${shQuote(':!.ai-task-master')}`);
+  await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
+  return { kind: 'ok' };
 }
 
 async function planManifest(agent: WorkerAgent, input: WorkerInput): Promise<FileManifest> {
@@ -284,25 +361,105 @@ async function commitOnBranch(
   branch: string,
   message: string,
 ): Promise<void> {
-  const exec = bash.execute;
-  if (typeof exec !== 'function') {
-    throw new Error('bash tool is missing an execute function');
-  }
+  const exec = requireExec(bash);
   const wt = shQuote(input.worktreePath);
   await runBash(exec, `git -C ${wt} checkout -B ${shQuote(branch)}`);
-  // Format BEFORE staging so the committed diff matches the project's formatter — LLM output
-  // is rarely byte-identical to biome/prettier/gofmt, and a format-gated CI would otherwise
-  // reject an otherwise-correct PR (issue #48). Run in the worktree; a non-zero exit (e.g.
-  // unfixable lint errors) surfaces as a worker error rather than a silent CI failure later.
-  if (input.formatCommand) {
-    await runBash(exec, `cd ${wt} && ${input.formatCommand}`);
-  }
+  await runFormat(exec, input);
   // Exclude aitm's own state dir: if `.ai-task-master/` sits in the worktree and the target
   // repo does not gitignore it, `git add -A` would otherwise commit our state.json/goal into
   // the PR. The `:!` pathspec keeps the target repo's tracked files (incl. its .gitignore)
   // untouched while guaranteeing the state dir is never staged.
   await runBash(exec, `git -C ${wt} add -A -- ${shQuote(':!.ai-task-master')}`);
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
+}
+
+function requireExec(
+  bash: Tool<BashInput, BashOutput>,
+): NonNullable<Tool<BashInput, BashOutput>['execute']> {
+  const exec = bash.execute;
+  if (typeof exec !== 'function') {
+    throw new Error('bash tool is missing an execute function');
+  }
+  return exec;
+}
+
+// Format BEFORE staging (and before verify) so the committed diff matches the project's formatter
+// — LLM output is rarely byte-identical to biome/prettier/gofmt, and a format-gated CI would
+// otherwise reject an otherwise-correct PR (issue #48). A non-zero exit (e.g. unfixable lint
+// errors) surfaces as a worker error rather than a silent CI failure later.
+async function runFormat(
+  exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
+  input: WorkerInput,
+): Promise<void> {
+  if (!input.formatCommand) return;
+  await runBash(exec, `cd ${shQuote(input.worktreePath)} && ${input.formatCommand}`);
+}
+
+// Run the verify command in the worktree and return its raw outcome. Unlike runBash it never
+// throws on a non-zero exit — a failing verify is a handled outcome the gate reacts to, so it
+// reads exitCode/stdout/stderr off BashOutput directly. Carries the hard-ceiling timeout so a
+// real test suite isn't cut off at the bash tool's 60s default (issue #122).
+async function runVerify(
+  exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
+  input: WorkerInput,
+): Promise<BashOutput> {
+  const command = `cd ${shQuote(input.worktreePath)} && ${input.verifyCommand}`;
+  const out = await exec(
+    { command, timeoutMs: VERIFY_TIMEOUT_MS },
+    { toolCallId: `worker-verify-${Date.now()}`, messages: [] },
+  );
+  if (isAsyncIterable(out)) {
+    throw new Error('bash tool returned an async iterable; expected a single result');
+  }
+  return out;
+}
+
+function logVerify(
+  input: WorkerInput,
+  out: BashOutput,
+  durationMs: number,
+  fixPassFollowed: boolean,
+): void {
+  input.logger?.info('worker: verify', {
+    command: input.verifyCommand,
+    exitCode: out.exitCode,
+    durationMs,
+    fixPassFollowed,
+  });
+}
+
+// The single bounded fix task: fix whatever the verify command reported. Scoped as one `task` so
+// the Worker's manifest prompt targets the fix instead of re-planning the group; mirrors the
+// CI-fix session's buildFixTask shape (ci-fix.ts).
+function buildVerifyFixTask(groupId: string, out: BashOutput): Task {
+  const text = [
+    'The project verify command failed after your edits. Fix every error it reports so the verify',
+    'command exits zero — change only what the failures require.',
+    '',
+    'Verify output (tail):',
+    verifyOutputTail(out),
+  ].join('\n');
+  return { id: `${groupId}-verify-fix`, text, complexity: 'complex', done: false };
+}
+
+function verifyBlockedReason(verifyCommand: string, out: BashOutput): string {
+  return [
+    `The verify command (\`${verifyCommand}\`) still failed (exit ${out.exitCode}) after one local fix`,
+    'pass — nothing was committed and no PR was opened. Fix the errors and re-run, or configure a',
+    'more capable coding model.',
+    '',
+    'Verify output (tail):',
+    verifyOutputTail(out),
+  ].join('\n');
+}
+
+// Last VERIFY_TAIL_MAX chars of combined stdout+stderr — the failure tail is what a fixer needs.
+function verifyOutputTail(out: BashOutput): string {
+  const combined = [out.stdout, out.stderr]
+    .map((s) => s.trimEnd())
+    .filter((s) => s.length > 0)
+    .join('\n');
+  return combined.length > VERIFY_TAIL_MAX ? combined.slice(-VERIFY_TAIL_MAX) : combined;
 }
 
 async function runBash(

@@ -48,6 +48,7 @@ The merged result is what every other module sees. A frozen snapshot is written 
   "mergeMethod": "squash",
   "stylePath": null,
   "formatCommand": null,              // optional; run in the worktree before the Worker commits
+  "verifyCommand": null,              // optional; test/lint gate run before the Worker commits
   "logLevel": "info",
   "allowForcePush": true,             // optional; false forbids all force-push (incl. --force-with-lease)
   "prBodySections": ["## Summary", "## Changes", "## Testing"]  // optional; per-repo PR body headings
@@ -91,6 +92,10 @@ Every aitm-opened PR follows a fixed body shape so reviewers get a consistent la
 ## formatCommand
 
 LLM output is rarely byte-identical to a project's formatter, so on a repo with a format-gated CI (biome/prettier/gofmt/black) an otherwise-correct PR would fail on formatting alone. Set `formatCommand` to a shell command (e.g. `"bun run lint:fix"`); the Worker runs it in the worktree **before `git add -A`**, so the committed diff already matches the formatter. A non-zero exit (e.g. unfixable lint errors) surfaces as a Worker error rather than a later CI failure. Project/global config only — not a CLI flag. Unset → no format step (current behavior).
+
+## verifyCommand
+
+The first time any test or lint runs against a Worker's diff is otherwise on GitHub CI, after the PR is already open — every avoidable red-CI cycle costs a full remote round-trip plus a coding-tier fix session. Set `verifyCommand` to a shell command (e.g. `"bun test"` or `"bun run lint && bun test"`); the Worker runs it in the worktree **after the editor fanout and after `formatCommand`, before `git add`**. On a non-zero exit the Worker runs **one** bounded local fix pass (a task-scoped manifest+editor re-run fed the tail of the verify output), then re-verifies. Exit 0 → commit as usual; still non-zero → the group **blocks without committing** and no PR is opened, so a red diff never reaches the remote. The verify call is given a 600s timeout (the bash tool's ceiling) so real test suites aren't cut off. The same gate is inherited by the CI-fix session and the `merge-pr` take-over fix pass. Project/global config only — not a CLI flag. Unset → no verify step (current behavior).
 
 ## Per-role models
 

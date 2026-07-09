@@ -192,6 +192,27 @@ test('runFixSession: CI failure → saves logs+comments to disk, fix prompt refe
   }
 });
 
+test('runFixSession: threads verifyCommand into the fix Worker input (issue #122)', async () => {
+  let captured: WorkerInput | null = null;
+  const result = await runFixSession(
+    baseInput({
+      runCmd: recordingRunCmd().runCmd,
+      subagents: baseSubagents({
+        formatCommand: 'bun run lint:fix',
+        verifyCommand: 'bun test',
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'fixed');
+  assert.ok(captured, 'worker was invoked');
+  assert.equal((captured as WorkerInput).verifyCommand, 'bun test');
+  assert.equal((captured as WorkerInput).formatCommand, 'bun run lint:fix');
+});
+
 test('runFixSession: clears stale context before downloading (fresh-context-only)', async () => {
   const order: string[] = [];
   const prContext: FixSessionPrContext = {

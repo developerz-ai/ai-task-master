@@ -5,7 +5,7 @@ import { CiFailed } from '../github/errors.ts';
 import type { CiResult, RunCmd, RunCmdResult } from '../github/github-client.ts';
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
-import type { WorkerResult } from '../subagents/worker.ts';
+import type { WorkerInput, WorkerResult } from '../subagents/worker.ts';
 import { runTakeOverFlow, type TakeOverFlowInput, type TakeOverGithub } from './take-over-flow.ts';
 
 type GhCall =
@@ -184,6 +184,31 @@ test('runTakeOverFlow: CI failure → invokes Worker, blocks if Worker blocked',
   assert.equal(result.kind, 'blocked');
   if (result.kind === 'blocked') assert.match(result.reason, /no worker fix in test|worker/i);
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0);
+});
+
+test('runTakeOverFlow: threads verifyCommand into the CI-fix Worker input (issue #122)', async () => {
+  const gh = fakeGithub({ checks: ['throw-cifailed'], threads: [[]] });
+  let captured: WorkerInput | null = null;
+  const input = baseInput(gh.github, {
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      workerModel: dummyModel,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      formatCommand: 'bun run lint:fix',
+      verifyCommand: 'bun test',
+      runWorkerOverride: async (win) => {
+        captured = win;
+        return { kind: 'blocked', reason: 'stop here' } satisfies WorkerResult;
+      },
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'blocked');
+  assert.ok(captured, 'CI-fix worker was invoked');
+  assert.equal((captured as WorkerInput).verifyCommand, 'bun test');
+  assert.equal((captured as WorkerInput).formatCommand, 'bun run lint:fix');
 });
 
 test('runTakeOverFlow: max iterations exhausted with threads remaining → blocked', async () => {

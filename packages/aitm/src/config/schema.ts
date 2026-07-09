@@ -62,6 +62,11 @@ export const ConfigFileSchema = z
     // diff matches the project's formatter (e.g. "bun run lint:fix"). Unset → no format step.
     // See src/subagents/worker.ts §commitOnBranch and issue #48.
     formatCommand: z.string().optional(),
+    // Shell command run in the worktree by the Worker after the editor fanout + formatCommand and
+    // before `git add`, so a diff that fails tests/lint never opens a red PR. A non-zero exit
+    // triggers one bounded local fix pass; if it still fails the group blocks without committing.
+    // Unset → no verify step. See src/subagents/worker.ts and issue #122.
+    verifyCommand: z.string().optional(),
     logLevel: LogLevelSchema.optional(),
     // How many PR groups may have a Worker running at the same time. Default 1 = sequential.
     // See src/loop/work-loop.ts and src/workspace/worktree-pool.ts.
@@ -114,6 +119,7 @@ export type ResolvedConfig = {
   adminMerge?: boolean;
   stylePath: string | null;
   formatCommand: string | null;
+  verifyCommand: string | null;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   concurrency: number;
   // Whether aitm may force-push (`--force-with-lease`). Default true.

@@ -196,11 +196,16 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
       const raw = await execBash(exec, cwd, input.command + CWD_EPILOGUE, timeout);
       const { stdout: stripped, cwd: nextCwd } = stripCwdMarker(raw.stdout);
       if (nextCwd !== undefined) cwd = nextCwd;
-      let stdout = truncateStream(stripped);
-      if (input.run_in_background && !manager) {
-        stdout = `${stdout}\n[run_in_background was requested but no background process manager is configured; the command ran in the foreground]`;
-      }
-      return { stdout, stderr: truncateStream(raw.stderr), exitCode: raw.exitCode };
+      // Append the no-manager notice BEFORE truncating, so the final stdout still honors the cap.
+      const withNotice =
+        input.run_in_background && !manager
+          ? `${stripped}\n[run_in_background was requested but no background process manager is configured; the command ran in the foreground]`
+          : stripped;
+      return {
+        stdout: truncateStream(withNotice),
+        stderr: truncateStream(raw.stderr),
+        exitCode: raw.exitCode,
+      };
     },
   });
 }

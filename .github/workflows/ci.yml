@@ -31,9 +31,13 @@ jobs:
       - name: typecheck
         run: bun run typecheck
 
-      # bun test runs files in parallel by default; matches the parallelism in node --test.
-      - name: test
-        run: bun test
+      # No `bun test` here: the suite is authored against `node:test`, and Bun's
+      # node:test shim mis-handles it when many files run together — an async test
+      # in one file leaks context into the next, so Bun throws "test() inside
+      # another test()" on top-level tests (oven-sh/bun#5090). It's ordering-
+      # dependent and unfixable from our side. The `node` job below is the
+      # authoritative test runner (full suite: src + test/integration). Bun still
+      # guards install + lint + typecheck.
 
   node:
     name: node (test + lint)

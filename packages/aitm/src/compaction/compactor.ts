@@ -18,7 +18,10 @@
 import { generateText, type LanguageModel } from 'ai';
 import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
 
-export type CompactionDecision = { kind: 'skip' } | { kind: 'compact'; keepLastSteps: number };
+export type CompactionDecision =
+  | { kind: 'skip' }
+  // contextLength is carried so the wiring can log it per compaction without a second lookup.
+  | { kind: 'compact'; keepLastSteps: number; contextLength: number };
 
 export type CompactionInit = {
   // The "fast" tier model used to write the summary. See src/credentials/defaults.ts.
@@ -59,7 +62,11 @@ export class Compactor {
     const ratio = liveInputTokens / contextLength;
     const threshold = this.init.threshold ?? DEFAULT_THRESHOLD;
     if (ratio >= threshold) {
-      return { kind: 'compact', keepLastSteps: this.init.keepLastSteps ?? DEFAULT_KEEP_LAST_STEPS };
+      return {
+        kind: 'compact',
+        keepLastSteps: this.init.keepLastSteps ?? DEFAULT_KEEP_LAST_STEPS,
+        contextLength,
+      };
     }
     return { kind: 'skip' };
   }

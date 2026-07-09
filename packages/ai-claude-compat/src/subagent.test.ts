@@ -112,6 +112,26 @@ test('createSubagent: builds a ToolLoopAgent registering the submit tool alongsi
   assert.deepEqual(Object.keys(agent.tools).sort(), [SUBMIT_TOOL_NAME, 'readFile'].sort());
 });
 
+test('createSubagent: forwards an optional prepareStep into the agent loop (issue #102)', async () => {
+  let prepareCalls = 0;
+  const s = scriptedModel(() => ({ submit: JSON.stringify({ n: 1 }) }));
+  const agent = createSubagent(
+    {
+      model: s.model,
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      prepareStep: async () => {
+        prepareCalls++;
+        return undefined;
+      },
+    },
+    12,
+  );
+  await agent.generate({ prompt: 'go' });
+  assert.ok(prepareCalls >= 1, 'the SDK invoked the passed-through prepareStep');
+});
+
 // --- submittedOutput (typed, never throws) ---
 
 test('submittedOutput: ok on a valid submit call', () => {

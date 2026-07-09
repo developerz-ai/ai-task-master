@@ -77,6 +77,33 @@ test('modelForCapability honors per-tier override', () => {
   assert.equal(modelIdOf(creds.modelForCapability('smart')), DEFAULT_MODELS.smart);
 });
 
+test('modelIdForCapability returns the resolved id via the same fallback chain (issue #102)', () => {
+  const override = new Credentials(
+    baseResolved({ models: { ...DEFAULT_MODELS, coding: 'custom/coder-pro' } }),
+  );
+  assert.equal(override.modelIdForCapability('coding'), 'custom/coder-pro');
+  assert.equal(override.modelIdForCapability('smart'), DEFAULT_MODELS.smart);
+  // generic fallback when the tier is empty
+  const generic = new Credentials(
+    baseResolved({ models: { generic: 'g/only', smart: '', coding: '', fast: '' } }),
+  );
+  assert.equal(generic.modelIdForCapability('coding'), 'g/only');
+  // built-in default when both tier and generic are empty
+  const dflt = new Credentials(
+    baseResolved({ models: { generic: '', smart: '', coding: '', fast: '' } }),
+  );
+  assert.equal(dflt.modelIdForCapability('fast'), DEFAULT_MODELS.fast);
+});
+
+test('modelIdFor maps role → capability → id, matching modelFor (issue #102)', () => {
+  const creds = new Credentials(baseResolved({ models: { ...DEFAULT_MODELS, coding: 'x/coder' } }));
+  assert.equal(creds.modelIdFor('worker'), 'x/coder');
+  assert.equal(creds.modelIdFor('planner'), DEFAULT_MODELS.smart);
+  assert.equal(creds.modelIdFor('orchestrator'), DEFAULT_MODELS.fast);
+  // The id path agrees with the handle path.
+  assert.equal(creds.modelIdFor('worker'), modelIdOf(creds.modelFor('worker')));
+});
+
 test('modelForCapability falls back to generic when tier is empty', () => {
   const creds = new Credentials(
     baseResolved({

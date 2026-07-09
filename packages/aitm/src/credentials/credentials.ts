@@ -53,15 +53,28 @@ export class Credentials {
   }
 
   modelForCapability(capability: Capability): LanguageModel {
-    const modelId =
-      this.resolved.models[capability] ||
-      this.resolved.models.generic ||
-      DEFAULT_MODELS[capability];
-    // Subagents lean on structured output (Output.object). OpenRouter may route a model to a
+    // Subagents lean on structured output (the `submit` tool). OpenRouter may route a model to a
     // provider — notably Amazon Bedrock — that rejects the AI SDK's structured-output request
     // (`output_config.format`), failing the Planner/Worker/Reviewer at random. Skip Bedrock so
     // those calls land on a provider that accepts the parameter.
-    return this.provider().chat(modelId, { provider: { ignore: ['amazon-bedrock'] } });
+    return this.provider().chat(this.modelIdForCapability(capability), {
+      provider: { ignore: ['amazon-bedrock'] },
+    });
+  }
+
+  // The resolved model *id string* for a capability tier, via the same fallback chain
+  // modelForCapability uses: models[capability] → models.generic → built-in default. Callers that
+  // need the id (e.g. the Compactor's context-window lookup, issue #102) use this instead of
+  // reaching into the provider handle's internals.
+  modelIdForCapability(capability: Capability): string {
+    return (
+      this.resolved.models[capability] || this.resolved.models.generic || DEFAULT_MODELS[capability]
+    );
+  }
+
+  // Role-keyed sugar over modelIdForCapability, mirroring modelFor(role).
+  modelIdFor(role: Role): string {
+    return this.modelIdForCapability(ROLE_CAPABILITY[role]);
   }
 
   // Lets CLI fail fast before any LLM call (docs/commands/start.md §Preconditions step 2).

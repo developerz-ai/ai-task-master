@@ -61,7 +61,7 @@ test('shouldCompact returns compact at exactly the 0.7 default threshold', async
     limits: stubLimits(100_000),
   });
   const decision = await c.shouldCompact('openai/gpt-5', 70_000);
-  assert.deepEqual(decision, { kind: 'compact', keepLastSteps: 6 });
+  assert.deepEqual(decision, { kind: 'compact', keepLastSteps: 6, contextLength: 100_000 });
 });
 
 test('shouldCompact returns compact above the threshold and carries keepLastSteps override', async () => {
@@ -71,7 +71,7 @@ test('shouldCompact returns compact above the threshold and carries keepLastStep
     keepLastSteps: 3,
   });
   const decision = await c.shouldCompact('openai/gpt-5', 99_999);
-  assert.deepEqual(decision, { kind: 'compact', keepLastSteps: 3 });
+  assert.deepEqual(decision, { kind: 'compact', keepLastSteps: 3, contextLength: 100_000 });
 });
 
 test('shouldCompact skips when contextLength is zero, negative, or non-finite', async () => {
@@ -104,6 +104,7 @@ test('shouldCompact honors a custom threshold', async () => {
   assert.deepEqual(await c.shouldCompact('openai/gpt-5', 50_000), {
     kind: 'compact',
     keepLastSteps: 6,
+    contextLength: 100_000,
   });
 });
 

@@ -29,8 +29,12 @@ import { type Tool, type ToolSet, tool } from 'ai';
 import { z } from 'zod';
 // Type-only import — no runtime cycle with commands.ts, which imports this module's value.
 import type { RunLoopInput } from '../cli/commands.ts';
+import { buildCompactionStep } from '../compaction/compaction-step.ts';
+import { Compactor } from '../compaction/compactor.ts';
 import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
+import { OpenRouterClient } from '../openrouter/client.ts';
+import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
 import { Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
@@ -320,9 +324,21 @@ async function defaultPlanGroups(
 
 // ---- Orchestrator bridge ---------------------------------------------------
 
-function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
+export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
   const { input, mcp, rollingContext } = ctx;
   const style = input.styleDigest ?? input.agentConfig.contents;
+
+  // One Compactor per run: summarize-and-continue when a subagent's context window fills, instead
+  // of dying on a provider overflow on the "really big PRs" runs aitm exists for (issue #102). The
+  // summarizer is the fast tier; model-limits come from the OpenRouter catalog (lazy, cached; a
+  // lookup miss or fetch failure just skips compaction — non-fatal). Threaded into both worker
+  // paths (stage machine + CI-fix) and the reviewer.
+  const compactor = new Compactor({
+    summarizer: input.credentials.modelForCapability('fast'),
+    limits: new ModelLimitsRegistry(
+      new OpenRouterClient(input.resolved.openrouterApiKey, input.resolved.baseURL),
+    ),
+  });
   const orch = new Orchestrator({
     credentials: input.credentials,
     agentConfig: input.agentConfig,
@@ -344,6 +360,10 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
       model: input.credentials.modelFor('reviewer'),
       tools,
       systemPrompt: composeSystemPrompt(style, REVIEWER_SYSTEM_PREFIX, worktree.path),
+      prepareStep: buildCompactionStep<ReviewerTools>({
+        compactor,
+        modelId: input.credentials.modelIdFor('reviewer'),
+      }),
     });
     return runReviewerSubagent(agent, {
       pr,
@@ -362,6 +382,10 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
         model: input.credentials.modelFor('worker'),
         tools,
         systemPrompt: composeSystemPrompt(style, WORKER_SYSTEM_PREFIX, worktree.path),
+        prepareStep: buildCompactionStep<WorkerTools>({
+          compactor,
+          modelId: input.credentials.modelIdFor('worker'),
+        }),
       });
       return runWorkerSubagent(agent, {
         group,
@@ -395,6 +419,7 @@ function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrat
           credentials: input.credentials,
           workerTools: resolveWorkerTools(mcp.toolsForRole('worker'), worktree.path),
           styleContents: style,
+          compactor,
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
         },

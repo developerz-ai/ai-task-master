@@ -161,6 +161,27 @@ test('createReviewerAgent builds an agent that exposes the injected tools', () =
   assert.strictEqual(agent.tools.github, tools.github);
 });
 
+test('createReviewerAgent forwards timeout → a stalled step surfaces as a deadline error (issue #129)', async () => {
+  const { tools } = makeTools();
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const agent = createReviewerAgent({
+    model: stalling,
+    tools,
+    systemPrompt: REVIEWER_SYSTEM_PREFIX,
+    timeout: { stepMs: 40 },
+  });
+  const result = await runReviewer(agent, baseInput([thread('T1', 'please rename this variable')]));
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') assert.match(result.error, /exceeded the configured deadline/);
+});
+
 test('runReviewer yields one resolution per thread, mixed fixed/replied/wontfix', async () => {
   const outputs: ThreadResolutionOutput[] = [
     { kind: 'fixed', commitMessage: 'fix: rename variable' },

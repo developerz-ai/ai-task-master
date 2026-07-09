@@ -71,6 +71,7 @@ export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAge
         execute: async (plan) => plan,
       }),
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
+      ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
     },
     20,
   );

@@ -68,6 +68,8 @@ export type ResolveStyleInput = {
   credentials: Credentials;
   agentConfig: AgentConfig;
   state: StateStore;
+  // Per-step LLM request deadline (ms) for the style-digest call (issue #129).
+  llmStepTimeoutMs: number;
 };
 
 // Inputs for the optional one-shot planning phase (issue #17). Mirrors the Planner's needs:
@@ -288,7 +290,13 @@ export async function runStart(
   const resolveStyle = ctx.resolveStyle ?? defaultResolveStyle;
   let styleDigest: string;
   try {
-    styleDigest = await resolveStyle({ cwd, credentials, agentConfig, state });
+    styleDigest = await resolveStyle({
+      cwd,
+      credentials,
+      agentConfig,
+      state,
+      llmStepTimeoutMs: resolved.llmStepTimeoutMs,
+    });
   } catch {
     styleDigest = agentConfig.contents;
   }
@@ -430,7 +438,13 @@ export async function runMergePr(
   const resolveStyle = ctx.resolveStyle ?? defaultResolveStyle;
   let styleDigest: string;
   try {
-    styleDigest = await resolveStyle({ cwd, credentials, agentConfig, state });
+    styleDigest = await resolveStyle({
+      cwd,
+      credentials,
+      agentConfig,
+      state,
+      llmStepTimeoutMs: resolved.llmStepTimeoutMs,
+    });
   } catch {
     styleDigest = agentConfig.contents;
   }
@@ -734,7 +748,10 @@ async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
   }
   let digest: string;
   try {
-    const distiller = new StyleDistiller({ model: credentials.modelFor('planner') });
+    const distiller = new StyleDistiller({
+      model: credentials.modelFor('planner'),
+      timeout: { stepMs: input.llmStepTimeoutMs },
+    });
     digest = await distiller.distill({ config: agentConfig, repoRoot: cwd });
   } catch {
     return agentConfig.contents;
@@ -793,6 +810,7 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
       workerModel: input.credentials.modelFor('worker'),
       workerTools,
       styleContents,
+      timeout: { stepMs: input.resolved.llmStepTimeoutMs },
       ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
       ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
     },

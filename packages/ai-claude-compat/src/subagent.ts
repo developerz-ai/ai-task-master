@@ -13,6 +13,7 @@ import {
   type LanguageModel,
   type ModelMessage,
   stepCountIs,
+  type TimeoutConfiguration,
   type Tool,
   ToolLoopAgent,
   type ToolLoopAgentSettings,
@@ -49,6 +50,11 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   submit: Tool;
   // Step cap; falls back to defaultMaxSteps.
   maxSteps?: number;
+  // Per-step LLM request deadline, armed at generate time (see createSubagent — a constructor-level
+  // timeout is a verified no-op in ai@6.0.182). Omitted → no deadline, behavior byte-identical to
+  // before. Policy-free passthrough: aitm supplies `{ stepMs }` from config; compat sets no default.
+  // A per-call `timeout` passed to `agent.generate` wins over this one. See issue #129.
+  timeout?: TimeoutConfiguration;
   // Optional per-step hook (the AI SDK's `prepareStep`). Policy-free passthrough: aitm builds one
   // to swap in compacted messages between steps (issue #102), and later a deferred-tool-activation
   // step composes into the SAME function — one prepareStep may return both `messages` and
@@ -66,13 +72,73 @@ export function createSubagent<TOOLS extends ToolSet>(
   config: SubagentConfig<TOOLS>,
   defaultMaxSteps: number,
 ): ToolLoopAgent<never, TOOLS> {
-  return new ToolLoopAgent<never, TOOLS>({
+  const agent = new ToolLoopAgent<never, TOOLS>({
     model: config.model,
     tools: { ...config.tools, submit: config.submit },
     instructions: config.systemPrompt,
     stopWhen: [stepCountIs(config.maxSteps ?? defaultMaxSteps), hasToolCall(SUBMIT_TOOL_NAME)],
     ...(config.prepareStep ? { prepareStep: config.prepareStep } : {}),
   });
+  if (config.timeout !== undefined) armStepTimeout(agent, config.timeout);
+  return agent;
+}
+
+// Arm the per-step deadline at generate time. The pinned AI SDK (ai@6.0.182) drops a
+// constructor-level `timeout`: `ToolLoopAgent.generate` destructures the per-call `timeout` and
+// forwards it to `generateText`, so the prepared constructor settings are overwritten with
+// `undefined` on every call that omits it — which is every aitm call site. We therefore wrap
+// `generate` to inject the configured timeout when the caller supplied neither a `timeout` nor an
+// `abortSignal` (either means the caller owns the deadline, so we leave it untouched), and translate
+// the SDK's generic abort into a deadline-named error via callWithStepTimeout.
+function armStepTimeout<TOOLS extends ToolSet>(
+  agent: ToolLoopAgent<never, TOOLS>,
+  timeout: TimeoutConfiguration,
+): void {
+  type Generate = ToolLoopAgent<never, TOOLS>['generate'];
+  const original = agent.generate.bind(agent) as Generate;
+  const wrapped: Generate = (params) => {
+    if (params.timeout !== undefined || params.abortSignal !== undefined) return original(params);
+    return callWithStepTimeout(() => original({ ...params, timeout }), timeout);
+  };
+  agent.generate = wrapped;
+}
+
+// A per-step LLM deadline expired. Names the configured bound so a run leg's reason is actionable —
+// the SDK aborts a timed-out step with no reason, surfacing only the generic "This operation was
+// aborted" otherwise. `cause` retains the original abort error.
+export class StepTimeoutError extends Error {
+  override readonly name = 'StepTimeoutError';
+}
+
+function stepTimeoutMessage(timeout: TimeoutConfiguration): string {
+  const ms = typeof timeout === 'number' ? timeout : (timeout.stepMs ?? timeout.totalMs);
+  return `LLM step exceeded the configured deadline (${ms} ms)`;
+}
+
+// True for an abort/timeout error. The SDK's step timer calls `AbortController.abort()` with no
+// reason (→ DOMException 'AbortError'); `AbortSignal.timeout` (the totalMs path) throws
+// 'TimeoutError'. Matching both keeps this portable across Bun/Node/Deno without importing the SDK's
+// internal helper.
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+}
+
+// Run a deadline-armed AI SDK call, translating the SDK's generic abort into a StepTimeoutError that
+// names the bound. `timeout === undefined` → pass-through (no deadline, raw errors propagate). The
+// direct `generateText` call sites use this: they inject the `timeout` key themselves (key-absence
+// preserved when unset) and wrap the call here so a stalled provider surfaces a named timeout.
+export async function callWithStepTimeout<T>(
+  call: () => Promise<T>,
+  timeout: TimeoutConfiguration | undefined,
+): Promise<T> {
+  try {
+    return await call();
+  } catch (err) {
+    if (timeout !== undefined && isAbortError(err)) {
+      throw new StepTimeoutError(stepTimeoutMessage(timeout), { cause: err });
+    }
+    throw err;
+  }
 }
 
 // Structural shape of the agent.generate() result fields submittedOutput reads — kept minimal so

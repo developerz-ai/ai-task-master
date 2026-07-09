@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { SubagentFactory, SubagentInit } from './factory.ts';
+import { DEFAULT_LLM_STEP_TIMEOUT_MS, type SubagentFactory, type SubagentInit } from './factory.ts';
 
 test('SubagentInit / SubagentFactory types are exported (compile-time check)', () => {
   // The body is only here so the import is preserved through ts-strip / bundlers.
@@ -8,4 +8,9 @@ test('SubagentInit / SubagentFactory types are exported (compile-time check)', (
   const _f: SubagentFactory<unknown, unknown> | undefined = undefined;
   assert.equal(_t, undefined);
   assert.equal(_f, undefined);
+});
+
+test('DEFAULT_LLM_STEP_TIMEOUT_MS is 900_000 and clears the 600s bash ceiling (issue #129)', () => {
+  assert.equal(DEFAULT_LLM_STEP_TIMEOUT_MS, 900_000);
+  assert.ok(DEFAULT_LLM_STEP_TIMEOUT_MS > 600_000, 'must exceed MAX_BASH_TIMEOUT_MS');
 });

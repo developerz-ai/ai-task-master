@@ -112,6 +112,30 @@ test('StyleDistiller: model error → falls back to raw config contents', async 
   }
 });
 
+test('StyleDistiller: a stalled step is aborted at the deadline and degrades to raw contents (issue #129)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    // A summarizer that never settles on its own; the armed { stepMs: 40 } deadline aborts it, and
+    // distill's never-throws contract degrades to the raw config contents rather than hanging.
+    const stalling = new MockLanguageModelV3({
+      doGenerate: (opts) =>
+        new Promise((_resolve, reject) => {
+          opts.abortSignal?.addEventListener('abort', () =>
+            reject(new DOMException('This operation was aborted', 'AbortError')),
+          );
+        }),
+    });
+    const config = claudeConfig(join(repo.path, 'CLAUDE.md'), '# raw fallback\n- rule\n');
+    const digest = await new StyleDistiller({ model: stalling, timeout: { stepMs: 40 } }).distill({
+      config,
+      repoRoot: repo.path,
+    });
+    assert.equal(digest, '# raw fallback\n- rule\n');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('StyleDistiller: no config and no signals → empty string without an LLM call', async () => {
   const repo = await makeTempRepo();
   try {

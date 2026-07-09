@@ -70,11 +70,13 @@ export {
 } from './search-tools.ts';
 export { loadSkills, type SkillDefinition } from './skills-loader.ts';
 export {
+  callWithStepTimeout,
   composeSystemPrompt,
   createSubagent,
   formatSubmitIssues,
   runWithSchemaRetry,
   type SchemaRetryOptions,
+  StepTimeoutError,
   SUBMIT_TOOL_NAME,
   type SubagentConfig,
   type SubmittedOutput,

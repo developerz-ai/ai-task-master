@@ -21,7 +21,7 @@
 // iteration because their tool bindings (worktree, threads) change each iteration.
 
 import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
-import type { LanguageModel } from 'ai';
+import type { LanguageModel, TimeoutConfiguration } from 'ai';
 import { CiFailed } from '../github/errors.ts';
 import {
   type CiResult,
@@ -89,6 +89,9 @@ export type TakeOverSubagents = {
   // Optional verify command the CI-fix Worker runs before staging; a fix pass whose result still
   // fails verify blocks instead of rebasing and force-pushing a red commit (issue #122).
   verifyCommand?: string;
+  // Per-step LLM request deadline, armed on both take-over agents (Worker + Reviewer). Unset → none.
+  // Orthogonal to the flow's between-iterations `signal` cancel (issue #129).
+  timeout?: TimeoutConfiguration;
   // Injection seam — bypass the real subagent agents in tests.
   runReviewerOverride?: (input: {
     pr: number;
@@ -320,6 +323,7 @@ async function runReviewerThreads(
       REVIEWER_SYSTEM_PREFIX,
       input.worktreePath,
     ),
+    ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
   });
   return runReviewer(agent, {
     pr: input.pr,
@@ -380,6 +384,7 @@ async function runWorkerCiFix(
       WORKER_SYSTEM_PREFIX,
       input.worktreePath,
     ),
+    ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
   });
   return runWorker(agent, workerInput);
 }

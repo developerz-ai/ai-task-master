@@ -1,8 +1,26 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { StepTimeoutError } from '@developerz.ai/ai-claude-compat';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import { Compactor } from './compactor.ts';
+
+// A summarizer that only settles by rejecting when its abortSignal fires — proves the per-step
+// deadline is armed (issue #129).
+function stallingModel(): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(
+            opts.abortSignal?.reason instanceof Error
+              ? opts.abortSignal.reason
+              : new DOMException('This operation was aborted', 'AbortError'),
+          ),
+        );
+      }),
+  });
+}
 
 function stubLimits(contextLength: number, modelId = 'openai/gpt-5'): ModelLimitsLookup {
   return {
@@ -123,6 +141,18 @@ test('compact returns the summarizer text and embeds the JSON of older messages'
   const sent = prompts[0] ?? '';
   assert.match(sent, /bulleted note/);
   assert.ok(sent.includes(JSON.stringify(older)), 'prompt must embed JSON of older messages');
+});
+
+test('compact arms the per-step deadline and surfaces a StepTimeoutError on a stalled summarizer (issue #129)', async () => {
+  const c = new Compactor({
+    summarizer: stallingModel(),
+    limits: stubLimits(100_000),
+    timeout: { stepMs: 40 },
+  });
+  await assert.rejects(
+    c.compact([{ role: 'user', content: 'x' }]),
+    (err: unknown) => err instanceof StepTimeoutError,
+  );
 });
 
 test('compact survives circular references in messages', async () => {

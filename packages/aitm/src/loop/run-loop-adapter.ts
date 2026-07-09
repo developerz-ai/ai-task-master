@@ -315,6 +315,7 @@ async function defaultPlanGroups(
     model: input.credentials.modelFor('planner'),
     tools: resolvePlannerTools(mcp.toolsForRole('planner'), input.cwd),
     systemPrompt: composeSystemPrompt(style, PLANNER_SYSTEM_PREFIX, input.cwd),
+    timeout: { stepMs: input.resolved.llmStepTimeoutMs },
   });
   const result = await runPlanner(agent, {
     goal: input.goal,
@@ -333,6 +334,8 @@ async function defaultPlanGroups(
 export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
   const { input, mcp, rollingContext } = ctx;
   const style = input.styleDigest ?? input.agentConfig.contents;
+  // Per-step LLM deadline armed on every generate site in this bridge (issue #129).
+  const stepTimeout = { stepMs: input.resolved.llmStepTimeoutMs };
 
   // One Compactor per run: summarize-and-continue when a subagent's context window fills, instead
   // of dying on a provider overflow on the "really big PRs" runs aitm exists for (issue #102). The
@@ -344,6 +347,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     limits: new ModelLimitsRegistry(
       new OpenRouterClient(input.resolved.openrouterApiKey, input.resolved.baseURL),
     ),
+    timeout: stepTimeout,
   });
   const orch = new Orchestrator({
     credentials: input.credentials,
@@ -355,6 +359,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     ...(input.resolved.prBodySections !== undefined
       ? { prBodySections: input.resolved.prBodySections }
       : {}),
+    timeout: stepTimeout,
   });
 
   // Build + run the Reviewer over a thread set in the given worktree. Shared by the prPerTask
@@ -370,6 +375,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         compactor,
         modelId: input.credentials.modelIdFor('reviewer'),
       }),
+      timeout: stepTimeout,
     });
     return runReviewerSubagent(agent, {
       pr,
@@ -392,6 +398,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           compactor,
           modelId: input.credentials.modelIdFor('worker'),
         }),
+        timeout: stepTimeout,
       });
       return runWorkerSubagent(agent, {
         group,
@@ -426,6 +433,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           workerTools: resolveWorkerTools(mcp.toolsForRole('worker'), worktree.path),
           styleContents: style,
           compactor,
+          timeout: stepTimeout,
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
         },

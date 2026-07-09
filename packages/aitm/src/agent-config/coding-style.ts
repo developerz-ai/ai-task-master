@@ -6,13 +6,16 @@
 
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { generateText, type LanguageModel } from 'ai';
+import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
 import type { AgentConfig } from './agent-config-detector.ts';
 
 export type StyleDistillerInit = {
   // Smart-tier handle, e.g. Credentials.modelFor('planner'). Injected so this module stays
   // provider-agnostic (no role/capability knowledge here — that lives in Credentials).
   model: LanguageModel;
+  // Per-step LLM request deadline (issue #129). Unset → no deadline. On expiry the SDK aborts and
+  // the existing catch degrades to the raw style contents — a stalled style step never hangs the run.
+  timeout?: TimeoutConfiguration;
 };
 
 export type DistillInput = {
@@ -60,6 +63,7 @@ export class StyleDistiller {
       const { text } = await generateText({
         model: this.init.model,
         prompt: buildPrompt(signals),
+        ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
       });
       const digest = cleanDigest(text);
       return digest === '' ? fallback : digest;

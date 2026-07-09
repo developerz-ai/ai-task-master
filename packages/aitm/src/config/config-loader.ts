@@ -9,6 +9,7 @@ import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../loop/constants.ts';
 import { type McpServers, McpServersSchema } from '../mcp/schema.ts';
+import { DEFAULT_LLM_STEP_TIMEOUT_MS } from '../subagents/factory.ts';
 import {
   type CliOverrides,
   type ConfigFile,
@@ -38,6 +39,7 @@ const KNOWN_KEYS = new Set<string>([
   'maxPrs',
   'maxSessions',
   'maxCiFixAttempts',
+  'llmStepTimeoutMs',
   'autoMerge',
   'mergeMethod',
   'stylePath',
@@ -52,6 +54,7 @@ const DEFAULTS = {
   maxPrs: 5,
   maxSessions: null as number | null,
   maxCiFixAttempts: DEFAULT_MAX_CI_FIX_ATTEMPTS,
+  llmStepTimeoutMs: DEFAULT_LLM_STEP_TIMEOUT_MS,
   autoMerge: true,
   prPerTask: false,
   mergeMethod: 'squash' as const,
@@ -131,6 +134,13 @@ export class ConfigLoader {
         project?.maxCiFixAttempts,
         global?.maxCiFixAttempts,
         DEFAULTS.maxCiFixAttempts,
+      ),
+      // Config-only (no CLI flag): project > global > default.
+      llmStepTimeoutMs: pick(
+        undefined,
+        project?.llmStepTimeoutMs,
+        global?.llmStepTimeoutMs,
+        DEFAULTS.llmStepTimeoutMs,
       ),
       autoMerge: pick(
         cliOverrides.autoMerge,

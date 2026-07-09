@@ -186,6 +186,34 @@ test('runTakeOverFlow: CI failure → invokes Worker, blocks if Worker blocked',
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0);
 });
 
+test('runTakeOverFlow: threads timeout into the real take-over Worker → a stalled step blocks (issue #129)', async () => {
+  // CI failed → the Worker runs. With no runWorkerOverride the real agent is built with the
+  // forwarded per-step deadline; a stalled model is aborted at { stepMs: 40 } and blocks the flow.
+  const gh = fakeGithub({ checks: ['throw-cifailed'], threads: [[]] });
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const result = await runTakeOverFlow(
+    baseInput(gh.github, {
+      subagents: {
+        reviewerModel: dummyModel,
+        reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+        workerModel: stalling,
+        workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+        styleContents: '',
+        timeout: { stepMs: 40 },
+      },
+    }),
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /exceeded the configured deadline/);
+});
+
 test('runTakeOverFlow: threads verifyCommand into the CI-fix Worker input (issue #122)', async () => {
   const gh = fakeGithub({ checks: ['throw-cifailed'], threads: [[]] });
   let captured: WorkerInput | null = null;

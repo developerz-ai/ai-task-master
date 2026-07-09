@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { StepTimeoutError } from '@developerz.ai/ai-claude-compat';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
@@ -55,6 +56,19 @@ function modelEmitting(text: string | (() => string)): MockLanguageModelV3 {
       usage: emptyUsage(),
       warnings: [],
     }),
+  });
+}
+
+// A model that only settles by rejecting when its abortSignal fires — proves the direct generateText
+// sites arm the per-step deadline (issue #129).
+function stallingModel(): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
   });
 }
 
@@ -308,6 +322,23 @@ test('finalizeCommit throws when git amend fails', async () => {
   await assert.rejects(
     () => o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt'),
     /git commit --amend failed/,
+  );
+});
+
+test('finalizeCommit arms the per-step deadline — a stalled refine call surfaces a StepTimeoutError (issue #129)', async () => {
+  const { provider } = recordingProvider(stallingModel());
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSessions: null,
+    github: {} as never,
+    runCmd: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    timeout: { stepMs: 40 },
+  });
+  await assert.rejects(
+    () => o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt'),
+    (err: unknown) => err instanceof StepTimeoutError,
   );
 });
 

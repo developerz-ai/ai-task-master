@@ -4,10 +4,12 @@ import { ToolLoopAgent, tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import {
+  callWithStepTimeout,
   composeSystemPrompt,
   createSubagent,
   formatSubmitIssues,
   runWithSchemaRetry,
+  StepTimeoutError,
   SUBMIT_TOOL_NAME,
   submittedOutput,
 } from './subagent.ts';
@@ -130,6 +132,117 @@ test('createSubagent: forwards an optional prepareStep into the agent loop (issu
   );
   await agent.generate({ prompt: 'go' });
   assert.ok(prepareCalls >= 1, 'the SDK invoked the passed-through prepareStep');
+});
+
+// --- per-step timeout arming (issue #129) ---
+
+// A model whose doGenerate never settles on its own — it resolves only by rejecting when the merged
+// abortSignal fires. Proves the deadline is armed at *generate* time: a settings-only passthrough
+// (dead in ai@6.0.182) would never abort this and the call would hang.
+function stallingModel(): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          const reason = opts.abortSignal?.reason;
+          reject(
+            reason instanceof Error
+              ? reason
+              : new DOMException('This operation was aborted', 'AbortError'),
+          );
+        });
+      }),
+  });
+}
+
+test('createSubagent: arms a per-step deadline at generate time — a stalled provider is aborted (issue #129)', async () => {
+  const agent = createSubagent(
+    {
+      model: stallingModel(),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      timeout: { stepMs: 40 },
+    },
+    12,
+  );
+  await assert.rejects(agent.generate({ prompt: 'go' }), (err: unknown) => {
+    assert.ok(err instanceof StepTimeoutError, 'surfaces a StepTimeoutError');
+    assert.match((err as Error).message, /exceeded the configured deadline \(40 ms\)/);
+    return true;
+  });
+});
+
+test('createSubagent: a per-call timeout overrides the configured one (issue #129)', async () => {
+  // Configured deadline is effectively infinite; the short per-call timeout is what must fire, so a
+  // fast abort proves the per-call value won. The wrapper passes caller-supplied timeouts straight
+  // through, so the SDK's raw abort surfaces (translation is the caller's concern here).
+  const agent = createSubagent(
+    {
+      model: stallingModel(),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      timeout: { stepMs: 100_000 },
+    },
+    12,
+  );
+  await assert.rejects(
+    agent.generate({ prompt: 'go', timeout: { stepMs: 40 } }),
+    (err: unknown) => err instanceof Error && !(err instanceof StepTimeoutError),
+  );
+});
+
+test('createSubagent: with timeout omitted no deadline is armed — a stalled step stays pending (issue #129)', async () => {
+  const ac = new AbortController();
+  const agent = createSubagent(
+    { model: stallingModel(), tools: {}, systemPrompt: 'sys', submit: submitTool(OutSchema) },
+    12,
+  );
+  const gen = agent.generate({ prompt: 'go', abortSignal: ac.signal }).then(
+    () => 'settled',
+    () => 'settled',
+  );
+  const pending = await Promise.race([gen, new Promise((r) => setTimeout(() => r('pending'), 80))]);
+  assert.equal(pending, 'pending', 'no deadline fired at 80ms — the call is still in flight');
+  ac.abort(); // clean up the in-flight generate
+  await gen;
+});
+
+// --- callWithStepTimeout (translate abort → named timeout) ---
+
+test('callWithStepTimeout: returns the value when the call resolves', async () => {
+  const out = await callWithStepTimeout(async () => 7, { stepMs: 1000 });
+  assert.equal(out, 7);
+});
+
+test('callWithStepTimeout: translates an abort error into a StepTimeoutError naming the bound', async () => {
+  const abort = new DOMException('This operation was aborted', 'AbortError');
+  await assert.rejects(
+    callWithStepTimeout(() => Promise.reject(abort), { stepMs: 900_000 }),
+    (err: unknown) => {
+      assert.ok(err instanceof StepTimeoutError);
+      assert.match((err as Error).message, /900000 ms/);
+      assert.equal((err as Error).cause, abort, 'retains the original abort as cause');
+      return true;
+    },
+  );
+});
+
+test('callWithStepTimeout: a non-abort error propagates unchanged', async () => {
+  const boom = new Error('provider 500');
+  await assert.rejects(
+    callWithStepTimeout(() => Promise.reject(boom), { stepMs: 1000 }),
+    (err: unknown) => err === boom,
+  );
+});
+
+test('callWithStepTimeout: timeout undefined is a pass-through — a raw abort is NOT translated', async () => {
+  const abort = new DOMException('This operation was aborted', 'AbortError');
+  await assert.rejects(
+    callWithStepTimeout(() => Promise.reject(abort), undefined),
+    (err: unknown) => err === abort,
+  );
 });
 
 // --- submittedOutput (typed, never throws) ---

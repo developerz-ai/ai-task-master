@@ -129,8 +129,15 @@ aitm config set models.smart anthropic/claude-opus-4.7
 aitm config set models.coding anthropic/claude-sonnet-4.6
 aitm config set models.fast    openai/gpt-5-mini
 aitm config set autoMerge true --project
+aitm config set llmStepTimeoutMs 900000   # per-step LLM deadline (default 15 min)
 aitm config list
 ```
+
+`llmStepTimeoutMs` bounds a **single** LLM step — one provider request plus that step's tool calls
+— not the whole run, so a stalled provider can't hang an unattended run while long multi-step Worker
+passes still run to completion. It must clear the bash tool's 600 s ceiling plus a slow high-effort
+completion; the floor is 1000 ms. On expiry the step is aborted and surfaces as a blocked/errored
+group (the SDK does not auto-retry a timeout).
 
 See [`docs/config.md`](docs/config.md) for the full schema.
 

@@ -10,7 +10,11 @@ import type {
   ReadFileInput,
   ReadFileOutput,
 } from '@developerz.ai/ai-claude-compat';
-import { createSubagent, submittedOutput } from '@developerz.ai/ai-claude-compat';
+import {
+  createSubagent,
+  formatSubmitIssues,
+  runWithSchemaRetry,
+} from '@developerz.ai/ai-claude-compat';
 import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../plan/schema.ts';
 import type { SubagentInit } from './factory.ts';
@@ -77,12 +81,22 @@ export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Prom
     return { kind: 'error', error: `maxPrs must be a positive integer, received ${input.maxPrs}` };
   }
   try {
-    const result = await agent.generate({ prompt: buildUserPrompt(input) });
-    const raw = submittedOutput(result, PlanSchema);
-    if (!raw || raw.groups.length === 0) {
+    const submitted = await runWithSchemaRetry(agent, PlanSchema, buildUserPrompt(input));
+    if (!submitted.ok) {
+      // Only after the retry kernel exhausts. Distinguish the two failure modes in the message so
+      // a weak model that never submits reads differently from one that keeps mangling the schema.
+      if (submitted.reason === 'invalid') {
+        return {
+          kind: 'error',
+          error: `planner plan failed schema validation after retries: ${formatSubmitIssues(submitted.issues)}`,
+        };
+      }
+      return { kind: 'blocked', reason: 'planner did not submit a plan after retries' };
+    }
+    if (submitted.value.groups.length === 0) {
       return { kind: 'blocked', reason: 'planner returned an empty group list' };
     }
-    return { kind: 'ok', plan: capGroups(raw, input.maxPrs) };
+    return { kind: 'ok', plan: capGroups(submitted.value, input.maxPrs) };
   } catch (err) {
     return { kind: 'error', error: err instanceof Error ? err.message : String(err) };
   }

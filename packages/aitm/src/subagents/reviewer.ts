@@ -18,7 +18,8 @@ import {
   type BashInput,
   type BashOutput,
   createSubagent,
-  submittedOutput,
+  formatSubmitIssues,
+  runWithSchemaRetry,
 } from '@developerz.ai/ai-claude-compat';
 import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
@@ -144,12 +145,22 @@ async function resolveOneThread(
   input: ReviewerInput,
   thread: ReviewThread,
 ): Promise<ThreadResolution> {
-  const result = await agent.generate({ prompt: buildThreadPrompt(input, thread) });
-  const out = submittedOutput(result, ThreadResolutionOutputSchema);
-  if (!out) {
-    // Agent stopped without submitting (e.g. step budget exhausted) — leave the thread for a human.
-    return { threadId: thread.id, kind: 'wontfix', reason: 'reviewer did not submit a resolution' };
+  const submitted = await runWithSchemaRetry(
+    agent,
+    ThreadResolutionOutputSchema,
+    buildThreadPrompt(input, thread),
+  );
+  if (!submitted.ok) {
+    // After the retry kernel exhausts, leave THIS thread for a human as wontfix — never throw, so
+    // one thread's bad submission doesn't abort the remaining threads (or discard resolutions
+    // already completed this pass). Distinguish the two failure modes in the reason.
+    const reason =
+      submitted.reason === 'invalid'
+        ? `reviewer resolution failed schema validation after retries: ${formatSubmitIssues(submitted.issues)}`
+        : 'reviewer did not submit a resolution after retries';
+    return { threadId: thread.id, kind: 'wontfix', reason };
   }
+  const out = submitted.value;
   switch (out.kind) {
     case 'fixed': {
       // commitMessage is optional on the flat schema; fall back to a generic subject.

@@ -215,27 +215,42 @@ test('runReviewer returns ok with no resolutions when threads is empty', async (
   assert.equal(calls.bashes.length, 0);
 });
 
-test('runReviewer returns error when the submitted resolution fails schema validation', async () => {
+test('runReviewer: a thread whose submission never validates resolves wontfix without aborting the rest (issue #101)', async () => {
   const { tools } = makeTools();
-  // submit called with a kind outside the enum → ThreadResolutionOutputSchema.parse throws.
+  // Thread 1 submits an out-of-enum `kind` on every attempt (3 calls: initial + 2 retries), so the
+  // schema-retry kernel exhausts; thread 2 then submits a valid resolution on its first call.
+  let i = 0;
   const model = new MockLanguageModelV3({
-    doGenerate: async () => ({
-      content: [
-        {
-          type: 'tool-call',
-          toolCallId: 'submit-0',
-          toolName: 'submit',
-          input: JSON.stringify({ kind: 'bogus' }),
-        },
-      ],
-      finishReason: { unified: 'tool-calls', raw: undefined },
-      usage: emptyUsage(),
-      warnings: [],
-    }),
+    doGenerate: async () => {
+      const idx = i++;
+      const input = idx < 3 ? { kind: 'bogus' } : { kind: 'replied' };
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${idx}`,
+            toolName: 'submit',
+            input: JSON.stringify(input),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
   });
   const agent = createReviewerAgent({ model, tools, systemPrompt: REVIEWER_SYSTEM_PREFIX });
-  const result = await runReviewer(agent, baseInput([thread('T1', 'hmm')]));
-  assert.equal(result.kind, 'error');
+  const result = await runReviewer(agent, baseInput([thread('T1', 'hmm'), thread('T2', 'ok?')]));
+
+  // The bad thread no longer throws / aborts — the run completes and BOTH threads are resolved.
+  assert.equal(result.kind, 'ok');
+  if (result.kind === 'ok') {
+    assert.equal(result.resolutions.length, 2);
+    const t1 = result.resolutions.find((r) => r.threadId === 'T1');
+    assert.equal(t1?.kind, 'wontfix');
+    if (t1?.kind === 'wontfix') assert.match(t1.reason, /schema validation after retries/i);
+    assert.equal(result.resolutions.find((r) => r.threadId === 'T2')?.kind, 'replied');
+  }
 });
 
 test('runReviewer returns error when bash fails during the fixed-thread commit', async () => {

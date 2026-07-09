@@ -327,9 +327,10 @@ test('runWorker returns blocked when the manifest is empty', async () => {
   assert.equal(calls.bashes.length, 0);
 });
 
-test('runWorker returns error when the submitted manifest fails schema validation', async () => {
+test('runWorker: persistently schema-invalid manifest → error after retries, naming schema validation (issue #101)', async () => {
   const { tools } = makeTools();
-  // submit called with args that don't match FileManifestSchema (files is not an array).
+  // submit called with args that don't match FileManifestSchema (files is not an array) on every
+  // attempt → the schema-retry kernel exhausts → error, distinct from the empty-manifest blocked.
   const model = new MockLanguageModelV3({
     doGenerate: async () => ({
       content: [
@@ -349,6 +350,7 @@ test('runWorker returns error when the submitted manifest fails schema validatio
 
   const result = await runWorker(agent, baseInput());
   assert.equal(result.kind, 'error');
+  if (result.kind === 'error') assert.match(result.error, /schema validation after retries/i);
 });
 
 test('runWorker returns error when bash fails during commit', async () => {

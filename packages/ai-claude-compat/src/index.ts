@@ -39,6 +39,7 @@ export {
   multiEditTool,
 } from './edit-tools.ts';
 export { type EnvInfo, envBlock } from './env-block.ts';
+export { type FileOp, FileStateTracker, hashContent, hashFile } from './file-state.ts';
 export {
   asString,
   asStringArray,
@@ -47,6 +48,8 @@ export {
   parseFrontmatter,
 } from './frontmatter.ts';
 export {
+  DEFAULT_READ_LINES,
+  type FileToolInit,
   type ReadFileInput,
   type ReadFileOutput,
   readFileTool,

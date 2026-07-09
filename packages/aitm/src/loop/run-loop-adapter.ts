@@ -18,6 +18,7 @@ import {
   bashTool,
   composeSystemPrompt,
   editFileTool,
+  FileStateTracker,
   globTool,
   grepTool,
   multiBashTool,
@@ -80,11 +81,14 @@ import {
 // still be able to read, search, edit, commit and open a PR — so it uses the compat lib's
 // tools, scoped to the active worktree.
 export function localEditTools(cwd: string): WorkerTools {
+  // One FileStateTracker per tool set (per subagent invocation) so read-before-edit enforcement is
+  // scoped to a single run — the four file tools share it (issue #104).
+  const fileState = new FileStateTracker();
   return {
-    readFile: readFileTool({ cwd }),
-    writeFile: writeFileTool({ cwd }),
-    editFile: editFileTool({ cwd }),
-    multiEdit: multiEditTool({ cwd }),
+    readFile: readFileTool({ cwd, fileState }),
+    writeFile: writeFileTool({ cwd, fileState }),
+    editFile: editFileTool({ cwd, fileState }),
+    multiEdit: multiEditTool({ cwd, fileState }),
     grep: grepTool({ cwd }),
     glob: globTool({ cwd }),
     bash: bashTool({ cwd }),
@@ -94,8 +98,9 @@ export function localEditTools(cwd: string): WorkerTools {
 
 // Read-only subset for the Planner — survey the repo without write/edit/bash.
 export function localReadTools(cwd: string): PlannerTools {
+  const fileState = new FileStateTracker();
   return {
-    readFile: readFileTool({ cwd }),
+    readFile: readFileTool({ cwd, fileState }),
     grep: grepTool({ cwd }),
     glob: globTool({ cwd }),
   };

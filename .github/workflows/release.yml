@@ -19,6 +19,12 @@ on:
     types: [published]
   workflow_dispatch:
 
+# Serialize releases, but NEVER cancel one mid-flight — npm publishes are
+# irreversible, so cancel-in-progress must stay false (repo CI standard).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   id-token: write   # REQUIRED for OIDC — lets npm mint a token from this run

@@ -26,6 +26,7 @@ import { CiFailed } from '../github/errors.ts';
 import {
   type CiResult,
   defaultRunCmd,
+  defaultSleep,
   type MergeMethod,
   type RunCmd,
 } from '../github/github-client.ts';
@@ -383,11 +384,5 @@ async function runWorkerCiFix(
     styleContents: input.subagents.styleContents,
     rollingContext: '',
     ...(input.subagents.formatCommand ? { formatCommand: input.subagents.formatCommand } : {}),
-  });
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
   });
 }

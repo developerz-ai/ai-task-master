@@ -342,6 +342,31 @@ test('finalizeCommit arms the per-step deadline — a stalled refine call surfac
   );
 });
 
+test('openPr arms the per-step deadline — a stalled compose call surfaces a StepTimeoutError (issue #129)', async () => {
+  // composePr carries the same callWithStepTimeout wrapping as refineCommitMessage; assert the
+  // deadline fires on its generateText too, before github.createPr is ever reached.
+  let createPrCalled = false;
+  const { provider } = recordingProvider(stallingModel());
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSessions: null,
+    github: {
+      createPr: async () => {
+        createPrCalled = true;
+        return basePr('aitm/core');
+      },
+    },
+    timeout: { stepMs: 40 },
+  });
+  await assert.rejects(
+    () => o.openPr(baseGroup(), baseDelivery(), 'main'),
+    (err: unknown) => err instanceof StepTimeoutError,
+  );
+  assert.equal(createPrCalled, false, 'the stalled compose aborts before the PR is opened');
+});
+
 test('openPr composes title + body via the orchestrator model and calls github.createPr', async () => {
   const composition = { title: 'feat: core — add a', body: COMPLIANT_BODY };
   const model = modelSubmitting(composition);

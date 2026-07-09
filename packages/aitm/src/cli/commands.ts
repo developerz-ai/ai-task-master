@@ -793,6 +793,7 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
       workerTools,
       styleContents,
       ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
+      ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
     },
   });
 

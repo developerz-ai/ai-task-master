@@ -47,6 +47,7 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     assert.equal(resolved.mergeMethod, 'squash');
     assert.equal(resolved.stylePath, null);
     assert.equal(resolved.formatCommand, null);
+    assert.equal(resolved.verifyCommand, null);
     assert.equal(resolved.logLevel, 'info');
     assert.equal(resolved.concurrency, 1);
     assert.equal(resolved.allowForcePush, true);
@@ -67,6 +68,34 @@ test('resolve: formatCommand is read from project, then global (issue #48)', asy
 
     await writeProjectConfig(cwd.path, { formatCommand: 'bun run lint:fix' });
     assert.equal((await loader.resolve({})).formatCommand, 'bun run lint:fix');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: verifyCommand is read from project, then global, and warns on neither (issue #122)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const warnings: string[] = [];
+    await writeGlobalConfig(home.path, { verifyCommand: 'bun test' });
+    const loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn: (m) => warnings.push(m) },
+    );
+    assert.equal((await loader.resolve({})).verifyCommand, 'bun test');
+
+    await writeProjectConfig(cwd.path, { verifyCommand: 'bun run lint && bun test' });
+    assert.equal((await loader.resolve({})).verifyCommand, 'bun run lint && bun test');
+
+    // A known key must never trip the unknown-config-key warning.
+    assert.equal(
+      warnings.some((w) => /unknown config key "verifyCommand"/.test(w)),
+      false,
+    );
   } finally {
     await home.cleanup();
     await cwd.cleanup();

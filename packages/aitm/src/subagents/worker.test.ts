@@ -445,3 +445,235 @@ test('runWorker fans out editors in parallel — manifest call comes first, edit
     assert.ok(maxInFlight >= 2, `expected parallel fanout, got ${summaries.join(' / ')}`);
   }
 });
+
+// ---- verifyCommand gate (issue #122) ----
+
+const VERIFY_TIMEOUT_MS = 600_000;
+
+// Bash fake that discriminates the verify invocation by its 600s timeout — only the verify call
+// carries `timeoutMs`. verifyExitCodes[] drives successive verify outcomes; every other command
+// (checkout / format / add / commit) exits 0. Records all bash inputs and the verify subset.
+function makeVerifyTools(verifyExitCodes: number[]): {
+  tools: WorkerTools;
+  bashes: BashInput[];
+  verifies: BashInput[];
+} {
+  const bashes: BashInput[] = [];
+  const verifies: BashInput[] = [];
+  let vi = 0;
+  const base = makeTools().tools;
+  const bash = tool<BashInput, BashOutput>({
+    description: 'run a bash command in the worktree',
+    inputSchema: z.object({
+      command: z.string(),
+      timeoutMs: z.number().int().positive().optional(),
+    }),
+    execute: async (input) => {
+      bashes.push(input);
+      if (input.timeoutMs === VERIFY_TIMEOUT_MS) {
+        const i = vi++;
+        verifies.push(input);
+        const code = verifyExitCodes[i] ?? 0;
+        return {
+          stdout: `verify stdout ${i}`,
+          stderr: code === 0 ? '' : `VERIFY FAILED marker-${i}`,
+          exitCode: code,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    },
+  });
+  return { tools: { ...base, bash }, bashes, verifies };
+}
+
+// Model that submits a manifest at specific call indices (main pass at 0, fix pass later) and
+// returns editor text otherwise. Records the prompt seen at each call + counts submits.
+function makeManifestModel(submits: Array<{ at: number; manifest: FileManifest }>): {
+  model: MockLanguageModelV3;
+  prompts: string[];
+  submitCount: () => number;
+} {
+  const prompts: string[] = [];
+  let i = 0;
+  let submitted = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      const idx = i++;
+      prompts[idx] = JSON.stringify(options.prompt);
+      const hit = submits.find((s) => s.at === idx);
+      if (hit) {
+        submitted++;
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: `submit-${idx}`,
+              toolName: 'submit',
+              input: JSON.stringify(hit.manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      return {
+        content: [{ type: 'text', text: `edited #${idx}` }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  return { model, prompts, submitCount: () => submitted };
+}
+
+function makeCaptureLogger(events: Array<Record<string, unknown>>) {
+  const rec =
+    (level: string) =>
+    (msg: string, fields?: Record<string, unknown>): void => {
+      events.push({ level, msg, ...(fields ?? {}) });
+    };
+  return {
+    debug: rec('debug'),
+    info: rec('info'),
+    warn: rec('warn'),
+    error: rec('error'),
+    status: () => {},
+    flush: async () => {},
+  };
+}
+
+const oneFileManifest: FileManifest = {
+  files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+  draftCommitMessage: 'feat: a',
+};
+const fixManifest: FileManifest = {
+  files: [{ path: 'src/a.ts', kind: 'modify', purpose: 'fix the failing test' }],
+  draftCommitMessage: 'fix: make verify pass',
+};
+
+test('runWorker verifyCommand green: one verify (timeoutMs 600000) before git add, then normal commit', async () => {
+  const { model } = makeManifestModel([{ at: 0, manifest: oneFileManifest }]);
+  const { tools, bashes, verifies } = makeVerifyTools([0]); // verify passes first try
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), verifyCommand: 'run-verify' });
+  assert.equal(result.kind, 'ok');
+
+  assert.equal(verifies.length, 1);
+  assert.equal(verifies[0]?.timeoutMs, VERIFY_TIMEOUT_MS);
+  // Bash order: checkout -B, verify, add -A, commit — the git commands are identical to today's,
+  // with exactly one verify invocation inserted before `git add`.
+  const cmds = bashes.map((b) => b.command);
+  assert.equal(cmds.length, 4);
+  assert.match(cmds[0] ?? '', /git -C '\/tmp\/wt' checkout -B 'aitm\/core'/);
+  assert.match(cmds[1] ?? '', /cd '\/tmp\/wt' && run-verify/);
+  assert.match(cmds[2] ?? '', /add -A -- ':!\.ai-task-master'/);
+  assert.match(cmds[3] ?? '', /commit -m 'feat: a'/);
+  const verifyIdx = cmds.findIndex((c) => c.includes('run-verify'));
+  const addIdx = cmds.findIndex((c) => c.includes('add -A'));
+  assert.ok(verifyIdx >= 0 && verifyIdx < addIdx, 'verify must run before git add');
+});
+
+test('runWorker verifyCommand red→green: exactly one fix pass, two verifies, then commits', async () => {
+  const { model, prompts, submitCount } = makeManifestModel([
+    { at: 0, manifest: oneFileManifest },
+    { at: 2, manifest: fixManifest }, // fix-pass manifest after the 1 editor at call 1
+  ]);
+  const { tools, bashes, verifies } = makeVerifyTools([1, 0]); // red, then green
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), verifyCommand: 'run-verify' });
+  assert.equal(result.kind, 'ok');
+
+  assert.equal(verifies.length, 2);
+  assert.equal(submitCount(), 2, 'exactly one fix-pass manifest run (main + one fix)');
+  assert.ok(
+    bashes.some((b) => b.command.includes('commit -m')),
+    'the change is committed after the green re-verify',
+  );
+  // delivery.changes reflects the first-pass edit AND the fix-pass edit (all committed files).
+  if (result.kind === 'ok') {
+    assert.deepEqual(
+      result.delivery.changes.map((c) => `${c.kind} ${c.path}`),
+      ['create src/a.ts', 'modify src/a.ts'],
+    );
+  }
+  // The fix-task manifest prompt (model call 2) carries the failing verify output tail.
+  assert.match(prompts[2] ?? '', /verify command failed/i);
+  assert.match(prompts[2] ?? '', /VERIFY FAILED marker-0/);
+});
+
+test('runWorker verifyCommand red twice: blocked with the verify tail, nothing staged or committed', async () => {
+  const { model } = makeManifestModel([
+    { at: 0, manifest: oneFileManifest },
+    { at: 2, manifest: fixManifest },
+  ]);
+  const { tools, bashes, verifies } = makeVerifyTools([1, 1]); // red, red
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), verifyCommand: 'run-verify' });
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /still failed/i);
+    assert.match(result.reason, /VERIFY FAILED marker-1/);
+  }
+  assert.equal(verifies.length, 2);
+  const cmds = bashes.map((b) => b.command);
+  assert.equal(
+    cmds.some((c) => c.includes('add -A')),
+    false,
+    'no git add on a doubly-red verify',
+  );
+  assert.equal(
+    cmds.some((c) => c.includes('commit -m')),
+    false,
+    'no git commit on a doubly-red verify',
+  );
+});
+
+test('runWorker without verifyCommand: zero verify invocations, byte-identical git sequence (regression guard)', async () => {
+  const { model } = makeManifestModel([{ at: 0, manifest: oneFileManifest }]);
+  const { tools, bashes, verifies } = makeVerifyTools([1]); // would fail IF ever called
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput()); // verifyCommand unset
+  assert.equal(result.kind, 'ok');
+  assert.equal(verifies.length, 0);
+  assert.equal(
+    bashes.some((b) => b.timeoutMs === VERIFY_TIMEOUT_MS),
+    false,
+  );
+  // Exactly checkout, add, commit — no extra bash calls.
+  assert.equal(bashes.length, 3);
+  assert.match(bashes[0]?.command ?? '', /checkout -B/);
+  assert.match(bashes[1]?.command ?? '', /add -A/);
+  assert.match(bashes[2]?.command ?? '', /commit -m/);
+});
+
+test('runWorker verifyCommand emits one structured log event per verify invocation', async () => {
+  const { model } = makeManifestModel([
+    { at: 0, manifest: oneFileManifest },
+    { at: 2, manifest: fixManifest },
+  ]);
+  const { tools } = makeVerifyTools([1, 0]); // red then green → two verify events
+  const events: Array<Record<string, unknown>> = [];
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, {
+    ...baseInput(),
+    verifyCommand: 'run-verify',
+    logger: makeCaptureLogger(events),
+  });
+  assert.equal(result.kind, 'ok');
+
+  const verifyLogs = events.filter((e) => e.msg === 'worker: verify');
+  assert.equal(verifyLogs.length, 2);
+  assert.equal(verifyLogs[0]?.command, 'run-verify');
+  assert.equal(verifyLogs[0]?.exitCode, 1);
+  assert.equal(verifyLogs[0]?.fixPassFollowed, true);
+  assert.equal(typeof verifyLogs[0]?.durationMs, 'number');
+  assert.equal(verifyLogs[1]?.exitCode, 0);
+  assert.equal(verifyLogs[1]?.fixPassFollowed, false);
+});

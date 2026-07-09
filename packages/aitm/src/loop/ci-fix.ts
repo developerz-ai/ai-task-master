@@ -65,6 +65,9 @@ export type FixSessionSubagents = {
   // Optional formatter command the Worker runs before committing, so the diff matches the
   // project's formatter (issue #48).
   formatCommand?: string;
+  // Optional verify command the Worker runs before staging; a fix session whose worker result
+  // still fails verify blocks instead of rebasing and force-pushing a red commit (issue #122).
+  verifyCommand?: string;
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
@@ -171,6 +174,8 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     styleContents: subagents.styleContents,
     rollingContext: '',
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
+    ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),
+    ...(input.logger ? { logger: input.logger } : {}),
   };
   if (subagents.runWorkerOverride) return subagents.runWorkerOverride(workerInput);
   const agent = createWorkerAgent({

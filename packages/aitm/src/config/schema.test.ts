@@ -29,6 +29,15 @@ test('ConfigFileSchema accepts the documented shape', () => {
 test('ConfigFileSchema rejects bad types', () => {
   assert.throws(() => ConfigFileSchema.parse({ maxPrs: 'five' }));
   assert.throws(() => ConfigFileSchema.parse({ mergeMethod: 'rebase-merge' }));
+  assert.throws(() => ConfigFileSchema.parse({ verifyCommand: 123 }));
+});
+
+test('ConfigFileSchema accepts formatCommand + verifyCommand as strings (issue #122)', () => {
+  const parsed = ConfigFileSchema.parse({
+    formatCommand: 'bun run lint:fix',
+    verifyCommand: 'bun test',
+  });
+  assert.equal(parsed.verifyCommand, 'bun test');
 });
 
 test('CapabilityModelsSchema is permissive about unknown extra keys', () => {

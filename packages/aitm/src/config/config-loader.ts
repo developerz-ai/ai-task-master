@@ -40,6 +40,7 @@ const KNOWN_KEYS = new Set<string>([
   'mergeMethod',
   'stylePath',
   'formatCommand',
+  'verifyCommand',
   'logLevel',
   'concurrency',
   'mcpServers',
@@ -54,6 +55,7 @@ const DEFAULTS = {
   adminMerge: false,
   stylePath: null as string | null,
   formatCommand: null as string | null,
+  verifyCommand: null as string | null,
   logLevel: 'info' as const,
   concurrency: 1,
   allowForcePush: true,
@@ -148,6 +150,13 @@ export class ConfigLoader {
         project?.formatCommand,
         global?.formatCommand,
         DEFAULTS.formatCommand,
+      ),
+      // verifyCommand is not exposed via CliOverrides — project/global only, like formatCommand.
+      verifyCommand: pickNullable(
+        undefined,
+        project?.verifyCommand,
+        global?.verifyCommand,
+        DEFAULTS.verifyCommand,
       ),
       // logLevel is not exposed via CliOverrides — project/global only.
       logLevel: pick(undefined, project?.logLevel, global?.logLevel, DEFAULTS.logLevel),

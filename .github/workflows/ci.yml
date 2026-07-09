@@ -31,6 +31,12 @@ jobs:
       - name: typecheck
         run: bun run typecheck
 
+      # Typecheck the test files too (they're excluded from the main `typecheck` build),
+      # so a test that drifts from package source — a removed export, a changed contract —
+      # fails CI instead of only surfacing at runtime. See issue #101.
+      - name: typecheck (tests)
+        run: bun run typecheck:tests
+
       # No `bun test` here: the suite is authored against `node:test`, and Bun's
       # node:test shim mis-handles it when many files run together — an async test
       # in one file leaks context into the next, so Bun throws "test() inside

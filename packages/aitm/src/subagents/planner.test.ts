@@ -119,8 +119,9 @@ test('runPlanner returns blocked when the model emits an empty plan', async () =
   assert.equal(result.kind, 'blocked');
 });
 
-test('runPlanner returns blocked when the model never submits a plan', async () => {
-  // Text-only response (no submit tool-call) → submittedOutput finds nothing → blocked.
+test('runPlanner: never-submits → blocked after retries, with a no-submission reason (issue #101)', async () => {
+  // Text-only on every attempt (no submit tool-call) → the retry kernel exhausts → blocked, with a
+  // reason distinct from the schema-invalid case.
   const model = new MockLanguageModelV3({
     doGenerate: async () => ({
       content: [{ type: 'text', text: 'I could not produce a plan.' }],
@@ -132,10 +133,13 @@ test('runPlanner returns blocked when the model never submits a plan', async () 
   const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
   assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked')
+    assert.match(result.reason, /did not submit a plan after retries/i);
 });
 
-test('runPlanner returns error when the submitted plan fails schema validation', async () => {
-  // submit called with args that don't match PlanSchema (missing groups) → schema.parse throws.
+test('runPlanner: persistently schema-invalid submit → error after retries, naming schema validation (issue #101)', async () => {
+  // submit called with args that don't match PlanSchema (missing groups) on every attempt → the
+  // retry kernel exhausts → error, distinguished from the no-submission case.
   const agent = createPlannerAgent({
     model: planSubmitModel({ goal: 'x' }),
     tools: {},
@@ -143,6 +147,7 @@ test('runPlanner returns error when the submitted plan fails schema validation',
   });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
   assert.equal(result.kind, 'error');
+  if (result.kind === 'error') assert.match(result.error, /schema validation after retries/i);
 });
 
 test('runPlanner rejects maxPrs < 1 up front', async () => {

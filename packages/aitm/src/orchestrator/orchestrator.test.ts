@@ -435,6 +435,58 @@ test('openPr prompt instructs the standard PR body template', async () => {
   assert.match(capturedPrompt, /## Testing/);
 });
 
+test('composePr throws a schema-validation error when the submitted composition is invalid (issue #101)', async () => {
+  // submit called with a composition missing `body` → PrCompositionSchema.safeParse fails →
+  // the forced-submit path (no agent loop, no retry) surfaces the typed failure as an error.
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: `submit-${submitCallId++}`,
+          toolName: 'submit',
+          input: JSON.stringify({ title: 't' }),
+        },
+      ],
+      finishReason: { unified: 'tool-calls', raw: undefined },
+      usage: emptyUsage(),
+      warnings: [],
+    }),
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSessions: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await assert.rejects(o.openPr(baseGroup(), baseDelivery(), 'main'), /schema validation/i);
+});
+
+test('composePr throws a no-submission error when the model never submits a composition (issue #101)', async () => {
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [{ type: 'text', text: 'no submission here' }],
+      finishReason: { unified: 'stop', raw: undefined },
+      usage: emptyUsage(),
+      warnings: [],
+    }),
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSessions: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await assert.rejects(
+    o.openPr(baseGroup(), baseDelivery(), 'main'),
+    /did not submit a PR composition/i,
+  );
+});
+
 test('openPr prompt anchors the title on the group goal, not the worker draft message', async () => {
   let capturedPrompt = '';
   const model = new MockLanguageModelV3({

@@ -11,6 +11,7 @@
 import {
   hasToolCall,
   type LanguageModel,
+  type ModelMessage,
   stepCountIs,
   type Tool,
   ToolLoopAgent,
@@ -70,17 +71,86 @@ type StepsResult = {
   steps: ReadonlyArray<{ toolCalls: ReadonlyArray<{ toolName: string; input: unknown }> }>;
 };
 
-// Extract and validate the result the agent submitted via the `submit` tool. Returns undefined if
-// the agent stopped without submitting (e.g. exhausted the step budget) — callers map that to their
-// own blocked/error state, mirroring the old empty-output handling. Pass the same Zod schema the
-// submit tool was built with.
+// Typed extraction outcome — never a throw. `no-submission` = the agent stopped without ever
+// calling `submit`; `invalid` = it called `submit` but the input failed the Zod schema (including
+// input the SDK left as a raw string after a JSON-parse failure). Callers map each to their own
+// blocked/error/wontfix state, or route through runWithSchemaRetry to auto-correct first.
+export type SubmittedOutput<OUTPUT> =
+  | { ok: true; value: OUTPUT }
+  | { ok: false; reason: 'no-submission' }
+  | { ok: false; reason: 'invalid'; issues: readonly z.core.$ZodIssue[] };
+
+// Extract and validate the result the agent submitted via the `submit` tool. NEVER throws: a
+// missing submission is `no-submission`, a schema-invalid one is `invalid` with the Zod issues, so
+// a single malformed `submit` no longer surfaces a ZodError up the run leg. Pass the same Zod
+// schema the submit tool was built with. Because `hasToolCall(SUBMIT_TOOL_NAME)` matches even a
+// schema-invalid call, every mismatch already lands in `result.steps` — this is the one detection
+// point for both failure modes, with no dependency on SDK tool-error feedback reaching the model.
 export function submittedOutput<OUTPUT>(
   result: StepsResult,
   outputSchema: z.ZodType<OUTPUT>,
-): OUTPUT | undefined {
+): SubmittedOutput<OUTPUT> {
   const call = result.steps
     .flatMap((step) => step.toolCalls)
     .find((toolCall) => toolCall.toolName === SUBMIT_TOOL_NAME);
-  if (!call) return undefined;
-  return outputSchema.parse(call.input);
+  if (!call) return { ok: false, reason: 'no-submission' };
+  const parsed = outputSchema.safeParse(call.input);
+  if (!parsed.success) return { ok: false, reason: 'invalid', issues: parsed.error.issues };
+  return { ok: true, value: parsed.data };
+}
+
+// Human-readable one-line rendering of Zod issues, for a caller's blocked/error/wontfix reason
+// text (the model-facing corrective message is built separately by runWithSchemaRetry).
+export function formatSubmitIssues(issues: readonly z.core.$ZodIssue[]): string {
+  return issues.map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ');
+}
+
+export type SchemaRetryOptions = {
+  // Corrective re-invocations after the first attempt. Default 2 → up to 3 total generations.
+  maxRetries?: number;
+};
+
+// Run a subagent to a schema-valid `submit`, correcting a botched attempt in-conversation. Runs
+// `generate`, extracts via submittedOutput; on `no-submission`/`invalid` it re-invokes the SAME
+// agent with the full prior message history (so the model sees its own bad call and the SDK's
+// tool-error result) plus ONE corrective user message quoting the validation issues. Bounded by
+// maxRetries; returns the last typed failure once retries exhaust. A success on retry is
+// indistinguishable to the caller from a first-try success. This is the recovery layer for the
+// number-one weak-model failure mode: one mangled schema no longer ends the run leg.
+export async function runWithSchemaRetry<TOOLS extends ToolSet, OUTPUT>(
+  agent: ToolLoopAgent<never, TOOLS>,
+  schema: z.ZodType<OUTPUT>,
+  prompt: string,
+  options: SchemaRetryOptions = {},
+): Promise<SubmittedOutput<OUTPUT>> {
+  const maxRetries = options.maxRetries ?? 2;
+  let messages: ModelMessage[] = [{ role: 'user', content: prompt }];
+  let last: SubmittedOutput<OUTPUT> = { ok: false, reason: 'no-submission' };
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const result = await agent.generate({ messages });
+    last = submittedOutput(result, schema);
+    if (last.ok) return last;
+    if (attempt === maxRetries) break;
+    // Continue the same conversation: prior turns + the model's response (its invalid call and the
+    // SDK's tool-error result are both in response.messages) + one corrective user message.
+    messages = [
+      ...messages,
+      ...result.response.messages,
+      { role: 'user', content: correctiveMessage(last) },
+    ];
+  }
+  return last;
+}
+
+function correctiveMessage(
+  failure: { reason: 'no-submission' } | { reason: 'invalid'; issues: readonly z.core.$ZodIssue[] },
+): string {
+  if (failure.reason === 'no-submission') {
+    return `You did not call the \`${SUBMIT_TOOL_NAME}\` tool. Call \`${SUBMIT_TOOL_NAME}\` now with a single object that matches the required schema.`;
+  }
+  return `Your \`${SUBMIT_TOOL_NAME}\` input failed schema validation:\n${failure.issues
+    .map((i) => `- ${i.path.join('.') || '<root>'}: ${i.message}`)
+    .join(
+      '\n',
+    )}\nCall \`${SUBMIT_TOOL_NAME}\` again with a corrected object that fixes every issue above.`;
 }

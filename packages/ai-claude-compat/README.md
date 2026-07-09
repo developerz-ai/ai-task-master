@@ -86,11 +86,24 @@ instructions + a step-count stop condition); `composeSystemPrompt` assembles the
 instructions as **your coding style + a role prefix + an `<env>` block** (cwd,
 platform, OS, runtime, date).
 
+Structured output is delivered by a terminal **`submit` tool** (function calling),
+not `response_format: json_schema` — some OpenAI-compatible providers ignore the
+latter. Build the `submit` tool with a concrete Zod schema; the agent stops when it
+calls `submit`. Read the validated result back with `submittedOutput`, or drive the
+whole run through `runWithSchemaRetry`, which corrects a botched `submit` in-conversation
+before giving up.
+
 ```ts
 import { openai } from '@ai-sdk/openai';
-import { Output } from 'ai';
+import { tool } from 'ai';
 import { z } from 'zod';
-import { composeSystemPrompt, createSubagent } from '@developerz.ai/ai-claude-compat';
+import {
+  composeSystemPrompt,
+  createSubagent,
+  runWithSchemaRetry,
+} from '@developerz.ai/ai-claude-compat';
+
+const OutputSchema = z.object({ summary: z.string() });
 
 const worker = createSubagent(
   {
@@ -98,14 +111,24 @@ const worker = createSubagent(
     tools,
     systemPrompt: composeSystemPrompt(
       claudeMd,                         // coding-style signal from the target repo
-      'You implement one task and report the diff.',
+      'You implement one task and report the diff, then call submit.',
       process.cwd(),                    // → <env> block
     ),
-    output: Output.object({ schema: z.object({ summary: z.string() }) }),
+    // A concrete schema so the AI SDK infers the tool's param type.
+    submit: tool({
+      description: 'Submit the finished result (the OutputSchema).',
+      inputSchema: OutputSchema,
+      execute: async (out) => out,
+    }),
     maxSteps: 40,
   },
   /* defaultMaxSteps */ 25,
 );
+
+// Typed, never throws: { ok: true, value } | { ok: false, reason: 'no-submission' | 'invalid', … }.
+// runWithSchemaRetry re-prompts the same agent (default 2 retries) if the model botches the schema.
+const result = await runWithSchemaRetry(worker, OutputSchema, 'Implement the task.');
+if (result.ok) console.log(result.value.summary);
 ```
 
 Expose `worker` to a parent agent as a tool to get the isolated-context,
@@ -136,6 +159,7 @@ for (const dir of claudeDirs(process.cwd())) {
 | `backgroundProcessTools`, `ProcessManager` | Non-blocking background commands (dev servers): start / tail output / kill / killAll |
 | `globTool`, `grepTool`, `globToRegExp` | File glob + content search |
 | `composeSystemPrompt`, `createSubagent` | System-prompt composer + subagent-as-tool factory |
+| `submittedOutput`, `runWithSchemaRetry`, `formatSubmitIssues` | Typed `submit`-tool extraction + schema-mismatch retry kernel |
 | `envBlock` | Render the `<env>` system-context block from `EnvInfo` |
 | `loadSkills`, `loadAgents`, `claudeDirs` | `.claude/` discovery + parsing |
 | `parseFrontmatter`, `asString`, `asStringArray` | YAML-frontmatter helpers |

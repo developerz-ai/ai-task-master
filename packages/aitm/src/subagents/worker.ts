@@ -40,7 +40,8 @@ import type {
 import {
   composeSystemPrompt,
   createSubagent,
-  submittedOutput,
+  formatSubmitIssues,
+  runWithSchemaRetry,
 } from '@developerz.ai/ai-claude-compat';
 import { generateText, stepCountIs, type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
@@ -210,6 +211,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
   try {
     const planned = await planAndEdit(agent, init, input);
     if (planned.kind === 'blocked') return { kind: 'blocked', reason: planned.reason };
+    if (planned.kind === 'error') return { kind: 'error', error: planned.error };
 
     // delivery.changes must reflect every committed edit, so a fix pass that touched new files
     // is appended to the first-pass changes (the Orchestrator narrates the PR body off this).
@@ -242,7 +244,8 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
 
 type PlanEditResult =
   | { kind: 'ok'; changes: FileChange[]; draftCommitMessage: string }
-  | { kind: 'blocked'; reason: string };
+  | { kind: 'blocked'; reason: string }
+  | { kind: 'error'; error: string };
 
 // Phase 1 + Phase 2 only: plan the file manifest, then fan editors out over it. No verify, no
 // commit. Shared by the main pass and the single bounded verify fix pass — because the fix pass
@@ -252,7 +255,19 @@ async function planAndEdit(
   init: SubagentInit<WorkerTools>,
   input: WorkerInput,
 ): Promise<PlanEditResult> {
-  const manifest = await planManifest(agent, input);
+  const submitted = await planManifest(agent, input);
+  if (!submitted.ok) {
+    // Only after the schema-retry kernel exhausts. A model that never submits gets the same
+    // capability guidance as a zero-file manifest; one that keeps mangling the schema is an error.
+    if (submitted.reason === 'invalid') {
+      return {
+        kind: 'error',
+        error: `worker manifest failed schema validation after retries: ${formatSubmitIssues(submitted.issues)}`,
+      };
+    }
+    return { kind: 'blocked', reason: EMPTY_MANIFEST_REASON };
+  }
+  const manifest = submitted.value;
   if (manifest.files.length === 0) {
     return { kind: 'blocked', reason: EMPTY_MANIFEST_REASON };
   }
@@ -302,11 +317,11 @@ async function commitWithVerify(
   return { kind: 'ok', extraChanges };
 }
 
-async function planManifest(agent: WorkerAgent, input: WorkerInput): Promise<FileManifest> {
-  const result = await agent.generate({ prompt: buildManifestPrompt(input) });
-  // No submission (e.g. step budget exhausted) → empty manifest; runWorker maps that to a
-  // "blocked" with model-capability guidance, same as a degenerate zero-file manifest.
-  return submittedOutput(result, FileManifestSchema) ?? { files: [], draftCommitMessage: '' };
+function planManifest(agent: WorkerAgent, input: WorkerInput) {
+  // The schema-retry kernel corrects a botched `submit` in-conversation before giving up, so a
+  // weak model that mangles the FileManifest once no longer ends the leg. planAndEdit maps the
+  // typed failure (no-submission → capability guidance; invalid → error) to its own outcome.
+  return runWithSchemaRetry(agent, FileManifestSchema, buildManifestPrompt(input));
 }
 
 function buildManifestPrompt(input: WorkerInput): string {

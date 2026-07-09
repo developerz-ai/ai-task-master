@@ -13,7 +13,7 @@
 //   docs/vendor/ai-sdk/chunk-09.md §"Subagents" §"Controlling What the Model Sees"
 //   docs/vendor/ai-sdk/chunk-09.md §"Loop Control" — stopWhen: [stepCountIs(N), hasToolCall('done')]
 
-import { submittedOutput } from '@developerz.ai/ai-claude-compat';
+import { formatSubmitIssues, submittedOutput } from '@developerz.ai/ai-claude-compat';
 import { generateText, hasToolCall, stepCountIs, ToolLoopAgent, tool } from 'ai';
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
@@ -325,12 +325,18 @@ export class Orchestrator {
       },
       toolChoice: { type: 'tool', toolName: 'submit' },
     });
+    // Forced single-step submit (toolChoice), so there's no agent loop to retry through here (that
+    // recovery is for the subagents, issue #101). Surface the typed extraction failure as an error.
     const out = submittedOutput(result, PrCompositionSchema);
-    if (!out) {
-      throw new Error('orchestrator did not submit a PR composition');
+    if (!out.ok) {
+      throw new Error(
+        out.reason === 'invalid'
+          ? `orchestrator PR composition failed schema validation: ${formatSubmitIssues(out.issues)}`
+          : 'orchestrator did not submit a PR composition',
+      );
     }
-    assertPrBodySections(out.body, this.prBodySections());
-    return out;
+    assertPrBodySections(out.value.body, this.prBodySections());
+    return out.value;
   }
 
   private buildPrPrompt(group: PrGroup, delivery: WorkerDelivery): string {

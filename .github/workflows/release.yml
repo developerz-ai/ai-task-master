@@ -36,8 +36,13 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       # Trusted publishing needs npm >= 11.5.1; Node 22 ships an older npm.
+      # Pinned (not @latest): npm 11.6.x regressed the provenance path — a global
+      # install lands without a resolvable `sigstore` module, so `npm publish`
+      # with provenance dies on "Cannot find module 'sigstore'". 11.5.2 is the
+      # last release before that regression and satisfies the trusted-publishing
+      # minimum. Revisit when a fixed latest ships.
       - name: upgrade npm
-        run: npm install -g npm@latest
+        run: npm install -g npm@11.5.2
 
       - uses: oven-sh/setup-bun@v2
         with:

@@ -72,7 +72,7 @@ export function readFileTool(init: FileToolInit): Tool<ReadFileInput, ReadFileOu
       }
       if (st.size === 0) {
         // A real (empty) file that was successfully read — record it so a later Write/Edit is allowed.
-        init.fileState.record(safe, hashContent(''), st.mtimeMs, 'read');
+        init.fileState.record(safe, hashContent(''), 'read');
         return { content: `${input.path} exists but is empty (0 bytes).` };
       }
       const offset = input.offset ?? 1;
@@ -80,7 +80,7 @@ export function readFileTool(init: FileToolInit): Tool<ReadFileInput, ReadFileOu
       const window = await readNumberedWindow(safe, offset, limit);
       // Fingerprint the WHOLE file (hashFile streams it) even for a windowed read, so a later Edit
       // can tell whether the on-disk content changed since this read.
-      init.fileState.record(safe, await hashFile(safe), st.mtimeMs, 'read');
+      init.fileState.record(safe, await hashFile(safe), 'read');
       return { content: renderReadBody(input.path, window, offset) };
     },
   });
@@ -100,7 +100,7 @@ export function writeFileTool(init: FileToolInit): Tool<WriteFileInput, WriteFil
       }
       await mkdir(dirname(safe), { recursive: true });
       await atomicWriteFile(safe, input.content);
-      init.fileState.record(safe, hashContent(input.content), (await stat(safe)).mtimeMs, 'write');
+      init.fileState.record(safe, hashContent(input.content), 'write');
       return { ok: true };
     },
   });

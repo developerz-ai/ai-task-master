@@ -5,7 +5,7 @@
 // changed on disk since; identical old/new strings are rejected; a numbered snippet of the edited
 // region rides the result so the model can self-verify without a re-read. Writes are atomic.
 
-import { readFile as fsReadFile, stat } from 'node:fs/promises';
+import { readFile as fsReadFile } from 'node:fs/promises';
 import { type Tool, tool } from 'ai';
 import { z } from 'zod';
 import { atomicWriteFile } from './atomic-write.ts';
@@ -45,7 +45,7 @@ export function editFileTool(init: FileToolInit): Tool<EditFileInput, EditFileOu
       const original = await readForEdit(init.fileState, safe, input.path);
       const { next, count } = applyEdit(original, input);
       await atomicWriteFile(safe, next);
-      init.fileState.record(safe, hashContent(next), (await stat(safe)).mtimeMs, 'edit');
+      init.fileState.record(safe, hashContent(next), 'edit');
       return { ok: true, replacements: count, snippet: editSnippet(original, next) };
     },
   });
@@ -71,7 +71,7 @@ export function multiEditTool(init: FileToolInit): Tool<MultiEditInput, MultiEdi
         }
       });
       await atomicWriteFile(safe, content);
-      init.fileState.record(safe, hashContent(content), (await stat(safe)).mtimeMs, 'edit');
+      init.fileState.record(safe, hashContent(content), 'edit');
       return { ok: true, replacements: total, snippet: editSnippet(original, content) };
     },
   });

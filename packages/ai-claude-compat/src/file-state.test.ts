@@ -14,7 +14,7 @@ test('FileStateTracker: unseen paths report not-seen and never stale', () => {
 
 test('FileStateTracker: record marks seen; matching hash is fresh, differing hash is stale', () => {
   const t = new FileStateTracker();
-  t.record('/x/a.ts', hashContent('v1'), 1000, 'read');
+  t.record('/x/a.ts', hashContent('v1'), 'read');
   assert.equal(t.hasSeen('/x/a.ts'), true);
   assert.equal(t.isStale('/x/a.ts', hashContent('v1')), false);
   assert.equal(t.isStale('/x/a.ts', hashContent('v2')), true);
@@ -23,10 +23,10 @@ test('FileStateTracker: record marks seen; matching hash is fresh, differing has
 
 test('FileStateTracker: re-recording a stale file clears the stale mark', () => {
   const t = new FileStateTracker();
-  t.record('/x/a.ts', hashContent('v1'), 1000, 'read');
+  t.record('/x/a.ts', hashContent('v1'), 'read');
   assert.equal(t.isStale('/x/a.ts', hashContent('v2')), true);
   assert.deepEqual(t.staleFiles(), ['/x/a.ts']);
-  t.record('/x/a.ts', hashContent('v2'), 2000, 'edit');
+  t.record('/x/a.ts', hashContent('v2'), 'edit');
   assert.deepEqual(t.staleFiles(), []);
   assert.equal(t.isStale('/x/a.ts', hashContent('v2')), false);
 });

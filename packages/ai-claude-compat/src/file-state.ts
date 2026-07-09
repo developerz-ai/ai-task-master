@@ -9,7 +9,7 @@ import { createReadStream } from 'node:fs';
 
 export type FileOp = 'read' | 'write' | 'edit';
 
-type Fingerprint = { contentHash: string; mtimeMs: number; lastOp: FileOp };
+type Fingerprint = { contentHash: string; lastOp: FileOp };
 
 export class FileStateTracker {
   private readonly files = new Map<string, Fingerprint>();
@@ -17,8 +17,8 @@ export class FileStateTracker {
 
   // Record a file the model has now seen (read) or produced (write/edit). Keyed by resolved
   // absolute path. Clears any prior stale mark — the fingerprint is now current.
-  record(absPath: string, contentHash: string, mtimeMs: number, op: FileOp): void {
-    this.files.set(absPath, { contentHash, mtimeMs, lastOp: op });
+  record(absPath: string, contentHash: string, op: FileOp): void {
+    this.files.set(absPath, { contentHash, lastOp: op });
     this.stale.delete(absPath);
   }
 

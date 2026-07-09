@@ -384,7 +384,7 @@ export class WorkLoop {
       if (stage === 'ci-failed') {
         ctx.fixAttempts += 1;
         if (ctx.fixAttempts > this.maxCiFixAttempts) {
-          ctx.blockedReason = `CI fix attempts exhausted after ${this.maxCiFixAttempts} passes for PR #${ctx.group.pr} — needs human attention`;
+          ctx.blockedReason = `CI fix attempts exhausted after ${this.maxCiFixAttempts} passes for PR #${prNumberOf(ctx.group)} — needs human attention`;
           const next: GroupStage = 'blocked';
           ctx.group = { ...ctx.group, stage: next };
           await this.persistStageAfter(stage, next, ctx);

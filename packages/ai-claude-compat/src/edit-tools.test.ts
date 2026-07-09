@@ -1,15 +1,27 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { applyEdit, editFileTool, multiEditTool } from './edit-tools.ts';
+import { FileStateTracker } from './file-state.ts';
+import { readFileTool } from './fs-tools.ts';
 
 async function tempDir(
   prefix = 'compat-edit-',
 ): Promise<{ path: string; cleanup: () => Promise<void> }> {
   const path = await mkdtemp(join(tmpdir(), prefix));
   return { path, cleanup: () => rm(path, { recursive: true, force: true }) };
+}
+
+function tools(cwd: string) {
+  const fileState = new FileStateTracker();
+  return {
+    fileState,
+    read: readFileTool({ cwd, fileState }),
+    edit: editFileTool({ cwd, fileState }),
+    multiEdit: multiEditTool({ cwd, fileState }),
+  };
 }
 
 async function run<I, O>(t: { execute?: unknown }, input: I): Promise<O> {
@@ -40,6 +52,10 @@ test('applyEdit: rejects an empty oldString', () => {
   assert.throws(() => applyEdit('abc', { oldString: '', newString: 'y' }), /must be non-empty/);
 });
 
+test('applyEdit: rejects identical oldString and newString (issue #104)', () => {
+  assert.throws(() => applyEdit('abc', { oldString: 'a', newString: 'a' }), /identical/);
+});
+
 test('applyEdit: throws on ambiguous oldString without replaceAll', () => {
   assert.throws(
     () => applyEdit('a a a', { oldString: 'a', newString: 'b' }),
@@ -60,16 +76,75 @@ test('applyEdit: newString with $ tokens is inserted verbatim', () => {
 
 // ---- editFileTool ----
 
-test('editFileTool: writes the replacement back to disk', async () => {
+test('editFileTool: fails without a prior read; succeeds after one and returns a numbered snippet (issue #104)', async () => {
   const dir = await tempDir();
   try {
-    await writeFile(join(dir.path, 'f.txt'), 'const a = 1;\n');
+    await writeFile(join(dir.path, 'f.txt'), 'const a = 1;\nconst b = 2;\n');
+    const t = tools(dir.path);
+    await assert.rejects(
+      () => run(t.edit, { path: 'f.txt', oldString: 'a = 1', newString: 'a = 2' }),
+      /was not Read this run/,
+    );
+    // Read populates the tracker; now the edit lands and reports a snippet.
+    await run(t.read, { path: 'f.txt' });
+    const out = await run<
+      { path: string; oldString: string; newString: string },
+      { replacements: number; snippet: string }
+    >(t.edit, { path: 'f.txt', oldString: 'a = 1', newString: 'a = 99' });
+    assert.equal(out.replacements, 1);
+    assert.equal(await readFile(join(dir.path, 'f.txt'), 'utf8'), 'const a = 99;\nconst b = 2;\n');
+    assert.match(out.snippet, /1\tconst a = 99;/);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('editFileTool: rejects an edit against content changed on disk since the read (issue #104)', async () => {
+  const dir = await tempDir();
+  try {
+    await writeFile(join(dir.path, 'f.txt'), 'v1 content\n');
+    const t = tools(dir.path);
+    await run(t.read, { path: 'f.txt' });
+    // Something else changes the file after the read.
+    await writeFile(join(dir.path, 'f.txt'), 'externally rewritten\n');
+    await assert.rejects(
+      () => run(t.edit, { path: 'f.txt', oldString: 'externally', newString: 'x' }),
+      /modified since you read it/,
+    );
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('editFileTool: an immediate follow-up edit needs no re-read (issue #104)', async () => {
+  const dir = await tempDir();
+  try {
+    await writeFile(join(dir.path, 'f.txt'), 'alpha beta gamma\n');
+    const t = tools(dir.path);
+    await run(t.read, { path: 'f.txt' });
+    await run(t.edit, { path: 'f.txt', oldString: 'alpha', newString: 'A' });
+    // No re-read — the previous edit refreshed the tracker.
     const out = await run<
       { path: string; oldString: string; newString: string },
       { replacements: number }
-    >(editFileTool({ cwd: dir.path }), { path: 'f.txt', oldString: 'a = 1', newString: 'a = 2' });
+    >(t.edit, { path: 'f.txt', oldString: 'gamma', newString: 'G' });
     assert.equal(out.replacements, 1);
-    assert.equal(await readFile(join(dir.path, 'f.txt'), 'utf8'), 'const a = 2;\n');
+    assert.equal(await readFile(join(dir.path, 'f.txt'), 'utf8'), 'A beta G\n');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('editFileTool: preserves an executable file’s mode across the edit (issue #104)', async () => {
+  const dir = await tempDir();
+  try {
+    const file = join(dir.path, 'run.sh');
+    await writeFile(file, '#!/bin/sh\necho hi\n');
+    await chmod(file, 0o755);
+    const t = tools(dir.path);
+    await run(t.read, { path: 'run.sh' });
+    await run(t.edit, { path: 'run.sh', oldString: 'hi', newString: 'bye' });
+    assert.equal((await stat(file)).mode & 0o777, 0o755);
   } finally {
     await dir.cleanup();
   }
@@ -79,7 +154,7 @@ test('editFileTool: rejects a path escaping the worktree', async () => {
   const dir = await tempDir();
   try {
     await assert.rejects(
-      () => run(editFileTool({ cwd: dir.path }), { path: '../x', oldString: 'a', newString: 'b' }),
+      () => run(tools(dir.path).edit, { path: '../x', oldString: 'a', newString: 'b' }),
       /path escapes worktree/,
     );
   } finally {
@@ -89,14 +164,16 @@ test('editFileTool: rejects a path escaping the worktree', async () => {
 
 // ---- multiEditTool ----
 
-test('multiEditTool: applies edits in order and writes once', async () => {
+test('multiEditTool: applies edits in order and writes once (after a read) (issue #104)', async () => {
   const dir = await tempDir();
   try {
     await writeFile(join(dir.path, 'f.txt'), 'one two three\n');
+    const t = tools(dir.path);
+    await run(t.read, { path: 'f.txt' });
     const out = await run<
       { path: string; edits: { oldString: string; newString: string }[] },
       { replacements: number }
-    >(multiEditTool({ cwd: dir.path }), {
+    >(t.multiEdit, {
       path: 'f.txt',
       edits: [
         { oldString: 'one', newString: '1' },
@@ -110,13 +187,15 @@ test('multiEditTool: applies edits in order and writes once', async () => {
   }
 });
 
-test('multiEditTool: is atomic — a failing edit leaves the file untouched', async () => {
+test('multiEditTool: is atomic — a failing edit leaves the file untouched (issue #104)', async () => {
   const dir = await tempDir();
   try {
     await writeFile(join(dir.path, 'f.txt'), 'keep me\n');
+    const t = tools(dir.path);
+    await run(t.read, { path: 'f.txt' });
     await assert.rejects(
       () =>
-        run(multiEditTool({ cwd: dir.path }), {
+        run(t.multiEdit, {
           path: 'f.txt',
           edits: [
             { oldString: 'keep', newString: 'changed' },
@@ -126,6 +205,23 @@ test('multiEditTool: is atomic — a failing edit leaves the file untouched', as
       /edit 2\/2: oldString not found/,
     );
     assert.equal(await readFile(join(dir.path, 'f.txt'), 'utf8'), 'keep me\n');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('multiEditTool: fails without a prior read (issue #104)', async () => {
+  const dir = await tempDir();
+  try {
+    await writeFile(join(dir.path, 'f.txt'), 'x\n');
+    await assert.rejects(
+      () =>
+        run(tools(dir.path).multiEdit, {
+          path: 'f.txt',
+          edits: [{ oldString: 'x', newString: 'y' }],
+        }),
+      /was not Read this run/,
+    );
   } finally {
     await dir.cleanup();
   }

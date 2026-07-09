@@ -1,12 +1,16 @@
-// String-replace edit tools, modeled on Claude Code's Edit. `editFile` does one exact
-// replacement; `multiEdit` applies a sequence atomically (all succeed and the file is written
-// once, or nothing is written). Both reject an `oldString` that is absent or — unless
-// `replaceAll` — ambiguous, so the model can't silently edit the wrong occurrence.
+// String-replace edit tools, modeled on Claude Code's Edit. `editFile` does one exact replacement;
+// `multiEdit` applies a sequence atomically (all succeed and the file is written once, or nothing
+// is written). Both reject an `oldString` that is absent or — unless `replaceAll` — ambiguous, and
+// (issue #104) enforce the file-state contract: the file must have been Read this run and not have
+// changed on disk since; identical old/new strings are rejected; a numbered snippet of the edited
+// region rides the result so the model can self-verify without a re-read. Writes are atomic.
 
-import { readFile as fsReadFile, writeFile as fsWriteFile } from 'node:fs/promises';
+import { readFile as fsReadFile } from 'node:fs/promises';
 import { type Tool, tool } from 'ai';
 import { z } from 'zod';
-import type { ToolInit } from './fs-tools.ts';
+import { atomicWriteFile } from './atomic-write.ts';
+import { type FileStateTracker, hashContent } from './file-state.ts';
+import type { FileToolInit } from './fs-tools.ts';
 import { resolveInside } from './safe-path.ts';
 
 const editSpecSchema = z.object({
@@ -24,33 +28,38 @@ const multiEditInputSchema = z.object({
 // Schema<T> is invariant; hand-written optionals won't unify with Zod's `T | undefined`).
 export type EditSpec = z.infer<typeof editSpecSchema>;
 export type EditFileInput = z.infer<typeof editFileInputSchema>;
-export type EditFileOutput = { ok: boolean; replacements: number };
+export type EditFileOutput = { ok: boolean; replacements: number; snippet: string };
 export type MultiEditInput = z.infer<typeof multiEditInputSchema>;
-export type MultiEditOutput = { ok: boolean; replacements: number };
+export type MultiEditOutput = { ok: boolean; replacements: number; snippet: string };
 
-export function editFileTool(init: ToolInit): Tool<EditFileInput, EditFileOutput> {
+const MAX_LINE_CHARS = 2000;
+const SNIPPET_CONTEXT_LINES = 4;
+
+export function editFileTool(init: FileToolInit): Tool<EditFileInput, EditFileOutput> {
   return tool({
     description:
-      'Edit a file in the worktree by exact string replacement. `oldString` must occur exactly once unless `replaceAll` is true (then every occurrence is replaced). Errors if `oldString` is not found, or is ambiguous without `replaceAll`.',
+      'Edit a file in the worktree by exact string replacement. You must Read the file earlier in this run first, or the call fails; if the file changed on disk since your Read, re-read it before editing. Strip the line-number prefix from Read output when building `oldString`. `oldString` must occur exactly once unless `replaceAll` is true. The result includes a `cat -n` numbered snippet of the edited region — do not re-read the file just to verify.',
     inputSchema: editFileInputSchema,
     execute: async (input: EditFileInput): Promise<EditFileOutput> => {
       const safe = await resolveInside(init.cwd, input.path);
-      const original = await fsReadFile(safe, 'utf8');
+      const original = await readForEdit(init.fileState, safe, input.path);
       const { next, count } = applyEdit(original, input);
-      await fsWriteFile(safe, next, 'utf8');
-      return { ok: true, replacements: count };
+      await atomicWriteFile(safe, next);
+      init.fileState.record(safe, hashContent(next), 'edit');
+      return { ok: true, replacements: count, snippet: editSnippet(original, next) };
     },
   });
 }
 
-export function multiEditTool(init: ToolInit): Tool<MultiEditInput, MultiEditOutput> {
+export function multiEditTool(init: FileToolInit): Tool<MultiEditInput, MultiEditOutput> {
   return tool({
     description:
-      'Apply a sequence of exact string replacements to a single file atomically. Edits apply in order to the in-memory contents; if any edit fails (string absent or ambiguous), nothing is written. Use for several related edits to the same file.',
+      'Apply a sequence of exact string replacements to a single file atomically. You must Read the file earlier in this run first, or the call fails; re-read if it changed on disk since. Strip the line-number prefix from Read output when building each `oldString`. Edits apply in order to the in-memory contents; if any fails (string absent, ambiguous, or identical to its replacement), nothing is written. The result includes a numbered snippet of the edited region.',
     inputSchema: multiEditInputSchema,
     execute: async (input: MultiEditInput): Promise<MultiEditOutput> => {
       const safe = await resolveInside(init.cwd, input.path);
-      let content = await fsReadFile(safe, 'utf8');
+      const original = await readForEdit(init.fileState, safe, input.path);
+      let content = original;
       let total = 0;
       input.edits.forEach((edit, i) => {
         try {
@@ -61,10 +70,37 @@ export function multiEditTool(init: ToolInit): Tool<MultiEditInput, MultiEditOut
           throw new Error(`edit ${i + 1}/${input.edits.length}: ${(err as Error).message}`);
         }
       });
-      await fsWriteFile(safe, content, 'utf8');
-      return { ok: true, replacements: total };
+      await atomicWriteFile(safe, content);
+      init.fileState.record(safe, hashContent(content), 'edit');
+      return { ok: true, replacements: total, snippet: editSnippet(original, content) };
     },
   });
+}
+
+// Enforce the read-before-edit + not-stale contract, returning the on-disk content to edit against.
+async function readForEdit(
+  fileState: FileStateTracker,
+  safe: string,
+  displayPath: string,
+): Promise<string> {
+  if (!fileState.hasSeen(safe)) {
+    throw new Error(
+      `Refusing to edit ${displayPath}: it was not Read this run. Read it first, then Edit.`,
+    );
+  }
+  let content: string;
+  try {
+    content = await fsReadFile(safe, 'utf8');
+  } catch (err) {
+    if (typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'ENOENT') {
+      throw new Error(`Cannot edit ${displayPath}: file not found (was it deleted?).`);
+    }
+    throw err;
+  }
+  if (fileState.isStale(safe, hashContent(content))) {
+    throw new Error(`${displayPath} was modified since you read it — re-read it before editing.`);
+  }
+  return content;
 }
 
 // Pure string replacement with the uniqueness contract. Uses split/join so `newString` is
@@ -74,6 +110,10 @@ export function applyEdit(content: string, edit: EditSpec): { next: string; coun
   // '' — which `split('')` would treat as a match at every character boundary.
   if (edit.oldString.length === 0) {
     throw new Error('oldString must be non-empty');
+  }
+  // A paid-for no-op — reject before touching the file (issue #104).
+  if (edit.oldString === edit.newString) {
+    throw new Error('oldString and newString are identical — the edit would change nothing');
   }
   const occurrences = content.split(edit.oldString).length - 1;
   if (occurrences === 0) {
@@ -90,6 +130,35 @@ export function applyEdit(content: string, edit: EditSpec): { next: string; coun
   const at = content.indexOf(edit.oldString);
   const next = content.slice(0, at) + edit.newString + content.slice(at + edit.oldString.length);
   return { next, count: 1 };
+}
+
+// A `cat -n` numbered window of the edited file centered on the first line that changed, so the
+// model can confirm the edit landed without a follow-up Read.
+function editSnippet(before: string, after: string): string {
+  const around = firstDiffLine(before, after);
+  const lines = after.split('\n');
+  const start = Math.max(0, around - SNIPPET_CONTEXT_LINES);
+  const end = Math.min(lines.length, around + SNIPPET_CONTEXT_LINES + 1);
+  return lines
+    .slice(start, end)
+    .map((line, i) => `${start + i + 1}\t${truncateLine(line)}`)
+    .join('\n');
+}
+
+// The 0-based index of the first line that differs between two versions (or the last common line
+// when one is a strict prefix of the other).
+function firstDiffLine(before: string, after: string): number {
+  const a = before.split('\n');
+  const b = after.split('\n');
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    if (a[i] !== b[i]) return i;
+  }
+  return Math.max(0, n - 1);
+}
+
+function truncateLine(line: string): string {
+  return line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS)}…` : line;
 }
 
 function preview(s: string): string {

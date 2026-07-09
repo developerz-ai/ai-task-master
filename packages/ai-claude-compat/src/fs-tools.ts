@@ -1,13 +1,19 @@
 // Read/write filesystem tools, modeled on Claude Code's Read/Write. Every tool is scoped to a
 // `cwd` (the active worktree) and rejects paths that escape it via the shared `resolveInside`
 // guard. AI-SDK `Tool`-shaped so they drop straight into a subagent's tool set.
+//
+// The file tools share a per-run FileStateTracker (issue #104): Read fingerprints what the model
+// saw, Write refuses to clobber an unread file, and Edit (edit-tools.ts) refuses stale/unseen
+// content. Output is `cat -n` numbered, windowed to a default of 2000 lines.
 
 import { createReadStream } from 'node:fs';
-import { readFile as fsReadFile, writeFile as fsWriteFile, mkdir } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { type Tool, tool } from 'ai';
 import { z } from 'zod';
+import { atomicWriteFile } from './atomic-write.ts';
+import { type FileStateTracker, hashContent, hashFile } from './file-state.ts';
 import { resolveInside } from './safe-path.ts';
 
 export type ToolInit = {
@@ -16,8 +22,17 @@ export type ToolInit = {
   cwd: string;
 };
 
-// offset is a 1-based starting line; limit is the max number of lines to return. Both optional
-// — omitting them reads the whole file. Mirrors Claude Code's Read line window.
+// ToolInit plus the run's file-state tracker. REQUIRED (never optional) on the four file tools so
+// read-before-edit enforcement can't be silently dropped by forgetting a parameter. grep/glob keep
+// the plain ToolInit — they don't touch file state. See issue #104.
+export type FileToolInit = ToolInit & { fileState: FileStateTracker };
+
+// Default read window and per-line cap, matching the harness contract.
+export const DEFAULT_READ_LINES = 2000;
+const MAX_LINE_CHARS = 2000;
+
+// offset is a 1-based starting line; limit is the max number of lines to return. Both optional —
+// omitting `limit` reads a 2000-line window from `offset` (default 1). Mirrors Claude Code's Read.
 const readFileInputSchema = z.object({
   path: z.string().min(1),
   offset: z.number().int().positive().optional(),
@@ -36,62 +51,119 @@ export type ReadFileOutput = { content: string };
 export type WriteFileInput = z.infer<typeof writeFileInputSchema>;
 export type WriteFileOutput = { ok: boolean };
 
-export function readFileTool(init: ToolInit): Tool<ReadFileInput, ReadFileOutput> {
+export function readFileTool(init: FileToolInit): Tool<ReadFileInput, ReadFileOutput> {
   return tool({
     description:
-      'Read a UTF-8 text file from the current worktree. Path may be relative (resolved against the worktree root) or absolute (must still be inside the worktree). Optionally pass `offset` (1-based start line) and `limit` (line count) to read a window of a large file.',
+      'Read a UTF-8 text file from the current worktree. Path may be relative (resolved against the worktree root) or absolute (must still be inside the worktree). Output is `cat -n` numbered: each line is `<line-number>\\t<content>`. Reads up to 2000 lines by default — pass `offset` (1-based start line) and `limit` to read a specific window; when you already know which part of the file you need, read only that window, as this matters for large files. Do not re-read a file you just edited to verify — the edit result already carries a snippet.',
     inputSchema: readFileInputSchema,
     execute: async (input: ReadFileInput): Promise<ReadFileOutput> => {
       const safe = await resolveInside(init.cwd, input.path);
-      // Whole-file read returns the bytes verbatim; a windowed read streams line-by-line so a
-      // small window of a huge file doesn't pull the whole thing into memory.
-      if (input.offset === undefined && input.limit === undefined) {
-        return { content: await fsReadFile(safe, 'utf8') };
+      let st: Awaited<ReturnType<typeof stat>>;
+      try {
+        st = await stat(safe);
+      } catch (err) {
+        if (isEnoent(err)) return { content: `File not found: ${input.path}` };
+        throw err;
       }
-      return { content: await readWindow(safe, input.offset, input.limit) };
+      if (st.isDirectory()) {
+        return {
+          content: `${input.path} is a directory, not a file. Use glob or grep to explore its contents.`,
+        };
+      }
+      if (st.size === 0) {
+        // A real (empty) file that was successfully read — record it so a later Write/Edit is allowed.
+        init.fileState.record(safe, hashContent(''), 'read');
+        return { content: `${input.path} exists but is empty (0 bytes).` };
+      }
+      const offset = input.offset ?? 1;
+      const limit = input.limit ?? DEFAULT_READ_LINES;
+      const window = await readNumberedWindow(safe, offset, limit);
+      // Fingerprint the WHOLE file (hashFile streams it) even for a windowed read, so a later Edit
+      // can tell whether the on-disk content changed since this read.
+      init.fileState.record(safe, await hashFile(safe), 'read');
+      return { content: renderReadBody(input.path, window, offset) };
     },
   });
 }
 
-export function writeFileTool(init: ToolInit): Tool<WriteFileInput, WriteFileOutput> {
+export function writeFileTool(init: FileToolInit): Tool<WriteFileInput, WriteFileOutput> {
   return tool({
     description:
-      'Write a UTF-8 text file inside the current worktree. Creates parent directories. Overwrites any existing file. Path must stay inside the worktree.',
+      'Write a UTF-8 text file inside the current worktree. Creates parent directories; writes atomically (temp file + rename) and preserves an existing file’s mode. Overwriting an existing file you have not Read this run will fail — Read it first. For partial changes, use the edit tool instead.',
     inputSchema: writeFileInputSchema,
     execute: async (input: WriteFileInput): Promise<WriteFileOutput> => {
       const safe = await resolveInside(init.cwd, input.path);
+      if ((await pathExists(safe)) && !init.fileState.hasSeen(safe)) {
+        throw new Error(
+          `Refusing to overwrite ${input.path}: it exists but was not Read this run. Read it first (or use the edit tool for a partial change), then Write.`,
+        );
+      }
       await mkdir(dirname(safe), { recursive: true });
-      await fsWriteFile(safe, input.content, 'utf8');
+      await atomicWriteFile(safe, input.content);
+      init.fileState.record(safe, hashContent(input.content), 'write');
       return { ok: true };
     },
   });
 }
 
-// Stream the [offset, offset+limit) line window (1-based offset) without reading the whole file.
-// readline strips line terminators, so when the window runs to the end of the file we re-attach a
-// trailing newline — matching the whole-file read for to-EOF windows. A window capped early by
-// `limit` returns just the joined lines (no trailing terminator).
-async function readWindow(path: string, offset?: number, limit?: number): Promise<string> {
-  const start = offset ?? 1;
+type ReadWindow = { lines: string[]; shownTo: number; more: boolean; lastLineNo: number };
+
+// Stream the [offset, offset+limit) line window (1-based), numbering each line `cat -n` style and
+// truncating over-long lines. Never holds more than `limit` rendered lines in memory. `more` is
+// true when at least one line exists past the window.
+async function readNumberedWindow(
+  path: string,
+  offset: number,
+  limit: number,
+): Promise<ReadWindow> {
   const stream = createReadStream(path, { encoding: 'utf8' });
   try {
     const rl = createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
     const lines: string[] = [];
     let lineNo = 0;
-    let cappedEarly = false;
+    let more = false;
     for await (const line of rl) {
       lineNo += 1;
-      if (lineNo < start) continue;
-      lines.push(line);
-      if (limit !== undefined && lines.length >= limit) {
-        cappedEarly = true;
+      if (lineNo < offset) continue;
+      if (lines.length >= limit) {
+        more = true;
         break;
       }
+      lines.push(`${lineNo}\t${truncateLine(line)}`);
     }
     rl.close();
-    const text = lines.join('\n');
-    return !cappedEarly && lines.length > 0 ? `${text}\n` : text;
+    return { lines, shownTo: offset + lines.length - 1, more, lastLineNo: lineNo };
   } finally {
     stream.destroy();
   }
+}
+
+function renderReadBody(path: string, window: ReadWindow, offset: number): string {
+  if (window.lines.length === 0) {
+    return `Offset ${offset} is past the last line of ${path} (${window.lastLineNo} lines total).`;
+  }
+  const text = window.lines.join('\n');
+  return window.more
+    ? `${text}\n\n[showing lines ${offset}-${window.shownTo}; more remain — continue with offset: ${window.shownTo + 1}]`
+    : text;
+}
+
+function truncateLine(line: string): string {
+  return line.length > MAX_LINE_CHARS
+    ? `${line.slice(0, MAX_LINE_CHARS)}… [line truncated: ${line.length} chars]`
+    : line;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (err) {
+    if (isEnoent(err)) return false;
+    throw err;
+  }
+}
+
+function isEnoent(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'ENOENT';
 }

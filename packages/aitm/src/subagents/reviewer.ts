@@ -238,7 +238,10 @@ async function execBash(
   exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
   command: string,
 ): Promise<BashOutput> {
-  const out = await exec({ command }, { toolCallId: `reviewer-bash-${Date.now()}`, messages: [] });
+  const out = await exec(
+    { command, description: 'reviewer commit step' },
+    { toolCallId: `reviewer-bash-${Date.now()}`, messages: [] },
+  );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');
   }

@@ -3,7 +3,9 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { bashTool, multiBashTool } from './bash-tool.ts';
+import type { execa } from 'execa';
+import { ProcessManager, type SpawnFn } from './background-process.ts';
+import { bashTool, MAX_BASH_OUTPUT_CHARS, multiBashTool } from './bash-tool.ts';
 
 async function tempDir(
   prefix = 'compat-bash-',
@@ -121,6 +123,194 @@ test('multiBashTool: each command gets a fresh cwd (cd does not leak)', async ()
     assert.equal(out.exitCode, 0);
     // The second command's pwd is the worktree root, not sub — the cd in command 1 was scoped.
     assert.equal(out.results[1]?.stdout.endsWith('/sub'), false);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+// ---- issue #103: truncation, persistent cwd, description, run_in_background, 120s default ----
+
+// Records the effective timeout the exec seam receives; resolves instantly (never spawns).
+function timeoutSpyExec(): { exec: typeof execa; timeouts: number[] } {
+  const timeouts: number[] = [];
+  const stub = (_file: string, _args: readonly string[], opts: { timeout?: number }) => {
+    timeouts.push(opts.timeout ?? -1);
+    const p = Promise.resolve({ stdout: '', stderr: '', exitCode: 0 }) as Promise<{
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+    }> & { pid: number };
+    p.pid = 4242;
+    return p;
+  };
+  return { exec: stub as unknown as typeof execa, timeouts };
+}
+
+// A ProcessManager spawn that never launches a real process — enough for start()/killAll().
+function fakeSpawn(): SpawnFn {
+  const stream = { on: () => stream };
+  const proc = { stdout: stream, stderr: stream, on: () => proc, kill: () => true, pid: 5150 };
+  return (() => proc) as unknown as SpawnFn;
+}
+
+test('bashTool: default timeout is 120s and per-call timeoutMs is capped at 600s (issue #103)', async () => {
+  const a = timeoutSpyExec();
+  await run(bashTool({ cwd: '/w', exec: a.exec }), { command: 'echo hi', description: 'greet' });
+  assert.equal(a.timeouts[0], 120_000);
+
+  const b = timeoutSpyExec();
+  await run(bashTool({ cwd: '/w', exec: b.exec }), {
+    command: 'echo hi',
+    description: 'greet',
+    timeoutMs: 900_000,
+  });
+  assert.equal(b.timeouts[0], 600_000);
+});
+
+test('bashTool: input schema requires description; run_in_background never fails validation (issue #103)', () => {
+  const schema = bashTool({ cwd: '/w' }).inputSchema as unknown as {
+    safeParse: (v: unknown) => { success: boolean };
+  };
+  assert.equal(schema.safeParse({ command: 'ls' }).success, false);
+  assert.equal(schema.safeParse({ command: 'ls', description: 'list' }).success, true);
+  assert.equal(
+    schema.safeParse({ command: 'ls', description: 'list', run_in_background: true }).success,
+    true,
+  );
+  assert.equal(
+    schema.safeParse({ command: 'ls', description: 'list', run_in_background: false }).success,
+    true,
+  );
+});
+
+test('bashTool: description text carries the contract + file-tool steering (issue #103)', () => {
+  const desc = bashTool({ cwd: '/w' }).description ?? '';
+  assert.match(desc, /working directory PERSISTS/i);
+  assert.match(desc, /variables, functions.*does NOT|does NOT/i);
+  assert.match(desc, /cat.*head.*tail.*sed.*awk.*echo/i);
+  assert.match(desc, /dedicated read\/edit\/grep tools/i);
+  assert.match(desc, /Use the `gh` CLI for GitHub/i);
+  assert.match(desc, /milliseconds \(default 120000, ceiling 600000\)/i);
+  assert.match(desc, /run_in_background/);
+});
+
+test('bashTool: stdout over the cap is truncated, keeping head + tail + a notice (issue #103)', async () => {
+  const dir = await tempDir();
+  try {
+    const out = await run<{ command: string; description: string }, { stdout: string }>(
+      bashTool({ cwd: dir.path }),
+      { command: `head -c 40000 /dev/zero | tr '\\0' a; echo END_OF_OUTPUT`, description: 'big' },
+    );
+    assert.ok(out.stdout.length <= MAX_BASH_OUTPUT_CHARS + 200, 'capped near the limit');
+    assert.match(out.stdout, /\[output truncated: \d+ chars total/);
+    assert.match(out.stdout, /^a+/, 'original head present');
+    assert.match(out.stdout, /END_OF_OUTPUT/, 'original tail present');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('bashTool: cwd persists across calls; a timed-out call leaves it unchanged (issue #103)', async () => {
+  const dir = await tempDir();
+  try {
+    await mkdir(join(dir.path, 'sub'), { recursive: true });
+    const t = bashTool({ cwd: dir.path });
+    await run(t, { command: 'cd sub', description: 'enter sub' });
+    const pwd1 = await run<{ command: string; description: string }, { stdout: string }>(t, {
+      command: 'pwd',
+      description: 'where',
+    });
+    assert.ok(pwd1.stdout.trim().endsWith('/sub'), `expected .../sub, got ${pwd1.stdout.trim()}`);
+
+    // A timed-out command emits no marker → the tracked cwd stays at /sub.
+    await run(t, { command: 'sleep 5', description: 'hang', timeoutMs: 50 });
+    const pwd2 = await run<{ command: string; description: string }, { stdout: string }>(t, {
+      command: 'pwd',
+      description: 'where again',
+    });
+    assert.ok(pwd2.stdout.trim().endsWith('/sub'), 'timeout did not corrupt cwd');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('bashTool: a non-zero exit is preserved and the cwd marker never leaks into stdout (issue #103)', async () => {
+  const dir = await tempDir();
+  try {
+    const out = await run<
+      { command: string; description: string },
+      { stdout: string; exitCode: number }
+    >(bashTool({ cwd: dir.path }), { command: 'echo before; (exit 3)', description: 'fail 3' });
+    assert.equal(out.exitCode, 3);
+    assert.match(out.stdout, /before/);
+    assert.equal(out.stdout.includes('__AITM_CWD__'), false);
+    assert.equal(out.stdout.includes('\x00'), false);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('bashTool: output containing NUL bytes still strips only the trailing cwd marker (issue #103)', async () => {
+  const dir = await tempDir();
+  try {
+    const out = await run<{ command: string; description: string }, { stdout: string }>(
+      bashTool({ cwd: dir.path }),
+      { command: `printf 'a\\000b'`, description: 'nul output' },
+    );
+    assert.ok(out.stdout.includes('\x00'), "the command's own NUL survives");
+    assert.equal(out.stdout.includes('__AITM_CWD__'), false, 'our marker is gone');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('bashTool: run_in_background routes to the ProcessManager and returns a bg id (issue #103)', async () => {
+  const manager = new ProcessManager({ cwd: '/w', spawn: fakeSpawn() });
+  try {
+    const out = await run<
+      { command: string; description: string; run_in_background: boolean },
+      { stdout: string; exitCode: number }
+    >(bashTool({ cwd: '/w', processManager: manager }), {
+      command: 'sleep 100',
+      description: 'dev server',
+      run_in_background: true,
+    });
+    assert.equal(out.exitCode, 0);
+    assert.match(out.stdout, /Started background process bg-1/);
+    assert.match(out.stdout, /bashOutput/);
+  } finally {
+    manager.killAll();
+  }
+});
+
+test('bashTool: run_in_background without a manager runs in the foreground with a notice (issue #103)', async () => {
+  const dir = await tempDir();
+  try {
+    const out = await run<
+      { command: string; description: string; run_in_background: boolean },
+      { stdout: string; exitCode: number }
+    >(bashTool({ cwd: dir.path }), {
+      command: 'echo ran-in-fg',
+      description: 'x',
+      run_in_background: true,
+    });
+    assert.equal(out.exitCode, 0);
+    assert.match(out.stdout, /ran-in-fg/);
+    assert.match(out.stdout, /no background process manager/i);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('multiBashTool: each command output is truncated per command (issue #103)', async () => {
+  const dir = await tempDir();
+  try {
+    const out = await run<{ commands: string[] }, MultiOut>(multiBashTool({ cwd: dir.path }), {
+      commands: [`head -c 40000 /dev/zero | tr '\\0' a`],
+    });
+    const first = out.results[0]?.stdout ?? '';
+    assert.ok(first.length <= MAX_BASH_OUTPUT_CHARS + 200);
+    assert.match(first, /\[output truncated/);
   } finally {
     await dir.cleanup();
   }

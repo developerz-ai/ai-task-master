@@ -1,17 +1,29 @@
-// Shell tool, modeled on Claude Code's Bash. Runs a command via `bash -c` with its initial cwd
-// set to the worktree. Unlike the FS tools it is intentionally NOT confined to the worktree:
-// subagents need git, test and build commands, so `cd`, absolute paths and `git -C` are all
-// legitimate. The trust boundary is "an agent is running on your repo" — same as Claude Code
-// itself; sandboxing/containerization is out of scope. The worktree is the initial cwd as a
-// convenience default, not a security boundary.
+// Shell tool, modeled on Claude Code's Bash. Runs a command via `bash -c` with its cwd set to the
+// worktree. Unlike the FS tools it is intentionally NOT confined to the worktree: subagents need
+// git, test and build commands, so `cd`, absolute paths and `git -C` are all legitimate. The trust
+// boundary is "an agent is running on your repo" — same as Claude Code itself; sandboxing is out of
+// scope. The worktree is the initial cwd as a convenience default, not a security boundary.
+//
+// Parity with the Claude Code Bash contract (issue #103): output is truncated (head+tail) so one
+// verbose command can't blow the context window; the working directory PERSISTS across calls (a
+// `cd` carries to the next call), tracked per tool instance; `description` is a required field; the
+// default timeout is 120s (ceiling 600s); and `run_in_background: true` routes to a ProcessManager
+// when one is configured.
 
 import { type Tool, tool } from 'ai';
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
+import type { ProcessManager } from './background-process.ts';
 
 const bashInputSchema = z.object({
   command: z.string().min(1),
+  // Required: a short, human-readable summary of what the command does. No behavioral effect — it
+  // matches the harness schema and surfaces in tool-call logs.
+  description: z.string().min(1),
   timeoutMs: z.number().int().positive().optional(),
+  // Start the command in the background (needs a ProcessManager, see BashToolInit). Omitted/false
+  // is a no-op; `true` never fails validation — without a manager it runs in the foreground.
+  run_in_background: z.boolean().optional(),
 });
 
 const multiBashInputSchema = z.object({
@@ -37,83 +49,173 @@ export type MultiBashOutput = {
 };
 
 export type BashToolInit = {
-  // Initial cwd for the command.
+  // Initial cwd for the command. bashTool then tracks cwd across calls from here.
   cwd: string;
-  // Tool-level default timeout. Per-call overrides via `timeoutMs` in the input. Default 60s —
-  // enough for `git push`, `git fetch`, `npm install` on small projects.
+  // Tool-level default timeout. Per-call overrides via `timeoutMs` in the input. Default 120s —
+  // enough for routine installs/builds without spurious timeouts.
   defaultTimeoutMs?: number;
   // Test seam — swap out execa to record argv without spawning.
   exec?: typeof execa;
+  // Optional background-process manager. When provided, `run_in_background: true` routes the
+  // command to it (spawned without awaiting, in the manager's cwd). Without it, a background
+  // request runs in the foreground with a notice. See background-process.ts (issue #103).
+  processManager?: ProcessManager;
 };
 
-const DEFAULT_BASH_TIMEOUT_MS = 60_000;
+// Cap for EACH of stdout/stderr returned to the model. A verbose command (npm install, a full test
+// run) can otherwise dump megabytes into context. Exported so callers can reason about the bound.
+export const MAX_BASH_OUTPUT_CHARS = 30_000;
+
+const DEFAULT_BASH_TIMEOUT_MS = 120_000;
 // Hard ceiling on the effective timeout so a single tool call — via a huge per-call timeoutMs or
 // an over-large configured default — can't pin the agent loop far longer than intended.
 const MAX_BASH_TIMEOUT_MS = 600_000;
 
-// Run a single command via `bash -c`, capturing stdout/stderr/exitCode. Never throws — a
-// non-zero exit, a timeout, or a spawn failure all come back as a BashOutput with the detail
-// in stderr, so the LLM can read it and react. Shared by both the single and sequence tools.
-async function runBash(
+// Epilogue appended (newline-separated) to every FOREGROUND bashTool command: save the command's
+// exit status, print a NUL-sentinel-delimited $PWD to stdout so the caller can track cwd across
+// calls, then exit with the saved status. Runs in the command's own shell (a `cd` persists) and
+// after any command that returns a non-zero status normally (`false`, `(exit 3)`, a program's exit
+// code) — those still emit the marker. It does NOT run when the command ends the shell itself (a
+// bare `exit`/`exec`) or the process is killed (timeout): no marker → the tracked cwd is left
+// unchanged. An appended epilogue (not a trap) is used deliberately — an EXIT trap makes bash defer
+// a timeout SIGTERM while it waits on a foreground child, which would hang runaway commands.
+const CWD_SENTINEL = '\x00__AITM_CWD__';
+const CWD_EPILOGUE = `\n__aitm_ec=$?; printf '\\000__AITM_CWD__%s' "$PWD"; exit "$__aitm_ec"`;
+
+const BASH_DESCRIPTION = [
+  'Run a shell command inside the current worktree. Returns stdout, stderr, and exit code; a',
+  'non-zero exit is returned (not thrown) so you can read the error.',
+  'The working directory PERSISTS between calls — a `cd` in one call carries to the next — but',
+  'other shell state (variables, functions) does NOT; the shell is re-initialized each call.',
+  'Interactive flags (e.g. `git rebase -i`, `git add -i`) are not supported.',
+  '`timeoutMs` is in milliseconds (default 120000, ceiling 600000).',
+  'Set `run_in_background: true` for a long-lived process (e.g. a dev server): it returns',
+  'immediately with a background id you poll via bashOutput.',
+  'Avoid using this tool to run `cat`/`head`/`tail`/`sed`/`awk`/`echo` for file access — use the',
+  'dedicated read/edit/grep tools instead.',
+  'Use the `gh` CLI for GitHub operations (PRs, issues, API).',
+  '`description` is a short human-readable summary of what the command does.',
+].join(' ');
+
+// Truncate one stream to MAX_BASH_OUTPUT_CHARS, keeping the original HEAD and TAIL (so an error
+// summary at the end survives) joined by a notice carrying the original size.
+function truncateStream(s: string): string {
+  if (s.length <= MAX_BASH_OUTPUT_CHARS) return s;
+  const notice = `\n\n[output truncated: ${s.length} chars total; showing the head and tail]\n\n`;
+  const budget = MAX_BASH_OUTPUT_CHARS - notice.length;
+  const head = Math.floor(budget * 0.35);
+  const tail = budget - head;
+  return s.slice(0, head) + notice + s.slice(s.length - tail);
+}
+
+// Split the cwd marker off the end of stdout. Returns the real stdout and the captured cwd, or
+// `cwd: undefined` when no marker is present (early exit/exec, timeout, spawn failure). The marker
+// is found by its NUL sentinel, so command output containing bare NUL bytes still parses.
+function stripCwdMarker(stdout: string): { stdout: string; cwd: string | undefined } {
+  const idx = stdout.lastIndexOf(CWD_SENTINEL);
+  if (idx === -1) return { stdout, cwd: undefined };
+  const cwd = stdout.slice(idx + CWD_SENTINEL.length);
+  return { stdout: stdout.slice(0, idx), cwd: cwd.length > 0 ? cwd : undefined };
+}
+
+function asString(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
+
+// Low-level runner: `bash -c`, never throws — a non-zero exit, a timeout, or a spawn failure all
+// come back as a BashOutput with the detail in stderr. Returns RAW (untruncated, marker-included)
+// streams; each tool applies its own marker-strip + truncation. Shared by both tools.
+async function execBash(
   exec: typeof execa,
   cwd: string,
   command: string,
   timeout: number,
 ): Promise<BashOutput> {
+  // Plain `-c`, not a login shell (`-lc`): a login shell sources /etc/profile and ~/.bash_profile,
+  // which in CI can `cd` away from `cwd` before the command runs. Also scrub BASH_ENV — even a
+  // non-login `bash -c` sources the file it points to at startup, which could `cd` away.
+  // `detached: true` puts bash in its own process group so the timeout can group-kill the whole
+  // tree: a multi-statement command (the cwd epilogue makes every bashTool command multi-statement)
+  // keeps bash alive as the parent, and a long-running child would hold the stdout pipe open — so
+  // execa's own `timeout` would wait for that pipe to close. We SIGKILL the group ourselves instead.
+  const subprocess = exec('bash', ['-c', command], {
+    cwd,
+    timeout,
+    detached: true,
+    env: { ...process.env, BASH_ENV: '' },
+  });
+  const timer = setTimeout(() => {
+    const pid = subprocess.pid;
+    if (pid !== undefined) {
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {
+        // Already exited or unkillable — the awaited result reflects reality either way.
+      }
+    }
+  }, timeout);
   try {
-    // Plain `-c`, not a login shell (`-lc`): a login shell sources /etc/profile and
-    // ~/.bash_profile, which in CI can `cd` away from `cwd` before the command runs. Also
-    // scrub BASH_ENV — even a non-login `bash -c` sources the file it points to at startup,
-    // which could `cd` away and defeat the cwd lock.
-    const r = await exec('bash', ['-c', command], {
-      cwd,
-      timeout,
-      env: { ...process.env, BASH_ENV: '' },
-    });
-    return {
-      stdout: typeof r.stdout === 'string' ? r.stdout : '',
-      stderr: typeof r.stderr === 'string' ? r.stderr : '',
-      exitCode: r.exitCode ?? 0,
-    };
+    const r = await subprocess;
+    return { stdout: asString(r.stdout), stderr: asString(r.stderr), exitCode: r.exitCode ?? 0 };
   } catch (err) {
     if (err instanceof ExecaError) {
       return {
-        stdout: typeof err.stdout === 'string' ? err.stdout : '',
+        stdout: asString(err.stdout),
         stderr: typeof err.stderr === 'string' ? err.stderr : err.message,
         exitCode: err.exitCode ?? 1,
       };
     }
-    // Unknown failure (timeout, ENOENT on bash, etc.).
-    return {
-      stdout: '',
-      stderr: err instanceof Error ? err.message : String(err),
-      exitCode: 1,
-    };
+    // Unknown failure (ENOENT on bash, etc.).
+    return { stdout: '', stderr: err instanceof Error ? err.message : String(err), exitCode: 1 };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
   const exec = init.exec ?? execa;
   const defaultTimeout = init.defaultTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
+  const manager = init.processManager;
+  // Tracked across calls (per tool instance): each subagent invocation constructs a fresh tool.
+  let cwd = init.cwd;
   return tool({
-    description:
-      'Run a shell command inside the current worktree. Returns stdout, stderr, and exit code. The command runs via `bash -c` with its initial cwd set to the worktree.',
+    description: BASH_DESCRIPTION,
     inputSchema: bashInputSchema,
-    execute: (input): Promise<BashOutput> =>
-      runBash(
-        exec,
-        init.cwd,
-        input.command,
-        Math.min(input.timeoutMs ?? defaultTimeout, MAX_BASH_TIMEOUT_MS),
-      ),
+    execute: async (input): Promise<BashOutput> => {
+      if (input.run_in_background && manager) {
+        const status = manager.start(input.command);
+        const pid = status.pid !== null ? ` (pid ${status.pid})` : '';
+        return {
+          stdout: `Started background process ${status.id}${pid}. Read new output with bashOutput({ id: "${status.id}" }) and stop it with killBash({ id: "${status.id}" }).`,
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      const timeout = Math.min(input.timeoutMs ?? defaultTimeout, MAX_BASH_TIMEOUT_MS);
+      // Marker-strip happens BEFORE truncation, so the epilogue's marker can never be trimmed off.
+      const raw = await execBash(exec, cwd, input.command + CWD_EPILOGUE, timeout);
+      const { stdout: stripped, cwd: nextCwd } = stripCwdMarker(raw.stdout);
+      if (nextCwd !== undefined) cwd = nextCwd;
+      // Append the no-manager notice BEFORE truncating, so the final stdout still honors the cap.
+      const withNotice =
+        input.run_in_background && !manager
+          ? `${stripped}\n[run_in_background was requested but no background process manager is configured; the command ran in the foreground]`
+          : stripped;
+      return {
+        stdout: truncateStream(withNotice),
+        stderr: truncateStream(raw.stderr),
+        exitCode: raw.exitCode,
+      };
+    },
   });
 }
 
 // Run a sequence of commands one after another, each in a fresh `bash -c` with cwd reset to the
 // worktree (so a `cd` in one command does not leak into the next — chain `cd x && …` within a
-// single command for that). Stops at the first non-zero exit: the commands after the failure
-// are NOT run. This mirrors a `set -e` script the model can emit as one tool call instead of
-// many round-trips. The per-call `timeoutMs` applies to each command, not the whole sequence.
+// single command for that). Stops at the first non-zero exit: the commands after the failure are
+// NOT run. This mirrors a `set -e` script the model can emit as one tool call instead of many
+// round-trips. The per-call `timeoutMs` applies to each command, not the whole sequence. Each
+// command's output is truncated the same way as bashTool.
 export function multiBashTool(init: BashToolInit): Tool<MultiBashInput, MultiBashOutput> {
   const exec = init.exec ?? execa;
   const defaultTimeout = init.defaultTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
@@ -126,8 +228,13 @@ export function multiBashTool(init: BashToolInit): Tool<MultiBashInput, MultiBas
       const results: Array<{ command: string } & BashOutput> = [];
       for (let i = 0; i < input.commands.length; i++) {
         const command = input.commands[i] ?? '';
-        const out = await runBash(exec, init.cwd, command, timeout);
-        results.push({ command, ...out });
+        const out = await execBash(exec, init.cwd, command, timeout);
+        results.push({
+          command,
+          stdout: truncateStream(out.stdout),
+          stderr: truncateStream(out.stderr),
+          exitCode: out.exitCode,
+        });
         if (out.exitCode !== 0) {
           return { results, exitCode: out.exitCode, failedAt: i };
         }

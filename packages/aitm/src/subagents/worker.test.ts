@@ -593,6 +593,13 @@ test('runWorker verifyCommand red→green: exactly one fix pass, two verifies, t
     bashes.some((b) => b.command.includes('commit -m')),
     'the change is committed after the green re-verify',
   );
+  // delivery.changes reflects the first-pass edit AND the fix-pass edit (all committed files).
+  if (result.kind === 'ok') {
+    assert.deepEqual(
+      result.delivery.changes.map((c) => `${c.kind} ${c.path}`),
+      ['create src/a.ts', 'modify src/a.ts'],
+    );
+  }
   // The fix-task manifest prompt (model call 2) carries the failing verify output tail.
   assert.match(prompts[2] ?? '', /verify command failed/i);
   assert.match(prompts[2] ?? '', /VERIFY FAILED marker-0/);

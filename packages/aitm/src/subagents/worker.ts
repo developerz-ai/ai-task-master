@@ -211,11 +211,15 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
     const planned = await planAndEdit(agent, init, input);
     if (planned.kind === 'blocked') return { kind: 'blocked', reason: planned.reason };
 
+    // delivery.changes must reflect every committed edit, so a fix pass that touched new files
+    // is appended to the first-pass changes (the Orchestrator narrates the PR body off this).
+    let changes = planned.changes;
     if (input.verifyCommand) {
       // Verify gate: format + verify, one bounded fix pass, commit only when green. A red diff
       // never reaches the remote when the operator has configured a verify command (issue #122).
       const gated = await commitWithVerify(agent, init, input, branch, planned.draftCommitMessage);
       if (gated.kind === 'blocked') return { kind: 'blocked', reason: gated.reason };
+      if (gated.extraChanges.length > 0) changes = [...changes, ...gated.extraChanges];
     } else {
       await commitOnBranch(init.tools.bash, input, branch, planned.draftCommitMessage);
     }
@@ -225,7 +229,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
       delivery: {
         branch,
         draftCommitMessage: planned.draftCommitMessage,
-        changes: planned.changes,
+        changes,
         progressEntries: input.task
           ? [`- ${input.task.text}`]
           : input.group.tasks.map((task) => `- ${task.text}`),
@@ -259,26 +263,32 @@ async function planAndEdit(
 // Gate committing on `verifyCommand`. Branch checkout + format run first (verify must see the
 // formatted files); then verify in the worktree. On a non-zero exit: exactly ONE bounded fix pass
 // (a task-scoped manifest+editor re-run fed the verify output) + re-format + re-verify. Still red →
-// `blocked` carrying the verify tail; nothing is staged or committed. Green → stage + commit.
+// `blocked` carrying the verify tail; nothing is staged or committed. Green → stage + commit,
+// returning any files the fix pass touched so runWorker can fold them into the delivery.
 async function commitWithVerify(
   agent: WorkerAgent,
   init: SubagentInit<WorkerTools>,
   input: WorkerInput,
   branch: string,
   message: string,
-): Promise<{ kind: 'ok' } | { kind: 'blocked'; reason: string }> {
+): Promise<{ kind: 'ok'; extraChanges: FileChange[] } | { kind: 'blocked'; reason: string }> {
   const exec = requireExec(init.tools.bash);
-  const wt = shQuote(input.worktreePath);
-  await runBash(exec, `git -C ${wt} checkout -B ${shQuote(branch)}`);
-  await runFormat(exec, input);
+  await checkoutAndFormat(exec, input, branch);
 
   let started = Date.now();
   let out = await runVerify(exec, input);
   logVerify(input, out, Date.now() - started, out.exitCode !== 0);
 
+  let extraChanges: FileChange[] = [];
   if (out.exitCode !== 0) {
-    // One bounded fix pass. planAndEdit never verifies, so this cannot recurse.
-    await planAndEdit(agent, init, { ...input, task: buildVerifyFixTask(input.group.id, out) });
+    // One bounded fix pass. planAndEdit never verifies, so this cannot recurse. Its edits are
+    // captured for the delivery; an empty/blocked fix manifest simply makes zero edits, and the
+    // re-verify below is still authoritative (per the spec, a still-red gate blocks on the tail).
+    const fixed = await planAndEdit(agent, init, {
+      ...input,
+      task: buildVerifyFixTask(input.group.id, out),
+    });
+    if (fixed.kind === 'ok') extraChanges = fixed.changes;
     await runFormat(exec, input);
     started = Date.now();
     out = await runVerify(exec, input);
@@ -288,9 +298,8 @@ async function commitWithVerify(
     }
   }
 
-  await runBash(exec, `git -C ${wt} add -A -- ${shQuote(':!.ai-task-master')}`);
-  await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
-  return { kind: 'ok' };
+  await stageAndCommit(exec, input, message);
+  return { kind: 'ok', extraChanges };
 }
 
 async function planManifest(agent: WorkerAgent, input: WorkerInput): Promise<FileManifest> {
@@ -362,13 +371,30 @@ async function commitOnBranch(
   message: string,
 ): Promise<void> {
   const exec = requireExec(bash);
-  const wt = shQuote(input.worktreePath);
-  await runBash(exec, `git -C ${wt} checkout -B ${shQuote(branch)}`);
+  await checkoutAndFormat(exec, input, branch);
+  await stageAndCommit(exec, input, message);
+}
+
+// Branch setup + format — the pre-staging steps shared by the plain commit path and the verify
+// gate (which slots verify + a fix pass between this and stageAndCommit).
+async function checkoutAndFormat(
+  exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
+  input: WorkerInput,
+  branch: string,
+): Promise<void> {
+  await runBash(exec, `git -C ${shQuote(input.worktreePath)} checkout -B ${shQuote(branch)}`);
   await runFormat(exec, input);
-  // Exclude aitm's own state dir: if `.ai-task-master/` sits in the worktree and the target
-  // repo does not gitignore it, `git add -A` would otherwise commit our state.json/goal into
-  // the PR. The `:!` pathspec keeps the target repo's tracked files (incl. its .gitignore)
-  // untouched while guaranteeing the state dir is never staged.
+}
+
+// Stage (excluding aitm's own state dir) + commit — the post-verify steps shared by both paths.
+// Excluding `.ai-task-master/` keeps our state.json/goal out of the target-repo commit even when
+// the target repo does not gitignore it; the `:!` pathspec leaves its tracked files untouched.
+async function stageAndCommit(
+  exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
+  input: WorkerInput,
+  message: string,
+): Promise<void> {
+  const wt = shQuote(input.worktreePath);
   await runBash(exec, `git -C ${wt} add -A -- ${shQuote(':!.ai-task-master')}`);
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
 }

@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { MockLanguageModelV3 } from 'ai/test';
 import type { RunLoopInput } from '../cli/commands.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { GitHubClient } from '../github/github-client.ts';
@@ -18,6 +19,7 @@ import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import {
   type AdapterStatePort,
   branchFor,
+  defaultMakeOrchestrator,
   githubThreadTool,
   localEditTools,
   type PlanGroupsOutcome,
@@ -547,4 +549,72 @@ test('githubThreadTool dispatches reply and resolve to the GitHub client', async
   assert.deepEqual(r1, { ok: true });
   assert.deepEqual(r2, { ok: true });
   assert.deepEqual(calls, ['reply:t1:hi', 'resolve:t2']);
+});
+
+// ---- compaction wiring (issue #102) ----------------------------------------
+
+// A worker model that submits an empty FileManifest on its first step → the worker blocks without
+// running editors or git, so driving the real bridge stays fast and side-effect-free.
+function emptyManifestModel(): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: 'submit-0',
+          toolName: 'submit',
+          input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+        },
+      ],
+      finishReason: { unified: 'tool-calls', raw: undefined },
+      usage: {
+        inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+        outputTokens: { total: 1, text: 1, reasoning: undefined },
+        totalTokens: 2,
+      },
+      warnings: [],
+    }),
+  });
+}
+
+test('defaultMakeOrchestrator constructs the Compactor and wires it into the stage-machine worker (issue #102)', async () => {
+  const model = emptyManifestModel();
+  const rolesSeen: string[] = [];
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: (role: string) => {
+      rolesSeen.push(role);
+      return 'openai/gpt-5';
+    },
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const mcp = { toolsForRole: () => ({}) };
+  const input = {
+    cwd: '/tmp/adapter-compaction',
+    resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
+    credentials,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    github: {},
+    goal: 'g',
+    criteria: undefined,
+    branch: undefined,
+    state: {},
+  };
+
+  // Constructing the bridge builds OpenRouterClient + ModelLimitsRegistry + Compactor (lazily, no
+  // network) — proving they are live in the production path, not dead exports.
+  const orch = defaultMakeOrchestrator({ input, mcp, rollingContext: '' } as never);
+  assert.equal(typeof orch.runWorker, 'function');
+
+  const res = await orch.runWorker({
+    group: group('core'),
+    worktree: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  assert.equal(res.kind, 'blocked'); // empty manifest → blocked, but the wiring already ran
+  assert.ok(
+    rolesSeen.includes('worker'),
+    'buildCompactionStep queried the worker-tier model id → the worker received compaction wiring',
+  );
 });

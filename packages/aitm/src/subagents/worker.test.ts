@@ -136,6 +136,12 @@ test('WORKER_SYSTEM_PREFIX mentions FileManifest + the two phases', () => {
   assert.match(WORKER_SYSTEM_PREFIX, /Phase 2/);
 });
 
+test('WORKER_SYSTEM_PREFIX carries the compaction continuation contract (issue #102)', () => {
+  assert.match(WORKER_SYSTEM_PREFIX, /summarized/i);
+  assert.match(WORKER_SYSTEM_PREFIX, /continue the task from that summary/i);
+  assert.match(WORKER_SYSTEM_PREFIX, /do not wrap up early/i);
+});
+
 test('createWorkerAgent builds an agent that exposes the injected tools', () => {
   const { tools } = makeTools();
   const agent = createWorkerAgent({

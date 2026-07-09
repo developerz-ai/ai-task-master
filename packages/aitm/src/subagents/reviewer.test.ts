@@ -142,6 +142,12 @@ test('REVIEWER_SYSTEM_PREFIX names the three outcomes', () => {
   assert.match(REVIEWER_SYSTEM_PREFIX, /"wontfix"/);
 });
 
+test('REVIEWER_SYSTEM_PREFIX carries the compaction continuation contract (issue #102)', () => {
+  assert.match(REVIEWER_SYSTEM_PREFIX, /summarized/i);
+  assert.match(REVIEWER_SYSTEM_PREFIX, /continue from that summary/i);
+  assert.match(REVIEWER_SYSTEM_PREFIX, /do not\s+wrap up early/i);
+});
+
 test('createReviewerAgent builds an agent that exposes the injected tools', () => {
   const { tools } = makeTools();
   const agent = createReviewerAgent({

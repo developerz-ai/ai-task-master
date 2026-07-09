@@ -192,6 +192,58 @@ test('runFixSession: CI failure → saves logs+comments to disk, fix prompt refe
   }
 });
 
+test('runFixSession: threads compaction into the real CI-fix worker when a compactor is set (issue #102)', async () => {
+  // No runWorkerOverride → the real worker agent is built. buildCompactionStep is invoked only when
+  // a compactor is present, and it (and nothing else on this path) queries the coding-tier id — so
+  // observing modelIdForCapability('coding') proves the CI-fix worker received compaction wiring.
+  const capsSeen: string[] = [];
+  const emptyManifestModel = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: 'submit-0',
+          toolName: 'submit',
+          input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+        },
+      ],
+      finishReason: { unified: 'tool-calls', raw: undefined },
+      usage: {
+        inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+        outputTokens: { total: 1, text: 1, reasoning: undefined },
+        totalTokens: 2,
+      },
+      warnings: [],
+    }),
+  });
+  const stubCompactor = {
+    shouldCompact: async () => ({ kind: 'skip' }),
+    compact: async () => '',
+  } as unknown as import('../compaction/compactor.ts').Compactor;
+
+  const result = await runFixSession(
+    baseInput({
+      runCmd: recordingRunCmd().runCmd,
+      subagents: {
+        credentials: {
+          modelForCapability: () => emptyManifestModel,
+          modelIdForCapability: (cap) => {
+            capsSeen.push(cap);
+            return 'openai/gpt-5';
+          },
+        },
+        workerTools: {} as WorkerTools,
+        styleContents: '',
+        compactor: stubCompactor,
+      },
+    }),
+  );
+
+  // Empty manifest → the worker blocks (nothing to commit), which is fine; we only assert wiring.
+  assert.equal(result.kind, 'blocked');
+  assert.ok(capsSeen.includes('coding'), 'buildCompactionStep queried the coding-tier model id');
+});
+
 test('runFixSession: threads verifyCommand into the fix Worker input (issue #122)', async () => {
   let captured: WorkerInput | null = null;
   const result = await runFixSession(

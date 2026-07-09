@@ -18,6 +18,8 @@
 
 import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel } from 'ai';
+import { buildCompactionStep } from '../compaction/compaction-step.ts';
+import type { Compactor } from '../compaction/compactor.ts';
 import type { Capability } from '../config/schema.ts';
 import { defaultRunCmd, type RunCmd, type RunCmdResult } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
@@ -52,9 +54,11 @@ export type FixSessionPrContext = {
 };
 
 // Model selector — Credentials satisfies it structurally. The session owns the tier decision:
-// always 'coding', so a CI fix lands on the strongest code model regardless of role mapping.
+// always 'coding', so a CI fix lands on the strongest code model regardless of role mapping. The
+// id method feeds the Compactor's context-window lookup for the same tier (issue #102).
 export type FixSessionModelSelector = {
   modelForCapability(capability: Capability): LanguageModel;
+  modelIdForCapability(capability: Capability): string;
 };
 
 export type FixSessionSubagents = {
@@ -68,6 +72,9 @@ export type FixSessionSubagents = {
   // Optional verify command the Worker runs before staging; a fix session whose worker result
   // still fails verify blocks instead of rebasing and force-pushing a red commit (issue #122).
   verifyCommand?: string;
+  // Optional Compactor. When present, the CI-fix Worker gets a prepareStep that summarizes-and-
+  // continues when its context window fills, using the 'coding'-tier model id (issue #102).
+  compactor?: Compactor;
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
@@ -178,10 +185,19 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     ...(input.logger ? { logger: input.logger } : {}),
   };
   if (subagents.runWorkerOverride) return subagents.runWorkerOverride(workerInput);
+  // Summarize-and-continue when the coding-tier context window fills (issue #102).
+  const prepareStep = subagents.compactor
+    ? buildCompactionStep<WorkerTools>({
+        compactor: subagents.compactor,
+        modelId: subagents.credentials.modelIdForCapability('coding'),
+        ...(input.logger ? { logger: input.logger } : {}),
+      })
+    : undefined;
   const agent = createWorkerAgent({
     model: subagents.credentials.modelForCapability('coding'),
     tools: subagents.workerTools,
     systemPrompt: composeSystemPrompt(subagents.styleContents, WORKER_SYSTEM_PREFIX, worktreePath),
+    ...(prepareStep ? { prepareStep } : {}),
   });
   return runWorker(agent, workerInput);
 }

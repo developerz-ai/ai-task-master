@@ -88,6 +88,9 @@ export const REVIEWER_SYSTEM_PREFIX = [
   '  leave the thread open. Submit { kind: "replied" }.',
   '- "wontfix": stale, out of scope, or you disagree. Reply with the reason via github.replyToThread,',
   '  resolve the thread via github.resolveThread. Submit { kind: "wontfix", reason }.',
+  '',
+  'If earlier conversation was summarized (context compaction), continue from that summary — do not',
+  'wrap up early or re-plan from scratch; resume the thread resolution where the summary leaves off.',
 ].join('\n');
 
 // Module-private link from agent to its init so runReviewer can drive bash commits with the
@@ -107,6 +110,7 @@ export function createReviewerAgent(init: SubagentInit<ReviewerTools>): Reviewer
         execute: async (resolution) => resolution,
       }),
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
+      ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
     },
     20,
   );

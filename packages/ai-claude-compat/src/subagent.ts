@@ -15,6 +15,7 @@ import {
   stepCountIs,
   type Tool,
   ToolLoopAgent,
+  type ToolLoopAgentSettings,
   type ToolSet,
 } from 'ai';
 import type { z } from 'zod';
@@ -48,6 +49,14 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   submit: Tool;
   // Step cap; falls back to defaultMaxSteps.
   maxSteps?: number;
+  // Optional per-step hook (the AI SDK's `prepareStep`). Policy-free passthrough: aitm builds one
+  // to swap in compacted messages between steps (issue #102), and later a deferred-tool-activation
+  // step composes into the SAME function — one prepareStep may return both `messages` and
+  // `activeTools`. The compat package stays free of any specific policy. Typed by indexing the
+  // SDK's own settings so it matches the ToolLoopAgent constructor exactly (writing
+  // `PrepareStepFunction<TOOLS>` here trips its `Record<string, Tool>` constraint under
+  // exactOptionalPropertyTypes, since ToolSet's element is a wider Tool union).
+  prepareStep?: ToolLoopAgentSettings<never, TOOLS>['prepareStep'];
 };
 
 // Wrap a ToolLoopAgent: register the caller's tools plus the `submit` tool, and stop when the step
@@ -62,6 +71,7 @@ export function createSubagent<TOOLS extends ToolSet>(
     tools: { ...config.tools, submit: config.submit },
     instructions: config.systemPrompt,
     stopWhen: [stepCountIs(config.maxSteps ?? defaultMaxSteps), hasToolCall(SUBMIT_TOOL_NAME)],
+    ...(config.prepareStep ? { prepareStep: config.prepareStep } : {}),
   });
 }
 

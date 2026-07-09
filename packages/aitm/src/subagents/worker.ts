@@ -143,6 +143,9 @@ export const WORKER_SYSTEM_PREFIX = [
   '- One responsibility per file; list each path once — parallel editors racing on one path clobber it.',
   "- Don't plan a modify you haven't read.",
   '- draftCommitMessage is a hint the Orchestrator may rewrite; conventional subject, ≤72 chars.',
+  '',
+  'If earlier conversation was summarized (context compaction), continue the task from that summary —',
+  'do not wrap up early, re-plan from scratch, or hand off; resume where the summary leaves off.',
 ].join('\n');
 
 // Editor subagent prompt — applied to every per-file fanout. Kept here so the Worker
@@ -180,6 +183,7 @@ export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent 
         execute: async (manifest) => manifest,
       }),
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
+      ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
     },
     30,
   );

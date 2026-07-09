@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import type { CompactorLike } from '../compaction/compaction-step.ts';
 import type { RunCmd, RunCmdResult } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
@@ -60,7 +61,7 @@ function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {
 
 function baseSubagents(overrides: Partial<FixSessionSubagents> = {}): FixSessionSubagents {
   return {
-    credentials: { modelForCapability: () => dummyModel },
+    credentials: { modelForCapability: () => dummyModel, modelIdForCapability: () => 'test/model' },
     workerTools: {} as WorkerTools,
     styleContents: '',
     runWorkerOverride: async () => okWorker(),
@@ -216,10 +217,10 @@ test('runFixSession: threads compaction into the real CI-fix worker when a compa
       warnings: [],
     }),
   });
-  const stubCompactor = {
+  const stubCompactor: CompactorLike = {
     shouldCompact: async () => ({ kind: 'skip' }),
     compact: async () => '',
-  } as unknown as import('../compaction/compactor.ts').Compactor;
+  };
 
   const result = await runFixSession(
     baseInput({
@@ -389,6 +390,7 @@ test('runFixSession: builds the Worker on the coding-capability model (no hardco
             // are never exercised; we only care that the coding tier was selected.
             return submitManifestModel({ files: [], draftCommitMessage: '' });
           },
+          modelIdForCapability: () => 'test/model',
         },
         workerTools: {} as WorkerTools,
         styleContents: '',

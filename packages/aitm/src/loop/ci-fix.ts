@@ -18,8 +18,7 @@
 
 import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel } from 'ai';
-import { buildCompactionStep } from '../compaction/compaction-step.ts';
-import type { Compactor } from '../compaction/compactor.ts';
+import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../config/schema.ts';
 import { defaultRunCmd, type RunCmd, type RunCmdResult } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
@@ -74,7 +73,7 @@ export type FixSessionSubagents = {
   verifyCommand?: string;
   // Optional Compactor. When present, the CI-fix Worker gets a prepareStep that summarizes-and-
   // continues when its context window fills, using the 'coding'-tier model id (issue #102).
-  compactor?: Compactor;
+  compactor?: CompactorLike;
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };

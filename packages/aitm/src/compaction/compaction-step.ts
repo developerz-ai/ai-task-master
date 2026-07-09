@@ -17,8 +17,13 @@ type CompactionPrepareStep<TOOLS extends ToolSet> = NonNullable<
   ToolLoopAgentSettings<never, TOOLS>['prepareStep']
 >;
 
+// Narrow port over the two Compactor methods this step calls, so tests/stubs can satisfy it
+// structurally (Compactor is a class with private state; a plain object can't otherwise match it,
+// and the repo forbids `as unknown as`). The real Compactor satisfies it.
+export type CompactorLike = Pick<Compactor, 'shouldCompact' | 'compact'>;
+
 export type CompactionStepInit = {
-  compactor: Compactor;
+  compactor: CompactorLike;
   // The resolved model id whose context window governs the threshold (from Credentials.modelIdFor).
   modelId: string;
   // Optional structured logger — one event per compaction. Mirrors the other loop seams.
@@ -31,16 +36,24 @@ const SUMMARY_HEADER =
   'Earlier conversation was summarized to fit the context window. Continue the task from this summary — do not wrap up early or re-plan from scratch.';
 
 // Build a `prepareStep` that compacts context when it crosses the threshold. Never throws: a lookup
-// miss (ModelNotFound), missing usage, or a summarizer error logs a warning and passes the messages
-// through uncompacted, so compaction failure can never crash the step.
+// miss (ModelNotFound) or a summarizer error logs a warning and passes the messages through
+// uncompacted, so compaction failure can never crash the step.
 export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
   init: CompactionStepInit,
 ): CompactionPrepareStep<TOOLS> {
   return async ({ steps, messages }) => {
-    // Live context size = the running input-token total the model reported on the latest completed
-    // step. On the first step (no steps yet, or usage absent) there is nothing to compact.
-    const liveInputTokens = steps.at(-1)?.usage.inputTokens;
-    if (liveInputTokens === undefined) return undefined;
+    // Nothing to send yet → nothing to compact.
+    if (messages.length === 0) return undefined;
+
+    // Size off the LIVE `messages` (the context this step will actually send), NOT the last step's
+    // usage. The installed ai does not persist a prepareStep `messages` override across steps — the
+    // override applies to the current step only, then the loop reverts to the full accumulated
+    // history on the next step. So after a compaction, the last step's usage reflects the small
+    // compacted call while `messages` reverts to the full history; sizing off usage would then read
+    // "small", skip, and let the full context overflow. Sizing off `messages` re-detects the large
+    // context each step and re-compacts, keeping every step's call bounded regardless of whether the
+    // SDK persists overrides. (A persistence-aware / cached-summary optimization is a follow-up.)
+    const liveInputTokens = estimateTokens(messages);
 
     let decision: Awaited<ReturnType<Compactor['shouldCompact']>>;
     try {
@@ -93,4 +106,18 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// Rough token estimate of the message array — ~4 chars per token over the serialized content. It
+// over-counts JSON structure slightly, which only makes compaction trigger a touch early; for a
+// context-overflow guardrail, erring toward compacting sooner is the safe direction.
+function estimateTokens(messages: readonly ModelMessage[]): number {
+  let chars = 0;
+  for (const message of messages) {
+    chars +=
+      typeof message.content === 'string'
+        ? message.content.length
+        : JSON.stringify(message.content).length;
+  }
+  return Math.ceil(chars / 4);
 }

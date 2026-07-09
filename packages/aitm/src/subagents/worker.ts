@@ -38,6 +38,7 @@ import type {
   WriteFileOutput,
 } from '@developerz.ai/ai-claude-compat';
 import {
+  callWithStepTimeout,
   composeSystemPrompt,
   createSubagent,
   formatSubmitIssues,
@@ -184,6 +185,7 @@ export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent 
       }),
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
       ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
+      ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
     },
     30,
   );
@@ -359,14 +361,19 @@ async function runEditor(
   file: FileManifestEntry,
   input: WorkerInput,
 ): Promise<FileChange> {
-  const { text } = await generateText({
-    model: init.model,
-    tools: init.tools,
-    system: composeSystemPrompt(input.styleContents, EDITOR_SYSTEM_PREFIX, input.worktreePath),
-    prompt: buildEditorPrompt(file, input),
-    stopWhen: stepCountIs(12),
-    providerOptions: { openai: { parallelToolCalls: true } },
-  });
+  const { text } = await callWithStepTimeout(
+    () =>
+      generateText({
+        model: init.model,
+        tools: init.tools,
+        system: composeSystemPrompt(input.styleContents, EDITOR_SYSTEM_PREFIX, input.worktreePath),
+        prompt: buildEditorPrompt(file, input),
+        stopWhen: stepCountIs(12),
+        providerOptions: { openai: { parallelToolCalls: true } },
+        ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
+      }),
+    init.timeout,
+  );
   const firstLine = text.trim().split('\n')[0];
   const summary = firstLine && firstLine.length > 0 ? firstLine : `${file.kind} ${file.path}`;
   return { path: file.path, kind: file.kind, summary };

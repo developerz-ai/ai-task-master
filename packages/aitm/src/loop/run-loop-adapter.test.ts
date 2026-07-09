@@ -618,3 +618,12 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
     'buildCompactionStep queried the worker-tier model id → the worker received compaction wiring',
   );
 });
+
+// Note (issue #129): the adapter threads `{ stepMs: resolved.llmStepTimeoutMs }` into every agent
+// `defaultMakeOrchestrator` builds (worker/reviewer/orchestrator/compactor + the CI-fix subagents).
+// A behavioral end-to-end assertion here would have to drive `defaultMakeOrchestrator`, which always
+// constructs a network-bound Compactor (ModelLimitsRegistry → OpenRouterClient), so a stalled-model
+// test becomes network-timing dependent. The threading is instead proven where it is deterministic:
+// each factory's own stall test (planner/worker/reviewer.test.ts) fires the deadline and surfaces the
+// StepTimeoutError, ci-fix.test.ts covers FixSessionSubagents.timeout, and commands.test.ts proves the
+// resolved value reaches RunLoopInput. The fan-out wiring itself is type-checked.

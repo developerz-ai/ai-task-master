@@ -111,6 +111,7 @@ export function createReviewerAgent(init: SubagentInit<ReviewerTools>): Reviewer
       }),
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
       ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
+      ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
     },
     20,
   );

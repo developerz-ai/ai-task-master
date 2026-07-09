@@ -119,6 +119,26 @@ test('runPlanner returns blocked when the model emits an empty plan', async () =
   assert.equal(result.kind, 'blocked');
 });
 
+test('createPlannerAgent forwards timeout → a stalled step surfaces as a deadline-named error (issue #129)', async () => {
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const agent = createPlannerAgent({
+    model: stalling,
+    tools: {},
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+    timeout: { stepMs: 40 },
+  });
+  const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') assert.match(result.error, /exceeded the configured deadline/);
+});
+
 test('runPlanner: never-submits → blocked after retries, with a no-submission reason (issue #101)', async () => {
   // Text-only on every attempt (no submit tool-call) → the retry kernel exhausts → blocked, with a
   // reason distinct from the schema-invalid case.

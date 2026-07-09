@@ -245,6 +245,35 @@ test('runFixSession: threads compaction into the real CI-fix worker when a compa
   assert.ok(capsSeen.includes('coding'), 'buildCompactionStep queried the coding-tier model id');
 });
 
+test('runFixSession: threads timeout into the real CI-fix Worker → a stalled step blocks the session (issue #129)', async () => {
+  // No runWorkerOverride → the real Worker agent is built with the forwarded per-step deadline. A
+  // stalled coding model is aborted at { stepMs: 40 } and surfaces as the session's blocked reason.
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const result = await runFixSession(
+    baseInput({
+      runCmd: recordingRunCmd().runCmd,
+      subagents: {
+        credentials: {
+          modelForCapability: () => stalling,
+          modelIdForCapability: () => 'test/model',
+        },
+        workerTools: {} as WorkerTools,
+        styleContents: '',
+        timeout: { stepMs: 40 },
+      },
+    }),
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /exceeded the configured deadline/);
+});
+
 test('runFixSession: threads verifyCommand into the fix Worker input (issue #122)', async () => {
   let captured: WorkerInput | null = null;
   const result = await runFixSession(

@@ -40,6 +40,16 @@ test('ConfigFileSchema accepts a positive maxCiFixAttempts and rejects non-posit
   assert.throws(() => ConfigFileSchema.parse({ maxCiFixAttempts: 'three' }));
 });
 
+test('ConfigFileSchema accepts a valid llmStepTimeoutMs and rejects < 1000 / non-integer (issue #129)', () => {
+  assert.equal(ConfigFileSchema.parse({ llmStepTimeoutMs: 900_000 }).llmStepTimeoutMs, 900_000);
+  assert.equal(ConfigFileSchema.parse({ llmStepTimeoutMs: 1000 }).llmStepTimeoutMs, 1000);
+  assert.throws(() => ConfigFileSchema.parse({ llmStepTimeoutMs: 999 }));
+  assert.throws(() => ConfigFileSchema.parse({ llmStepTimeoutMs: 0 }));
+  assert.throws(() => ConfigFileSchema.parse({ llmStepTimeoutMs: -1 }));
+  assert.throws(() => ConfigFileSchema.parse({ llmStepTimeoutMs: 1500.5 }));
+  assert.throws(() => ConfigFileSchema.parse({ llmStepTimeoutMs: '900000' }));
+});
+
 test('ConfigFileSchema accepts formatCommand + verifyCommand as strings (issue #122)', () => {
   const parsed = ConfigFileSchema.parse({
     formatCommand: 'bun run lint:fix',

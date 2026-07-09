@@ -58,6 +58,11 @@ export const ConfigFileSchema = z
     // Cap on CI-fix passes per PR group before it blocks for a human (issue #128). Bounds the
     // waiting-ci ⇄ ci-failed recovery loop on an unfixable red PR. See src/loop/work-loop.ts.
     maxCiFixAttempts: z.number().int().positive().optional(),
+    // Per-step LLM request deadline in ms (issue #129). Armed on every generate call so a stalled
+    // provider cannot hang an unattended run. Bounds one step — a provider HTTP call plus that step's
+    // tool executions — never the whole run. Must clear the bash-tool ceiling (600s) plus a slow
+    // high-effort completion, so ≥ 1000 and defaulted high. See src/subagents + docs/config.md.
+    llmStepTimeoutMs: z.number().int().min(1000).optional(),
     autoMerge: z.boolean().optional(),
     mergeMethod: MergeMethodSchema.optional(),
     stylePath: z.string().nullable().optional(),
@@ -117,6 +122,8 @@ export type ResolvedConfig = {
   maxSessions: number | null;
   // Cap on CI-fix passes per PR group before it blocks. Default DEFAULT_MAX_CI_FIX_ATTEMPTS. #128.
   maxCiFixAttempts: number;
+  // Per-step LLM request deadline in ms. Default DEFAULT_LLM_STEP_TIMEOUT_MS. Issue #129.
+  llmStepTimeoutMs: number;
   autoMerge: boolean;
   prPerTask: boolean;
   mergeMethod: 'squash' | 'merge' | 'rebase';

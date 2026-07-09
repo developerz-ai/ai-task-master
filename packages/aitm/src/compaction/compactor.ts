@@ -15,7 +15,8 @@
 //   docs/vendor/ai-sdk/chunk-09.md §"Loop Control" §"Prepare Step"
 //     (use prepareStep to swap in compacted messages between steps)
 
-import { generateText, type LanguageModel } from 'ai';
+import { callWithStepTimeout } from '@developerz.ai/ai-claude-compat';
+import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
 import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
 
 export type CompactionDecision =
@@ -31,6 +32,10 @@ export type CompactionInit = {
   threshold?: number; // default 0.7
   // How many of the most-recent steps to keep verbatim after compacting older history.
   keepLastSteps?: number; // default 6
+  // Per-step LLM request deadline for the summarizer call (issue #129). Unset → no deadline. On
+  // expiry the SDK aborts; callWithStepTimeout surfaces a named StepTimeoutError to the prepareStep
+  // caller rather than hanging the step.
+  timeout?: TimeoutConfiguration;
 };
 
 const DEFAULT_THRESHOLD = 0.7;
@@ -73,10 +78,15 @@ export class Compactor {
 
   // Produce a compact summary suitable for replacing the older conversation prefix.
   async compact(olderMessages: ReadonlyArray<unknown>): Promise<string> {
-    const { text } = await generateText({
-      model: this.init.summarizer,
-      prompt: `${SUMMARY_INSTRUCTIONS}\n${safeStringify(olderMessages)}`,
-    });
+    const { text } = await callWithStepTimeout(
+      () =>
+        generateText({
+          model: this.init.summarizer,
+          prompt: `${SUMMARY_INSTRUCTIONS}\n${safeStringify(olderMessages)}`,
+          ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
+        }),
+      this.init.timeout,
+    );
     return text;
   }
 }

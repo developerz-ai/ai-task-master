@@ -483,6 +483,37 @@ test('runStart: without --max-fix-attempts the loop gets the default cap (issue 
   }
 });
 
+test('runStart: threads the resolved llmStepTimeoutMs into both the style-digest seam and the loop (issue #129)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let styleSeen: number | undefined;
+    let loopSeen: number | undefined;
+    await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: async (input) => {
+          styleSeen = input.llmStepTimeoutMs;
+          return STUB_DIGEST;
+        },
+        runLoop: async (input) => {
+          loopSeen = input.resolved.llmStepTimeoutMs;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(styleSeen, 900_000, 'style-digest call gets the default deadline');
+    assert.equal(loopSeen, 900_000, 'the loop gets the default deadline');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 // ---- runStart: planning phase (issue #17) -----------------------------------
 
 test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups + status working', async () => {

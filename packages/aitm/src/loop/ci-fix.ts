@@ -17,7 +17,7 @@
 // loop and decide what to do with the result (advance to waiting-ci, or block).
 
 import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
-import type { LanguageModel } from 'ai';
+import type { LanguageModel, TimeoutConfiguration } from 'ai';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../config/schema.ts';
 import { defaultRunCmd, type RunCmd, type RunCmdResult } from '../github/github-client.ts';
@@ -74,6 +74,8 @@ export type FixSessionSubagents = {
   // Optional Compactor. When present, the CI-fix Worker gets a prepareStep that summarizes-and-
   // continues when its context window fills, using the 'coding'-tier model id (issue #102).
   compactor?: CompactorLike;
+  // Per-step LLM request deadline, forwarded to the CI-fix Worker agent (issue #129). Unset → none.
+  timeout?: TimeoutConfiguration;
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
@@ -197,6 +199,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     tools: subagents.workerTools,
     systemPrompt: composeSystemPrompt(subagents.styleContents, WORKER_SYSTEM_PREFIX, worktreePath),
     ...(prepareStep ? { prepareStep } : {}),
+    ...(subagents.timeout !== undefined ? { timeout: subagents.timeout } : {}),
   });
   return runWorker(agent, workerInput);
 }

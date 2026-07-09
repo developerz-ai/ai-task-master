@@ -155,6 +155,27 @@ test('createWorkerAgent builds an agent that exposes the injected tools', () => 
   assert.strictEqual(agent.tools.readFile, tools.readFile);
 });
 
+test('createWorkerAgent forwards timeout → a stalled manifest step surfaces as a deadline error (issue #129)', async () => {
+  const { tools } = makeTools();
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const agent = createWorkerAgent({
+    model: stalling,
+    tools,
+    systemPrompt: WORKER_SYSTEM_PREFIX,
+    timeout: { stepMs: 40 },
+  });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') assert.match(result.error, /exceeded the configured deadline/);
+});
+
 test('runWorker: manifest → per-file edits → commit sequence', async () => {
   const manifest: FileManifest = {
     files: [

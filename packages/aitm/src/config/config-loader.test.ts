@@ -44,6 +44,7 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     assert.equal(resolved.maxPrs, 5);
     assert.equal(resolved.maxSessions, null);
     assert.equal(resolved.maxCiFixAttempts, 3);
+    assert.equal(resolved.llmStepTimeoutMs, 900_000);
     assert.equal(resolved.autoMerge, true);
     assert.equal(resolved.mergeMethod, 'squash');
     assert.equal(resolved.stylePath, null);
@@ -284,6 +285,28 @@ test('resolve: maxCiFixAttempts follows CLI > project > global > default precede
 
     // CLI override beats both.
     assert.equal((await loader.resolve({ maxCiFixAttempts: 2 })).maxCiFixAttempts, 2);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: llmStepTimeoutMs follows project > global > default (config-only, no CLI flag) (issue #129)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-global',
+      llmStepTimeoutMs: 300_000,
+    });
+    const loader = new ConfigLoader(cwd.path, home.path, {});
+
+    // Global wins over the built-in default.
+    assert.equal((await loader.resolve({})).llmStepTimeoutMs, 300_000);
+
+    // Project wins over global.
+    await writeProjectConfig(cwd.path, { maxPrs: 1, llmStepTimeoutMs: 120_000 });
+    assert.equal((await loader.resolve({})).llmStepTimeoutMs, 120_000);
   } finally {
     await home.cleanup();
     await cwd.cleanup();

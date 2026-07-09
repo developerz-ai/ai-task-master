@@ -13,8 +13,19 @@
 //   docs/vendor/ai-sdk/chunk-09.md §"Subagents" §"Controlling What the Model Sees"
 //   docs/vendor/ai-sdk/chunk-09.md §"Loop Control" — stopWhen: [stepCountIs(N), hasToolCall('done')]
 
-import { formatSubmitIssues, submittedOutput } from '@developerz.ai/ai-claude-compat';
-import { generateText, hasToolCall, stepCountIs, ToolLoopAgent, tool } from 'ai';
+import {
+  callWithStepTimeout,
+  formatSubmitIssues,
+  submittedOutput,
+} from '@developerz.ai/ai-claude-compat';
+import {
+  generateText,
+  hasToolCall,
+  stepCountIs,
+  type TimeoutConfiguration,
+  ToolLoopAgent,
+  tool,
+} from 'ai';
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
 import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
@@ -104,6 +115,9 @@ export type OrchestratorInit = {
   prBodySections?: readonly string[];
   // Defaults to execa-backed runner. Tests inject a recorder.
   runCmd?: RunCmd;
+  // Per-step LLM request deadline for the two direct generateText sites (commit-message refine, PR
+  // compose). Unset → no deadline. Threaded from resolved config as `{ stepMs }`. Issue #129.
+  timeout?: TimeoutConfiguration;
 };
 
 // Per-group state needed to wire the subagent tools. Built fresh for each Orchestrator
@@ -286,10 +300,15 @@ export class Orchestrator {
   }
 
   private async refineCommitMessage(group: PrGroup, delivery: WorkerDelivery): Promise<string> {
-    const { text } = await generateText({
-      model: this.init.credentials.modelFor('orchestrator'),
-      prompt: this.buildCommitPrompt(group, delivery),
-    });
+    const { text } = await callWithStepTimeout(
+      () =>
+        generateText({
+          model: this.init.credentials.modelFor('orchestrator'),
+          prompt: this.buildCommitPrompt(group, delivery),
+          ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
+        }),
+      this.init.timeout,
+    );
     return text.trim();
   }
 
@@ -312,19 +331,24 @@ export class Orchestrator {
     // Structured output via a forced submit tool (tool-calling) rather than response_format
     // json_schema, which some OpenAI-compatible providers ignore. Single tool + forced choice =
     // one-shot; generateText takes a single step (no stopWhen), so it can't loop on the tool.
-    const result = await generateText({
-      model: this.init.credentials.modelFor('orchestrator'),
-      prompt: this.buildPrPrompt(group, delivery),
-      tools: {
-        submit: tool({
-          description:
-            'Submit the composed pull-request title and body (the PrComposition schema).',
-          inputSchema: PrCompositionSchema,
-          execute: async (composition) => composition,
+    const result = await callWithStepTimeout(
+      () =>
+        generateText({
+          model: this.init.credentials.modelFor('orchestrator'),
+          prompt: this.buildPrPrompt(group, delivery),
+          tools: {
+            submit: tool({
+              description:
+                'Submit the composed pull-request title and body (the PrComposition schema).',
+              inputSchema: PrCompositionSchema,
+              execute: async (composition) => composition,
+            }),
+          },
+          toolChoice: { type: 'tool', toolName: 'submit' },
+          ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
         }),
-      },
-      toolChoice: { type: 'tool', toolName: 'submit' },
-    });
+      this.init.timeout,
+    );
     // Forced single-step submit (toolChoice), so there's no agent loop to retry through here (that
     // recovery is for the subagents, issue #101). Surface the typed extraction failure as an error.
     const out = submittedOutput(result, PrCompositionSchema);

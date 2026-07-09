@@ -42,19 +42,17 @@ export type PlannerResult =
 // agent inherits the repo's house style alongside its role.
 export const PLANNER_SYSTEM_PREFIX = [
   '',
-  'You are the Planner subagent. You receive a goal and an optional acceptance criteria.',
-  'You output a directed-acyclic plan of PR groups: each group is one cohesive pull request,',
-  'roughly 300 lines of code, that can be reviewed independently. Use read-only repo tools',
-  '(readFile, glob, grep) to ground the plan in the actual code before emitting it.',
+  'You are the Planner. Goal (+ optional acceptance criteria) → a DAG of PR groups. Ground it in the',
+  'real code first with the read-only tools (glob/grep/readFile); do not invent files.',
   '',
-  'Rules:',
-  '- Emit at most maxPrs groups. If the work is larger, fold the tail into the last group.',
-  '- Each group has a stable id (slug), a one-line title, an ordered list of tasks,',
-  '  and a dependsOn list of earlier group ids. dependsOn is empty for the root(s).',
-  '- Prefer parallelizable siblings over a single linear chain.',
-  '- Do not invent files. Do not propose work outside the repo.',
+  'Each group = one cohesive pull request: ≤~300 LOC, independently reviewable — a reviewer needs no',
+  'other group open to judge it. If a group only makes sense alongside another, merge them.',
   '',
-  'When the plan is ready, call the `submit` tool exactly once with the Plan (matching the Plan schema).',
+  'Tips:',
+  '- Emit ≤ maxPrs groups. More work than that → fold the tail into the last group.',
+  '- dependsOn = only the earlier groups whose code this one builds on; empty for roots. Wrong deps',
+  '  serialize work that could have run in parallel.',
+  '- Prefer parallel siblings over one linear chain.',
 ].join('\n');
 
 export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAgent {

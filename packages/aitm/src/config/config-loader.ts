@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { ZodError, z } from 'zod';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
+import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../loop/constants.ts';
 import { type McpServers, McpServersSchema } from '../mcp/schema.ts';
 import {
   type CliOverrides,
@@ -36,6 +37,7 @@ const KNOWN_KEYS = new Set<string>([
   'models',
   'maxPrs',
   'maxSessions',
+  'maxCiFixAttempts',
   'autoMerge',
   'mergeMethod',
   'stylePath',
@@ -49,6 +51,7 @@ const KNOWN_KEYS = new Set<string>([
 const DEFAULTS = {
   maxPrs: 5,
   maxSessions: null as number | null,
+  maxCiFixAttempts: DEFAULT_MAX_CI_FIX_ATTEMPTS,
   autoMerge: true,
   prPerTask: false,
   mergeMethod: 'squash' as const,
@@ -122,6 +125,12 @@ export class ConfigLoader {
         project?.maxSessions,
         global?.maxSessions,
         DEFAULTS.maxSessions,
+      ),
+      maxCiFixAttempts: pick(
+        cliOverrides.maxCiFixAttempts,
+        project?.maxCiFixAttempts,
+        global?.maxCiFixAttempts,
+        DEFAULTS.maxCiFixAttempts,
       ),
       autoMerge: pick(
         cliOverrides.autoMerge,

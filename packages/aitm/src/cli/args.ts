@@ -16,6 +16,8 @@ export type StartArgs = {
   stylePath?: string | null;
   model?: string;
   concurrency?: number;
+  // Cap on CI-fix passes per PR group before it blocks for a human. From `--max-fix-attempts`. #128.
+  maxFixAttempts?: number;
   // Caller-specified branch for the PR(s). When the plan yields a single group it is used
   // verbatim; with multiple groups it becomes a prefix (`<branch>/<group-id>`) so concurrent
   // worktrees don't collide. When absent, branches default to `aitm/<group-id>`.
@@ -88,6 +90,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   let stylePath: string | undefined;
   let model: string | undefined;
   let concurrency: number | undefined;
+  let maxFixAttempts: number | undefined;
   let branch: string | undefined;
 
   let i = 0;
@@ -117,6 +120,14 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
       const n = parsePositiveInt(v);
       if (n === null) return HELP;
       concurrency = n;
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--max-fix-attempts') {
+      // Positive int (not parseNonNegativeInt): 0 CI-fix passes is nonsensical, unlike
+      // --max-sessions where 0 means unlimited.
+      const v = takeValue(args, i, inlineValue);
+      const n = parsePositiveInt(v);
+      if (n === null) return HELP;
+      maxFixAttempts = n;
       i += consumed(inlineValue !== null);
     } else if (flag === '--no-automerge') {
       // Boolean flag rejects any inline value: `--no-automerge=true` is a usage error,
@@ -171,6 +182,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   if (stylePath !== undefined) out.stylePath = stylePath;
   if (model !== undefined) out.model = model;
   if (concurrency !== undefined) out.concurrency = concurrency;
+  if (maxFixAttempts !== undefined) out.maxFixAttempts = maxFixAttempts;
   if (branch !== undefined) out.branch = branch;
   return out;
 }

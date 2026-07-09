@@ -43,6 +43,7 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     assert.equal(resolved.apiKeySource, 'env');
     assert.equal(resolved.maxPrs, 5);
     assert.equal(resolved.maxSessions, null);
+    assert.equal(resolved.maxCiFixAttempts, 3);
     assert.equal(resolved.autoMerge, true);
     assert.equal(resolved.mergeMethod, 'squash');
     assert.equal(resolved.stylePath, null);
@@ -261,6 +262,28 @@ test('resolve: CLI overrides beat project + global', async () => {
     assert.equal(resolved.concurrency, 7);
     // allowForcePush has no CLI override → project value (false) wins over the default.
     assert.equal(resolved.allowForcePush, false);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: maxCiFixAttempts follows CLI > project > global > default precedence', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global', maxCiFixAttempts: 5 });
+    const loader = new ConfigLoader(cwd.path, home.path, {});
+
+    // Global value wins over the built-in default.
+    assert.equal((await loader.resolve({})).maxCiFixAttempts, 5);
+
+    // Project value wins over global.
+    await writeProjectConfig(cwd.path, { maxCiFixAttempts: 4 });
+    assert.equal((await loader.resolve({})).maxCiFixAttempts, 4);
+
+    // CLI override beats both.
+    assert.equal((await loader.resolve({ maxCiFixAttempts: 2 })).maxCiFixAttempts, 2);
   } finally {
     await home.cleanup();
     await cwd.cleanup();

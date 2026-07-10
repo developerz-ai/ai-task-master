@@ -13,17 +13,21 @@
 //      so status transitions written by the loop are visible (PlanGraph snapshots at construction).
 //   4. Bridge the Orchestrator/subagents into the WorkLoopOrchestrator port and run the loop.
 
-import { resolve as resolvePath } from 'node:path';
+import { relative, resolve as resolvePath } from 'node:path';
 import {
   bashTool,
   composeSystemPrompt,
+  contextReminder,
   editFileTool,
   FileStateTracker,
   globTool,
   grepTool,
   multiBashTool,
   multiEditTool,
+  type ReminderProvider,
   readFileTool,
+  SYSTEM_REMINDER_CONTRACT,
+  withReminders,
   writeFileTool,
 } from '@developerz.ai/ai-claude-compat';
 import { type Tool, type ToolSet, tool } from 'ai';
@@ -84,11 +88,14 @@ export function localEditTools(cwd: string): WorkerTools {
   // One FileStateTracker per tool set (per subagent invocation) so read-before-edit enforcement is
   // scoped to a single run — the four file tools share it (issue #104).
   const fileState = new FileStateTracker();
+  // The four file-state tools carry a stale-read reminder on their model-visible result: a file
+  // changed on disk since the model read it surfaces one file-changed-externally note (issue #106).
+  const staleReminders: ReminderProvider = () => staleFileReminders(fileState, cwd);
   return {
-    readFile: readFileTool({ cwd, fileState }),
-    writeFile: writeFileTool({ cwd, fileState }),
-    editFile: editFileTool({ cwd, fileState }),
-    multiEdit: multiEditTool({ cwd, fileState }),
+    readFile: withReminders(readFileTool({ cwd, fileState }), staleReminders),
+    writeFile: withReminders(writeFileTool({ cwd, fileState }), staleReminders),
+    editFile: withReminders(editFileTool({ cwd, fileState }), staleReminders),
+    multiEdit: withReminders(multiEditTool({ cwd, fileState }), staleReminders),
     grep: grepTool({ cwd }),
     glob: globTool({ cwd }),
     bash: bashTool({ cwd }),
@@ -99,11 +106,40 @@ export function localEditTools(cwd: string): WorkerTools {
 // Read-only subset for the Planner — survey the repo without write/edit/bash.
 export function localReadTools(cwd: string): PlannerTools {
   const fileState = new FileStateTracker();
+  const staleReminders: ReminderProvider = () => staleFileReminders(fileState, cwd);
   return {
-    readFile: readFileTool({ cwd, fileState }),
+    readFile: withReminders(readFileTool({ cwd, fileState }), staleReminders),
     grep: grepTool({ cwd }),
     glob: globTool({ cwd }),
   };
+}
+
+// One file-changed-externally reminder per path the tracker (#104) has flagged stale — a file whose
+// on-disk content diverged from what the model read. Paths are stored absolute; surface them
+// repo-relative. Empty until a stale-read check flags one (e.g. an edit against a since-changed file).
+function staleFileReminders(fileState: FileStateTracker, cwd: string): string[] {
+  return fileState
+    .staleFiles()
+    .map(
+      (abs) =>
+        `${relative(cwd, abs)} was modified on disk since you last read it — your cached view is stale. Re-read it before editing.`,
+    );
+}
+
+// First-message context block for the subagents: the target-repo instructions + today's date, framed
+// as advisory <system-reminder> context (issue #106). Prepended to each subagent's first user message.
+export function harnessContextBlock(styleContents: string): string {
+  return contextReminder([
+    { label: 'claudeMd', body: styleContents },
+    { label: 'currentDate', body: new Date().toISOString().slice(0, 10) },
+  ]);
+}
+
+// System prompt for an agent whose tool set is decorated with reminders (issue #106): the base
+// prompt plus the provenance contract, so the model treats <system-reminder> content as advisory
+// harness context, not user intent. Folds into #105's prompt-block pipeline once that lands.
+export function reminderAgentSystemPrompt(style: string, rolePrefix: string, cwd: string): string {
+  return `${composeSystemPrompt(style, rolePrefix, cwd)}\n\n${SYSTEM_REMINDER_CONTRACT}`;
 }
 
 // Narrow state surface the adapter drives. StateStore satisfies it; tests pass an in-memory stub.
@@ -314,13 +350,14 @@ async function defaultPlanGroups(
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
     tools: resolvePlannerTools(mcp.toolsForRole('planner'), input.cwd),
-    systemPrompt: composeSystemPrompt(style, PLANNER_SYSTEM_PREFIX, input.cwd),
+    systemPrompt: reminderAgentSystemPrompt(style, PLANNER_SYSTEM_PREFIX, input.cwd),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
   });
   const result = await runPlanner(agent, {
     goal: input.goal,
     styleContents: style,
     maxPrs: input.resolved.maxPrs,
+    contextBlock: harnessContextBlock(style),
     ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
   });
   if (result.kind === 'ok')
@@ -370,7 +407,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
       tools,
-      systemPrompt: composeSystemPrompt(style, REVIEWER_SYSTEM_PREFIX, worktree.path),
+      systemPrompt: reminderAgentSystemPrompt(style, REVIEWER_SYSTEM_PREFIX, worktree.path),
       prepareStep: buildCompactionStep<ReviewerTools>({
         compactor,
         modelId: input.credentials.modelIdFor('reviewer'),
@@ -382,6 +419,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       threads,
       worktreePath: worktree.path,
       styleContents: style,
+      contextBlock: harnessContextBlock(style),
     });
   };
 
@@ -393,7 +431,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
         tools,
-        systemPrompt: composeSystemPrompt(style, WORKER_SYSTEM_PREFIX, worktree.path),
+        systemPrompt: reminderAgentSystemPrompt(style, WORKER_SYSTEM_PREFIX, worktree.path),
         prepareStep: buildCompactionStep<WorkerTools>({
           compactor,
           modelId: input.credentials.modelIdFor('worker'),
@@ -407,6 +445,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         baseBranch,
         styleContents: style,
         rollingContext,
+        contextBlock: harnessContextBlock(style),
         ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
         ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
       });

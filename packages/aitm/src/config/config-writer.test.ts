@@ -76,6 +76,24 @@ test('set persists providerRouting.<field> and fallbackModels.<tier> as nested o
   });
 });
 
+test('set persists reasoningEffort.<tier> as a nested object (issue #125)', async () => {
+  await withWriter(async ({ writer }) => {
+    await writer.set('global', 'reasoningEffort.smart', '"high"');
+    await writer.set('global', 'reasoningEffort.coding', '"medium"');
+    const file = await writer.list('global');
+    assert.deepEqual(file.reasoningEffort, { smart: 'high', coding: 'medium' });
+  });
+});
+
+test('set rejects a bad reasoningEffort value via schema (issue #125)', async () => {
+  await withWriter(async ({ writer }) => {
+    await assert.rejects(
+      () => writer.set('global', 'reasoningEffort.smart', '"maximum"'),
+      /reasoningEffort/,
+    );
+  });
+});
+
 test('set then unset removes the key and persists', async () => {
   await withWriter(async ({ writer, home }) => {
     await writer.set('global', 'maxPrs', '4');

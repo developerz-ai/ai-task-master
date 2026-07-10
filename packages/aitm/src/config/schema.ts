@@ -56,6 +56,28 @@ export const FallbackModelsSchema = z
   .passthrough();
 export type FallbackModels = z.infer<typeof FallbackModelsSchema>;
 
+// OpenRouter reasoning-effort tiers (issue #125). Emitted as `reasoning: { effort }` on the model
+// handle for a capability with an effort configured. The union's effort arm — a token-budget arm
+// can join later without a breaking change. Recommended tiers ship as docs only (see defaults.ts):
+// shipping defaults would change request bytes for every existing user and push the param to
+// endpoints that may reject it (custom baseURL, non-reasoning models). Strictly opt-in.
+export const ReasoningEffortSchema = z.enum(['xhigh', 'high', 'medium', 'low', 'minimal', 'none']);
+export type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>;
+
+// Per-capability reasoning effort. Mirrors the per-tier-optional shape of CapabilityModelsSchema;
+// resolved as a per-capability merge (project > global > profile). `generic` applies only to
+// explicit generic-capability resolution — unlike models.generic it is NOT a fallback for other
+// tiers.
+export const ReasoningEffortMapSchema = z
+  .object({
+    generic: ReasoningEffortSchema.optional(),
+    smart: ReasoningEffortSchema.optional(),
+    coding: ReasoningEffortSchema.optional(),
+    fast: ReasoningEffortSchema.optional(),
+  })
+  .passthrough();
+export type ReasoningEffortMap = z.infer<typeof ReasoningEffortMapSchema>;
+
 export const LogLevelSchema = z.enum(['debug', 'info', 'warn', 'error']);
 export const MergeMethodSchema = z.enum(['squash', 'merge', 'rebase']);
 
@@ -68,9 +90,10 @@ export const ProfileSchema = z
     openrouterApiKey: z.string().optional(),
     baseURL: z.url().optional(),
     models: CapabilityModelsSchema.optional(),
-    // Provider-shaped, so profile-able (issue #124).
+    // Provider-shaped, so profile-able (issues #124, #125).
     providerRouting: ProviderRoutingSchema.optional(),
     fallbackModels: FallbackModelsSchema.optional(),
+    reasoningEffort: ReasoningEffortMapSchema.optional(),
   })
   .passthrough();
 
@@ -95,6 +118,9 @@ export const ConfigFileSchema = z
     // also on ProfileSchema; resolved project > global > profile like baseURL.
     providerRouting: ProviderRoutingSchema.optional(),
     fallbackModels: FallbackModelsSchema.optional(),
+    // Per-capability OpenRouter reasoning effort (issue #125). Provider-shaped, so also on
+    // ProfileSchema; resolved as a per-capability merge (project > global > profile).
+    reasoningEffort: ReasoningEffortMapSchema.optional(),
     maxPrs: z.number().int().positive().optional(),
     maxSessions: z.number().int().positive().nullable().optional(),
     // Cap on CI-fix passes per PR group before it blocks for a human (issue #128). Bounds the
@@ -167,6 +193,9 @@ export type ResolvedConfig = {
   // so the constructed chat settings stay byte-identical to today for existing installs.
   providerRouting?: ProviderRouting | undefined;
   fallbackModels?: FallbackModels | undefined;
+  // Per-capability OpenRouter reasoning effort (issue #125). Defaults to {} — a capability with no
+  // entry gets no `reasoning` key, so with nothing configured every request stays byte-identical.
+  reasoningEffort: Partial<Record<Capability, ReasoningEffort>>;
   maxPrs: number;
   maxSessions: number | null;
   // Cap on CI-fix passes per PR group before it blocks. Default DEFAULT_MAX_CI_FIX_ATTEMPTS. #128.

@@ -194,13 +194,16 @@ const ALLOWED_PROFILE_ROOT_KEYS: ReadonlySet<string> = new Set([
   'models',
   'providerRouting',
   'fallbackModels',
+  'reasoningEffort',
 ]);
 // Roots that take exactly one nested segment (`models.<tier>`, `providerRouting.<field>`,
-// `fallbackModels.<tier>`); every other allowed key is a bare scalar (issue #124).
+// `fallbackModels.<tier>`, `reasoningEffort.<tier>`); every other allowed key is a bare scalar
+// (issues #124, #125).
 const ONE_LEVEL_NESTING_ROOTS: ReadonlySet<string> = new Set([
   'models',
   'providerRouting',
   'fallbackModels',
+  'reasoningEffort',
 ]);
 // Reserved object keys that would let a dotted path reach Object.prototype before the schema
 // runs — rejected outright to close a prototype-pollution vector in setDotted().
@@ -211,7 +214,7 @@ const FORBIDDEN_KEY_SEGMENTS: ReadonlySet<string> = new Set([
 ]);
 
 const KEY_SURFACE_HINT =
-  'Allowed keys: openrouterApiKey, baseURL, models.<tier>, providerRouting.<field>, fallbackModels.<tier>.';
+  'Allowed keys: openrouterApiKey, baseURL, models.<tier>, providerRouting.<field>, fallbackModels.<tier>, reasoningEffort.<tier>.';
 
 // Parse and validate a profile key path. Enforces the documented key surface and rejects
 // dangerous segments, so neither `set` nor `get` can mutate prototypes or write off-schema.

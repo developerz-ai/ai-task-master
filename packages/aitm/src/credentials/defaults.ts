@@ -21,3 +21,12 @@ export const DEFAULT_MODELS: Record<Capability, string> = {
   smart: 'anthropic/claude-opus-4.7',
   coding: 'anthropic/claude-opus-4.7',
 };
+
+// Recommended reasoning-effort tiers (issue #125) — DOCUMENTED, not defaulted. Shipping a default
+// effort would change request bytes for every existing user and push a `reasoning` param to
+// endpoints that may reject it (custom baseURL, non-reasoning models). Opt in via
+// `reasoningEffort.<tier>` (see docs/config.md):
+//   smart  → high   : plan/review mistakes cost a whole run leg — effort is the cheapest quality lever
+//   coding → medium : quality/volume balance on the Worker's editor fanout, the highest-traffic tier
+//   fast   → none   : routing/summarization needs no deliberation
+//   generic         : unset — effort has no generic-fallback semantics (unlike models.generic)

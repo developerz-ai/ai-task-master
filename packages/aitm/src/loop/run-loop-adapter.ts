@@ -84,13 +84,18 @@ import {
 // supplies them. aitm is MCP-first, but a bare `aitm start` (no `mcpServers` configured) must
 // still be able to read, search, edit, commit and open a PR — so it uses the compat lib's
 // tools, scoped to the active worktree.
+// A reminder provider that surfaces the tracker's stale set on a file tool's result (issue #106): a
+// file changed on disk since the model read it yields one file-changed-externally note on the next
+// successful file-tool result. Shared by localEditTools and localReadTools.
+function makeStaleReminderProvider(fileState: FileStateTracker, cwd: string): ReminderProvider {
+  return () => staleFileReminders(fileState, cwd);
+}
+
 export function localEditTools(cwd: string): WorkerTools {
   // One FileStateTracker per tool set (per subagent invocation) so read-before-edit enforcement is
   // scoped to a single run — the four file tools share it (issue #104).
   const fileState = new FileStateTracker();
-  // The four file-state tools carry a stale-read reminder on their model-visible result: a file
-  // changed on disk since the model read it surfaces one file-changed-externally note (issue #106).
-  const staleReminders: ReminderProvider = () => staleFileReminders(fileState, cwd);
+  const staleReminders = makeStaleReminderProvider(fileState, cwd);
   return {
     readFile: withReminders(readFileTool({ cwd, fileState }), staleReminders),
     writeFile: withReminders(writeFileTool({ cwd, fileState }), staleReminders),
@@ -106,7 +111,7 @@ export function localEditTools(cwd: string): WorkerTools {
 // Read-only subset for the Planner — survey the repo without write/edit/bash.
 export function localReadTools(cwd: string): PlannerTools {
   const fileState = new FileStateTracker();
-  const staleReminders: ReminderProvider = () => staleFileReminders(fileState, cwd);
+  const staleReminders = makeStaleReminderProvider(fileState, cwd);
   return {
     readFile: withReminders(readFileTool({ cwd, fileState }), staleReminders),
     grep: grepTool({ cwd }),

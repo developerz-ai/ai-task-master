@@ -94,6 +94,33 @@ test('withReminders: a wrapped tool defining its own toModelOutput is composed o
   });
 });
 
+test('withReminders: error-variant bases (from a wrapped toModelOutput) render into the content variant with the reminder appended', async () => {
+  const bases = [
+    { base: { type: 'error-text' as const, value: 'boom' }, text: 'boom' },
+    { base: { type: 'error-json' as const, value: { e: 1 } }, text: JSON.stringify({ e: 1 }) },
+    { base: { type: 'execution-denied' as const, reason: 'nope' }, text: 'nope' },
+  ];
+  for (const { base, text } of bases) {
+    const wrapped = tool({
+      description: 'returns an error-shaped base',
+      inputSchema: z.object({ path: z.string() }),
+      execute: async () => ({ raw: 1 }),
+      toModelOutput: () => base,
+    });
+    const rendered = await withReminders(wrapped, () => ['r']).toModelOutput?.({
+      ...CTX,
+      output: { raw: 1 },
+    });
+    assert.deepEqual(rendered, {
+      type: 'content',
+      value: [
+        { type: 'text', text },
+        { type: 'text', text: '<system-reminder>\nr\n</system-reminder>' },
+      ],
+    });
+  }
+});
+
 // --- withReminders: no-op and fail-open paths ---
 
 test('withReminders: empty provider result → rendering identical to the undecorated tool', async () => {

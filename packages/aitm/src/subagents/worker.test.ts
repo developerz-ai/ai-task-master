@@ -136,6 +136,42 @@ test('WORKER_SYSTEM_PREFIX mentions FileManifest + the two phases', () => {
   assert.match(WORKER_SYSTEM_PREFIX, /Phase 2/);
 });
 
+test('runWorker: prepends the contextBlock to the manifest (first user) message, ahead of the task text (issue #106)', async () => {
+  let sent = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      // Call 0 is the manifest agent; capture its first user message.
+      if (sent === '') sent = JSON.stringify(opts.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  await runWorker(agent, {
+    ...baseInput(),
+    contextBlock: '<system-reminder>\nWORKER-CTX\n</system-reminder>',
+  });
+  assert.match(sent, /WORKER-CTX/, 'the context block reached the manifest message');
+  // "PR group:" (with the colon) is unique to the manifest user message; the bare phrase also
+  // appears in the system prompt.
+  assert.ok(
+    sent.indexOf('WORKER-CTX') < sent.indexOf('PR group:'),
+    'the context block leads, ahead of the task text',
+  );
+});
+
 test('WORKER_SYSTEM_PREFIX carries the compaction continuation contract (issue #102)', () => {
   assert.match(WORKER_SYSTEM_PREFIX, /summarized/i);
   assert.match(WORKER_SYSTEM_PREFIX, /continue the task from that summary/i);

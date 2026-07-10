@@ -83,7 +83,12 @@ function appendReminders(base: ToolResultOutput, reminders: readonly string[]): 
 }
 
 // Render a non-text, non-content base as a single text string for embedding in the `content` variant.
-function nonContentBaseAsText(base: ToolResultOutput): string {
+// The param excludes text/content (handled upstream) so the `never` guard forces a compile error if
+// a future `ai` release adds a ToolResultOutput variant — this type is derived indirectly (above),
+// so a silent `default` would otherwise drop the new content.
+function nonContentBaseAsText(
+  base: Exclude<ToolResultOutput, { type: 'text' | 'content' }>,
+): string {
   switch (base.type) {
     case 'json':
     case 'error-json':
@@ -93,6 +98,9 @@ function nonContentBaseAsText(base: ToolResultOutput): string {
     case 'execution-denied':
       return base.reason ?? 'tool execution denied';
     default:
+      // Compile-time exhaustiveness: a new `ai` variant makes `base` non-`never` here → a type
+      // error, not a silent drop. Runtime stays fail-open (empty string) if one ever slips through.
+      base satisfies never;
       return '';
   }
 }

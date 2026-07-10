@@ -16,14 +16,15 @@ import { DEFAULT_MODELS } from './defaults.ts';
 // the submit-tool-based subagents at random — always excluded (issue #124, originally the point fix).
 const ALWAYS_IGNORE_PROVIDER = 'amazon-bedrock';
 
-// Build the OpenRouter chat settings for one call (issues #124, #125). Pure + exported for
-// testability, and the single settings-construction path: #109 composes `cache_control` into this
-// SAME object rather than adding a parallel builder. `modelId` is unused — routing and reasoning key
-// off the requested capability, not the resolved model id (a capability served through the
-// fallback chain still gets that capability's settings). With nothing configured the result is
+// Build the OpenRouter chat settings for one call (issues #124, #125, #109). Pure + exported for
+// testability, and the single settings-construction path — routing, per-capability fallback models,
+// reasoning effort, and prompt caching all compose into this ONE object rather than parallel
+// builders. `capability` selects the routing/reasoning/fallback settings (a capability served
+// through the model fallback chain still gets that capability's settings). Caching is gated on the
+// RESOLVED id AND the endpoint. With nothing configured and a non-Anthropic id the result is
 // byte-identical to the historical `{ provider: { ignore: ['amazon-bedrock'] } }`.
 export function chatSettings(
-  _modelId: string,
+  modelId: string,
   capability: Capability,
   resolved: ResolvedConfig,
 ): OpenRouterChatSettings {
@@ -41,10 +42,20 @@ export function chatSettings(
   };
   const fallback = resolved.fallbackModels?.[capability];
   const effort = resolved.reasoningEffort?.[capability];
+  // `cache_control` is an OpenRouter request-body directive enabling Anthropic automatic prompt
+  // caching. It only makes sense talking to OpenRouter itself, and only for anthropic/* routes:
+  //   - gated on the RESOLVED id, so an anthropic override on any tier is cached and a non-Anthropic
+  //     override on a default tier is not;
+  //   - suppressed when a custom `baseURL` is set — a self-hosted / z.ai / proxy endpoint is not
+  //     OpenRouter and would receive an unknown field, so those requests stay byte-identical (#109
+  //     spec bullet 3). TTL unset → provider default 5m; below the min cacheable prefix it is a
+  //     silent no-op.
+  const cacheable = modelId.startsWith('anthropic/') && !resolved.baseURL;
   return {
     provider,
     ...(fallback !== undefined ? { models: fallback } : {}),
     ...(effort !== undefined ? { reasoning: { effort } } : {}),
+    ...(cacheable ? { cache_control: { type: 'ephemeral' as const } } : {}),
   };
 }
 

@@ -27,11 +27,14 @@ function modelIdOf(handle: LanguageModel): string {
 
 // --- chatSettings (issue #124) ---
 
-test('chatSettings: nothing configured → byte-identical to the historical bedrock-ignore default', () => {
-  const s = chatSettings('anthropic/x', 'coding', baseResolved());
+test('chatSettings: nothing configured + non-Anthropic id → byte-identical to the historical default', () => {
+  // Post-#109 the byte-identical guarantee holds for non-Anthropic routes; an anthropic/* id adds
+  // cache_control (covered below).
+  const s = chatSettings('openai/gpt-5', 'coding', baseResolved());
   assert.deepEqual(s, { provider: { ignore: ['amazon-bedrock'] } });
-  // Explicit key-absence: only `ignore` under provider, and no `models`.
+  // Explicit key-absence: only `ignore` under provider, no `models`, no `cache_control`.
   assert.ok(!('models' in s), 'no fallback models key');
+  assert.ok(!('cache_control' in s), 'no caching for non-Anthropic id');
   assert.deepEqual(Object.keys(s.provider ?? {}), ['ignore'], 'no unconfigured routing keys');
 });
 
@@ -148,6 +151,71 @@ test('chatSettings: routing (#124) and reasoning (#125) coexist in one object fr
   });
   assert.deepEqual(s.models, ['a/x']);
   assert.deepEqual(s.reasoning, { effort: 'medium' });
+});
+
+// --- chatSettings prompt caching (issue #109) ---
+
+test('chatSettings: every DEFAULT_MODELS (anthropic/*) id enables ephemeral prompt caching', () => {
+  for (const modelId of Object.values(DEFAULT_MODELS)) {
+    const s = chatSettings(modelId, 'coding', baseResolved());
+    assert.deepEqual(s.cache_control, { type: 'ephemeral' }, `${modelId} cached`);
+    // Coexists with the always-on bedrock ignore.
+    assert.deepEqual(s.provider?.ignore, ['amazon-bedrock']);
+  }
+});
+
+test('chatSettings: a non-Anthropic id has no cache_control key (absence, not undefined)', () => {
+  const s = chatSettings('openai/gpt-5', 'smart', baseResolved());
+  assert.equal('cache_control' in s, false);
+});
+
+test('chatSettings: caching gates on the RESOLVED id — anthropic override cached, non-anthropic not', () => {
+  // The helper is called with whatever modelForCapability resolved, so an override flips caching.
+  assert.deepEqual(chatSettings('anthropic/custom-opus', 'coding', baseResolved()).cache_control, {
+    type: 'ephemeral',
+  });
+  assert.equal('cache_control' in chatSettings('mistralai/large', 'coding', baseResolved()), false);
+});
+
+test('chatSettings: a custom baseURL suppresses caching even for an anthropic/* id (issue #109)', () => {
+  // cache_control is an OpenRouter-only directive; a custom endpoint (z.ai, self-hosted, proxy) is
+  // not OpenRouter, so the request must stay byte-identical to today's.
+  const cfg = baseResolved({ baseURL: 'https://api.z.ai/api/coding/paas/v4' });
+  const s = chatSettings('anthropic/claude-opus-4.7', 'coding', cfg);
+  assert.equal('cache_control' in s, false, 'no caching on a custom endpoint');
+  assert.deepEqual(
+    s,
+    { provider: { ignore: ['amazon-bedrock'] } },
+    'byte-identical on custom baseURL',
+  );
+});
+
+test('chatSettings: caching composes with routing/fallback/reasoning in one object (issues #124/#125/#109)', () => {
+  const s = chatSettings(
+    'anthropic/claude-opus-4.7',
+    'coding',
+    baseResolved({
+      providerRouting: { sort: 'throughput' },
+      fallbackModels: { coding: ['anthropic/backup'] },
+      reasoningEffort: { coding: 'medium' },
+    }),
+  );
+  assert.deepEqual(s.cache_control, { type: 'ephemeral' });
+  assert.deepEqual(s.models, ['anthropic/backup']);
+  assert.deepEqual(s.reasoning, { effort: 'medium' });
+  assert.equal(s.provider?.sort, 'throughput');
+});
+
+test('modelForCapability routes through chatSettings so default (anthropic) handles are cached', () => {
+  // No provider internals mocked: assert the exported helper the constructor uses would cache each
+  // default tier. modelForCapability builds the handle from exactly this settings object.
+  const creds = new Credentials(baseResolved());
+  for (const capability of ['generic', 'smart', 'coding', 'fast'] as const) {
+    const id = creds.modelIdForCapability(capability);
+    assert.deepEqual(chatSettings(id, capability, baseResolved()).cache_control, {
+      type: 'ephemeral',
+    });
+  }
 });
 
 test('ROLE_CAPABILITY maps every role to a tier', () => {

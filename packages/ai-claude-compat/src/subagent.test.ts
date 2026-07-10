@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { ToolLoopAgent, tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
@@ -79,14 +82,24 @@ function agentFor(model: MockLanguageModelV3): ToolLoopAgent<never, Record<strin
   );
 }
 
-// --- composeSystemPrompt (unchanged) ---
+// --- composeSystemPrompt ---
 
-test('composeSystemPrompt: style + prefix + an <env> block (string cwd defaults to git repo)', () => {
-  const out = composeSystemPrompt('STYLE', '\nROLE', '/work/tree');
+test('composeSystemPrompt: style + prefix + an <env> block; the string cwd detects the git flag (issue #116)', () => {
+  // The test runs inside this repo, so the string cwd resolves to a real git repo → Yes.
+  const out = composeSystemPrompt('STYLE', '\nROLE', process.cwd());
   assert.match(out, /^STYLE\nROLE\n/);
   assert.match(out, /<env>/);
-  assert.match(out, /Working directory: \/work\/tree/);
+  assert.ok(out.includes(`Working directory: ${process.cwd()}`));
   assert.match(out, /Is directory a git repo: Yes/);
+});
+
+test('composeSystemPrompt: a non-git cwd renders "No" — the string shorthand no longer hardcodes Yes (issue #116)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-nogit-'));
+  try {
+    assert.match(composeSystemPrompt('S', 'R', dir), /Is directory a git repo: No/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('composeSystemPrompt: accepts a full EnvInfo', () => {

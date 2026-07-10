@@ -20,7 +20,7 @@ import {
   type ToolSet,
 } from 'ai';
 import type { z } from 'zod';
-import { type EnvInfo, envBlock } from './env-block.ts';
+import { detectGitRepo, type EnvInfo, envBlock } from './env-block.ts';
 
 // The tool a subagent calls to deliver its final structured result.
 export const SUBMIT_TOOL_NAME = 'submit';
@@ -34,8 +34,12 @@ export function composeSystemPrompt(
   rolePrefix: string,
   env: string | EnvInfo,
 ): string {
-  const info: EnvInfo = typeof env === 'string' ? { cwd: env, isGitRepo: true } : env;
-  return `${style}${rolePrefix}\n${envBlock(info)}`;
+  const info: EnvInfo = typeof env === 'string' ? { cwd: env } : env;
+  // Detect the git flag rather than asserting it — the string shorthand (every production call site)
+  // and a full EnvInfo that leaves isGitRepo unset both resolve it from the cwd (issue #116).
+  const resolved: EnvInfo =
+    info.isGitRepo === undefined ? { ...info, isGitRepo: detectGitRepo(info.cwd) } : info;
+  return `${style}${rolePrefix}\n${envBlock(resolved)}`;
 }
 
 export type SubagentConfig<TOOLS extends ToolSet> = {

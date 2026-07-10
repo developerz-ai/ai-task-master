@@ -1,4 +1,13 @@
 // Timing constants for the CI-fix and merge-pr loops.
+//
+// Prompt-cache pacing economics (issue #109, NOT yet load-bearing): once a subagent transcript is
+// held across one of these waits, the delay must respect the Anthropic prompt cache's 5-minute TTL.
+// A wait that holds a cached prefix should either stay comfortably inside the TTL (≤ 270_000 ms — the
+// next request still hits the cache) or accept and amortize a full cache miss (≥ 1_200_000 ms). A
+// delay just past the TTL (≈ 300_000 ms) is the worst case: the prefix is re-written at full cost
+// with almost none of the wait amortized — never choose it. This does not bind today: every sleep
+// below runs BETWEEN fresh subagent contexts, so there is no held prefix to protect and no value
+// changes here. It becomes load-bearing when transcripts persist across waits.
 
 export const CI_POLL_INTERVAL = 10_000; // ms: wait between checks during CI poll
 export const CI_START_WAIT = 60_000; // ms: wait before polling CI after push

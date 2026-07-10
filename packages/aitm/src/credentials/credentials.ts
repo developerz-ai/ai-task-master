@@ -16,14 +16,15 @@ import { DEFAULT_MODELS } from './defaults.ts';
 // the submit-tool-based subagents at random — always excluded (issue #124, originally the point fix).
 const ALWAYS_IGNORE_PROVIDER = 'amazon-bedrock';
 
-// Build the OpenRouter chat settings for one call (issues #124, #125). Pure + exported for
-// testability, and the single settings-construction path: #109 composes `cache_control` into this
-// SAME object rather than adding a parallel builder. `modelId` is unused — routing and reasoning key
-// off the requested capability, not the resolved model id (a capability served through the
-// fallback chain still gets that capability's settings). With nothing configured the result is
+// Build the OpenRouter chat settings for one call (issues #124, #125, #109). Pure + exported for
+// testability, and the single settings-construction path — routing, per-capability fallback models,
+// reasoning effort, and prompt caching all compose into this ONE object rather than parallel
+// builders. `capability` selects the routing/reasoning/fallback settings (a capability served
+// through the model fallback chain still gets that capability's settings); `modelId` gates prompt
+// caching, which is Anthropic-only. With nothing configured and a non-Anthropic id the result is
 // byte-identical to the historical `{ provider: { ignore: ['amazon-bedrock'] } }`.
 export function chatSettings(
-  _modelId: string,
+  modelId: string,
   capability: Capability,
   resolved: ResolvedConfig,
 ): OpenRouterChatSettings {
@@ -45,6 +46,11 @@ export function chatSettings(
     provider,
     ...(fallback !== undefined ? { models: fallback } : {}),
     ...(effort !== undefined ? { reasoning: { effort } } : {}),
+    // OpenRouter enables Anthropic automatic prompt caching from this top-level directive — only on
+    // anthropic/* routes. Gated on the RESOLVED id so an anthropic override on any tier is cached
+    // and a non-Anthropic override on a default tier is not. TTL unset → provider default 5m. Below
+    // Anthropic's minimum cacheable prefix it is a silent no-op (issue #109).
+    ...(modelId.startsWith('anthropic/') ? { cache_control: { type: 'ephemeral' as const } } : {}),
   };
 }
 

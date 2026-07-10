@@ -177,6 +177,19 @@ test('chatSettings: caching gates on the RESOLVED id — anthropic override cach
   assert.equal('cache_control' in chatSettings('mistralai/large', 'coding', baseResolved()), false);
 });
 
+test('chatSettings: a custom baseURL suppresses caching even for an anthropic/* id (issue #109)', () => {
+  // cache_control is an OpenRouter-only directive; a custom endpoint (z.ai, self-hosted, proxy) is
+  // not OpenRouter, so the request must stay byte-identical to today's.
+  const cfg = baseResolved({ baseURL: 'https://api.z.ai/api/coding/paas/v4' });
+  const s = chatSettings('anthropic/claude-opus-4.7', 'coding', cfg);
+  assert.equal('cache_control' in s, false, 'no caching on a custom endpoint');
+  assert.deepEqual(
+    s,
+    { provider: { ignore: ['amazon-bedrock'] } },
+    'byte-identical on custom baseURL',
+  );
+});
+
 test('chatSettings: caching composes with routing/fallback/reasoning in one object (issues #124/#125/#109)', () => {
   const s = chatSettings(
     'anthropic/claude-opus-4.7',

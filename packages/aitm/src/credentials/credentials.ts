@@ -20,8 +20,8 @@ const ALWAYS_IGNORE_PROVIDER = 'amazon-bedrock';
 // testability, and the single settings-construction path — routing, per-capability fallback models,
 // reasoning effort, and prompt caching all compose into this ONE object rather than parallel
 // builders. `capability` selects the routing/reasoning/fallback settings (a capability served
-// through the model fallback chain still gets that capability's settings); `modelId` gates prompt
-// caching, which is Anthropic-only. With nothing configured and a non-Anthropic id the result is
+// through the model fallback chain still gets that capability's settings). Caching is gated on the
+// RESOLVED id AND the endpoint. With nothing configured and a non-Anthropic id the result is
 // byte-identical to the historical `{ provider: { ignore: ['amazon-bedrock'] } }`.
 export function chatSettings(
   modelId: string,
@@ -42,15 +42,20 @@ export function chatSettings(
   };
   const fallback = resolved.fallbackModels?.[capability];
   const effort = resolved.reasoningEffort?.[capability];
+  // `cache_control` is an OpenRouter request-body directive enabling Anthropic automatic prompt
+  // caching. It only makes sense talking to OpenRouter itself, and only for anthropic/* routes:
+  //   - gated on the RESOLVED id, so an anthropic override on any tier is cached and a non-Anthropic
+  //     override on a default tier is not;
+  //   - suppressed when a custom `baseURL` is set — a self-hosted / z.ai / proxy endpoint is not
+  //     OpenRouter and would receive an unknown field, so those requests stay byte-identical (#109
+  //     spec bullet 3). TTL unset → provider default 5m; below the min cacheable prefix it is a
+  //     silent no-op.
+  const cacheable = modelId.startsWith('anthropic/') && !resolved.baseURL;
   return {
     provider,
     ...(fallback !== undefined ? { models: fallback } : {}),
     ...(effort !== undefined ? { reasoning: { effort } } : {}),
-    // OpenRouter enables Anthropic automatic prompt caching from this top-level directive — only on
-    // anthropic/* routes. Gated on the RESOLVED id so an anthropic override on any tier is cached
-    // and a non-Anthropic override on a default tier is not. TTL unset → provider default 5m. Below
-    // Anthropic's minimum cacheable prefix it is a silent no-op (issue #109).
-    ...(modelId.startsWith('anthropic/') ? { cache_control: { type: 'ephemeral' as const } } : {}),
+    ...(cacheable ? { cache_control: { type: 'ephemeral' as const } } : {}),
   };
 }
 

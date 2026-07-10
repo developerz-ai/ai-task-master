@@ -19,7 +19,8 @@ import type { Capability } from '../config/schema.ts';
 // built with `cache_control: { type: 'ephemeral' }` — the stable prefix (system prompt + tool defs,
 // re-sent every step of a multi-step run) bills at the cached rate. OpenRouter's automatic caching
 // is Anthropic-only, so a user override to a non-anthropic/* id on any tier drops caching for that
-// tier (byte-identical to pre-#109); an anthropic/* override on any tier keeps it.
+// tier (byte-identical to pre-#109); an anthropic/* override on any tier keeps it. Setting a custom
+// `baseURL` (a non-OpenRouter endpoint) also drops caching — cache_control is an OpenRouter directive.
 export const DEFAULT_MODELS: Record<Capability, string> = {
   fast: 'anthropic/claude-haiku-4.5',
   generic: 'anthropic/claude-sonnet-4.6',

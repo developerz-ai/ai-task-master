@@ -62,6 +62,15 @@ test('ConfigFileSchema accepts bashRules and rejects an unknown action / empty p
   assert.throws(() => ConfigFileSchema.parse({ bashRules: [{ pattern: 'x', action: 'ask' }] }));
   assert.throws(() => ConfigFileSchema.parse({ bashRules: [{ pattern: '', action: 'deny' }] }));
   assert.throws(() => ConfigFileSchema.parse({ bashRules: [{ pattern: 'x' }] }));
+  // A whitespace-only pattern would split to zero tokens and silently never match — reject it (it is
+  // trimmed before the length check), so a deny rule can't fail open.
+  assert.throws(() => ConfigFileSchema.parse({ bashRules: [{ pattern: '   ', action: 'deny' }] }));
+  assert.equal(
+    ConfigFileSchema.parse({ bashRules: [{ pattern: '  git push  ', action: 'deny' }] })
+      .bashRules?.[0]?.pattern,
+    'git push',
+    'a valid pattern is trimmed',
+  );
 });
 
 test('ConfigFileSchema accepts formatCommand + verifyCommand as strings (issue #122)', () => {

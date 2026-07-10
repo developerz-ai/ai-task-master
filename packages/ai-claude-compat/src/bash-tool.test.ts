@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { execa } from 'execa';
 import { ProcessManager, type SpawnFn } from './background-process.ts';
-import { bashTool, MAX_BASH_OUTPUT_CHARS, multiBashTool } from './bash-tool.ts';
+import { type BashOutput, bashTool, MAX_BASH_OUTPUT_CHARS, multiBashTool } from './bash-tool.ts';
 
 async function tempDir(
   prefix = 'compat-bash-',
@@ -328,11 +328,9 @@ function recordingExec(): { exec: typeof execa; calls: string[] } {
   return { exec: stub as unknown as typeof execa, calls };
 }
 
-type DenyOut = { stdout: string; stderr: string; exitCode: number; denied?: boolean };
-
 test('bashTool: a denied command returns a typed denial (exit 126) without spawning (issue #113)', async () => {
   const rec = recordingExec();
-  const out = await run<{ command: string }, DenyOut>(
+  const out = await run<{ command: string }, BashOutput>(
     bashTool({
       cwd: '/w',
       exec: rec.exec,
@@ -350,7 +348,7 @@ test('bashTool: a denied command returns a typed denial (exit 126) without spawn
 
 test('bashTool: a command not matched by any rule runs normally; omitting rules is unchanged (issue #113)', async () => {
   const rec = recordingExec();
-  const out = await run<{ command: string }, DenyOut>(
+  const out = await run<{ command: string }, BashOutput>(
     bashTool({
       cwd: '/w',
       exec: rec.exec,

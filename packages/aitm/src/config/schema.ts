@@ -13,7 +13,9 @@ import { McpServersSchema } from '../mcp/schema.ts';
 // A model-facing bash deny/allow rule (issue #113). Structurally the compat CommandRule; the schema
 // validates config-file input and ResolvedConfig carries the compat type.
 export const CommandRuleSchema = z.object({
-  pattern: z.string().min(1),
+  // Trim before the length check: a whitespace-only pattern would split to zero tokens and silently
+  // never match — a fail-open deny rule. Reject it at config-parse time instead (issue #113).
+  pattern: z.string().trim().min(1),
   action: z.enum(['deny', 'allow']),
 });
 

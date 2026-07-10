@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -84,13 +84,19 @@ function agentFor(model: MockLanguageModelV3): ToolLoopAgent<never, Record<strin
 
 // --- composeSystemPrompt ---
 
-test('composeSystemPrompt: style + prefix + an <env> block; the string cwd detects the git flag (issue #116)', () => {
-  // The test runs inside this repo, so the string cwd resolves to a real git repo → Yes.
-  const out = composeSystemPrompt('STYLE', '\nROLE', process.cwd());
-  assert.match(out, /^STYLE\nROLE\n/);
-  assert.match(out, /<env>/);
-  assert.ok(out.includes(`Working directory: ${process.cwd()}`));
-  assert.match(out, /Is directory a git repo: Yes/);
+test('composeSystemPrompt: style + prefix + an <env> block; the string cwd detects the git flag (issue #116)', async () => {
+  // Hermetic: own temp dir with a real .git so the assertion doesn't depend on ambient checkout state.
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-git-'));
+  try {
+    await mkdir(join(dir, '.git'));
+    const out = composeSystemPrompt('STYLE', '\nROLE', dir);
+    assert.match(out, /^STYLE\nROLE\n/);
+    assert.match(out, /<env>/);
+    assert.ok(out.includes(`Working directory: ${dir}`));
+    assert.match(out, /Is directory a git repo: Yes/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('composeSystemPrompt: a non-git cwd renders "No" — the string shorthand no longer hardcodes Yes (issue #116)', async () => {

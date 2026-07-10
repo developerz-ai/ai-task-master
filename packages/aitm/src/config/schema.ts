@@ -6,8 +6,18 @@
 //   coding  — code generation / edits (Worker)
 //   fast    — cheap routing / summarization (Orchestrator, toModelOutput compaction)
 
+import type { CommandRule } from '@developerz.ai/ai-claude-compat';
 import { z } from 'zod';
 import { McpServersSchema } from '../mcp/schema.ts';
+
+// A model-facing bash deny/allow rule (issue #113). Structurally the compat CommandRule; the schema
+// validates config-file input and ResolvedConfig carries the compat type.
+export const CommandRuleSchema = z.object({
+  // Trim before the length check: a whitespace-only pattern would split to zero tokens and silently
+  // never match — a fail-open deny rule. Reject it at config-parse time instead (issue #113).
+  pattern: z.string().trim().min(1),
+  action: z.enum(['deny', 'allow']),
+});
 
 export const CapabilityModelsSchema = z
   .object({
@@ -85,6 +95,9 @@ export const ConfigFileSchema = z
     // Per-repo PR body section headings (each a `## ` heading, in order). Unset → the default
     // Summary/Changes/Testing. See src/orchestrator/orchestrator.ts §resolvePrBodySections.
     prBodySections: z.array(z.string()).optional(),
+    // Deny/allow rules for the model-facing bash tool (issue #113). Resolved wholesale (project over
+    // global) and appended before the built-in destructive-command defaults; first-match-wins.
+    bashRules: z.array(CommandRuleSchema).optional(),
     // External MCP servers to mount into subagent tool surfaces (client only — aitm is never
     // exposed as an MCP server). See docs/mcp.md and src/mcp/schema.ts.
     mcpServers: McpServersSchema.optional(),
@@ -139,6 +152,9 @@ export type ResolvedConfig = {
   allowForcePush: boolean;
   // Per-repo PR body section headings. Undefined → orchestrator uses its default set.
   prBodySections?: readonly string[] | undefined;
+  // Effective bash deny/allow rules: configured rules (project over global) followed by the built-in
+  // destructive-command defaults, so every consumer sees one final first-match-wins list (issue #113).
+  bashRules: readonly CommandRule[];
   // Merged MCP server map across all discovered sources (see ConfigLoader.resolve for
   // precedence). Empty object when nothing was found — never undefined, so callers can
   // iterate without null-checks.

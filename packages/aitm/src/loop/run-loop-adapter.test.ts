@@ -533,6 +533,23 @@ test('localEditTools supplies worktree-scoped readFile/writeFile/bash (no-MCP fa
   assert.equal(typeof tools.bash.execute, 'function');
 });
 
+test('localEditTools: threads bash deny/allow rules into the bash + multiBash tools (issue #113)', async () => {
+  const tools = localEditTools('/tmp/wt', [{ pattern: 'git push --force*', action: 'deny' }]);
+  const opts = { toolCallId: 't', messages: [] as never[] };
+  const bashOut = (await tools.bash.execute?.({ command: 'git push --force' }, opts)) as {
+    exitCode: number;
+    denied?: boolean;
+  };
+  assert.equal(bashOut.exitCode, 126);
+  assert.equal(bashOut.denied, true);
+  const multiOut = (await tools.multiBash.execute?.({ commands: ['git push --force'] }, opts)) as {
+    failedAt: number | null;
+    exitCode: number;
+  };
+  assert.equal(multiOut.failedAt, 0);
+  assert.equal(multiOut.exitCode, 126);
+});
+
 // Flatten a tool-result rendering to text for reminder assertions.
 function renderedText(rendered: unknown): string {
   const r = rendered as { type: string; value: unknown };

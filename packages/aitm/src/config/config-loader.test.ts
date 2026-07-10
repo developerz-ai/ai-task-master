@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
-import { ConfigLoader } from './config-loader.ts';
+import { ConfigLoader, DEFAULT_BASH_RULES } from './config-loader.ts';
 
 type Temp = { path: string; cleanup: () => Promise<void> };
 
@@ -44,6 +44,11 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     assert.equal(resolved.maxPrs, 5);
     assert.equal(resolved.maxSessions, null);
     assert.equal(resolved.maxCiFixAttempts, 3);
+    assert.deepEqual(
+      resolved.bashRules,
+      DEFAULT_BASH_RULES,
+      'defaults only when nothing configured',
+    );
     assert.equal(resolved.llmStepTimeoutMs, 900_000);
     assert.equal(resolved.autoMerge, true);
     assert.equal(resolved.mergeMethod, 'squash');
@@ -307,6 +312,39 @@ test('resolve: llmStepTimeoutMs follows project > global > default (config-only,
     // Project wins over global.
     await writeProjectConfig(cwd.path, { maxPrs: 1, llmStepTimeoutMs: 120_000 });
     assert.equal((await loader.resolve({})).llmStepTimeoutMs, 120_000);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: bashRules = configured (project over global, wholesale) then the built-in defaults (issue #113)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-global',
+      bashRules: [{ pattern: 'rm -rf *', action: 'deny' }],
+    });
+    const loader = new ConfigLoader(cwd.path, home.path, {});
+
+    // Global rules precede the defaults.
+    assert.deepEqual((await loader.resolve({})).bashRules, [
+      { pattern: 'rm -rf *', action: 'deny' },
+      ...DEFAULT_BASH_RULES,
+    ]);
+
+    // Project rules REPLACE global wholesale, then the defaults follow.
+    await writeProjectConfig(cwd.path, {
+      bashRules: [{ pattern: 'git push --force*', action: 'allow' }],
+    });
+    const resolved = await loader.resolve({});
+    assert.deepEqual(resolved.bashRules, [
+      { pattern: 'git push --force*', action: 'allow' },
+      ...DEFAULT_BASH_RULES,
+    ]);
+    // The project allow sits before the default deny → first-match-wins lets the repo opt in.
+    assert.equal(resolved.bashRules[0]?.action, 'allow');
   } finally {
     await home.cleanup();
     await cwd.cleanup();

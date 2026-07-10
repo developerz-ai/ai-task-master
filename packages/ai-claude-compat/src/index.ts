@@ -29,6 +29,11 @@ export {
   multiBashTool,
 } from './bash-tool.ts';
 export {
+  type CommandDecision,
+  type CommandRule,
+  evaluateCommand,
+} from './command-rules.ts';
+export {
   applyEdit,
   type EditFileInput,
   type EditFileOutput,

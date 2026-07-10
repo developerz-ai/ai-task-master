@@ -17,7 +17,7 @@ import {
 } from '@developerz.ai/ai-claude-compat';
 import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../plan/schema.ts';
-import type { SubagentInit } from './factory.ts';
+import { prependContextBlock, type SubagentInit } from './factory.ts';
 
 export type PlannerAgent = ToolLoopAgent<never, PlannerTools>;
 
@@ -34,6 +34,9 @@ export type PlannerInput = {
   criteria?: string;
   styleContents: string;
   maxPrs: number;
+  // Optional harness context block (a `<system-reminder>` envelope) prepended to the first user
+  // message — target-repo instructions + current date, framed as advisory context (issue #106).
+  contextBlock?: string;
 };
 
 export type PlannerResult =
@@ -110,7 +113,7 @@ function buildUserPrompt(input: PlannerInput): string {
   }
   lines.push(`maxPrs: ${input.maxPrs}`);
   lines.push('Survey the repo with the read-only tools, then call submit with the Plan.');
-  return lines.join('\n');
+  return prependContextBlock(input.contextBlock, lines.join('\n'));
 }
 
 // Truncate to maxPrs groups; fold any overflow into a single remainder task on

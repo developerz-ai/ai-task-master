@@ -5,7 +5,11 @@
 // real stack end-to-end.
 
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { SYSTEM_REMINDER_CONTRACT } from '@developerz.ai/ai-claude-compat';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { RunLoopInput } from '../cli/commands.ts';
 import { Credentials } from '../credentials/credentials.ts';
@@ -21,10 +25,12 @@ import {
   branchFor,
   defaultMakeOrchestrator,
   githubThreadTool,
+  harnessContextBlock,
   localEditTools,
   type PlanGroupsOutcome,
   planToPrGroups,
   type RunLoopAdapterSeams,
+  reminderAgentSystemPrompt,
   runLoopAdapter,
   sanitizeBranchComponent,
 } from './run-loop-adapter.ts';
@@ -525,6 +531,66 @@ test('localEditTools supplies worktree-scoped readFile/writeFile/bash (no-MCP fa
   assert.equal(typeof tools.readFile.execute, 'function');
   assert.equal(typeof tools.writeFile.execute, 'function');
   assert.equal(typeof tools.bash.execute, 'function');
+});
+
+// Flatten a tool-result rendering to text for reminder assertions.
+function renderedText(rendered: unknown): string {
+  const r = rendered as { type: string; value: unknown };
+  if (r.type === 'text') return r.value as string;
+  if (r.type === 'content') {
+    return (r.value as Array<{ type: string; text?: string }>)
+      .map((p) => (p.type === 'text' ? (p.text ?? '') : ''))
+      .join('\n');
+  }
+  return JSON.stringify(r.value);
+}
+
+test('localEditTools: a file changed on disk after its Read surfaces one file-changed reminder on the next file-tool result (issue #106)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-reminder-'));
+  try {
+    await writeFile(join(dir, 'a.ts'), 'v1', 'utf8');
+    const tools = localEditTools(dir);
+    const opts = { toolCallId: 't', messages: [] as never[] };
+    // Model reads A (the tracker records its content hash).
+    await tools.readFile.execute?.({ path: 'a.ts' }, opts);
+    // A is modified on disk out from under the model.
+    await writeFile(join(dir, 'a.ts'), 'v2-changed-on-disk', 'utf8');
+    // An edit against the since-changed file is rejected (read-before-edit staleness, #104) — the
+    // rejection is what flags A stale in the tracker.
+    await assert.rejects(
+      tools.editFile.execute?.(
+        { path: 'a.ts', oldString: 'v2-changed-on-disk', newString: 'x' },
+        opts,
+      ) as Promise<unknown>,
+      /modified since you read it/,
+    );
+    // The next successful file-tool result now carries exactly one file-changed-externally envelope.
+    const rendered = await tools.readFile.toModelOutput?.({
+      toolCallId: 't2',
+      input: { path: 'b.ts' },
+      output: '1\tcontents of b',
+    });
+    const text = renderedText(rendered);
+    assert.equal((text.match(/<system-reminder>/g) ?? []).length, 1, 'exactly one envelope');
+    assert.match(text, /a\.ts was modified on disk since you last read it/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('harnessContextBlock: one envelope carrying the claudeMd and currentDate sections (issue #106)', () => {
+  const block = harnessContextBlock('# House style\n- single quotes only');
+  assert.equal((block.match(/<system-reminder>/g) ?? []).length, 1, 'single envelope');
+  assert.match(block, /# claudeMd\n# House style\n- single quotes only/);
+  assert.match(block, /# currentDate\n\d{4}-\d{2}-\d{2}/);
+  assert.match(block, /may or may not be relevant/);
+});
+
+test('reminderAgentSystemPrompt: appends the provenance contract to the base system prompt (issue #106)', () => {
+  const prompt = reminderAgentSystemPrompt('# style', '\n## Role: Planner', '/repo');
+  assert.match(prompt, /# style/, 'carries the style payload');
+  assert.match(prompt, /## Role: Planner/, 'carries the role prefix');
+  assert.ok(prompt.includes(SYSTEM_REMINDER_CONTRACT), 'carries the system-reminder contract');
 });
 
 // ---- githubThreadTool ------------------------------------------------------

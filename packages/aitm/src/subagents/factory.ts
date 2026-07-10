@@ -32,3 +32,10 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
 
 // Concrete factory implementations live next to each subagent: planner.ts, worker.ts, reviewer.ts.
 export type SubagentFactory<TInit, TAgent> = (init: TInit) => TAgent;
+
+// Prepend an optional harness context block (a `<system-reminder>` envelope from
+// compat's contextReminder) to a subagent's first user message, separated by a blank line. Unset →
+// the prompt is returned unchanged. Shared by the planner/worker/reviewer prompt builders (#106).
+export function prependContextBlock(contextBlock: string | undefined, prompt: string): string {
+  return contextBlock ? `${contextBlock}\n\n${prompt}` : prompt;
+}

@@ -48,7 +48,7 @@ import { generateText, stepCountIs, type Tool, type ToolLoopAgent, tool } from '
 import { z } from 'zod';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
-import type { SubagentInit } from './factory.ts';
+import { prependContextBlock, type SubagentInit } from './factory.ts';
 
 // The Claude-Code-style tool surface (from @developerz.ai/ai-claude-compat) the Worker drives:
 // read/write whole files, edit by exact string replace (single + atomic batch), and search the
@@ -103,6 +103,8 @@ export type WorkerInput = {
   // Optional structured logger. When set, one event is emitted per verify invocation (command,
   // exit code, duration, whether a fix pass followed). Mirrors FixSessionInput.logger (issue #122).
   logger?: LoggerLike;
+  // Optional harness context block prepended to the manifest (first user) message (issue #106).
+  contextBlock?: string;
 };
 
 // Per-file outcome from the parallel editor fanout. Useful to the Orchestrator
@@ -353,7 +355,7 @@ function buildManifestPrompt(input: WorkerInput): string {
     lines.push('', 'Rolling context from prior PRs:', input.rollingContext);
   }
   lines.push('', 'Survey the repo, then call submit with the FileManifest.');
-  return lines.join('\n');
+  return prependContextBlock(input.contextBlock, lines.join('\n'));
 }
 
 async function runEditor(

@@ -24,7 +24,7 @@ import {
 import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
-import type { SubagentInit } from './factory.ts';
+import { prependContextBlock, type SubagentInit } from './factory.ts';
 import type { WorkerTools } from './worker.ts';
 
 // Subset of GitHubClient methods exposed to the agent. Kept as a single discriminated tool so
@@ -64,6 +64,8 @@ export type ReviewerInput = {
   threads: ReviewThread[];
   worktreePath: string;
   styleContents: string;
+  // Optional harness context block prepended to each thread's first user message (issue #106).
+  contextBlock?: string;
 };
 
 export type ThreadResolution =
@@ -195,7 +197,7 @@ function buildThreadPrompt(input: ReviewerInput, thread: ReviewThread): string {
     '',
     'Decide the outcome, take the action, then call submit with the ThreadResolutionOutput.',
   );
-  return lines.join('\n');
+  return prependContextBlock(input.contextBlock, lines.join('\n'));
 }
 
 async function commitFix(

@@ -119,6 +119,41 @@ test('runPlanner returns blocked when the model emits an empty plan', async () =
   assert.equal(result.kind, 'blocked');
 });
 
+test('runPlanner: prepends the contextBlock to the first user message, ahead of the task text (issue #106)', async () => {
+  let sent = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      sent = JSON.stringify(opts.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-ctx',
+            toolName: 'submit',
+            input: JSON.stringify(basicPlan(1)),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const result = await runPlanner(agent, {
+    goal: 'ship it',
+    styleContents: '',
+    maxPrs: 5,
+    contextBlock: '<system-reminder>\nCTX-BLOCK\n</system-reminder>',
+  });
+  assert.equal(result.kind, 'ok');
+  assert.match(sent, /CTX-BLOCK/, 'the context block reached the first user message');
+  assert.ok(
+    sent.indexOf('CTX-BLOCK') < sent.indexOf('ship it'),
+    'the context block leads, ahead of the task text',
+  );
+});
+
 test('createPlannerAgent forwards timeout → a stalled step surfaces as a deadline-named error (issue #129)', async () => {
   const stalling = new MockLanguageModelV3({
     doGenerate: (opts) =>

@@ -383,17 +383,27 @@ test('resolve: providerRouting + fallbackModels follow project > global > profil
       false,
     );
 
-    // Global beats profile.
+    // Global beats profile — distinct fallback arrays per layer prove the winner for both keys.
     await writeGlobalConfig(home.path, {
       activeProfile: 'p',
-      profiles: { p: { providerRouting: { sort: 'latency' } } },
+      profiles: {
+        p: { providerRouting: { sort: 'latency' }, fallbackModels: { coding: ['profile/x'] } },
+      },
       providerRouting: { sort: 'throughput' },
+      fallbackModels: { coding: ['global/x'] },
     });
-    assert.equal((await loader.resolve({})).providerRouting?.sort, 'throughput');
+    let winner = await loader.resolve({});
+    assert.equal(winner.providerRouting?.sort, 'throughput');
+    assert.deepEqual(winner.fallbackModels?.coding, ['global/x'], 'global fallback beats profile');
 
-    // Project beats global.
-    await writeProjectConfig(cwd.path, { providerRouting: { sort: 'price' } });
-    assert.equal((await loader.resolve({})).providerRouting?.sort, 'price');
+    // Project beats global — whole-object precedence, so project fully supplies both keys.
+    await writeProjectConfig(cwd.path, {
+      providerRouting: { sort: 'price' },
+      fallbackModels: { coding: ['project/x'] },
+    });
+    winner = await loader.resolve({});
+    assert.equal(winner.providerRouting?.sort, 'price');
+    assert.deepEqual(winner.fallbackModels?.coding, ['project/x'], 'project fallback beats global');
   } finally {
     await home.cleanup();
     await cwd.cleanup();

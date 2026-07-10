@@ -103,6 +103,23 @@ test('ProfileSchema also carries providerRouting + fallbackModels (issue #124)',
   assert.deepEqual(parsed.fallbackModels?.fast, ['x/mini']);
 });
 
+test('ConfigFileSchema accepts reasoningEffort per capability and rejects a bad effort (issue #125)', () => {
+  const parsed = ConfigFileSchema.parse({
+    reasoningEffort: { smart: 'high', coding: 'medium', fast: 'none' },
+  });
+  assert.deepEqual(parsed.reasoningEffort, { smart: 'high', coding: 'medium', fast: 'none' });
+  assert.throws(() => ConfigFileSchema.parse({ reasoningEffort: { smart: 'maximum' } }));
+  assert.throws(() => ConfigFileSchema.parse({ reasoningEffort: { smart: 5 } }));
+});
+
+test('ProfileSchema also carries reasoningEffort (issue #125)', () => {
+  const parsed = ProfileSchema.parse({
+    baseURL: 'https://api.z.ai/v1',
+    reasoningEffort: { coding: 'low' },
+  });
+  assert.equal(parsed.reasoningEffort?.coding, 'low');
+});
+
 test('ConfigFileSchema accepts formatCommand + verifyCommand as strings (issue #122)', () => {
   const parsed = ConfigFileSchema.parse({
     formatCommand: 'bun run lint:fix',

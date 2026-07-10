@@ -16,6 +16,7 @@ const baseResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig =
   stylePath: null,
   logLevel: 'info',
   concurrency: 1,
+  reasoningEffort: {},
   ...overrides,
 });
 
@@ -88,6 +89,65 @@ test('chatSettings: capability fallback applies even when the primary id came fr
     fallbackModels: { coding: ['fallback/coder'] },
   });
   assert.deepEqual(chatSettings(DEFAULT_MODELS.coding, 'coding', cfg).models, ['fallback/coder']);
+});
+
+// --- chatSettings reasoning effort (issue #125) ---
+
+test('chatSettings: a configured capability carries reasoning: { effort }', () => {
+  for (const [capability, effort] of [
+    ['smart', 'high'],
+    ['coding', 'medium'],
+    ['fast', 'none'],
+    ['generic', 'low'],
+  ] as const) {
+    const s = chatSettings(
+      'x/y',
+      capability,
+      baseResolved({ reasoningEffort: { [capability]: effort } }),
+    );
+    assert.deepEqual(s.reasoning, { effort });
+  }
+});
+
+test('chatSettings: an unconfigured capability has no reasoning key at all', () => {
+  const cfg = baseResolved({ reasoningEffort: { smart: 'high' } });
+  const other = chatSettings('x/y', 'coding', cfg);
+  assert.equal('reasoning' in other, false, 'key absence, not undefined');
+  // With nothing configured the whole object is still byte-identical to the historical default.
+  assert.deepEqual(chatSettings('x/y', 'coding', baseResolved()), {
+    provider: { ignore: ['amazon-bedrock'] },
+  });
+});
+
+test('chatSettings: effort keys off the requested capability even when the primary came from generic', () => {
+  // models.smart empty → the smart primary resolves via generic/DEFAULT, but the effort still keys
+  // off the requested `smart` capability, not the id-chain link that supplied the model.
+  const cfg = baseResolved({
+    models: { ...DEFAULT_MODELS, smart: '' },
+    reasoningEffort: { smart: 'high' },
+  });
+  assert.deepEqual(chatSettings(DEFAULT_MODELS.generic, 'smart', cfg).reasoning, {
+    effort: 'high',
+  });
+});
+
+test('chatSettings: routing (#124) and reasoning (#125) coexist in one object from the single helper', () => {
+  const s = chatSettings(
+    'x/y',
+    'coding',
+    baseResolved({
+      providerRouting: { sort: 'throughput', requireParameters: true },
+      fallbackModels: { coding: ['a/x'] },
+      reasoningEffort: { coding: 'medium' },
+    }),
+  );
+  assert.deepEqual(s.provider, {
+    ignore: ['amazon-bedrock'],
+    sort: 'throughput',
+    require_parameters: true,
+  });
+  assert.deepEqual(s.models, ['a/x']);
+  assert.deepEqual(s.reasoning, { effort: 'medium' });
 });
 
 test('ROLE_CAPABILITY maps every role to a tier', () => {

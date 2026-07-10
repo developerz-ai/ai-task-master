@@ -51,6 +51,7 @@ const KNOWN_KEYS = new Set<string>([
   'bashRules',
   'providerRouting',
   'fallbackModels',
+  'reasoningEffort',
   'mcpServers',
 ]);
 
@@ -225,6 +226,7 @@ export class ConfigLoader {
       ...(prBodySections !== undefined ? { prBodySections } : {}),
       ...(providerRouting !== undefined ? { providerRouting } : {}),
       ...(fallbackModels !== undefined ? { fallbackModels } : {}),
+      reasoningEffort: this.resolveReasoningEffort(global, project, profile),
       bashRules,
       mcpServers,
       mcpServerSources,
@@ -441,6 +443,30 @@ export class ConfigLoader {
     // --model pins the `generic` tier — the fallback every other capability
     // inherits when not explicitly set. See docs/config.md §"Per-role models".
     if (cliOverrides.model) merged.generic = cliOverrides.model;
+    return merged;
+  }
+
+  // Per-capability reasoning effort, merged profile < global < project (issue #125). No CLI
+  // override and no built-in defaults — starts empty, so an unconfigured capability carries no
+  // effort and its request stays byte-identical. `generic` is a plain capability here, NOT a
+  // fallback for the other tiers (unlike resolveModels' generic).
+  private resolveReasoningEffort(
+    global: ConfigFile | null,
+    project: ConfigFile | null,
+    profile: Profile | undefined,
+  ): ResolvedConfig['reasoningEffort'] {
+    const merged: ResolvedConfig['reasoningEffort'] = {};
+    for (const src of [
+      profile?.reasoningEffort,
+      global?.reasoningEffort,
+      project?.reasoningEffort,
+    ]) {
+      if (!src) continue;
+      if (src.generic) merged.generic = src.generic;
+      if (src.smart) merged.smart = src.smart;
+      if (src.coding) merged.coding = src.coding;
+      if (src.fast) merged.fast = src.fast;
+    }
     return merged;
   }
 }

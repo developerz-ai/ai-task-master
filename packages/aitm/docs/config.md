@@ -105,6 +105,33 @@ Each subagent can run on a different OpenRouter model. Use a cheap fast model fo
 
 > **Model capability matters for `coding`.** The Worker plans each PR group into a structured `FileManifest` (JSON). Weak/cheap models often return an **empty manifest** here, which blocks the group with an actionable message (issue #45). If you see "the configured coding model produced no files", set `models.coding` to a more capable model. The `smart` tier (Planner/Reviewer) likewise wants a strong reasoning model.
 
+## reasoningEffort
+
+Set OpenRouter [reasoning effort](https://openrouter.ai/docs/use-cases/reasoning-tokens) per capability tier. Each tier is optional; a tier with no entry is sent with **no** `reasoning` parameter, so its requests are byte-identical to today. Strictly opt-in — nothing is defaulted, because a `reasoning` param can be rejected by a custom-`baseURL` gateway or a non-reasoning model.
+
+```jsonc
+{
+  "reasoningEffort": {
+    "smart":  "high",     // Planner, Reviewer
+    "coding": "medium",   // Worker (manifest + editor fanout)
+    "fast":   "none"      // Orchestrator
+  }
+}
+```
+
+Values: `xhigh`, `high`, `medium`, `low`, `minimal`, `none`. Keys are capability tiers (`generic`, `smart`, `coding`, `fast`), same as `models` — the tier is selected by capability, not by the resolved model id, so a tier served through the model fallback chain still carries its own effort. Unlike `models.generic`, `reasoningEffort.generic` is **not** a fallback for the other tiers; it applies only to explicit `generic` resolution.
+
+Recommended tiers (mirrors the comment next to `DEFAULT_MODELS`):
+
+| Tier | Roles | Recommended | Why |
+| --- | --- | --- | --- |
+| `smart` | Planner, Reviewer | `high` | a wrong plan or missed review costs a whole run leg |
+| `coding` | Worker | `medium` | quality/volume balance on the highest-traffic tier |
+| `fast` | Orchestrator | `none` | routing/summarization needs no deliberation |
+| `generic` | (fallback model tier) | unset | effort has no generic-fallback semantics |
+
+Provider-shaped, so it can live in a named profile (`aitm profile set <name> reasoningEffort.smart high`) and resolves project > global > profile, merged per capability. See §Profiles.
+
 ## SRP
 
 | Module | Owns | Does NOT |

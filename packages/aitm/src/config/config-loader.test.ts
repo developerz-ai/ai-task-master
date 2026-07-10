@@ -410,6 +410,56 @@ test('resolve: providerRouting + fallbackModels follow project > global > profil
   }
 });
 
+test('resolve: reasoningEffort merges per capability, project > global > profile; unset → {} (issue #125)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    // Nothing configured → empty map (not undefined), so consumers can index without a null-check.
+    let loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    assert.deepEqual((await loader.resolve({})).reasoningEffort, {});
+
+    // Profile is the lowest layer; a profile carrying it resolves after activation with no warning.
+    const warnings: string[] = [];
+    await writeGlobalConfig(home.path, {
+      activeProfile: 'p',
+      profiles: { p: { reasoningEffort: { smart: 'high', coding: 'low' } } },
+    });
+    loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn: (m) => warnings.push(m) },
+    );
+    assert.deepEqual((await loader.resolve({})).reasoningEffort, { smart: 'high', coding: 'low' });
+    assert.equal(
+      warnings.some((w) => /unknown config key "reasoningEffort"/.test(w)),
+      false,
+    );
+
+    // Global overrides profile per capability; unset capabilities keep the lower layer (merge, not
+    // wholesale replace).
+    await writeGlobalConfig(home.path, {
+      activeProfile: 'p',
+      profiles: { p: { reasoningEffort: { smart: 'high', coding: 'low' } } },
+      reasoningEffort: { smart: 'medium' },
+    });
+    assert.deepEqual((await loader.resolve({})).reasoningEffort, {
+      smart: 'medium',
+      coding: 'low',
+    });
+
+    // Project wins over global for the capabilities it sets; others fall through.
+    await writeProjectConfig(cwd.path, { reasoningEffort: { coding: 'none' } });
+    assert.deepEqual((await loader.resolve({})).reasoningEffort, {
+      smart: 'medium',
+      coding: 'none',
+    });
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: CLI --model pins generic tier; other tiers inherit project/defaults', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

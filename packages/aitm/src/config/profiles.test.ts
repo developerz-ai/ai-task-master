@@ -114,6 +114,31 @@ test('set persists providerRouting.<field> and fallbackModels.<tier>; get reads 
   });
 });
 
+test('set persists reasoningEffort.<tier>; get reads it back (issue #125)', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    await manager.set('z.ai', 'reasoningEffort.smart', 'high');
+    await manager.set('z.ai', 'reasoningEffort.coding', 'medium');
+    assert.equal(await manager.get('z.ai', 'reasoningEffort.smart'), 'high');
+    assert.equal(await manager.get('z.ai', 'reasoningEffort.coding'), 'medium');
+  });
+});
+
+test('set rejects an off-surface reasoningEffort path and a bad effort value (issue #125)', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    await assert.rejects(
+      () => manager.set('z.ai', 'reasoningEffort', 'high'),
+      /Invalid profile key/,
+    );
+    await assert.rejects(
+      () => manager.set('z.ai', 'reasoningEffort.smart.deep', 'high'),
+      /Invalid profile key/,
+    );
+    await assert.rejects(() => manager.set('z.ai', 'reasoningEffort.smart', 'maximum'));
+  });
+});
+
 test('set rejects an off-surface providerRouting/fallbackModels path (too deep) (issue #124)', async () => {
   await withManager(async ({ manager }) => {
     await manager.add('z.ai', { preset: 'zai' });

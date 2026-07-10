@@ -16,11 +16,12 @@ import { DEFAULT_MODELS } from './defaults.ts';
 // the submit-tool-based subagents at random — always excluded (issue #124, originally the point fix).
 const ALWAYS_IGNORE_PROVIDER = 'amazon-bedrock';
 
-// Build the OpenRouter chat settings for one call (issue #124). Pure + exported for testability, and
-// the single settings-construction path: #109 composes `cache_control` and #125 composes `reasoning`
-// into this SAME object rather than adding a parallel builder. `modelId` is unused today but is the
-// input those issues gate on. With nothing configured the result is byte-identical to the historical
-// `{ provider: { ignore: ['amazon-bedrock'] } }`.
+// Build the OpenRouter chat settings for one call (issues #124, #125). Pure + exported for
+// testability, and the single settings-construction path: #109 composes `cache_control` into this
+// SAME object rather than adding a parallel builder. `modelId` is unused — routing and reasoning key
+// off the requested capability, not the resolved model id (a capability served through the
+// fallback chain still gets that capability's settings). With nothing configured the result is
+// byte-identical to the historical `{ provider: { ignore: ['amazon-bedrock'] } }`.
 export function chatSettings(
   _modelId: string,
   capability: Capability,
@@ -39,7 +40,12 @@ export function chatSettings(
     ...(routing?.only ? { only: routing.only } : {}),
   };
   const fallback = resolved.fallbackModels?.[capability];
-  return { provider, ...(fallback !== undefined ? { models: fallback } : {}) };
+  const effort = resolved.reasoningEffort?.[capability];
+  return {
+    provider,
+    ...(fallback !== undefined ? { models: fallback } : {}),
+    ...(effort !== undefined ? { reasoning: { effort } } : {}),
+  };
 }
 
 export type Role = 'planner' | 'worker' | 'reviewer' | 'orchestrator';

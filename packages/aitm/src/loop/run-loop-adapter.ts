@@ -16,6 +16,7 @@
 import { relative, resolve as resolvePath } from 'node:path';
 import {
   bashTool,
+  type CommandRule,
   composeSystemPrompt,
   contextReminder,
   editFileTool,
@@ -92,11 +93,13 @@ function makeStaleReminderProvider(fileState: FileStateTracker, cwd: string): Re
   return () => staleFileReminders(fileState, cwd);
 }
 
-export function localEditTools(cwd: string): WorkerTools {
+export function localEditTools(cwd: string, rules?: readonly CommandRule[]): WorkerTools {
   // One FileStateTracker per tool set (per subagent invocation) so read-before-edit enforcement is
   // scoped to a single run — the four file tools share it (issue #104).
   const fileState = new FileStateTracker();
   const staleReminders = makeStaleReminderProvider(fileState, cwd);
+  // Deny/allow governance on the model-facing shell (issue #113). Omitted → no governance.
+  const bashInit = rules ? { cwd, rules: [...rules] } : { cwd };
   return {
     readFile: withReminders(readFileTool({ cwd, fileState }), staleReminders),
     writeFile: withReminders(writeFileTool({ cwd, fileState }), staleReminders),
@@ -104,8 +107,8 @@ export function localEditTools(cwd: string): WorkerTools {
     multiEdit: withReminders(multiEditTool({ cwd, fileState }), staleReminders),
     grep: grepTool({ cwd }),
     glob: globTool({ cwd }),
-    bash: bashTool({ cwd }),
-    multiBash: multiBashTool({ cwd }),
+    bash: bashTool(bashInit),
+    multiBash: multiBashTool(bashInit),
   };
 }
 
@@ -415,7 +418,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // autoMergeFlow (runReviewer) and the stage machine (addressReviews).
   const runReviewerThreads = ({ pr, threads, worktree }: ReviewerInvocation) => {
     const github = githubThreadTool(input.github);
-    const tools = resolveReviewerTools(mcp.toolsForRole('reviewer'), worktree.path, github);
+    const tools = resolveReviewerTools(
+      mcp.toolsForRole('reviewer'),
+      worktree.path,
+      github,
+      input.resolved.bashRules,
+    );
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
       tools,
@@ -439,7 +447,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     runWorker: async ({ group, task, worktree, baseBranch }) => {
       // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
       // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
-      const tools = resolveWorkerTools(mcp.toolsForRole('worker'), worktree.path);
+      const tools = resolveWorkerTools(
+        mcp.toolsForRole('worker'),
+        worktree.path,
+        input.resolved.bashRules,
+      );
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
         tools,
@@ -482,7 +494,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
         subagents: {
           credentials: input.credentials,
-          workerTools: resolveWorkerTools(mcp.toolsForRole('worker'), worktree.path),
+          workerTools: resolveWorkerTools(
+            mcp.toolsForRole('worker'),
+            worktree.path,
+            input.resolved.bashRules,
+          ),
           styleContents: style,
           compactor,
           timeout: stepTimeout,
@@ -526,8 +542,16 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
 // Rather than fail closed when a server only exports the legacy readFile/writeFile/bash, we
 // partial-fill: prefer the MCP tool for each name, falling back to the local worktree-scoped
 // tool for any the server omits. The shape is asserted once at this boundary.
-function resolveWorkerTools(set: ToolSet, cwd: string): WorkerTools {
-  const local = localEditTools(cwd);
+// The bash deny/allow rules govern the LOCAL compat bash tools only (issue #113): an MCP-supplied
+// `bash` wins the partial-fill and sits outside this boundary — a documented limitation, not solved
+// here. Harness-side git (runGit/assertGitAllowed, and the CI-fix rebase's own allowForcePush gate)
+// never passes through the bash tool and is unaffected.
+function resolveWorkerTools(
+  set: ToolSet,
+  cwd: string,
+  rules?: readonly CommandRule[],
+): WorkerTools {
+  const local = localEditTools(cwd, rules);
   return {
     readFile: set.readFile ?? local.readFile,
     writeFile: set.writeFile ?? local.writeFile,
@@ -544,8 +568,9 @@ function resolveReviewerTools(
   set: ToolSet,
   cwd: string,
   github: Tool<GithubToolInput, GithubToolOutput>,
+  rules?: readonly CommandRule[],
 ): ReviewerTools {
-  return { ...resolveWorkerTools(set, cwd), github };
+  return { ...resolveWorkerTools(set, cwd, rules), github };
 }
 
 // The Planner gets only the read-only subset, partial-filled the same way. This is also the fix

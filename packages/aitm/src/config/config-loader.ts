@@ -4,6 +4,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { CommandRule } from '@developerz.ai/ai-claude-compat';
 import { ZodError, z } from 'zod';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
@@ -47,8 +48,21 @@ const KNOWN_KEYS = new Set<string>([
   'verifyCommand',
   'logLevel',
   'concurrency',
+  'bashRules',
   'mcpServers',
 ]);
+
+// Built-in destructive-command deny rules, appended AFTER any configured rules so a repo can
+// allow-override a single default (first-match-wins) without losing the rest (issue #113).
+// `git push --force*` deliberately also catches `--force-with-lease` on the model-facing side — the
+// sanctioned lease push is the harness's own CI-fix flow, not the model's shell.
+export const DEFAULT_BASH_RULES: readonly CommandRule[] = [
+  { pattern: 'git push --force*', action: 'deny' },
+  { pattern: 'git push -f', action: 'deny' },
+  { pattern: 'git push +*', action: 'deny' },
+  { pattern: 'gh pr merge', action: 'deny' },
+  { pattern: 'git reset --hard', action: 'deny' },
+];
 
 const DEFAULTS = {
   maxPrs: 5,
@@ -115,6 +129,13 @@ export class ConfigLoader {
 
     // Optional per-repo PR body sections (project > global). Undefined when neither sets it.
     const prBodySections = project?.prBodySections ?? global?.prBodySections;
+
+    // Configured bash rules (project over global, wholesale) then the built-in defaults, so every
+    // consumer sees one final first-match-wins list (issue #113).
+    const bashRules: readonly CommandRule[] = [
+      ...(project?.bashRules ?? global?.bashRules ?? []),
+      ...DEFAULT_BASH_RULES,
+    ];
 
     return {
       openrouterApiKey: apiKey,
@@ -193,6 +214,7 @@ export class ConfigLoader {
         DEFAULTS.allowForcePush,
       ),
       ...(prBodySections !== undefined ? { prBodySections } : {}),
+      bashRules,
       mcpServers,
       mcpServerSources,
     };

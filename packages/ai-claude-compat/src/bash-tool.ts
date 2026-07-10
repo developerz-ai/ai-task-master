@@ -14,6 +14,7 @@ import { type Tool, tool } from 'ai';
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
 import type { ProcessManager } from './background-process.ts';
+import { type CommandRule, evaluateCommand } from './command-rules.ts';
 
 const bashInputSchema = z.object({
   command: z.string().min(1),
@@ -35,7 +36,9 @@ const multiBashInputSchema = z.object({
 // optionals (`timeoutMs?: number`) don't match Zod's `number | undefined` under
 // `exactOptionalPropertyTypes`, which makes the AI SDK's invariant Schema<T> reject them.
 export type BashInput = z.infer<typeof bashInputSchema>;
-export type BashOutput = { stdout: string; stderr: string; exitCode: number };
+// `denied` marks a command blocked by a deny rule before it ever ran (exitCode 126) — additive, so a
+// future hooks layer can tell policy denial apart from a real command failure (issue #113).
+export type BashOutput = { stdout: string; stderr: string; exitCode: number; denied?: boolean };
 
 export type MultiBashInput = z.infer<typeof multiBashInputSchema>;
 // One entry per command that actually ran. On the first failure the sequence stops, so a
@@ -60,7 +63,22 @@ export type BashToolInit = {
   // command to it (spawned without awaiting, in the manager's cwd). Without it, a background
   // request runs in the foreground with a notice. See background-process.ts (issue #103).
   processManager?: ProcessManager;
+  // Deny/allow rules evaluated before spawning (issue #113). A denied command never runs and comes
+  // back as a typed denial (exitCode 126). Omitted/empty → no governance, behavior unchanged. This
+  // is a guardrail on the model's shell, not a sandbox — see command-rules.ts for the evasion limits.
+  rules?: CommandRule[];
 };
+
+// The result for a command a deny rule blocked before it ran: no spawn, exit 126, the pattern named,
+// and the `denied` marker set. Shared by bashTool and multiBashTool.
+function deniedResult(pattern: string): BashOutput {
+  return {
+    stdout: '',
+    stderr: `command blocked by rule \`${pattern}\`. Adjust your approach — do not retry the same command.`,
+    exitCode: 126,
+    denied: true,
+  };
+}
 
 // Cap for EACH of stdout/stderr returned to the model. A verbose command (npm install, a full test
 // run) can otherwise dump megabytes into context. Exported so callers can reason about the bound.
@@ -94,6 +112,9 @@ const BASH_DESCRIPTION = [
   'Avoid using this tool to run `cat`/`head`/`tail`/`sed`/`awk`/`echo` for file access — use the',
   'dedicated read/edit/grep tools instead.',
   'Use the `gh` CLI for GitHub operations (PRs, issues, API).',
+  'Some destructive commands (e.g. force pushes, PR merges) may be blocked by repository policy and',
+  'returned with exit code 126 — if a command is blocked, revise your approach rather than retrying',
+  'or working around it.',
   '`description` is a short human-readable summary of what the command does.',
 ].join(' ');
 
@@ -182,6 +203,10 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
     description: BASH_DESCRIPTION,
     inputSchema: bashInputSchema,
     execute: async (input): Promise<BashOutput> => {
+      // Governance runs before any spawn — including the background path — so a denied command never
+      // starts (issue #113).
+      const decision = evaluateCommand(input.command, init.rules ?? []);
+      if (decision.denied) return deniedResult(decision.pattern);
       if (input.run_in_background && manager) {
         const status = manager.start(input.command);
         const pid = status.pid !== null ? ` (pid ${status.pid})` : '';
@@ -228,6 +253,12 @@ export function multiBashTool(init: BashToolInit): Tool<MultiBashInput, MultiBas
       const results: Array<{ command: string } & BashOutput> = [];
       for (let i = 0; i < input.commands.length; i++) {
         const command = input.commands[i] ?? '';
+        // A denied command behaves like a failing one: recorded, and the sequence stops here (#113).
+        const decision = evaluateCommand(command, init.rules ?? []);
+        if (decision.denied) {
+          results.push({ command, ...deniedResult(decision.pattern) });
+          return { results, exitCode: 126, failedAt: i };
+        }
         const out = await execBash(exec, init.cwd, command, timeout);
         results.push({
           command,

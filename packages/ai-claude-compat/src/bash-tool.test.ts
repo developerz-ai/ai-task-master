@@ -315,3 +315,70 @@ test('multiBashTool: each command output is truncated per command (issue #103)',
     await dir.cleanup();
   }
 });
+
+// --- command deny/allow governance (issue #113) ---
+
+// Records the argv of every spawn so a denial test can assert the command never ran.
+function recordingExec(): { exec: typeof execa; calls: string[] } {
+  const calls: string[] = [];
+  const stub = async (_file: string, args: readonly string[]) => {
+    calls.push(args.join(' '));
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  return { exec: stub as unknown as typeof execa, calls };
+}
+
+type DenyOut = { stdout: string; stderr: string; exitCode: number; denied?: boolean };
+
+test('bashTool: a denied command returns a typed denial (exit 126) without spawning (issue #113)', async () => {
+  const rec = recordingExec();
+  const out = await run<{ command: string }, DenyOut>(
+    bashTool({
+      cwd: '/w',
+      exec: rec.exec,
+      rules: [{ pattern: 'git push --force*', action: 'deny' }],
+    }),
+    { command: 'git push --force' },
+  );
+  assert.equal(out.exitCode, 126);
+  assert.equal(out.denied, true);
+  assert.match(out.stderr, /blocked by rule `git push --force\*`/);
+  assert.match(out.stderr, /do not retry/i);
+  assert.equal(out.stdout, '');
+  assert.equal(rec.calls.length, 0, 'the denied command was never spawned');
+});
+
+test('bashTool: a command not matched by any rule runs normally; omitting rules is unchanged (issue #113)', async () => {
+  const rec = recordingExec();
+  const out = await run<{ command: string }, DenyOut>(
+    bashTool({
+      cwd: '/w',
+      exec: rec.exec,
+      rules: [{ pattern: 'git push --force*', action: 'deny' }],
+    }),
+    { command: 'git status' },
+  );
+  assert.equal(out.exitCode, 0);
+  assert.notEqual(out.denied, true);
+  assert.equal(rec.calls.length, 1, 'a non-matching command spawns');
+});
+
+test('multiBashTool: a denied command sets failedAt and skips the remaining commands (issue #113)', async () => {
+  const rec = recordingExec();
+  const out = await run<
+    { commands: string[] },
+    MultiOut & { results: Array<{ denied?: boolean }> }
+  >(
+    multiBashTool({
+      cwd: '/w',
+      exec: rec.exec,
+      rules: [{ pattern: 'git push -f', action: 'deny' }],
+    }),
+    { commands: ['echo before', 'git push -f', 'echo after'] },
+  );
+  assert.equal(out.failedAt, 1);
+  assert.equal(out.exitCode, 126);
+  assert.equal(out.results.length, 2, 'ran cmd 0, denied cmd 1, skipped cmd 2');
+  assert.equal(out.results[1]?.denied, true);
+  assert.equal(rec.calls.length, 1, 'only the first command spawned');
+});

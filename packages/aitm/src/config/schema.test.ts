@@ -50,6 +50,20 @@ test('ConfigFileSchema accepts a valid llmStepTimeoutMs and rejects < 1000 / non
   assert.throws(() => ConfigFileSchema.parse({ llmStepTimeoutMs: '900000' }));
 });
 
+test('ConfigFileSchema accepts bashRules and rejects an unknown action / empty pattern (issue #113)', () => {
+  const parsed = ConfigFileSchema.parse({
+    bashRules: [
+      { pattern: 'git push --force*', action: 'deny' },
+      { pattern: 'git push --force-with-lease', action: 'allow' },
+    ],
+  });
+  assert.equal(parsed.bashRules?.length, 2);
+  assert.equal(parsed.bashRules?.[0]?.action, 'deny');
+  assert.throws(() => ConfigFileSchema.parse({ bashRules: [{ pattern: 'x', action: 'ask' }] }));
+  assert.throws(() => ConfigFileSchema.parse({ bashRules: [{ pattern: '', action: 'deny' }] }));
+  assert.throws(() => ConfigFileSchema.parse({ bashRules: [{ pattern: 'x' }] }));
+});
+
 test('ConfigFileSchema accepts formatCommand + verifyCommand as strings (issue #122)', () => {
   const parsed = ConfigFileSchema.parse({
     formatCommand: 'bun run lint:fix',

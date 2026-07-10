@@ -172,6 +172,19 @@ Prefer editing JSON? The same thing as plain config:
 }
 ```
 
+### Provider routing & fallback
+
+OpenRouter serves the same model id through multiple upstream providers, and they differ sharply in tool-calling reliability. Two config keys (also settable per profile) steer the routing — mapped onto OpenRouter's `provider` controls:
+
+```bash
+aitm config set providerRouting.requireParameters true          # only route to endpoints that support every request parameter
+aitm config set providerRouting.order '["anthropic","openai"]'  # try these providers first
+aitm config set providerRouting.sort throughput                 # or "price" / "latency"
+aitm config set fallbackModels.coding '["anthropic/claude-opus-4.7","openai/gpt-5"]'  # fail over on a provider/model outage
+```
+
+Every subagent call carries tool definitions (the `submit` contract), so **`requireParameters: true` is recommended** — it guarantees the request lands on an endpoint that won't silently drop them. The caveat: it narrows the provider pool and can make a thinly-served model unroutable. `providerRouting.{order, allowFallbacks, requireParameters, sort, only, ignore}` all map to the OpenRouter `provider` block; `fallbackModels.<tier>` becomes the top-level `models` fallback array for that capability. **`amazon-bedrock` is always excluded** (it rejects the structured-output parameter) — this built-in ignore can't be removed.
+
 Full walkthrough in [`docs/providers.md`](docs/providers.md); profile command reference in [`docs/commands/profile.md`](docs/commands/profile.md).
 
 ## 🧪 Try it on a sandbox repo

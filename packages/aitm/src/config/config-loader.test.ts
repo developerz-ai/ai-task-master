@@ -351,6 +351,65 @@ test('resolve: bashRules = configured (project over global, wholesale) then the 
   }
 });
 
+test('resolve: providerRouting + fallbackModels follow project > global > profile; unset → omitted (issue #124)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    // Nothing configured → both keys omitted from ResolvedConfig.
+    let loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    let resolved = await loader.resolve({});
+    assert.ok(!('providerRouting' in resolved), 'omitted when unset');
+    assert.ok(!('fallbackModels' in resolved));
+
+    // Profile supplies it (lowest of the three); no unknown-key warning.
+    const warnings: string[] = [];
+    await writeGlobalConfig(home.path, {
+      activeProfile: 'p',
+      profiles: {
+        p: { providerRouting: { sort: 'latency' }, fallbackModels: { coding: ['a/x'] } },
+      },
+    });
+    loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn: (m) => warnings.push(m) },
+    );
+    resolved = await loader.resolve({});
+    assert.equal(resolved.providerRouting?.sort, 'latency', 'profile value applies');
+    assert.deepEqual(resolved.fallbackModels?.coding, ['a/x']);
+    assert.equal(
+      warnings.some((w) => /unknown config key "(providerRouting|fallbackModels)"/.test(w)),
+      false,
+    );
+
+    // Global beats profile — distinct fallback arrays per layer prove the winner for both keys.
+    await writeGlobalConfig(home.path, {
+      activeProfile: 'p',
+      profiles: {
+        p: { providerRouting: { sort: 'latency' }, fallbackModels: { coding: ['profile/x'] } },
+      },
+      providerRouting: { sort: 'throughput' },
+      fallbackModels: { coding: ['global/x'] },
+    });
+    let winner = await loader.resolve({});
+    assert.equal(winner.providerRouting?.sort, 'throughput');
+    assert.deepEqual(winner.fallbackModels?.coding, ['global/x'], 'global fallback beats profile');
+
+    // Project beats global — whole-object precedence, so project fully supplies both keys.
+    await writeProjectConfig(cwd.path, {
+      providerRouting: { sort: 'price' },
+      fallbackModels: { coding: ['project/x'] },
+    });
+    winner = await loader.resolve({});
+    assert.equal(winner.providerRouting?.sort, 'price');
+    assert.deepEqual(winner.fallbackModels?.coding, ['project/x'], 'project fallback beats global');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: CLI --model pins generic tier; other tiers inherit project/defaults', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

@@ -65,6 +65,17 @@ test('set with a dotted key writes a nested object', async () => {
   });
 });
 
+test('set persists providerRouting.<field> and fallbackModels.<tier> as nested objects (issue #124)', async () => {
+  await withWriter(async ({ writer }) => {
+    await writer.set('global', 'providerRouting.sort', '"throughput"');
+    await writer.set('global', 'providerRouting.order', '["anthropic","openai"]');
+    await writer.set('global', 'fallbackModels.coding', '["a/x","b/y"]');
+    const file = await writer.list('global');
+    assert.deepEqual(file.providerRouting, { sort: 'throughput', order: ['anthropic', 'openai'] });
+    assert.deepEqual(file.fallbackModels, { coding: ['a/x', 'b/y'] });
+  });
+});
+
 test('set then unset removes the key and persists', async () => {
   await withWriter(async ({ writer, home }) => {
     await writer.set('global', 'maxPrs', '4');

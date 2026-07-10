@@ -29,6 +29,8 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'stylePath',
   'logLevel',
   'concurrency',
+  'providerRouting',
+  'fallbackModels',
   'mcpServers',
 ]);
 

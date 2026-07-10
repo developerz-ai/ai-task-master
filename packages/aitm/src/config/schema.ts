@@ -31,6 +31,31 @@ export const CapabilityModelsSchema = z
 export type CapabilityModels = z.infer<typeof CapabilityModelsSchema>;
 export type Capability = 'generic' | 'smart' | 'coding' | 'fast';
 
+// OpenRouter provider-routing controls (issue #124). camelCase config keys map onto the snake_case
+// `provider.*` chat-settings fields in Credentials. Handle-level: one value applies to all roles.
+export const ProviderSortSchema = z.enum(['price', 'throughput', 'latency']);
+export const ProviderRoutingSchema = z.object({
+  order: z.array(z.string()).optional(),
+  allowFallbacks: z.boolean().optional(),
+  requireParameters: z.boolean().optional(),
+  sort: ProviderSortSchema.optional(),
+  only: z.array(z.string()).optional(),
+  ignore: z.array(z.string()).optional(),
+});
+export type ProviderRouting = z.infer<typeof ProviderRoutingSchema>;
+
+// Per-capability alternate model ids OpenRouter fails over to on a provider/model outage (issue
+// #124), mapped onto the top-level `models: string[]` chat setting. Mirrors CapabilityModelsSchema.
+export const FallbackModelsSchema = z
+  .object({
+    generic: z.array(z.string()).optional(),
+    smart: z.array(z.string()).optional(),
+    coding: z.array(z.string()).optional(),
+    fast: z.array(z.string()).optional(),
+  })
+  .passthrough();
+export type FallbackModels = z.infer<typeof FallbackModelsSchema>;
+
 export const LogLevelSchema = z.enum(['debug', 'info', 'warn', 'error']);
 export const MergeMethodSchema = z.enum(['squash', 'merge', 'rebase']);
 
@@ -43,6 +68,9 @@ export const ProfileSchema = z
     openrouterApiKey: z.string().optional(),
     baseURL: z.url().optional(),
     models: CapabilityModelsSchema.optional(),
+    // Provider-shaped, so profile-able (issue #124).
+    providerRouting: ProviderRoutingSchema.optional(),
+    fallbackModels: FallbackModelsSchema.optional(),
   })
   .passthrough();
 
@@ -63,6 +91,10 @@ export const ConfigFileSchema = z
     // See docs/auth.md §"LLM provider".
     baseURL: z.url().optional(),
     models: CapabilityModelsSchema.optional(),
+    // OpenRouter provider routing + per-capability model fallback (issue #124). Provider-shaped, so
+    // also on ProfileSchema; resolved project > global > profile like baseURL.
+    providerRouting: ProviderRoutingSchema.optional(),
+    fallbackModels: FallbackModelsSchema.optional(),
     maxPrs: z.number().int().positive().optional(),
     maxSessions: z.number().int().positive().nullable().optional(),
     // Cap on CI-fix passes per PR group before it blocks for a human (issue #128). Bounds the
@@ -131,6 +163,10 @@ export type ResolvedConfig = {
   // Resolved from config (project > global) or the OPENROUTER_BASE_URL env var.
   baseURL?: string | undefined;
   models: Required<Pick<CapabilityModels, 'generic' | 'smart' | 'coding' | 'fast'>>;
+  // OpenRouter provider routing + per-capability fallback model ids (issue #124). Omitted when unset
+  // so the constructed chat settings stay byte-identical to today for existing installs.
+  providerRouting?: ProviderRouting | undefined;
+  fallbackModels?: FallbackModels | undefined;
   maxPrs: number;
   maxSessions: number | null;
   // Cap on CI-fix passes per PR group before it blocks. Default DEFAULT_MAX_CI_FIX_ATTEMPTS. #128.

@@ -40,9 +40,14 @@ import type {
 import {
   callWithStepTimeout,
   composeSystemPrompt,
+  continueSubagent,
+  correctiveMessage,
   createSubagent,
   formatSubmitIssues,
-  runWithSchemaRetry,
+  runSubagent,
+  type SubagentHandle,
+  type SubmittedOutput,
+  submittedOutput,
 } from '@developerz.ai/ai-claude-compat';
 import { generateText, stepCountIs, type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
@@ -105,6 +110,9 @@ export type WorkerInput = {
   logger?: LoggerLike;
   // Optional harness context block prepended to the manifest (first user) message (issue #106).
   contextBlock?: string;
+  // Optional handle from an earlier manifest-planning run (a prior CI-fix pass for this group). When
+  // set, the manifest agent continues that conversation instead of planning fresh (issue #107).
+  priorHandle?: SubagentHandle<WorkerTools>;
 };
 
 // Per-file outcome from the parallel editor fanout. Useful to the Orchestrator
@@ -125,7 +133,9 @@ export type WorkerDelivery = {
 };
 
 export type WorkerResult =
-  | { kind: 'ok'; delivery: WorkerDelivery }
+  // `handle` retains the manifest-planning conversation so the next CI-fix pass for this group can
+  // continue it instead of re-planning from zero (issue #107).
+  | { kind: 'ok'; delivery: WorkerDelivery; handle: SubagentHandle<WorkerTools> }
   | { kind: 'blocked'; reason: string }
   | { kind: 'error'; error: string };
 
@@ -244,6 +254,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
           ? [`- ${input.task.text}`]
           : input.group.tasks.map((task) => `- ${task.text}`),
       },
+      handle: planned.handle,
     };
   } catch (err) {
     return { kind: 'error', error: err instanceof Error ? err.message : String(err) };
@@ -251,7 +262,12 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
 }
 
 type PlanEditResult =
-  | { kind: 'ok'; changes: FileChange[]; draftCommitMessage: string }
+  | {
+      kind: 'ok';
+      changes: FileChange[];
+      draftCommitMessage: string;
+      handle: SubagentHandle<WorkerTools>;
+    }
   | { kind: 'blocked'; reason: string }
   | { kind: 'error'; error: string };
 
@@ -263,7 +279,7 @@ async function planAndEdit(
   init: SubagentInit<WorkerTools>,
   input: WorkerInput,
 ): Promise<PlanEditResult> {
-  const submitted = await planManifest(agent, input);
+  const { submitted, handle } = await planManifest(agent, input);
   if (!submitted.ok) {
     // Only after the schema-retry kernel exhausts. A model that never submits gets the same
     // capability guidance as a zero-file manifest; one that keeps mangling the schema is an error.
@@ -280,7 +296,7 @@ async function planAndEdit(
     return { kind: 'blocked', reason: EMPTY_MANIFEST_REASON };
   }
   const changes = await Promise.all(manifest.files.map((file) => runEditor(init, file, input)));
-  return { kind: 'ok', changes, draftCommitMessage: manifest.draftCommitMessage };
+  return { kind: 'ok', changes, draftCommitMessage: manifest.draftCommitMessage, handle };
 }
 
 // Gate committing on `verifyCommand`. Branch checkout + format run first (verify must see the
@@ -325,11 +341,27 @@ async function commitWithVerify(
   return { kind: 'ok', extraChanges };
 }
 
-function planManifest(agent: WorkerAgent, input: WorkerInput) {
-  // The schema-retry kernel corrects a botched `submit` in-conversation before giving up, so a
-  // weak model that mangles the FileManifest once no longer ends the leg. planAndEdit maps the
-  // typed failure (no-submission → capability guidance; invalid → error) to its own outcome.
-  return runWithSchemaRetry(agent, FileManifestSchema, buildManifestPrompt(input));
+// Retries a botched `submit` up to this many times (matches the runWithSchemaRetry default).
+const MANIFEST_SCHEMA_RETRIES = 2;
+
+// Plan the FileManifest, retaining the conversation as a handle for the next CI-fix pass (#107). A
+// `priorHandle` continues that earlier conversation (the Worker remembers what it already tried)
+// rather than planning fresh. Schema correction (#101) rides the SAME continuation mechanism — a
+// botched `submit` is corrected in-conversation via continueSubagent before giving up.
+async function planManifest(
+  agent: WorkerAgent,
+  input: WorkerInput,
+): Promise<{ submitted: SubmittedOutput<FileManifest>; handle: SubagentHandle<WorkerTools> }> {
+  const prompt = buildManifestPrompt(input);
+  let run = input.priorHandle
+    ? await continueSubagent(input.priorHandle, prompt)
+    : await runSubagent(agent, prompt);
+  let submitted = submittedOutput(run.result, FileManifestSchema);
+  for (let attempt = 0; attempt < MANIFEST_SCHEMA_RETRIES && !submitted.ok; attempt++) {
+    run = await continueSubagent(run.handle, correctiveMessage(submitted));
+    submitted = submittedOutput(run.result, FileManifestSchema);
+  }
+  return { submitted, handle: run.handle };
 }
 
 function buildManifestPrompt(input: WorkerInput): string {

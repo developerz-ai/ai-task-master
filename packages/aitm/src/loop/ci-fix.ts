@@ -16,6 +16,7 @@
 // SRP: this is one fix pass — no polling, no iteration cap, no merge. Callers own the wait/re-poll
 // loop and decide what to do with the result (advance to waiting-ci, or block).
 
+import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
 import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, TimeoutConfiguration } from 'ai';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
@@ -96,11 +97,19 @@ export type FixSessionInput = {
   // force-with-lease push is refused and the session blocks instead of pushing.
   allowForcePush?: boolean;
   logger?: LoggerLike;
+  // Handle from this group's previous CI-fix pass (#107). When set, the fix Worker continues that
+  // manifest-planning conversation — it remembers what earlier passes already tried.
+  priorHandle?: SubagentHandle<WorkerTools>;
 };
 
 export type FixSessionResult =
-  | { kind: 'fixed' } // Worker committed a fix; rebased + force-pushed. CI will re-run.
+  // `handle` retains the fix Worker's manifest conversation for the next fix pass to continue (#107).
+  | { kind: 'fixed'; handle: SubagentHandle<WorkerTools> } // committed + rebased + force-pushed; CI re-runs.
   | { kind: 'blocked'; reason: string }; // Worker couldn't fix, or rebase/push failed.
+
+// The push-path outcome — handle-agnostic, since rebaseAndForcePush is also shared by the take-over
+// flow (which retains no conversation). runFixSession attaches the Worker handle to the 'fixed' case.
+export type PushResult = { kind: 'fixed' } | { kind: 'blocked'; reason: string };
 
 export async function runFixSession(input: FixSessionInput): Promise<FixSessionResult> {
   const { github, prContext, group, pr, baseBranch, worktreePath } = input;
@@ -131,7 +140,7 @@ export async function runFixSession(input: FixSessionInput): Promise<FixSessionR
   }
 
   // 3. Rebase onto the latest base, then force-with-lease push so CI re-runs on fresh ground.
-  return rebaseAndForcePush(
+  const pushed = await rebaseAndForcePush(
     runCmd,
     worktreePath,
     baseBranch,
@@ -139,6 +148,8 @@ export async function runFixSession(input: FixSessionInput): Promise<FixSessionR
     log,
     input.allowForcePush ?? true,
   );
+  // Carry the Worker's manifest handle out so the next fix pass for this group can continue it (#107).
+  return pushed.kind === 'fixed' ? { kind: 'fixed', handle: worker.handle } : pushed;
 }
 
 // The fix task: read the on-disk context (when present), fix every failure, verify locally. Scoped
@@ -184,6 +195,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
     ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),
+    ...(input.priorHandle ? { priorHandle: input.priorHandle } : {}),
   };
   if (subagents.runWorkerOverride) return subagents.runWorkerOverride(workerInput);
   // Summarize-and-continue when the coding-tier context window fills (issue #102).
@@ -215,7 +227,7 @@ export async function rebaseAndForcePush(
   pr: number,
   log: LoggerLike | undefined,
   allowForcePush = true,
-): Promise<FixSessionResult> {
+): Promise<PushResult> {
   // This is the only force-push path. When policy forbids it, don't rebase — block cleanly so a
   // human lands the fix, rather than leaving a rebased branch that can't be pushed.
   if (!allowForcePush) {

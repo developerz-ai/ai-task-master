@@ -6,8 +6,10 @@ import { z } from 'zod';
 import {
   callWithStepTimeout,
   composeSystemPrompt,
+  continueSubagent,
   createSubagent,
   formatSubmitIssues,
+  runSubagent,
   runWithSchemaRetry,
   StepTimeoutError,
   SUBMIT_TOOL_NAME,
@@ -313,6 +315,63 @@ test('runWithSchemaRetry: a first-try valid submit returns ok with no retry', as
   const out = await runWithSchemaRetry(agentFor(s.model), OutSchema, 'do it');
   assert.deepEqual(out, { ok: true, value: { n: 5 } });
   assert.equal(s.calls(), 1);
+});
+
+// --- runSubagent / continueSubagent (issue #107) ---
+
+test('continueSubagent: replays all prior messages then the follow-up; a fresh spawn shares none', async () => {
+  const s = scriptedModel(() => ({ submit: JSON.stringify({ n: 1 }) }));
+  const { handle } = await runSubagent(agentFor(s.model), 'FIRST-PROMPT');
+  await continueSubagent(handle, 'FOLLOW-UP');
+  // Call 0 (the fresh run) sees only FIRST-PROMPT.
+  assert.match(s.promptAt(0), /FIRST-PROMPT/);
+  assert.doesNotMatch(s.promptAt(0), /FOLLOW-UP/);
+  // Call 1 (the continuation) replays FIRST-PROMPT and the retained submit, then FOLLOW-UP.
+  assert.match(s.promptAt(1), /FIRST-PROMPT/);
+  assert.match(s.promptAt(1), new RegExp(SUBMIT_TOOL_NAME));
+  assert.match(s.promptAt(1), /FOLLOW-UP/);
+  // A fresh spawn on a different model shares nothing.
+  const s2 = scriptedModel(() => ({ submit: JSON.stringify({ n: 2 }) }));
+  await runSubagent(agentFor(s2.model), 'OTHER');
+  assert.doesNotMatch(s2.promptAt(0), /FIRST-PROMPT|FOLLOW-UP/);
+});
+
+test('continueSubagent: submittedOutput reflects only the new run — a submit only in retained history yields none', async () => {
+  const subs = [{ n: 1 }, { n: 2 }];
+  const s = scriptedModel((idx) =>
+    idx < 2 ? { submit: JSON.stringify(subs[idx]) } : { noSubmit: true },
+  );
+  const agent = agentFor(s.model);
+  const run0 = await runSubagent(agent, 'go');
+  assert.deepEqual(submittedOutput(run0.result, OutSchema), { ok: true, value: { n: 1 } });
+  const run1 = await continueSubagent(run0.handle, 'again');
+  assert.deepEqual(submittedOutput(run1.result, OutSchema), { ok: true, value: { n: 2 } });
+  // Run 2 does not submit; the earlier submits live in retained history but not in this run's steps.
+  const run2 = await continueSubagent(run1.handle, 'and again');
+  assert.deepEqual(submittedOutput(run2.result, OutSchema), { ok: false, reason: 'no-submission' });
+});
+
+test('continueSubagent: two successive continuations chain through returned handles', async () => {
+  const s = scriptedModel(() => ({ submit: JSON.stringify({ n: 7 }) }));
+  const run0 = await runSubagent(agentFor(s.model), 'P0');
+  const run1 = await continueSubagent(run0.handle, 'P1');
+  const run2 = await continueSubagent(run1.handle, 'P2');
+  // The third call's request carries every earlier user message in order.
+  const p2 = s.promptAt(2);
+  assert.ok(p2.indexOf('P0') < p2.indexOf('P1'));
+  assert.ok(p2.indexOf('P1') < p2.indexOf('P2'));
+  assert.equal(s.calls(), 3);
+  // The final handle keeps growing.
+  assert.ok(run2.handle.messages.length > run1.handle.messages.length);
+});
+
+test('continueSubagent: a handle whose messages were externally reshaped (compacted) continues from those as-is', async () => {
+  const s = scriptedModel(() => ({ submit: JSON.stringify({ n: 9 }) }));
+  const agent = agentFor(s.model);
+  const compacted = { agent, messages: [{ role: 'user' as const, content: 'COMPACTED-SUMMARY' }] };
+  await continueSubagent(compacted, 'CONTINUE-FROM-SUMMARY');
+  assert.match(s.promptAt(0), /COMPACTED-SUMMARY/);
+  assert.match(s.promptAt(0), /CONTINUE-FROM-SUMMARY/);
 });
 
 // --- formatSubmitIssues ---

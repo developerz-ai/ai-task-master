@@ -172,6 +172,65 @@ test('runWorker: prepends the contextBlock to the manifest (first user) message,
   );
 });
 
+test('runWorker: an ok result carries a handle retaining the manifest conversation (issue #107)', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({
+    model: makeWorkerModel(manifest, ['created a']),
+    tools,
+    systemPrompt: WORKER_SYSTEM_PREFIX,
+  });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  if (result.kind === 'ok') {
+    assert.ok(result.handle, 'the ok result exposes a handle');
+    assert.ok(result.handle.messages.length > 0, 'the handle retains the manifest conversation');
+  }
+});
+
+test('runWorker: a prior handle is continued — the retained conversation is replayed (issue #107)', async () => {
+  // The prior handle owns the agent that gets continued; its retained messages must be replayed.
+  let sent = '';
+  const { tools } = makeTools();
+  const priorAgent = createWorkerAgent({
+    model: new MockLanguageModelV3({
+      doGenerate: async (opts) => {
+        sent = JSON.stringify(opts.prompt);
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 's',
+              toolName: 'submit',
+              input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      },
+    }),
+    tools,
+    systemPrompt: WORKER_SYSTEM_PREFIX,
+  });
+  const priorHandle = {
+    agent: priorAgent,
+    messages: [{ role: 'user' as const, content: 'PRIOR-MANIFEST-CONVERSATION' }],
+  };
+  // The `agent` arg is unused when a prior handle is set — continuation runs on priorHandle.agent.
+  const throwaway = createWorkerAgent({
+    model: new MockLanguageModelV3(),
+    tools,
+    systemPrompt: WORKER_SYSTEM_PREFIX,
+  });
+  await runWorker(throwaway, { ...baseInput(), priorHandle });
+  assert.match(sent, /PRIOR-MANIFEST-CONVERSATION/, 'the prior conversation was replayed');
+});
+
 test('WORKER_SYSTEM_PREFIX carries the compaction continuation contract (issue #102)', () => {
   assert.match(WORKER_SYSTEM_PREFIX, /summarized/i);
   assert.match(WORKER_SYSTEM_PREFIX, /continue the task from that summary/i);

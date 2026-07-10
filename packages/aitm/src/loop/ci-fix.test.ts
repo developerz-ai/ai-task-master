@@ -3,6 +3,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { CompactorLike } from '../compaction/compaction-step.ts';
 import type { RunCmd, RunCmdResult } from '../github/github-client.ts';
@@ -69,7 +70,11 @@ function baseSubagents(overrides: Partial<FixSessionSubagents> = {}): FixSession
   };
 }
 
-function okWorker(): WorkerResult {
+function stubHandle(marker: string): SubagentHandle<WorkerTools> {
+  return { agent: {} as never, messages: [{ role: 'user', content: marker }] };
+}
+
+function okWorker(handle: SubagentHandle<WorkerTools> = stubHandle('worker-handle')): WorkerResult {
   return {
     kind: 'ok',
     delivery: {
@@ -78,6 +83,7 @@ function okWorker(): WorkerResult {
       changes: [{ path: 'src/a.ts', kind: 'modify', summary: 'fixed assertion' }],
       progressEntries: ['- fix CI'],
     },
+    handle,
   };
 }
 
@@ -293,6 +299,58 @@ test('runFixSession: threads verifyCommand into the fix Worker input (issue #122
   assert.ok(captured, 'worker was invoked');
   assert.equal((captured as WorkerInput).verifyCommand, 'bun test');
   assert.equal((captured as WorkerInput).formatCommand, 'bun run lint:fix');
+});
+
+test('runFixSession: threads a prior handle into the fix Worker and returns the updated handle (issue #107)', async () => {
+  let captured: WorkerInput | null = null;
+  const priorHandle = stubHandle('PRIOR-CONVERSATION');
+  const nextHandle = stubHandle('AFTER-THIS-PASS');
+  const result = await runFixSession(
+    baseInput({
+      runCmd: recordingRunCmd().runCmd,
+      priorHandle,
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker(nextHandle);
+        },
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'fixed');
+  if (result.kind === 'fixed') {
+    assert.strictEqual(
+      result.handle,
+      nextHandle,
+      "the session carries out the Worker's new handle",
+    );
+  }
+  assert.strictEqual(
+    (captured as WorkerInput | null)?.priorHandle,
+    priorHandle,
+    'the prior handle was continued by the fix Worker',
+  );
+});
+
+test('runFixSession: without a prior handle the fix Worker cold-starts (issue #107)', async () => {
+  let captured: WorkerInput | null = null;
+  const result = await runFixSession(
+    baseInput({
+      runCmd: recordingRunCmd().runCmd,
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'fixed');
+  assert.equal(
+    (captured as WorkerInput | null)?.priorHandle,
+    undefined,
+    'no prior handle threaded',
+  );
 });
 
 test('runFixSession: clears stale context before downloading (fresh-context-only)', async () => {

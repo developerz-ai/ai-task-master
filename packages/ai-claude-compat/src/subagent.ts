@@ -203,22 +203,76 @@ export async function runWithSchemaRetry<TOOLS extends ToolSet, OUTPUT>(
   let messages: ModelMessage[] = [{ role: 'user', content: prompt }];
   let last: SubmittedOutput<OUTPUT> = { ok: false, reason: 'no-submission' };
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const result = await agent.generate({ messages });
-    last = submittedOutput(result, schema);
+    // One replay step, shared with continuation (#107): run the agent and accumulate the full
+    // conversation (prior turns + the model's response — its call and the SDK's tool-error result).
+    const step = await generateOverMessages(agent, messages);
+    last = submittedOutput(step.result, schema);
     if (last.ok) return last;
     if (attempt === maxRetries) break;
-    // Continue the same conversation: prior turns + the model's response (its invalid call and the
-    // SDK's tool-error result are both in response.messages) + one corrective user message.
-    messages = [
-      ...messages,
-      ...result.response.messages,
-      { role: 'user', content: correctiveMessage(last) },
-    ];
+    messages = [...step.messages, { role: 'user', content: correctiveMessage(last) }];
   }
   return last;
 }
 
-function correctiveMessage(
+// The generate result an agent produces — kept as an indexed type so callers read `.steps` /
+// `.response.messages` without restating the SDK's deep result generic.
+type GenerateResult<TOOLS extends ToolSet> = Awaited<
+  ReturnType<ToolLoopAgent<never, TOOLS>['generate']>
+>;
+
+// A completed subagent run plus the full conversation, so a later call can continue it (#107).
+export type SubagentHandle<TOOLS extends ToolSet> = {
+  agent: ToolLoopAgent<never, TOOLS>;
+  // The request messages plus every assistant/tool message the run produced, in order.
+  messages: ModelMessage[];
+};
+
+// A run's raw result (for submittedOutput) paired with the handle to continue from.
+export type SubagentRun<TOOLS extends ToolSet> = {
+  result: GenerateResult<TOOLS>;
+  handle: SubagentHandle<TOOLS>;
+};
+
+// The one replay primitive: run the agent over `messages`, returning the result and the conversation
+// after it (input + response.messages). Schema-retry (#101) and continuation (#107) both build on it,
+// so there is never a second parallel replay path.
+async function generateOverMessages<TOOLS extends ToolSet>(
+  agent: ToolLoopAgent<never, TOOLS>,
+  messages: ModelMessage[],
+): Promise<{ result: GenerateResult<TOOLS>; messages: ModelMessage[] }> {
+  const result = await agent.generate({ messages });
+  return { result, messages: [...messages, ...result.response.messages] };
+}
+
+// Run a subagent from a fresh prompt, returning its result and a handle to continue the conversation.
+export async function runSubagent<TOOLS extends ToolSet>(
+  agent: ToolLoopAgent<never, TOOLS>,
+  prompt: string,
+): Promise<SubagentRun<TOOLS>> {
+  const { result, messages } = await generateOverMessages(agent, [
+    { role: 'user', content: prompt },
+  ]);
+  return { result, handle: { agent, messages } };
+}
+
+// Continue a completed run: re-invoke the SAME agent with the retained messages (verbatim — prior
+// tool calls and results included) plus one new user message. A fresh step budget applies, and
+// submittedOutput on the result reflects only this run's submission. Callers may pass a handle whose
+// messages were externally reshaped (e.g. compacted summary + tail) — they are used as-is.
+export async function continueSubagent<TOOLS extends ToolSet>(
+  handle: SubagentHandle<TOOLS>,
+  followUpPrompt: string,
+): Promise<SubagentRun<TOOLS>> {
+  const { result, messages } = await generateOverMessages(handle.agent, [
+    ...handle.messages,
+    { role: 'user', content: followUpPrompt },
+  ]);
+  return { result, handle: { agent: handle.agent, messages } };
+}
+
+// Corrective user message for a botched `submit`, exported so a caller running its own
+// continuation-based schema loop (e.g. the Worker's manifest planning, #107) reuses the exact wording.
+export function correctiveMessage(
   failure: { reason: 'no-submission' } | { reason: 'invalid'; issues: readonly z.core.$ZodIssue[] },
 ): string {
   if (failure.reason === 'no-submission') {

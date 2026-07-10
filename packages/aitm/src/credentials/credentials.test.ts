@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { LanguageModel } from 'ai';
 import type { ResolvedConfig } from '../config/schema.ts';
-import { Credentials, providerSettings, ROLE_CAPABILITY } from './credentials.ts';
+import { Credentials, chatSettings, providerSettings, ROLE_CAPABILITY } from './credentials.ts';
 import { DEFAULT_MODELS } from './defaults.ts';
 
 const baseResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig => ({
@@ -23,6 +23,72 @@ function modelIdOf(handle: LanguageModel): string {
   if (typeof handle === 'string') return handle;
   return handle.modelId;
 }
+
+// --- chatSettings (issue #124) ---
+
+test('chatSettings: nothing configured → byte-identical to the historical bedrock-ignore default', () => {
+  const s = chatSettings('anthropic/x', 'coding', baseResolved());
+  assert.deepEqual(s, { provider: { ignore: ['amazon-bedrock'] } });
+  // Explicit key-absence: only `ignore` under provider, and no `models`.
+  assert.ok(!('models' in s), 'no fallback models key');
+  assert.deepEqual(Object.keys(s.provider ?? {}), ['ignore'], 'no unconfigured routing keys');
+});
+
+test('chatSettings: configured routing maps camelCase → snake_case under provider; unset keys absent', () => {
+  const s = chatSettings(
+    'x/y',
+    'smart',
+    baseResolved({
+      providerRouting: {
+        order: ['anthropic', 'openai'],
+        allowFallbacks: false,
+        requireParameters: true,
+        sort: 'throughput',
+        only: ['anthropic'],
+      },
+    }),
+  );
+  assert.deepEqual(s.provider, {
+    ignore: ['amazon-bedrock'],
+    order: ['anthropic', 'openai'],
+    allow_fallbacks: false,
+    require_parameters: true,
+    sort: 'throughput',
+    only: ['anthropic'],
+  });
+});
+
+test('chatSettings: the built-in amazon-bedrock ignore is always unioned and deduplicated', () => {
+  const withUser = chatSettings(
+    'x/y',
+    'fast',
+    baseResolved({ providerRouting: { ignore: ['foo'] } }),
+  );
+  assert.deepEqual(withUser.provider?.ignore, ['foo', 'amazon-bedrock']);
+  const withDup = chatSettings(
+    'x/y',
+    'fast',
+    baseResolved({ providerRouting: { ignore: ['amazon-bedrock'] } }),
+  );
+  assert.deepEqual(withDup.provider?.ignore, ['amazon-bedrock'], 'exactly one entry');
+});
+
+test('chatSettings: models fallback present iff configured for the REQUESTED capability', () => {
+  const cfg = baseResolved({ fallbackModels: { coding: ['a/x', 'b/y'] } });
+  assert.deepEqual(chatSettings('primary/id', 'coding', cfg).models, ['a/x', 'b/y']);
+  // A different capability with no fallback configured → models omitted.
+  assert.ok(!('models' in chatSettings('primary/id', 'smart', cfg)));
+});
+
+test('chatSettings: capability fallback applies even when the primary id came from generic/DEFAULT', () => {
+  // `models.coding` is unset, so the coding primary resolves via generic/DEFAULT — the fallback still
+  // keys off the requested capability, not the id-chain link that supplied the primary.
+  const cfg = baseResolved({
+    models: { ...DEFAULT_MODELS, coding: '' },
+    fallbackModels: { coding: ['fallback/coder'] },
+  });
+  assert.deepEqual(chatSettings(DEFAULT_MODELS.coding, 'coding', cfg).models, ['fallback/coder']);
+});
 
 test('ROLE_CAPABILITY maps every role to a tier', () => {
   assert.equal(ROLE_CAPABILITY.planner, 'smart');

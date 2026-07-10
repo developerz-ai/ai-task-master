@@ -351,6 +351,55 @@ test('resolve: bashRules = configured (project over global, wholesale) then the 
   }
 });
 
+test('resolve: providerRouting + fallbackModels follow project > global > profile; unset → omitted (issue #124)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    // Nothing configured → both keys omitted from ResolvedConfig.
+    let loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    let resolved = await loader.resolve({});
+    assert.ok(!('providerRouting' in resolved), 'omitted when unset');
+    assert.ok(!('fallbackModels' in resolved));
+
+    // Profile supplies it (lowest of the three); no unknown-key warning.
+    const warnings: string[] = [];
+    await writeGlobalConfig(home.path, {
+      activeProfile: 'p',
+      profiles: {
+        p: { providerRouting: { sort: 'latency' }, fallbackModels: { coding: ['a/x'] } },
+      },
+    });
+    loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn: (m) => warnings.push(m) },
+    );
+    resolved = await loader.resolve({});
+    assert.equal(resolved.providerRouting?.sort, 'latency', 'profile value applies');
+    assert.deepEqual(resolved.fallbackModels?.coding, ['a/x']);
+    assert.equal(
+      warnings.some((w) => /unknown config key "(providerRouting|fallbackModels)"/.test(w)),
+      false,
+    );
+
+    // Global beats profile.
+    await writeGlobalConfig(home.path, {
+      activeProfile: 'p',
+      profiles: { p: { providerRouting: { sort: 'latency' } } },
+      providerRouting: { sort: 'throughput' },
+    });
+    assert.equal((await loader.resolve({})).providerRouting?.sort, 'throughput');
+
+    // Project beats global.
+    await writeProjectConfig(cwd.path, { providerRouting: { sort: 'price' } });
+    assert.equal((await loader.resolve({})).providerRouting?.sort, 'price');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: CLI --model pins generic tier; other tiers inherit project/defaults', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

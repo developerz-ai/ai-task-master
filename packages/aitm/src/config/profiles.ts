@@ -186,12 +186,21 @@ function jsonClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-// Only these may be set/get on a profile (mirrors the documented surface). `models` is the
-// only nesting root and only one level deep (models.<tier>).
+// Only these may be set/get on a profile (mirrors the documented surface). `models`,
+// `providerRouting`, and `fallbackModels` are nesting roots, one level deep (`<root>.<field>`).
 const ALLOWED_PROFILE_ROOT_KEYS: ReadonlySet<string> = new Set([
   'openrouterApiKey',
   'baseURL',
   'models',
+  'providerRouting',
+  'fallbackModels',
+]);
+// Roots that take exactly one nested segment (`models.<tier>`, `providerRouting.<field>`,
+// `fallbackModels.<tier>`); every other allowed key is a bare scalar (issue #124).
+const ONE_LEVEL_NESTING_ROOTS: ReadonlySet<string> = new Set([
+  'models',
+  'providerRouting',
+  'fallbackModels',
 ]);
 // Reserved object keys that would let a dotted path reach Object.prototype before the schema
 // runs — rejected outright to close a prototype-pollution vector in setDotted().
@@ -201,7 +210,8 @@ const FORBIDDEN_KEY_SEGMENTS: ReadonlySet<string> = new Set([
   'constructor',
 ]);
 
-const KEY_SURFACE_HINT = 'Allowed keys: openrouterApiKey, baseURL, models.<tier>.';
+const KEY_SURFACE_HINT =
+  'Allowed keys: openrouterApiKey, baseURL, models.<tier>, providerRouting.<field>, fallbackModels.<tier>.';
 
 // Parse and validate a profile key path. Enforces the documented key surface and rejects
 // dangerous segments, so neither `set` nor `get` can mutate prototypes or write off-schema.
@@ -217,7 +227,7 @@ function splitKey(key: string): [string, ...string[]] {
   if (first === undefined || !ALLOWED_PROFILE_ROOT_KEYS.has(first)) {
     throw new Error(`Invalid profile key: "${key}". ${KEY_SURFACE_HINT}`);
   }
-  if (first === 'models' ? rest.length !== 1 : rest.length !== 0) {
+  if (ONE_LEVEL_NESTING_ROOTS.has(first) ? rest.length !== 1 : rest.length !== 0) {
     throw new Error(`Invalid profile key: "${key}". ${KEY_SURFACE_HINT}`);
   }
   return [first, ...rest];

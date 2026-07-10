@@ -104,6 +104,31 @@ test('set updates a nested models tier; get reads it back', async () => {
   });
 });
 
+test('set persists providerRouting.<field> and fallbackModels.<tier>; get reads them back (issue #124)', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    await manager.set('z.ai', 'providerRouting.order', '["anthropic","openai"]');
+    await manager.set('z.ai', 'fallbackModels.coding', '["a/x"]');
+    assert.deepEqual(await manager.get('z.ai', 'providerRouting.order'), ['anthropic', 'openai']);
+    assert.deepEqual(await manager.get('z.ai', 'fallbackModels.coding'), ['a/x']);
+  });
+});
+
+test('set rejects an off-surface providerRouting/fallbackModels path (too deep) (issue #124)', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    await assert.rejects(
+      () => manager.set('z.ai', 'providerRouting.bogus.deep', 'x'),
+      /Invalid profile key/,
+    );
+    await assert.rejects(() => manager.set('z.ai', 'providerRouting', 'x'), /Invalid profile key/);
+    await assert.rejects(
+      () => manager.set('z.ai', 'fallbackModels.coding.deep', 'x'),
+      /Invalid profile key/,
+    );
+  });
+});
+
 test('set rejects a value that breaks the schema (non-URL baseURL)', async () => {
   await withManager(async ({ manager }) => {
     await manager.add('z.ai', { preset: 'zai' });

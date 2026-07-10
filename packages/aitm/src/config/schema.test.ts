@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CapabilityModelsSchema, ConfigFileSchema } from './schema.ts';
+import { CapabilityModelsSchema, ConfigFileSchema, ProfileSchema } from './schema.ts';
 
 test('ConfigFileSchema accepts empty object (all fields optional)', () => {
   const parsed = ConfigFileSchema.parse({});
@@ -71,6 +71,36 @@ test('ConfigFileSchema accepts bashRules and rejects an unknown action / empty p
     'git push',
     'a valid pattern is trimmed',
   );
+});
+
+test('ConfigFileSchema accepts providerRouting + fallbackModels and rejects a bad sort (issue #124)', () => {
+  const parsed = ConfigFileSchema.parse({
+    providerRouting: {
+      order: ['anthropic', 'openai'],
+      allowFallbacks: false,
+      requireParameters: true,
+      sort: 'throughput',
+      only: ['anthropic'],
+      ignore: ['amazon-bedrock'],
+    },
+    fallbackModels: { coding: ['a/x'], smart: ['b/y'] },
+  });
+  assert.deepEqual(parsed.providerRouting?.order, ['anthropic', 'openai']);
+  assert.equal(parsed.providerRouting?.sort, 'throughput');
+  assert.deepEqual(parsed.fallbackModels?.coding, ['a/x']);
+  assert.throws(() => ConfigFileSchema.parse({ providerRouting: { sort: 'cheapest' } }));
+  assert.throws(() => ConfigFileSchema.parse({ providerRouting: { order: 'anthropic' } }));
+  assert.throws(() => ConfigFileSchema.parse({ fallbackModels: { coding: 'a/x' } }));
+});
+
+test('ProfileSchema also carries providerRouting + fallbackModels (issue #124)', () => {
+  const parsed = ProfileSchema.parse({
+    baseURL: 'https://api.z.ai/v1',
+    providerRouting: { order: ['z-ai'] },
+    fallbackModels: { fast: ['x/mini'] },
+  });
+  assert.deepEqual(parsed.providerRouting?.order, ['z-ai']);
+  assert.deepEqual(parsed.fallbackModels?.fast, ['x/mini']);
 });
 
 test('ConfigFileSchema accepts formatCommand + verifyCommand as strings (issue #122)', () => {

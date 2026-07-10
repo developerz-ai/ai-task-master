@@ -3,10 +3,44 @@
 // Never reads config files or env directly — that's ConfigLoader's job.
 // SDK reference: docs/vendor/ai-sdk/chunk-09.md §"Subagents", chunk-04.md §"ToolLoopAgent".
 
-import { createOpenRouter, type OpenRouterProvider } from '@openrouter/ai-sdk-provider';
+import {
+  createOpenRouter,
+  type OpenRouterChatSettings,
+  type OpenRouterProvider,
+} from '@openrouter/ai-sdk-provider';
 import type { LanguageModel } from 'ai';
 import type { Capability, ResolvedConfig } from '../config/schema.ts';
 import { DEFAULT_MODELS } from './defaults.ts';
+
+// Amazon Bedrock rejects the AI SDK's structured-output request (`output_config.format`), failing
+// the submit-tool-based subagents at random — always excluded (issue #124, originally the point fix).
+const ALWAYS_IGNORE_PROVIDER = 'amazon-bedrock';
+
+// Build the OpenRouter chat settings for one call (issue #124). Pure + exported for testability, and
+// the single settings-construction path: #109 composes `cache_control` and #125 composes `reasoning`
+// into this SAME object rather than adding a parallel builder. `modelId` is unused today but is the
+// input those issues gate on. With nothing configured the result is byte-identical to the historical
+// `{ provider: { ignore: ['amazon-bedrock'] } }`.
+export function chatSettings(
+  _modelId: string,
+  capability: Capability,
+  resolved: ResolvedConfig,
+): OpenRouterChatSettings {
+  const routing = resolved.providerRouting;
+  const provider: NonNullable<OpenRouterChatSettings['provider']> = {
+    // The built-in exclusion is always unioned in (dedup), and stays unconditionally.
+    ignore: [...new Set([...(routing?.ignore ?? []), ALWAYS_IGNORE_PROVIDER])],
+    ...(routing?.order ? { order: routing.order } : {}),
+    ...(routing?.allowFallbacks !== undefined ? { allow_fallbacks: routing.allowFallbacks } : {}),
+    ...(routing?.requireParameters !== undefined
+      ? { require_parameters: routing.requireParameters }
+      : {}),
+    ...(routing?.sort ? { sort: routing.sort } : {}),
+    ...(routing?.only ? { only: routing.only } : {}),
+  };
+  const fallback = resolved.fallbackModels?.[capability];
+  return { provider, ...(fallback !== undefined ? { models: fallback } : {}) };
+}
 
 export type Role = 'planner' | 'worker' | 'reviewer' | 'orchestrator';
 
@@ -53,13 +87,8 @@ export class Credentials {
   }
 
   modelForCapability(capability: Capability): LanguageModel {
-    // Subagents lean on structured output (the `submit` tool). OpenRouter may route a model to a
-    // provider — notably Amazon Bedrock — that rejects the AI SDK's structured-output request
-    // (`output_config.format`), failing the Planner/Worker/Reviewer at random. Skip Bedrock so
-    // those calls land on a provider that accepts the parameter.
-    return this.provider().chat(this.modelIdForCapability(capability), {
-      provider: { ignore: ['amazon-bedrock'] },
-    });
+    const modelId = this.modelIdForCapability(capability);
+    return this.provider().chat(modelId, chatSettings(modelId, capability, this.resolved));
   }
 
   // The resolved model *id string* for a capability tier, via the same fallback chain

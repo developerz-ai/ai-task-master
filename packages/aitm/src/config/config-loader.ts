@@ -49,6 +49,8 @@ const KNOWN_KEYS = new Set<string>([
   'logLevel',
   'concurrency',
   'bashRules',
+  'providerRouting',
+  'fallbackModels',
   'mcpServers',
 ]);
 
@@ -137,6 +139,13 @@ export class ConfigLoader {
       ...DEFAULT_BASH_RULES,
     ];
 
+    // Provider routing + fallback models — provider-shaped, so project > global > profile like
+    // baseURL. Undefined when no layer sets it (issue #124).
+    const providerRouting =
+      project?.providerRouting ?? global?.providerRouting ?? profile?.providerRouting;
+    const fallbackModels =
+      project?.fallbackModels ?? global?.fallbackModels ?? profile?.fallbackModels;
+
     return {
       openrouterApiKey: apiKey,
       apiKeySource,
@@ -214,6 +223,8 @@ export class ConfigLoader {
         DEFAULTS.allowForcePush,
       ),
       ...(prBodySections !== undefined ? { prBodySections } : {}),
+      ...(providerRouting !== undefined ? { providerRouting } : {}),
+      ...(fallbackModels !== undefined ? { fallbackModels } : {}),
       bashRules,
       mcpServers,
       mcpServerSources,

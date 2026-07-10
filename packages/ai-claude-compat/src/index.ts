@@ -38,7 +38,7 @@ export {
   type MultiEditOutput,
   multiEditTool,
 } from './edit-tools.ts';
-export { type EnvInfo, envBlock } from './env-block.ts';
+export { detectGitRepo, type EnvInfo, envBlock } from './env-block.ts';
 export { type FileOp, FileStateTracker, hashContent, hashFile } from './file-state.ts';
 export {
   asString,

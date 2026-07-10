@@ -72,13 +72,18 @@ export { loadSkills, type SkillDefinition } from './skills-loader.ts';
 export {
   callWithStepTimeout,
   composeSystemPrompt,
+  continueSubagent,
+  correctiveMessage,
   createSubagent,
   formatSubmitIssues,
+  runSubagent,
   runWithSchemaRetry,
   type SchemaRetryOptions,
   StepTimeoutError,
   SUBMIT_TOOL_NAME,
   type SubagentConfig,
+  type SubagentHandle,
+  type SubagentRun,
   type SubmittedOutput,
   submittedOutput,
 } from './subagent.ts';

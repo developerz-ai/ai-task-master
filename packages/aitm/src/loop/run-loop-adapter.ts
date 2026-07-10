@@ -26,6 +26,7 @@ import {
   multiEditTool,
   type ReminderProvider,
   readFileTool,
+  type SubagentHandle,
   SYSTEM_REMINDER_CONTRACT,
   withReminders,
   writeFileTool,
@@ -379,6 +380,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // Per-step LLM deadline armed on every generate site in this bridge (issue #129).
   const stepTimeout = { stepMs: input.resolved.llmStepTimeoutMs };
 
+  // Per-group CI-fix conversation handles, retained in memory for the life of the run so successive
+  // fix passes for a group continue the same Worker conversation instead of re-planning cold — the
+  // Worker remembers what earlier passes already tried (issue #107). Never shared across groups; not
+  // persisted (a crash falls back to a cold start — durable transcripts are #108).
+  const ciFixHandles = new Map<string, SubagentHandle<WorkerTools>>();
+
   // One Compactor per run: summarize-and-continue when a subagent's context window fills, instead
   // of dying on a provider overflow on the "really big PRs" runs aitm exists for (issue #102). The
   // summarizer is the fast tier; model-limits come from the OpenRouter catalog (lazy, cached; a
@@ -469,6 +476,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     // ci-failed stage → shared fix session: download failed logs + comments to the state dir, run
     // the coding-capability Worker pointed at them, rebase onto origin/<base>, force-with-lease push.
     runCiFix: async ({ group, pr, worktree, baseBranch }) => {
+      const priorHandle = ciFixHandles.get(group.id);
       const result = await runFixSession({
         github: input.github,
         prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
@@ -486,8 +494,14 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         baseBranch,
         worktreePath: worktree.path,
         allowForcePush: input.resolved.allowForcePush,
+        ...(priorHandle ? { priorHandle } : {}),
       });
-      return result.kind === 'fixed' ? { kind: 'ok' } : { kind: 'blocked', reason: result.reason };
+      if (result.kind === 'fixed') {
+        // Retain this pass's conversation so the next fix pass for the group continues it (#107).
+        ciFixHandles.set(group.id, result.handle);
+        return { kind: 'ok' };
+      }
+      return { kind: 'blocked', reason: result.reason };
     },
     // addressing-reviews stage → run the Reviewer, then push its commits so the PR updates. The
     // Reviewer commits code fixes locally (worker pattern); a plain push suffices (additive commits,

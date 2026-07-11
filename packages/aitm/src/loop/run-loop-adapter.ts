@@ -238,7 +238,12 @@ export async function runLoopAdapter(
   const usesMcp = !seams.planGroups || !seams.makeOrchestrator;
   const mcp = seams.makeMcp
     ? seams.makeMcp(input)
-    : new McpClientManager({ servers: input.resolved.mcpServers });
+    : new McpClientManager({
+        servers: input.resolved.mcpServers,
+        ...(input.resolved.mcpRoleAllowlist !== undefined
+          ? { roleAllowlist: input.resolved.mcpRoleAllowlist }
+          : {}),
+      });
 
   let mcpConnected = false;
   try {
@@ -652,6 +657,24 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
 // `bash` wins the partial-fill and sits outside this boundary — a documented limitation, not solved
 // here. Harness-side git (runGit/assertGitAllowed, and the CI-fix rebase's own allowForcePush gate)
 // never passes through the bash tool and is unaffected.
+// The MCP ToolSet is now namespaced `mcp__<server>__<tool>` (issue #115), so partial-fill can no
+// longer look up a bare canonical name. Prefer the first MCP tool whose namespaced key resolves to
+// `canonical`, in server/config order (Object insertion order), else undefined → fall back local.
+// Exported for the partial-fill regression test.
+export function mcpTool(set: ToolSet, canonical: string): ToolSet[string] | undefined {
+  for (const [key, entry] of Object.entries(set)) {
+    if (mcpBaseName(key) === canonical) return entry;
+  }
+  return undefined;
+}
+
+// `mcp__<server>__<tool>` → `<tool>` (server has no `__`; a tool name may). Non-namespaced → undefined.
+function mcpBaseName(key: string): string | undefined {
+  const parts = key.split('__');
+  if (parts.length < 3 || parts[0] !== 'mcp') return undefined;
+  return parts.slice(2).join('__');
+}
+
 function resolveWorkerTools(
   set: ToolSet,
   cwd: string,
@@ -660,18 +683,18 @@ function resolveWorkerTools(
 ): WorkerTools {
   const local = localEditTools(cwd, rules, fetchHtmlAvailable);
   // fetchHtml is optional: keep the key only when MCP supplies one or the local binary is available.
-  const fetchHtml = set.fetchHtml ?? local.fetchHtml;
+  const fetchHtml = mcpTool(set, 'fetchHtml') ?? local.fetchHtml;
   return {
-    readFile: set.readFile ?? local.readFile,
-    writeFile: set.writeFile ?? local.writeFile,
-    editFile: set.editFile ?? local.editFile,
-    multiEdit: set.multiEdit ?? local.multiEdit,
-    grep: set.grep ?? local.grep,
-    glob: set.glob ?? local.glob,
-    bash: set.bash ?? local.bash,
-    multiBash: set.multiBash ?? local.multiBash,
-    webFetch: set.webFetch ?? local.webFetch,
-    datetime: set.datetime ?? local.datetime,
+    readFile: mcpTool(set, 'readFile') ?? local.readFile,
+    writeFile: mcpTool(set, 'writeFile') ?? local.writeFile,
+    editFile: mcpTool(set, 'editFile') ?? local.editFile,
+    multiEdit: mcpTool(set, 'multiEdit') ?? local.multiEdit,
+    grep: mcpTool(set, 'grep') ?? local.grep,
+    glob: mcpTool(set, 'glob') ?? local.glob,
+    bash: mcpTool(set, 'bash') ?? local.bash,
+    multiBash: mcpTool(set, 'multiBash') ?? local.multiBash,
+    webFetch: mcpTool(set, 'webFetch') ?? local.webFetch,
+    datetime: mcpTool(set, 'datetime') ?? local.datetime,
     ...(fetchHtml ? { fetchHtml } : {}),
   } as WorkerTools;
 }
@@ -692,13 +715,13 @@ function resolveReviewerTools(
 // readFile/grep/glob.
 function resolvePlannerTools(set: ToolSet, cwd: string, fetchHtmlAvailable = false): PlannerTools {
   const local = localReadTools(cwd, fetchHtmlAvailable);
-  const fetchHtml = set.fetchHtml ?? local.fetchHtml;
+  const fetchHtml = mcpTool(set, 'fetchHtml') ?? local.fetchHtml;
   return {
-    readFile: set.readFile ?? local.readFile,
-    grep: set.grep ?? local.grep,
-    glob: set.glob ?? local.glob,
-    webFetch: set.webFetch ?? local.webFetch,
-    datetime: set.datetime ?? local.datetime,
+    readFile: mcpTool(set, 'readFile') ?? local.readFile,
+    grep: mcpTool(set, 'grep') ?? local.grep,
+    glob: mcpTool(set, 'glob') ?? local.glob,
+    webFetch: mcpTool(set, 'webFetch') ?? local.webFetch,
+    datetime: mcpTool(set, 'datetime') ?? local.datetime,
     ...(fetchHtml ? { fetchHtml } : {}),
   } as PlannerTools;
 }

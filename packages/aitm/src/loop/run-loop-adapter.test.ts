@@ -28,6 +28,7 @@ import {
   harnessContextBlock,
   localEditTools,
   localReadTools,
+  mcpTool,
   type PlanGroupsOutcome,
   planToPrGroups,
   type RunLoopAdapterSeams,
@@ -525,6 +526,21 @@ test('resume: an interrupted waiting-ci group is rescheduled through the real ad
 });
 
 // ---- Default orchestrator bridge: no MCP → local fs-tools fallback ----------
+
+test('mcpTool: partial-fill matches a namespaced MCP tool by canonical name, first in config order (issue #115)', () => {
+  const a = { description: 'a' } as never;
+  const b = { description: 'b' } as never;
+  // Namespaced ToolSet as toolsForRole now produces it; insertion order = server/config order.
+  const set = { mcp__fs__readFile: a, mcp__other__readFile: b, mcp__git__status: {} as never };
+  assert.strictEqual(mcpTool(set, 'readFile'), a, 'first server in config order wins');
+  assert.strictEqual(mcpTool(set, 'status'), set.mcp__git__status);
+  // A canonical name no server exports → undefined (caller falls back to the local tool).
+  assert.equal(mcpTool(set, 'writeFile'), undefined);
+  // A bare (non-namespaced) key is never matched.
+  assert.equal(mcpTool({ readFile: a }, 'readFile'), undefined);
+  // Empty set (no MCP servers) → undefined → all-local fallback (bare `aitm start`).
+  assert.equal(mcpTool({}, 'readFile'), undefined);
+});
 
 test('localEditTools supplies worktree-scoped readFile/writeFile/bash (no-MCP fallback)', () => {
   // When no MCP server provides edit tools, the Worker/Reviewer fall back to these so a bare

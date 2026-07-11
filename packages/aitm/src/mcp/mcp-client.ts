@@ -14,7 +14,7 @@ import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { ToolSet } from 'ai';
 import type { Role } from '../credentials/credentials.ts';
 import type { LoggerLike } from '../logger/logger.ts';
-import type { McpServer, McpServers } from './schema.ts';
+import type { McpRoleAllowlist, McpRoleAllowlistValue, McpServer, McpServers } from './schema.ts';
 
 export type TransportKind = 'stdio' | 'http' | 'sse';
 
@@ -22,10 +22,10 @@ export type CreateMcpClient = (config: MCPClientConfig) => Promise<MCPClient>;
 
 export type McpClientInit = {
   servers: McpServers;
-  // Optional per-role allowlist: if set, only listed servers are mounted for that role.
-  // Example: { worker: ['filesystem'], reviewer: ['git'] }. Unlisted roles get every
-  // connected server.
-  roleAllowlist?: Partial<Record<Role, string[]>>;
+  // Optional per-role allowlist (issue #115). Per role, either whole servers by name
+  // (`{ worker: ['filesystem'] }`) or per-server tool patterns with `*` wildcards
+  // (`{ planner: { filesystem: ['read_*', 'list_*'] } }`). Unlisted roles get every connected server.
+  roleAllowlist?: McpRoleAllowlist;
   // Injection seam for tests — defaults to the AI SDK factory.
   createClient?: CreateMcpClient;
   logger?: LoggerLike;
@@ -75,24 +75,18 @@ export class McpClientManager {
     }
   }
 
+  // Every tool is mounted under the Claude Code convention `mcp__<server>__<tool>`, so name overlaps
+  // across servers no longer collide (both survive as distinct keys — no drop, no warning). The
+  // allowlist gates servers (array form) or individual tools (record form) per role (issue #115).
   toolsForRole(role: Role): ToolSet {
     const allowed = this.init.roleAllowlist?.[role];
     const merged: ToolSet = {};
-    const owner = new Map<string, string>();
     for (const s of this.servers) {
-      if (allowed !== undefined && !allowed.includes(s.name)) continue;
+      const toolFilter = serverToolFilter(allowed, s.name);
+      if (toolFilter === null) continue; // this server is not mounted for the role
       for (const [toolName, tool] of Object.entries(s.tools)) {
-        const previous = owner.get(toolName);
-        if (previous !== undefined) {
-          this.init.logger?.warn('duplicate mcp tool name', {
-            tool: toolName,
-            server: s.name,
-            existingServer: previous,
-          });
-          continue;
-        }
-        merged[toolName] = tool;
-        owner.set(toolName, s.name);
+        if (!toolFilter(toolName)) continue;
+        merged[namespacedName(s.name, toolName)] = tool;
       }
     }
     return merged;
@@ -148,6 +142,46 @@ function buildClientConfig(name: string, server: McpServer): MCPClientConfig {
 
 function clientNameFor(name: string): string {
   return `aitm-${name}`;
+}
+
+// `mcp__<server>__<tool>`, the Claude Code namespacing convention (issue #115). Server names are
+// sanitized to the OpenAI-compatible function-name charset; they should avoid `__` so the split back
+// to <server>/<tool> stays unambiguous (documented in docs/mcp.md).
+function namespacedName(serverName: string, toolName: string): string {
+  return `mcp__${sanitizeServerName(serverName)}__${toolName}`;
+}
+
+function sanitizeServerName(name: string): string {
+  // Collapse any run of 2+ underscores to `-` as well: `__` is the namespace delimiter, so a server
+  // name containing it (`my__server`) would make mcpBaseName mis-split `mcp__my__server__tool`.
+  return name.replace(/[^A-Za-z0-9_-]/g, '-').replace(/_{2,}/g, '-');
+}
+
+// Resolve the per-role, per-server tool gate (issue #115). Returns a predicate over un-namespaced
+// tool names, or null when the server is not mounted for the role:
+//   allowed undefined        → every server, every tool
+//   string[] (whole servers) → this server iff listed, then every tool
+//   Record<string,string[]>  → this server iff a key, then tools matching its `*`-glob patterns
+function serverToolFilter(
+  allowed: McpRoleAllowlistValue | undefined,
+  serverName: string,
+): ((toolName: string) => boolean) | null {
+  if (allowed === undefined) return () => true;
+  if (Array.isArray(allowed)) return allowed.includes(serverName) ? () => true : null;
+  // Own-property only: a server named `toString`/`__proto__` must not read an inherited member
+  // (which would make `.some(...)` throw and abort role resolution).
+  const patterns = Object.hasOwn(allowed, serverName) ? allowed[serverName] : undefined;
+  if (patterns === undefined) return null;
+  return (toolName) => patterns.some((pattern) => matchesGlob(toolName, pattern));
+}
+
+// `*` matches any run of characters; every other character is literal (no other metacharacters).
+function matchesGlob(name: string, pattern: string): boolean {
+  const body = pattern
+    .split('*')
+    .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*');
+  return new RegExp(`^${body}$`).test(name);
 }
 
 function errorMessage(err: unknown): string {

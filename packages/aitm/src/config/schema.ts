@@ -8,7 +8,7 @@
 
 import type { CommandRule } from '@developerz.ai/ai-claude-compat';
 import { z } from 'zod';
-import { McpServersSchema } from '../mcp/schema.ts';
+import { McpRoleAllowlistSchema, McpServersSchema } from '../mcp/schema.ts';
 
 // A model-facing bash deny/allow rule (issue #113). Structurally the compat CommandRule; the schema
 // validates config-file input and ResolvedConfig carries the compat type.
@@ -163,6 +163,10 @@ export const ConfigFileSchema = z
     // External MCP servers to mount into subagent tool surfaces (client only — aitm is never
     // exposed as an MCP server). See docs/mcp.md and src/mcp/schema.ts.
     mcpServers: McpServersSchema.optional(),
+    // Per-role MCP allowlist (issue #115): whole servers by name or per-server `*`-glob tool
+    // patterns. aitm-config-only (project > global); the Claude Code interop sources contribute
+    // mcpServers alone. See src/mcp/schema.ts and src/mcp/mcp-client.ts.
+    mcpRoleAllowlist: McpRoleAllowlistSchema.optional(),
   })
   .passthrough();
 
@@ -231,6 +235,9 @@ export type ResolvedConfig = {
   // precedence). Empty object when nothing was found — never undefined, so callers can
   // iterate without null-checks.
   mcpServers: import('../mcp/schema.ts').McpServers;
+  // Per-role MCP allowlist (issue #115), aitm-config-only (project > global). Undefined → every role
+  // gets every connected server. Passed into McpClientManager.
+  mcpRoleAllowlist?: import('../mcp/schema.ts').McpRoleAllowlist | undefined;
   // One label per server name explaining where the entry came from. Useful for the
   // snapshot, `aitm config list`, and "duplicate name shadowed by X" warnings.
   mcpServerSources: Record<string, McpServerSource>;

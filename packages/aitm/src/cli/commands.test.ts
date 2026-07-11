@@ -11,7 +11,14 @@ import type {
   RunPlannerInput,
   StartCtx,
 } from './commands.ts';
-import { autoMergeNotice, runConfig, runMergePr, runProfile, runStart } from './commands.ts';
+import {
+  autoMergeNotice,
+  runConfig,
+  runMergePr,
+  runProfile,
+  runStart,
+  usageSummaryLine,
+} from './commands.ts';
 
 const FAKE_KEY = 'sk-or-fake-test-key';
 
@@ -152,6 +159,45 @@ test('autoMergeNotice: full warning when on, null when off', () => {
   assert.equal(autoMergeNotice(false), null);
 });
 
+test('usageSummaryLine: renders overall tokens + per-role breakdown + cost, or "cost unknown" (issue #114)', () => {
+  const line = usageSummaryLine({
+    perRole: {
+      planner: {
+        inputTokens: 100,
+        outputTokens: 20,
+        cachedInputTokens: 0,
+        calls: 1,
+        costUsd: 0.001,
+      },
+      worker: {
+        inputTokens: 500,
+        outputTokens: 80,
+        cachedInputTokens: 50,
+        calls: 4,
+        costUsd: 0.009,
+      },
+    },
+    overall: {
+      inputTokens: 600,
+      outputTokens: 100,
+      cachedInputTokens: 50,
+      calls: 5,
+      costUsd: 0.01,
+    },
+  });
+  assert.match(line, /^Usage: 5 calls, 600 in \/ 100 out tokens \(50 cached\), \$0\.0100/);
+  assert.match(line, /planner 100in\/20out/);
+  assert.match(line, /worker 500in\/80out/);
+  assert.ok(line.endsWith('\n'), 'exactly one line');
+
+  // Null overall cost (any pricing unavailable) renders "cost unknown".
+  const unknown = usageSummaryLine({
+    perRole: {},
+    overall: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, calls: 1, costUsd: null },
+  });
+  assert.match(unknown, /cost unknown/);
+});
+
 test('runStart: prints the auto-merge banner to stdout when auto-merge is on (default)', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();
@@ -199,7 +245,9 @@ test('runStart: --no-automerge suppresses the banner', async () => {
       },
     );
     assert.equal(result.code, 0, result.message);
-    assert.equal(out, '');
+    // The banner is suppressed, but the end-of-run usage summary is always written (issue #114).
+    assert.ok(!out.includes('auto-merge is ON'), 'no auto-merge banner');
+    assert.match(out, /^Usage: /, 'usage summary line still written');
   } finally {
     await repo.cleanup();
     await home.cleanup();

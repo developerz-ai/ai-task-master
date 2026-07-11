@@ -81,6 +81,8 @@ export type FixSessionSubagents = {
   // Provider options forwarded to the CI-fix Worker agent — the adapter attaches OpenRouter
   // web_search here by default for fix sessions (issue #112). Unset → none.
   providerOptions?: SubagentInit<WorkerTools>['providerOptions'];
+  // Usage sink forwarded to the CI-fix Worker agent, recorded under the worker role (#114). Unset → none.
+  onUsage?: SubagentInit<WorkerTools>['onUsage'];
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
@@ -219,6 +221,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     ...(subagents.providerOptions !== undefined
       ? { providerOptions: subagents.providerOptions }
       : {}),
+    ...(subagents.onUsage !== undefined ? { onUsage: subagents.onUsage } : {}),
   });
   return runWorker(agent, workerInput);
 }

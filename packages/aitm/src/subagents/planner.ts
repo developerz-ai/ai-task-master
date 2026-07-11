@@ -69,8 +69,12 @@ export const PLANNER_SYSTEM_PREFIX = [
   '  (`fetchHtml` for scraper-hostile sites, when available). `datetime` gives the current time.',
 ].join('\n');
 
+// Link a Planner agent back to its init so runPlanner can reach the optional onUsage sink (#114)
+// without threading it through PlannerInput — mirrors the worker/reviewer WeakMap pattern.
+const plannerInitRegistry = new WeakMap<PlannerAgent, SubagentInit<PlannerTools>>();
+
 export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAgent {
-  return createSubagent<PlannerTools>(
+  const agent = createSubagent<PlannerTools>(
     {
       model: init.model,
       tools: init.tools,
@@ -85,14 +89,19 @@ export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAge
     },
     20,
   );
+  plannerInitRegistry.set(agent, init);
+  return agent;
 }
 
 export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Promise<PlannerResult> {
   if (!Number.isInteger(input.maxPrs) || input.maxPrs < 1) {
     return { kind: 'error', error: `maxPrs must be a positive integer, received ${input.maxPrs}` };
   }
+  const onUsage = plannerInitRegistry.get(agent)?.onUsage;
   try {
-    const submitted = await runWithSchemaRetry(agent, PlanSchema, buildUserPrompt(input));
+    const submitted = await runWithSchemaRetry(agent, PlanSchema, buildUserPrompt(input), {
+      ...(onUsage ? { onUsage } : {}),
+    });
     if (!submitted.ok) {
       // Only after the retry kernel exhausts. Distinguish the two failure modes in the message so
       // a weak model that never submits reads differently from one that keeps mangling the schema.

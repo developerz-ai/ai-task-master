@@ -55,7 +55,7 @@ import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
-import { prependContextBlock, type SubagentInit } from './factory.ts';
+import { type OnUsage, prependContextBlock, reportUsage, type SubagentInit } from './factory.ts';
 
 // The Claude-Code-style tool surface (from @developerz.ai/ai-claude-compat) the Worker drives:
 // read/write whole files, edit by exact string replace (single + atomic batch), and search the
@@ -291,7 +291,7 @@ async function planAndEdit(
   init: SubagentInit<WorkerTools>,
   input: WorkerInput,
 ): Promise<PlanEditResult> {
-  const { submitted, handle } = await planManifest(agent, input);
+  const { submitted, handle } = await planManifest(agent, input, init.onUsage);
   if (!submitted.ok) {
     // Only after the schema-retry kernel exhausts. A model that never submits gets the same
     // capability guidance as a zero-file manifest; one that keeps mangling the schema is an error.
@@ -363,14 +363,17 @@ const MANIFEST_SCHEMA_RETRIES = 2;
 async function planManifest(
   agent: WorkerAgent,
   input: WorkerInput,
+  onUsage: OnUsage | undefined,
 ): Promise<{ submitted: SubmittedOutput<FileManifest>; handle: SubagentHandle<WorkerTools> }> {
   const prompt = buildManifestPrompt(input);
   let run = input.priorHandle
     ? await continueSubagent(input.priorHandle, prompt)
     : await runSubagent(agent, prompt);
+  reportUsage(onUsage, run.result);
   let submitted = submittedOutput(run.result, FileManifestSchema);
   for (let attempt = 0; attempt < MANIFEST_SCHEMA_RETRIES && !submitted.ok; attempt++) {
     run = await continueSubagent(run.handle, correctiveMessage(submitted));
+    reportUsage(onUsage, run.result);
     submitted = submittedOutput(run.result, FileManifestSchema);
   }
   return { submitted, handle: run.handle };
@@ -407,7 +410,7 @@ async function runEditor(
   file: FileManifestEntry,
   input: WorkerInput,
 ): Promise<FileChange> {
-  const { text } = await callWithStepTimeout(
+  const result = await callWithStepTimeout(
     () =>
       generateText({
         model: init.model,
@@ -424,7 +427,8 @@ async function runEditor(
       }),
     init.timeout,
   );
-  const firstLine = text.trim().split('\n')[0];
+  reportUsage(init.onUsage, result); // per-file editor pass, recorded under the worker role (#114)
+  const firstLine = result.text.trim().split('\n')[0];
   const summary = firstLine && firstLine.length > 0 ? firstLine : `${file.kind} ${file.path}`;
   return { path: file.path, kind: file.kind, summary };
 }

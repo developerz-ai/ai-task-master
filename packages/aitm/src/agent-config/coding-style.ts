@@ -7,6 +7,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
+import { type OnUsage, reportUsage } from '../subagents/factory.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
 
 export type StyleDistillerInit = {
@@ -16,6 +17,9 @@ export type StyleDistillerInit = {
   // Per-step LLM request deadline (issue #129). Unset → no deadline. On expiry the SDK aborts and
   // the existing catch degrades to the raw style contents — a stalled style step never hangs the run.
   timeout?: TimeoutConfiguration;
+  // Usage sink for the style-digest call, recorded under the planner role (#114). It runs on the
+  // planner's model. Unset → no accounting.
+  onUsage?: OnUsage;
 };
 
 export type DistillInput = {
@@ -60,12 +64,13 @@ export class StyleDistiller {
     const signals = await gatherSignals(input);
     if (signals.length === 0) return fallback;
     try {
-      const { text } = await generateText({
+      const result = await generateText({
         model: this.init.model,
         prompt: buildPrompt(signals),
         ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
       });
-      const digest = cleanDigest(text);
+      reportUsage(this.init.onUsage, result);
+      const digest = cleanDigest(result.text);
       return digest === '' ? fallback : digest;
     } catch {
       return fallback;

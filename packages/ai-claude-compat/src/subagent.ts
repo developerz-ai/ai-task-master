@@ -11,6 +11,7 @@
 import {
   hasToolCall,
   type LanguageModel,
+  type LanguageModelUsage,
   type ModelMessage,
   stepCountIs,
   type TimeoutConfiguration,
@@ -198,6 +199,10 @@ export function formatSubmitIssues(issues: readonly z.core.$ZodIssue[]): string 
 export type SchemaRetryOptions = {
   // Corrective re-invocations after the first attempt. Default 2 → up to 3 total generations.
   maxRetries?: number;
+  // Optional per-generation usage sink — invoked once per attempt with that generation's total usage
+  // and resolved model id, so a caller can meter cost across the whole retry loop (issue #114).
+  // Policy-free passthrough; a throwing sink must not break the loop.
+  onUsage?: (usage: LanguageModelUsage, modelId: string | undefined) => void;
 };
 
 // Run a subagent to a schema-valid `submit`, correcting a botched attempt in-conversation. Runs
@@ -220,6 +225,7 @@ export async function runWithSchemaRetry<TOOLS extends ToolSet, OUTPUT>(
     // One replay step, shared with continuation (#107): run the agent and accumulate the full
     // conversation (prior turns + the model's response — its call and the SDK's tool-error result).
     const step = await generateOverMessages(agent, messages);
+    reportUsage(options.onUsage, step.result);
     last = submittedOutput(step.result, schema);
     if (last.ok) return last;
     if (attempt === maxRetries) break;
@@ -233,6 +239,21 @@ export async function runWithSchemaRetry<TOOLS extends ToolSet, OUTPUT>(
 type GenerateResult<TOOLS extends ToolSet> = Awaited<
   ReturnType<ToolLoopAgent<never, TOOLS>['generate']>
 >;
+
+// Feed a generation's total usage + resolved model id to an optional sink (issue #114). The
+// schema-retry loop hides the raw result from planner/reviewer callers, so it meters here.
+// Fire-and-forget: a throwing sink or a missing field must never break the run leg.
+function reportUsage<TOOLS extends ToolSet>(
+  onUsage: SchemaRetryOptions['onUsage'],
+  result: GenerateResult<TOOLS>,
+): void {
+  if (!onUsage) return;
+  try {
+    onUsage(result.totalUsage, result.response.modelId);
+  } catch {
+    // observability must never break the run
+  }
+}
 
 // A completed subagent run plus the full conversation, so a later call can continue it (#107).
 export type SubagentHandle<TOOLS extends ToolSet> = {

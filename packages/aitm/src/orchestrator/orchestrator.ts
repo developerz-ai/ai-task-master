@@ -32,6 +32,7 @@ import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
 import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
+import { type OnUsage, reportUsage } from '../subagents/factory.ts';
 import type { PlannerTools } from '../subagents/planner.ts';
 import type { ReviewerTools } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerTools } from '../subagents/worker.ts';
@@ -118,6 +119,8 @@ export type OrchestratorInit = {
   // Per-step LLM request deadline for the two direct generateText sites (commit-message refine, PR
   // compose). Unset → no deadline. Threaded from resolved config as `{ stepMs }`. Issue #129.
   timeout?: TimeoutConfiguration;
+  // Usage sink for the two direct generateText sites, recorded under the orchestrator role (#114).
+  onUsage?: OnUsage;
 };
 
 // Per-group state needed to wire the subagent tools. Built fresh for each Orchestrator
@@ -300,7 +303,7 @@ export class Orchestrator {
   }
 
   private async refineCommitMessage(group: PrGroup, delivery: WorkerDelivery): Promise<string> {
-    const { text } = await callWithStepTimeout(
+    const result = await callWithStepTimeout(
       () =>
         generateText({
           model: this.init.credentials.modelFor('orchestrator'),
@@ -309,7 +312,8 @@ export class Orchestrator {
         }),
       this.init.timeout,
     );
-    return text.trim();
+    reportUsage(this.init.onUsage, result);
+    return result.text.trim();
   }
 
   private buildCommitPrompt(group: PrGroup, delivery: WorkerDelivery): string {
@@ -349,6 +353,7 @@ export class Orchestrator {
         }),
       this.init.timeout,
     );
+    reportUsage(this.init.onUsage, result);
     // Forced single-step submit (toolChoice), so there's no agent loop to retry through here (that
     // recovery is for the subagents, issue #101). Surface the typed extraction failure as an error.
     const out = submittedOutput(result, PrCompositionSchema);

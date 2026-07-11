@@ -101,6 +101,60 @@ test('RunStateSchema rejects unknown provider', () => {
   );
 });
 
+test('RunStateSchema: usage is optional (legacy state parses) and round-trips when present (issue #114)', () => {
+  const base = {
+    status: 'success' as const,
+    prGroups: [],
+    currentGroupIndex: 0,
+    currentTaskIndex: 0,
+    sessionCount: 0,
+    currentPr: null,
+    runId: 'r1',
+    provider: 'openrouter' as const,
+    model: 'x',
+    agentConfigFile: 'CLAUDE.md' as const,
+    createdAt: 'now',
+    updatedAt: 'now',
+    options: {
+      autoMerge: true,
+      maxPrs: 5,
+      maxSessions: null,
+      mergeMethod: 'squash' as const,
+      stylePath: null,
+      concurrency: 1,
+    },
+  };
+  // A pre-#114 state.json (no `usage`) still parses.
+  assert.equal(RunStateSchema.parse(base).usage, undefined);
+  // A run's usage totals round-trip.
+  const usage = {
+    perRole: {
+      worker: {
+        inputTokens: 100,
+        outputTokens: 20,
+        cachedInputTokens: 10,
+        calls: 2,
+        costUsd: 0.001,
+      },
+    },
+    overall: {
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedInputTokens: 10,
+      calls: 2,
+      costUsd: 0.001,
+    },
+  };
+  const parsed = RunStateSchema.parse({ ...base, usage });
+  assert.deepEqual(parsed.usage, usage);
+  // costUsd may be null (any pricing unknown) — still valid.
+  const nullCost = RunStateSchema.parse({
+    ...base,
+    usage: { perRole: {}, overall: { ...usage.overall, costUsd: null } },
+  });
+  assert.equal(nullCost.usage?.overall.costUsd, null);
+});
+
 test('RunStateSchema defaults options.prPerTask to false', () => {
   const parsed = RunStateSchema.parse({
     status: 'planning',

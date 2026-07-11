@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { LanguageModelUsage } from 'ai';
 import {
   DEFAULT_LLM_STEP_TIMEOUT_MS,
   prependContextBlock,
+  reportUsage,
   type SubagentFactory,
   type SubagentInit,
 } from './factory.ts';
@@ -18,6 +20,26 @@ test('SubagentInit / SubagentFactory types are exported (compile-time check)', (
 test('DEFAULT_LLM_STEP_TIMEOUT_MS is 900_000 and clears the 600s bash ceiling (issue #129)', () => {
   assert.equal(DEFAULT_LLM_STEP_TIMEOUT_MS, 900_000);
   assert.ok(DEFAULT_LLM_STEP_TIMEOUT_MS > 600_000, 'must exceed MAX_BASH_TIMEOUT_MS');
+});
+
+test('reportUsage forwards usage + modelId, and swallows a throwing sink (issue #114)', () => {
+  const result = {
+    totalUsage: { inputTokens: 10, outputTokens: 2 } as LanguageModelUsage,
+    response: { modelId: 'anthropic/opus' },
+  };
+  const seen: Array<{ usage: LanguageModelUsage; modelId: string | undefined }> = [];
+  reportUsage((usage, modelId) => seen.push({ usage, modelId }), result);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.modelId, 'anthropic/opus');
+  assert.equal(seen[0]?.usage.inputTokens, 10);
+  // A throwing sink must never propagate — observability can't break a run.
+  assert.doesNotThrow(() =>
+    reportUsage(() => {
+      throw new Error('sink boom');
+    }, result),
+  );
+  // No sink → no-op.
+  assert.doesNotThrow(() => reportUsage(undefined, result));
 });
 
 test('prependContextBlock: prepends the block with a blank-line separator, or returns the prompt unchanged (issue #106)', () => {

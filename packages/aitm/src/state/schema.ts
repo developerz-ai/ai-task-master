@@ -67,6 +67,25 @@ export const RunStatusSchema = z.enum([
 ]);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 
+// Per-run token/cost accounting persisted at flush (issue #114). Additive + optional so a legacy
+// state.json without it still parses. Mirrors UsageTracker.totals(): tokens per role + overall, with
+// costUsd null when any pricing was unknown.
+const RoleUsageSchema = z.object({
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  cachedInputTokens: z.number().int().nonnegative(),
+  calls: z.number().int().nonnegative(),
+  costUsd: z.number().nullable(),
+});
+export const UsageTotalsSchema = z.object({
+  // partialRecord (not record): only roles that actually ran are present, matching UsageTracker.totals.
+  perRole: z.partialRecord(
+    z.enum(['planner', 'worker', 'reviewer', 'orchestrator']),
+    RoleUsageSchema,
+  ),
+  overall: RoleUsageSchema,
+});
+
 export const RunStateSchema = z.object({
   status: RunStatusSchema,
   prGroups: z.array(PrGroupSchema),
@@ -89,5 +108,7 @@ export const RunStateSchema = z.object({
     stylePath: z.string().nullable(),
     concurrency: z.number().int().positive(),
   }),
+  // Token/cost totals, written after the loop returns (issue #114). Optional so old state files load.
+  usage: UsageTotalsSchema.optional(),
 });
 export type RunState = z.infer<typeof RunStateSchema>;

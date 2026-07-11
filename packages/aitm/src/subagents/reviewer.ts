@@ -159,6 +159,7 @@ async function resolveOneThread(
     agent,
     ThreadResolutionOutputSchema,
     buildThreadPrompt(input, thread),
+    { ...(init.onUsage ? { onUsage: init.onUsage } : {}) },
   );
   if (!submitted.ok) {
     // After the retry kernel exhausts, leave THIS thread for a human as wontfix — never throw, so

@@ -40,6 +40,7 @@ import { buildCompactionStep } from '../compaction/compaction-step.ts';
 import { Compactor } from '../compaction/compactor.ts';
 import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
+import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
 import { providerOptionsWithServerTools, webSearchTool } from '../openrouter/server-tools.ts';
@@ -402,11 +403,17 @@ async function defaultPlanGroups(
   fetchHtmlAvailable: boolean,
 ): Promise<PlanGroupsOutcome> {
   const style = input.styleDigest ?? input.agentConfig.contents;
+  const plannerUsage = roleUsageSink(
+    input.usage,
+    'planner',
+    input.credentials.modelIdFor('planner'),
+  );
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
     tools: resolvePlannerTools(mcp.toolsForRole('planner'), input.cwd, fetchHtmlAvailable),
     systemPrompt: reminderAgentSystemPrompt(style, PLANNER_SYSTEM_PREFIX, input.cwd),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
+    ...(plannerUsage ? { onUsage: plannerUsage } : {}),
   });
   const result = await runPlanner(agent, {
     goal: input.goal,
@@ -451,13 +458,34 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // summarizer is the fast tier; model-limits come from the OpenRouter catalog (lazy, cached; a
   // lookup miss or fetch failure just skips compaction — non-fatal). Threaded into both worker
   // paths (stage machine + CI-fix) and the reviewer.
+  // Reuse the run's single ModelLimitsRegistry (built in runStart for the usage tracker) so the
+  // catalog is fetched at most once (issue #114); fall back to a fresh one for callers that don't
+  // provide it (tests, direct adapter use).
+  const limits =
+    input.modelLimits ??
+    new ModelLimitsRegistry(
+      new OpenRouterClient(input.resolved.openrouterApiKey, input.resolved.baseURL),
+    );
   const compactor = new Compactor({
     summarizer: input.credentials.modelForCapability('fast'),
-    limits: new ModelLimitsRegistry(
-      new OpenRouterClient(input.resolved.openrouterApiKey, input.resolved.baseURL),
-    ),
+    limits,
     timeout: stepTimeout,
   });
+  // Role-scoped usage sinks off the run's tracker (issue #114); undefined when no tracker, so each
+  // init omits the seam. The fallback model id is the role's configured id, used when a response
+  // doesn't echo modelId.
+  const orchUsage = roleUsageSink(
+    input.usage,
+    'orchestrator',
+    input.credentials.modelIdFor('orchestrator'),
+  );
+  const workerUsage = roleUsageSink(input.usage, 'worker', input.credentials.modelIdFor('worker'));
+  const reviewerUsage = roleUsageSink(
+    input.usage,
+    'reviewer',
+    input.credentials.modelIdFor('reviewer'),
+  );
+
   const orch = new Orchestrator({
     credentials: input.credentials,
     agentConfig: input.agentConfig,
@@ -469,6 +497,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       ? { prBodySections: input.resolved.prBodySections }
       : {}),
     timeout: stepTimeout,
+    ...(orchUsage ? { onUsage: orchUsage } : {}),
   });
 
   // Build + run the Reviewer over a thread set in the given worktree. Shared by the prPerTask
@@ -491,6 +520,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         modelId: input.credentials.modelIdFor('reviewer'),
       }),
       timeout: stepTimeout,
+      ...(reviewerUsage ? { onUsage: reviewerUsage } : {}),
     });
     return runReviewerSubagent(agent, {
       pr,
@@ -523,6 +553,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         }),
         timeout: stepTimeout,
         ...(providerOptions !== undefined ? { providerOptions } : {}),
+        ...(workerUsage ? { onUsage: workerUsage } : {}),
       });
       return runWorkerSubagent(agent, {
         group,
@@ -552,6 +583,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     runCiFix: async ({ group, pr, worktree, baseBranch }) => {
       const priorHandle = ciFixHandles.get(group.id);
       const ciFixProviderOptions = webSearchProviderOptions(input.resolved.webSearch, true);
+      // The CI-fix Worker runs on the coding tier, so its fallback model id is the coding id.
+      const ciFixUsage = roleUsageSink(
+        input.usage,
+        'worker',
+        input.credentials.modelIdForCapability('coding'),
+      );
       const result = await runFixSession({
         github: input.github,
         prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
@@ -569,6 +606,8 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           // CI-fix Worker: web_search on by default (undefined) — a fix pass looking up an error or
           // changelog is the highest-value place for it; only an explicit `false` disables it.
           ...(ciFixProviderOptions !== undefined ? { providerOptions: ciFixProviderOptions } : {}),
+          // CI-fix Worker usage recorded under `worker`; it runs on the coding-tier model (#114).
+          ...(ciFixUsage ? { onUsage: ciFixUsage } : {}),
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
         },

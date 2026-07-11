@@ -19,6 +19,14 @@ import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { GitHubClient } from '../github/github-client.ts';
 import { localEditTools, runLoopAdapter } from '../loop/run-loop-adapter.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
+import {
+  type RoleUsage,
+  roleUsageSink,
+  type UsageTotals,
+  UsageTracker,
+} from '../observability/usage-tracker.ts';
+import { OpenRouterClient } from '../openrouter/client.ts';
+import { type ModelLimitsLookup, ModelLimitsRegistry } from '../openrouter/model-limits.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import type { ParsedArgs } from './args.ts';
@@ -41,6 +49,12 @@ export type RunLoopInput = {
   // Caller-specified PR branch (from `--branch`). Used verbatim for a single-group plan,
   // prefixed per group otherwise. Undefined falls back to `aitm/<group-id>`.
   branch: string | undefined;
+  // Per-run token/cost accounting (issue #114). The adapter binds role-scoped onUsage sinks off it;
+  // runStart flushes totals() to state + a summary line. Unset → no accounting.
+  usage?: UsageTracker;
+  // The single ModelLimitsRegistry for the run, shared by the tracker's pricing and the Compactor's
+  // context lookup (#102) so the catalog is fetched at most once. Unset → the adapter builds its own.
+  modelLimits?: ModelLimitsLookup;
 };
 
 export type RunMergeFlowInput = {
@@ -70,6 +84,8 @@ export type ResolveStyleInput = {
   state: StateStore;
   // Per-step LLM request deadline (ms) for the style-digest call (issue #129).
   llmStepTimeoutMs: number;
+  // Usage sink for the style-digest call, recorded under the planner role (#114). Unset → none.
+  usage?: UsageTracker;
 };
 
 // Inputs for the optional one-shot planning phase (issue #17). Mirrors the Planner's needs:
@@ -166,6 +182,18 @@ export function autoMergeNotice(autoMerge: boolean): string | null {
     '  Pass --no-automerge for this run, or `aitm config set autoMerge false` to disable it by default.',
     '',
   ].join('\n');
+}
+
+// One end-of-run token/cost summary line (issue #114): overall tokens + per-role breakdown, with the
+// estimated total USD or `cost unknown` when any model's pricing was unavailable. Exported for tests.
+export function usageSummaryLine(totals: UsageTotals): string {
+  const { overall } = totals;
+  const cost = overall.costUsd === null ? 'cost unknown' : `$${overall.costUsd.toFixed(4)}`;
+  const perRole = Object.entries(totals.perRole)
+    .filter((entry): entry is [string, RoleUsage] => entry[1] !== undefined)
+    .map(([role, u]) => `${role} ${u.inputTokens}in/${u.outputTokens}out`)
+    .join(', ');
+  return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached), ${cost}${perRole ? ` — ${perRole}` : ''}\n`;
 }
 
 export async function runStart(
@@ -284,6 +312,14 @@ export async function runStart(
     }
   }
 
+  // Per-run token/cost accounting (issue #114). One ModelLimitsRegistry for the run — shared by the
+  // tracker's pricing and the Compactor's context lookup (#102) so the catalog is fetched at most
+  // once. The tracker's onUsage sinks are bound in the adapter; totals flush after the loop.
+  const modelLimits = new ModelLimitsRegistry(
+    new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL),
+  );
+  const usage = new UsageTracker(modelLimits);
+
   // Coding-style digest (plan slice 01): distilled once from AgentConfig + repo signals and cached
   // in the state dir, reused on resume. Threaded into the loop so planner/worker/reviewer prompts
   // carry the digest. Never blocks — a thrown seam degrades to raw AgentConfig.contents.
@@ -296,6 +332,7 @@ export async function runStart(
       agentConfig,
       state,
       llmStepTimeoutMs: resolved.llmStepTimeoutMs,
+      usage,
     });
   } catch {
     styleDigest = agentConfig.contents;
@@ -318,9 +355,21 @@ export async function runStart(
       goal: args.goal,
       criteria: args.criteria,
       branch: args.branch,
+      usage,
+      modelLimits,
     });
   } catch (err) {
     return { code: 1, message: errMsg(err) };
+  }
+
+  // Flush per-run usage/cost accounting (issue #114): persist totals + one summary line to the
+  // stdout sink. Fire-and-forget — a tracker or state error must never change the run's outcome.
+  try {
+    const totals = await usage.totals();
+    await state.update((s) => ({ ...s, usage: totals }));
+    (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(usageSummaryLine(totals));
+  } catch {
+    // observability must never break the run
   }
 
   // Persist the first awaiting-pr number into state so `aitm merge-pr` (with no --pr)
@@ -748,9 +797,12 @@ async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
   }
   let digest: string;
   try {
+    // Style distillation runs on the planner's model, so its usage is recorded under `planner`.
+    const onUsage = roleUsageSink(input.usage, 'planner', credentials.modelIdFor('planner'));
     const distiller = new StyleDistiller({
       model: credentials.modelFor('planner'),
       timeout: { stepMs: input.llmStepTimeoutMs },
+      ...(onUsage ? { onUsage } : {}),
     });
     digest = await distiller.distill({ config: agentConfig, repoRoot: cwd });
   } catch {

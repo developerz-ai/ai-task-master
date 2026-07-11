@@ -7,7 +7,18 @@
 // (`composeSystemPrompt`) now live in @developerz.ai/ai-claude-compat; the concrete factories
 // (planner.ts/worker.ts/reviewer.ts) call createSubagent with their own tools + output type.
 
-import type { LanguageModel, TimeoutConfiguration, ToolLoopAgentSettings, ToolSet } from 'ai';
+import type {
+  LanguageModel,
+  LanguageModelUsage,
+  TimeoutConfiguration,
+  ToolLoopAgentSettings,
+  ToolSet,
+} from 'ai';
+
+// A subagent-usage sink (issue #114). Fired once per generate call with the result's `totalUsage`
+// (all steps) and `response.modelId`. Fire-and-forget: a recording error must never break the run,
+// so the accumulation side (UsageTracker.record) swallows and this stays a plain void callback.
+export type OnUsage = (usage: LanguageModelUsage, modelId: string | undefined) => void;
 
 // Default per-step LLM request deadline (issue #129). The bound covers one provider HTTP call plus
 // that step's tool executions, and a single legitimate Worker step may run a bash call at the tool's
@@ -32,6 +43,9 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
   // aitm rides OpenRouter server tools here (e.g. web_search: `{ openrouter: { tools: [...] } }`).
   // Unset → none. The Worker's editor fanout reads the same field to merge onto its generateText.
   providerOptions?: ToolLoopAgentSettings<never, TTools>['providerOptions'];
+  // Per-call token-usage sink (issue #114). The runners read it from this init to record each
+  // generate's totalUsage; unset → no accounting. Fire-and-forget, never breaks the run.
+  onUsage?: OnUsage;
 };
 
 // Concrete factory implementations live next to each subagent: planner.ts, worker.ts, reviewer.ts.
@@ -42,4 +56,19 @@ export type SubagentFactory<TInit, TAgent> = (init: TInit) => TAgent;
 // the prompt is returned unchanged. Shared by the planner/worker/reviewer prompt builders (#106).
 export function prependContextBlock(contextBlock: string | undefined, prompt: string): string {
   return contextBlock ? `${contextBlock}\n\n${prompt}` : prompt;
+}
+
+// Feed a generate result's total usage + resolved model id to an optional sink (issue #114). For the
+// direct generateText / agent.generate call sites (worker editor + manifest, orchestrator, style
+// distiller); the schema-retry path meters inside compat. Fire-and-forget — never breaks the run.
+export function reportUsage(
+  onUsage: OnUsage | undefined,
+  result: { totalUsage: LanguageModelUsage; response: { modelId: string } },
+): void {
+  if (!onUsage) return;
+  try {
+    onUsage(result.totalUsage, result.response.modelId);
+  } catch {
+    // observability must never break the run
+  }
 }

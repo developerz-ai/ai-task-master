@@ -9,10 +9,15 @@ export const OpenRouterModelSchema = z
     id: z.string(),
     name: z.string().optional(),
     context_length: z.number().int().positive(),
+    // Per-token USD as decimal strings. `input_cache_read`/`input_cache_write` price cached prompt
+    // tokens (issue #114): a cached run's input bills at ~10% of `prompt`, so flat-rate math would
+    // overstate cost ~10x and hide caching's dollar effect. Absent fields degrade to flat pricing.
     pricing: z
       .object({
         prompt: z.string().optional(),
         completion: z.string().optional(),
+        input_cache_read: z.string().optional(),
+        input_cache_write: z.string().optional(),
       })
       .optional(),
   })

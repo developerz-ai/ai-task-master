@@ -97,7 +97,10 @@ type Entry = {
 };
 
 // Return only the lines of `text` matching `re`; the caller has already advanced the read cursor
-// over everything, so skipped lines are consumed (not re-delivered) but not shown.
+// over everything, so skipped lines are consumed (not re-delivered) but not shown. Line-oriented on
+// each read's chunk: a single line split across two incremental reads (e.g. `ER` then `ROR\n`) is
+// filtered as two fragments and can be missed. Fine for line-buffered output (the dev-server / log
+// case this targets); cross-read partial-line retention is issue #154.
 function filterLines(text: string, re: RegExp): string {
   if (text === '') return '';
   return text
@@ -204,16 +207,16 @@ export class ProcessManager {
     if (!entry) return false;
     if (entry.running) {
       this.signalGroup(entry, signal);
-      this.scheduleEscalation(id, entry);
+      this.scheduleEscalation(entry);
     }
     return true;
   }
 
   killAll(signal: NodeJS.Signals = 'SIGTERM'): void {
-    for (const [id, entry] of this.procs) {
+    for (const entry of this.procs.values()) {
       if (entry.running) {
         this.signalGroup(entry, signal);
-        this.scheduleEscalation(id, entry);
+        this.scheduleEscalation(entry);
       }
     }
   }
@@ -238,25 +241,25 @@ export class ProcessManager {
     }
   }
 
-  // Arm a one-shot SIGKILL for a process that ignores the graceful signal. The timer is unref'd so
-  // it never keeps the event loop alive, and is cleared by finalize() when the process exits.
-  private scheduleEscalation(id: string, entry: Entry): void {
+  // Arm a one-shot group SIGKILL for a kill that the process ignores. Deliberately NOT cancelled
+  // when the group leader (bash) exits: a descendant that ignored SIGTERM can outlive its shell, so
+  // the escalation must still reach the group. The final SIGKILL targets the group by pgid — if the
+  // group is already gone it is a harmless ESRCH (see signalGroup). The timer is unref'd so it never
+  // keeps the event loop alive (guarded for Deno, whose setTimeout returns a numeric id, not a
+  // Timeout object).
+  private scheduleEscalation(entry: Entry): void {
     if (entry.killTimer) return; // one escalation timer per process
     const timer = setTimeout(() => {
-      const e = this.procs.get(id);
-      if (e?.running) this.signalGroup(e, 'SIGKILL');
+      entry.killTimer = null;
+      this.signalGroup(entry, 'SIGKILL');
     }, this.killGraceMs);
-    timer.unref();
+    if (typeof timer !== 'number') timer.unref();
     entry.killTimer = timer;
   }
 
-  // Run terminal-state bookkeeping once: clear any pending escalation and fire onExit. Guarded so
-  // `error` + `exit` both landing cannot double-notify.
+  // Fire onExit once when the tracked process reaches a terminal state. Guarded so `error` + `exit`
+  // both landing cannot double-notify. Does NOT touch the escalation timer — see scheduleEscalation.
   private finalize(id: string, entry: Entry): void {
-    if (entry.killTimer) {
-      clearTimeout(entry.killTimer);
-      entry.killTimer = null;
-    }
     if (entry.exitFired) return;
     entry.exitFired = true;
     if (this.onExit) {

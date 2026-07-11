@@ -1,0 +1,126 @@
+// Bridge an AgentDefinition-shaped spec to a model-invocable AI SDK tool (issue #126). Calling the
+// returned tool spawns a fresh, bounded child loop (`generateText` + a step cap) that surveys with
+// the supplied read-only toolset and returns a self-contained conclusion. The child sees the full
+// file text; the parent's context holds only the answer — this is the delegation that keeps a
+// survey phase from ingesting raw dumps into a long-lived conversation.
+//
+// Provider-agnostic: `model` is a plain injected LanguageModel handle, no Anthropic SDK. The child
+// shares NO parent conversation — each call's `prompt` must be self-contained (stated in the tool
+// description). Read-only enforcement is by explicit `allowedTools` allowlist, never name-sniffing.
+
+import {
+  generateText,
+  type LanguageModel,
+  stepCountIs,
+  type TimeoutConfiguration,
+  type Tool,
+  type ToolSet,
+  tool,
+} from 'ai';
+import { z } from 'zod';
+import type { AgentDefinition } from './agents-loader.ts';
+import { callWithStepTimeout } from './subagent.ts';
+
+// The subset of AgentDefinition makeAgentTool consumes: `name` is the ToolSet key callers mount the
+// returned tool under, `description` is the tool description, `systemPrompt` is the child's system.
+export type AgentToolSpec = Pick<AgentDefinition, 'name' | 'description' | 'systemPrompt'>;
+
+export type AgentToolOptions = {
+  // Child model handle (fast tier at the aitm call site).
+  model: LanguageModel;
+  // Child toolset — every key must appear in allowedTools or construction throws.
+  tools: ToolSet;
+  // Explicit allowlist of permitted tool names. Enforcement is by allowlist, not name inspection,
+  // so a renamed or MCP-supplied read tool still passes iff the caller vouches for it.
+  allowedTools: readonly string[];
+  // Child step cap; a child that exhausts it still returns its last text (or a no-conclusion line).
+  maxSteps?: number;
+  // Truncation cap on the returned text; output past it is cut with an explicit marker.
+  maxOutputChars?: number;
+  // Optional tighter child deadline. The parent's per-step deadline already propagates via the
+  // execute abortSignal (#129); this bounds the child more aggressively when a caller wants it.
+  timeout?: TimeoutConfiguration;
+};
+
+export const DEFAULT_AGENT_TOOL_MAX_STEPS = 15;
+export const DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS = 4000;
+// Appended when the child's final text is cut at maxOutputChars.
+export const AGENT_TOOL_TRUNCATION_MARKER = '\n\n[output truncated]';
+// Returned when the child stopped without producing final assistant text (e.g. step-cap exhaustion
+// on a tool call). An informative line rather than an empty string so the parent isn't left guessing.
+export const AGENT_TOOL_NO_CONCLUSION = '(no conclusion: the survey ended without a final answer)';
+// Prefix on the line returned when the child's provider errored — caught, never thrown into the
+// parent step, so one flaky survey can't abort the parent's whole generate.
+export const AGENT_TOOL_ERROR_PREFIX = 'survey failed: ';
+
+// Thrown at construction (not at call time) when the toolset violates the read-only contract.
+export class AgentToolConstructionError extends Error {
+  override readonly name = 'AgentToolConstructionError';
+}
+
+const agentToolInputSchema = z.object({
+  prompt: z
+    .string()
+    .min(1)
+    .describe(
+      'A self-contained question — the child shares no parent context, so include every detail it needs.',
+    ),
+});
+
+export type AgentToolInput = z.infer<typeof agentToolInputSchema>;
+
+export function makeAgentTool(
+  spec: AgentToolSpec,
+  opts: AgentToolOptions,
+): Tool<AgentToolInput, string> {
+  const allowed = new Set(opts.allowedTools);
+  for (const key of Object.keys(opts.tools)) {
+    // No recursion: the child toolset must never contain the spawn tool itself.
+    if (key === spec.name) {
+      throw new AgentToolConstructionError(
+        `agent tool "${spec.name}" cannot contain itself in its own toolset (no recursion)`,
+      );
+    }
+    if (!allowed.has(key)) {
+      throw new AgentToolConstructionError(
+        `agent tool "${spec.name}" toolset carries "${key}", which is outside the allowedTools allowlist`,
+      );
+    }
+  }
+
+  const maxSteps = opts.maxSteps ?? DEFAULT_AGENT_TOOL_MAX_STEPS;
+  const maxOutputChars = opts.maxOutputChars ?? DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS;
+
+  return tool({
+    description: spec.description,
+    inputSchema: agentToolInputSchema,
+    // execute is concurrency-safe: it closes over no mutable state, so parallel calls (independent
+    // explore tool calls in one assistant message) never corrupt each other.
+    execute: async ({ prompt }, options): Promise<string> => {
+      try {
+        const result = await callWithStepTimeout(
+          () =>
+            generateText({
+              model: opts.model,
+              system: spec.systemPrompt,
+              tools: opts.tools,
+              prompt,
+              stopWhen: stepCountIs(maxSteps),
+              // Forward the parent's per-step deadline (#129) so a stalled child can't outlive the
+              // parent step; a caller-supplied opts.timeout bounds it tighter still.
+              ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
+              ...(opts.timeout !== undefined ? { timeout: opts.timeout } : {}),
+            }),
+          opts.timeout,
+        );
+        const text = result.text.trim();
+        if (text === '') return AGENT_TOOL_NO_CONCLUSION;
+        return text.length > maxOutputChars
+          ? text.slice(0, maxOutputChars) + AGENT_TOOL_TRUNCATION_MARKER
+          : text;
+      } catch (err) {
+        return `${AGENT_TOOL_ERROR_PREFIX}${err instanceof Error ? err.message : String(err)}`;
+      }
+    },
+  });
+}

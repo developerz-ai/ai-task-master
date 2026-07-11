@@ -48,6 +48,11 @@ function basicPlan(groupCount: number): Plan {
   return { goal: 'do the thing', groups };
 }
 
+test('PLANNER_SYSTEM_PREFIX carries the explore delegation guidance, gated on availability (issue #126)', () => {
+  assert.match(PLANNER_SYSTEM_PREFIX, /`explore` tool is available/);
+  assert.match(PLANNER_SYSTEM_PREFIX, /in parallel/);
+});
+
 test('PLANNER_SYSTEM_PREFIX is non-empty and mentions maxPrs + Plan', () => {
   assert.match(PLANNER_SYSTEM_PREFIX, /maxPrs/);
   assert.match(PLANNER_SYSTEM_PREFIX, /Plan/);

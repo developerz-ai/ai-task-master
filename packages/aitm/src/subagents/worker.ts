@@ -160,6 +160,9 @@ export const WORKER_SYSTEM_PREFIX = [
   'A vague purpose produces a wrong file.',
   '',
   'Tips:',
+  '- When an `explore` tool is available, delegate broad or multi-file survey questions to it with a',
+  '  self-contained question; issue independent explore calls in one turn to run them in parallel, and',
+  '  build the manifest from the conclusions it returns — keep your own context for the plan, not raw dumps.',
   '- One responsibility per file; list each path once — parallel editors racing on one path clobber it.',
   "- Don't plan a modify you haven't read.",
   '- draftCommitMessage is a hint the Orchestrator may rewrite; conventional subject, ≤72 chars.',
@@ -405,6 +408,15 @@ function buildManifestPrompt(input: WorkerInput): string {
   return prependContextBlock(input.contextBlock, lines.join('\n'));
 }
 
+// Editors never nest surveys (issue #126): strip the runtime-only `explore` extra the adapter may
+// have mounted on the Worker tool set before the per-file fanout. Absent → returned unchanged.
+export function editorToolSet(tools: WorkerTools): WorkerTools {
+  const { explore: _explore, ...rest } = tools as WorkerTools & {
+    explore?: Tool<unknown, unknown>;
+  };
+  return rest as WorkerTools;
+}
+
 async function runEditor(
   init: SubagentInit<WorkerTools>,
   file: FileManifestEntry,
@@ -414,7 +426,7 @@ async function runEditor(
     () =>
       generateText({
         model: init.model,
-        tools: init.tools,
+        tools: editorToolSet(init.tools),
         system: composeSystemPrompt(input.styleContents, EDITOR_SYSTEM_PREFIX, input.worktreePath),
         prompt: buildEditorPrompt(file, input),
         stopWhen: stepCountIs(12),

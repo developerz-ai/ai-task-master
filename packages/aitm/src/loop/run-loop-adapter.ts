@@ -15,6 +15,7 @@
 
 import { relative, resolve as resolvePath } from 'node:path';
 import {
+  type AgentToolInput,
   bashTool,
   type CommandRule,
   composeSystemPrompt,
@@ -51,6 +52,7 @@ import type { Plan } from '../plan/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
 import { appendGroupDigest, type GroupDigestEntry } from '../state/rolling-context.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
+import { buildExploreTool } from '../subagents/explore.ts';
 import {
   createPlannerAgent,
   PLANNER_SYSTEM_PREFIX,
@@ -104,6 +106,30 @@ function makeStaleReminderProvider(fileState: FileStateTracker, cwd: string): Re
 // WorkerTools/PlannerTools. The local builders return the core set plus this optional extra; the
 // model still gets the tool at runtime, and resolvers cast back to the core type.
 type WithFetchHtml<T> = T & { fetchHtml?: Tool<FetchHtmlInput, WebFetchOutput> };
+
+// `explore` (issue #126) is a runtime-only extra for the same reason as fetchHtml: an optional tool
+// field on WorkerTools/PlannerTools would inject `undefined` into the ToolLoopAgent TypedToolCall
+// union (#112). It sits here so the core tool types stay unchanged — every record built without it
+// (take-over flow, orchestrator-as-tool, test stubs) compiles and behaves exactly as today.
+type WithExplore<T> = T & { explore?: Tool<AgentToolInput, string> };
+
+// The worktree-confined read-only trio the explore child surveys with — picked from localReadTools
+// so it inherits the same resolveInside confinement, minus the web/datetime tools (the child's
+// allowlist is readFile/grep/glob only). Rooted at the invoking agent's cwd/worktree.
+export function exploreReadTools(cwd: string): ToolSet {
+  const read = localReadTools(cwd);
+  return { readFile: read.readFile, grep: read.grep, glob: read.glob };
+}
+
+// The explore tool for an agent rooted at `cwd`: a fast-tier child surveying the worktree-confined
+// read trio (issue #126). Built per call site (Planner at the repo root, Worker at its group
+// worktree) so the child never escapes the invoking agent's cwd.
+function buildExploreFor(input: RunLoopInput, cwd: string): Tool<AgentToolInput, string> {
+  return buildExploreTool({
+    model: input.credentials.modelForCapability('fast'),
+    readTools: exploreReadTools(cwd),
+  });
+}
 
 // Web + time function tools mounted into every subagent tool set (issue #112). webFetch (stealthed
 // local fetch, SSRF-guarded) and datetime are always present; fetchHtml (curl-impersonate) only when
@@ -473,7 +499,12 @@ async function defaultPlanGroups(
   );
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
-    tools: resolvePlannerTools(mcp.toolsForRole('planner'), input.cwd, fetchHtmlAvailable),
+    tools: resolvePlannerTools(
+      mcp.toolsForRole('planner'),
+      input.cwd,
+      fetchHtmlAvailable,
+      buildExploreFor(input, input.cwd),
+    ),
     systemPrompt: reminderAgentSystemPrompt(style, PLANNER_SYSTEM_PREFIX, input.cwd),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
@@ -608,6 +639,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         worktree.path,
         input.resolved.bashRules,
         fetchHtmlAvailable,
+        buildExploreFor(input, worktree.path),
       );
       // Regular Worker: web_search only when explicitly enabled (webSearch: true).
       const providerOptions = webSearchProviderOptions(input.resolved.webSearch, false);
@@ -673,6 +705,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             worktree.path,
             input.resolved.bashRules,
             fetchHtmlAvailable,
+            buildExploreFor(input, worktree.path),
           ),
           styleContents: style,
           compactor,
@@ -747,12 +780,13 @@ function mcpBaseName(key: string): string | undefined {
   return parts.slice(2).join('__');
 }
 
-function resolveWorkerTools(
+export function resolveWorkerTools(
   set: ToolSet,
   cwd: string,
   rules?: readonly CommandRule[],
   fetchHtmlAvailable = false,
-): WorkerTools {
+  explore?: Tool<AgentToolInput, string>,
+): WithExplore<WorkerTools> {
   const local = localEditTools(cwd, rules, fetchHtmlAvailable);
   // fetchHtml is optional: keep the key only when MCP supplies one or the local binary is available.
   const fetchHtml = mcpTool(set, 'fetchHtml') ?? local.fetchHtml;
@@ -768,7 +802,9 @@ function resolveWorkerTools(
     webFetch: mcpTool(set, 'webFetch') ?? local.webFetch,
     datetime: mcpTool(set, 'datetime') ?? local.datetime,
     ...(fetchHtml ? { fetchHtml } : {}),
-  } as WorkerTools;
+    // explore (#126) is never MCP-filled — adapter-local glue, present only when the caller wired it.
+    ...(explore ? { explore } : {}),
+  } as WithExplore<WorkerTools>;
 }
 
 function resolveReviewerTools(
@@ -785,7 +821,12 @@ function resolveReviewerTools(
 // for the latent no-MCP bug: previously the Planner was handed the raw MCP ToolSet with no local
 // fallback, so a bare `aitm start` left it with zero tools despite its prompt promising
 // readFile/grep/glob.
-function resolvePlannerTools(set: ToolSet, cwd: string, fetchHtmlAvailable = false): PlannerTools {
+export function resolvePlannerTools(
+  set: ToolSet,
+  cwd: string,
+  fetchHtmlAvailable = false,
+  explore?: Tool<AgentToolInput, string>,
+): WithExplore<PlannerTools> {
   const local = localReadTools(cwd, fetchHtmlAvailable);
   const fetchHtml = mcpTool(set, 'fetchHtml') ?? local.fetchHtml;
   return {
@@ -795,7 +836,9 @@ function resolvePlannerTools(set: ToolSet, cwd: string, fetchHtmlAvailable = fal
     webFetch: mcpTool(set, 'webFetch') ?? local.webFetch,
     datetime: mcpTool(set, 'datetime') ?? local.datetime,
     ...(fetchHtml ? { fetchHtml } : {}),
-  } as PlannerTools;
+    // explore (#126) is never MCP-filled — adapter-local glue, present only when the caller wired it.
+    ...(explore ? { explore } : {}),
+  } as WithExplore<PlannerTools>;
 }
 
 // The Reviewer's `github` tool is local glue over GitHubClient — not an MCP tool — so the

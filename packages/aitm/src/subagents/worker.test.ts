@@ -8,6 +8,7 @@ import {
   type BashInput,
   type BashOutput,
   createWorkerAgent,
+  editorToolSet,
   type FileManifest,
   type ReadFileInput,
   type ReadFileOutput,
@@ -134,6 +135,38 @@ test('WORKER_SYSTEM_PREFIX mentions FileManifest + the two phases', () => {
   assert.match(WORKER_SYSTEM_PREFIX, /FileManifest/);
   assert.match(WORKER_SYSTEM_PREFIX, /Phase 1/);
   assert.match(WORKER_SYSTEM_PREFIX, /Phase 2/);
+});
+
+test('WORKER_SYSTEM_PREFIX carries the explore delegation guidance, gated on availability (issue #126)', () => {
+  assert.match(WORKER_SYSTEM_PREFIX, /`explore` tool is available/);
+  assert.match(WORKER_SYSTEM_PREFIX, /in parallel/);
+});
+
+test('editorToolSet strips the runtime explore extra so editors never nest surveys (issue #126)', () => {
+  const readFile = tool({
+    description: 'r',
+    inputSchema: z.object({ p: z.string() }),
+    execute: async () => 'x',
+  });
+  const explore = tool({
+    description: 'e',
+    inputSchema: z.object({ prompt: z.string() }),
+    execute: async () => 'a',
+  });
+  const withExplore = { readFile, explore } as unknown as WorkerTools;
+  const stripped = editorToolSet(withExplore);
+  assert.equal('explore' in stripped, false, 'explore removed');
+  assert.equal('readFile' in stripped, true, 'other tools retained');
+});
+
+test('editorToolSet returns a set without explore unchanged (no-op when the extra is absent)', () => {
+  const readFile = tool({
+    description: 'r',
+    inputSchema: z.object({ p: z.string() }),
+    execute: async () => 'x',
+  });
+  const noExplore = { readFile } as unknown as WorkerTools;
+  assert.deepEqual(Object.keys(editorToolSet(noExplore)), ['readFile']);
 });
 
 test('runWorker: prepends the contextBlock to the manifest (first user) message, ahead of the task text (issue #106)', async () => {

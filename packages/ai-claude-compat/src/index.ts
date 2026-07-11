@@ -2,6 +2,18 @@
 // Vercel AI SDK: cwd-scoped FS/edit/search/shell tools, an <env> system-context block, and
 // .claude/ skills + agents loading.
 
+export {
+  AGENT_TOOL_ERROR_PREFIX,
+  AGENT_TOOL_NO_CONCLUSION,
+  AGENT_TOOL_TRUNCATION_MARKER,
+  AgentToolConstructionError,
+  type AgentToolInput,
+  type AgentToolOptions,
+  type AgentToolSpec,
+  DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS,
+  DEFAULT_AGENT_TOOL_MAX_STEPS,
+  makeAgentTool,
+} from './agent-spawn.ts';
 export { type AgentDefinition, claudeDirs, loadAgents } from './agents-loader.ts';
 export {
   type BackgroundBashInput,

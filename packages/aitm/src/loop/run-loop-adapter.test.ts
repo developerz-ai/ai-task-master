@@ -10,7 +10,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { SYSTEM_REMINDER_CONTRACT } from '@developerz.ai/ai-claude-compat';
+import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
+import { z } from 'zod';
 import type { RunLoopInput } from '../cli/commands.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { GitHubClient } from '../github/github-client.ts';
@@ -25,6 +27,7 @@ import {
   branchFor,
   createRollingContextAccumulator,
   defaultMakeOrchestrator,
+  exploreReadTools,
   githubThreadTool,
   harnessContextBlock,
   localEditTools,
@@ -35,6 +38,8 @@ import {
   planToPrGroups,
   type RunLoopAdapterSeams,
   reminderAgentSystemPrompt,
+  resolvePlannerTools,
+  resolveWorkerTools,
   runLoopAdapter,
   sanitizeBranchComponent,
   webSearchProviderOptions,
@@ -863,4 +868,56 @@ test('createRollingContextAccumulator keeps queuing after a write failure (chain
   );
   assert.ok(b.startsWith(a) && b.includes('PR #2 — g2'), 'a later append still proceeds');
   assert.equal(acc.current(), b);
+});
+
+// ---- explore fan-out wiring (issue #126) -----------------------------------
+
+const stubExplore = () =>
+  tool({
+    description: 'stub explore',
+    inputSchema: z.object({ prompt: z.string() }),
+    execute: async () => 'surveyed',
+  });
+
+test('exploreReadTools exposes exactly the worktree-confined read trio', () => {
+  const tools = exploreReadTools('/tmp/some-worktree');
+  assert.deepEqual(Object.keys(tools).sort(), ['glob', 'grep', 'readFile']);
+  assert.equal(typeof tools.readFile?.execute, 'function');
+});
+
+test('exploreReadTools: the explore child readFile rejects a path escaping the worktree', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-explore-'));
+  try {
+    const tools = exploreReadTools(dir);
+    const exec = tools.readFile?.execute;
+    assert.equal(typeof exec, 'function');
+    await assert.rejects(
+      () =>
+        (exec as (i: unknown, o: unknown) => Promise<unknown>)(
+          { path: '../escape' },
+          { toolCallId: 't', messages: [] },
+        ),
+      /escapes worktree/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolveWorkerTools mounts explore only when the caller wires it (never MCP-filled)', () => {
+  // Bare no-MCP `aitm start`: empty server set, explore supplied → the manifest Worker gets the local
+  // trio plus explore.
+  const withExplore = resolveWorkerTools({}, '/tmp/wt', undefined, false, stubExplore());
+  assert.equal('explore' in withExplore, true, 'explore present when wired');
+  assert.equal(typeof withExplore.readFile.execute, 'function', 'local trio still filled');
+  // Omitted (take-over flow / bare stubs) → absent, record behaves exactly as before.
+  const withoutExplore = resolveWorkerTools({}, '/tmp/wt');
+  assert.equal('explore' in withoutExplore, false, 'absent when not wired');
+});
+
+test('resolvePlannerTools mounts explore only when the caller wires it', () => {
+  const withExplore = resolvePlannerTools({}, '/tmp/repo', false, stubExplore());
+  assert.equal('explore' in withExplore, true);
+  const withoutExplore = resolvePlannerTools({}, '/tmp/repo');
+  assert.equal('explore' in withoutExplore, false);
 });

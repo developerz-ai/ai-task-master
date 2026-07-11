@@ -16,9 +16,11 @@ export type ModelLimits = {
   cacheWriteUsdPerToken?: number;
 };
 
-// Parse a catalog per-token USD string ("0.000005") to a number; undefined/blank/non-finite → undefined.
+// Parse a catalog per-token USD string ("0.000005") to a number; undefined/blank/non-finite →
+// undefined. The blank guard is load-bearing: `Number('')` and whitespace-only strings are `0` in
+// JS, which would masquerade a missing price as $0/token instead of "unknown".
 function parsePrice(raw: string | undefined): number | undefined {
-  if (raw === undefined) return undefined;
+  if (raw === undefined || raw.trim() === '') return undefined;
   const n = Number(raw);
   return Number.isFinite(n) ? n : undefined;
 }

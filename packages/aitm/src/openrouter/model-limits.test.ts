@@ -79,6 +79,19 @@ test('preload parses per-token pricing incl. cache read/write; blank/missing →
   assert.equal(n.cacheReadUsdPerToken, undefined);
 });
 
+test('preload treats blank/whitespace pricing strings as missing, not $0 (issue #114)', async () => {
+  // `Number('')` is 0 in JS — a blank catalog field must degrade to undefined (unknown), not $0/token.
+  const blank: OpenRouterModel = {
+    id: 'blank/price',
+    context_length: 1000,
+    pricing: { prompt: '', completion: '   ' },
+  };
+  const r = new ModelLimitsRegistry(makeStub([blank]) as unknown as OpenRouterClient);
+  const p = await r.forModel('blank/price');
+  assert.equal(p.promptUsdPerToken, undefined, 'blank prompt → undefined, not 0');
+  assert.equal(p.completionUsdPerToken, undefined, 'whitespace completion → undefined, not 0');
+});
+
 test('forModel throws ModelNotFound for unknown id', async () => {
   const stub = makeStub([opus]);
   const r = new ModelLimitsRegistry(stub as unknown as OpenRouterClient);

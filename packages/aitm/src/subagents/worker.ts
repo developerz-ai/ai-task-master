@@ -53,6 +53,8 @@ import { generateText, stepCountIs, type Tool, type ToolLoopAgent, tool } from '
 import { z } from 'zod';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
+import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
+import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
 import { prependContextBlock, type SubagentInit } from './factory.ts';
 
 // The Claude-Code-style tool surface (from @developerz.ai/ai-claude-compat) the Worker drives:
@@ -67,6 +69,11 @@ export type WorkerTools = {
   glob: Tool<GlobInput, GlobOutput>;
   bash: Tool<BashInput, BashOutput>;
   multiBash: Tool<MultiBashInput, MultiBashOutput>;
+  // Web + time tools (issue #112). Always present (local fallback). The optional curl-impersonate
+  // `fetchHtml` is NOT a field here: an optional tool property injects `undefined` into the SDK's
+  // TypedToolCall union. It is mounted as a runtime extra by the adapter when its binary is available.
+  webFetch: Tool<WebFetchInput, WebFetchOutput>;
+  datetime: Tool<DatetimeInput, DatetimeOutput>;
 };
 
 // File manifest — Phase 1 structured output. Each entry drives one editor in Phase 2.
@@ -156,6 +163,8 @@ export const WORKER_SYSTEM_PREFIX = [
   '- One responsibility per file; list each path once — parallel editors racing on one path clobber it.',
   "- Don't plan a modify you haven't read.",
   '- draftCommitMessage is a hint the Orchestrator may rewrite; conventional subject, ≤72 chars.',
+  '- To check an unfamiliar API, error, or changelog: `webFetch` a URL (`fetchHtml` for scraper-hostile',
+  '  sites, when available); web_search may be enabled. `datetime` gives the current time.',
   '',
   'If earlier conversation was summarized (context compaction), continue the task from that summary —',
   'do not wrap up early, re-plan from scratch, or hand off; resume where the summary leaves off.',
@@ -175,6 +184,8 @@ const EDITOR_SYSTEM_PREFIX = [
   '- dependent shell steps (`mkdir … && generate && test`) → `multiBash` with an ordered `commands`',
   '  array; it stops at the first failure, so you see which step broke.',
   "Independent calls can go in parallel. Match the file style; add nothing the purpose didn't ask for.",
+  '- Stuck on an API/error/version? `webFetch` a doc URL (`fetchHtml` for scraper-hostile sites, when',
+  '  available); web_search may be enabled. `datetime` for the current time.',
   '',
   "Your first line is returned to the Worker as this file's summary — one line, present tense,",
   'specific: `adds retry+backoff to fetchUser`, not `done`.',
@@ -198,6 +209,7 @@ export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent 
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
       ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
       ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
+      ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
     },
     30,
   );
@@ -403,7 +415,11 @@ async function runEditor(
         system: composeSystemPrompt(input.styleContents, EDITOR_SYSTEM_PREFIX, input.worktreePath),
         prompt: buildEditorPrompt(file, input),
         stopWhen: stepCountIs(12),
-        providerOptions: { openai: { parallelToolCalls: true } },
+        // web_search (issue #112) rides providerOptions.openrouter when the adapter enabled it for
+        // this Worker. The old `{ openai: { parallelToolCalls: true } }` was dead — the OpenRouter
+        // provider ignores the `openai` namespace, and parallelToolCalls is already an OpenRouter
+        // chat-setting default (true), so dropping it changes no request bytes.
+        ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
         ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
       }),
     init.timeout,

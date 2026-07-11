@@ -25,6 +25,7 @@ import { defaultRunCmd, type RunCmd, type RunCmdResult } from '../github/github-
 import type { ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
+import type { SubagentInit } from '../subagents/factory.ts';
 import {
   createWorkerAgent,
   runWorker,
@@ -77,6 +78,9 @@ export type FixSessionSubagents = {
   compactor?: CompactorLike;
   // Per-step LLM request deadline, forwarded to the CI-fix Worker agent (issue #129). Unset → none.
   timeout?: TimeoutConfiguration;
+  // Provider options forwarded to the CI-fix Worker agent — the adapter attaches OpenRouter
+  // web_search here by default for fix sessions (issue #112). Unset → none.
+  providerOptions?: SubagentInit<WorkerTools>['providerOptions'];
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
@@ -212,6 +216,9 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     systemPrompt: composeSystemPrompt(subagents.styleContents, WORKER_SYSTEM_PREFIX, worktreePath),
     ...(prepareStep ? { prepareStep } : {}),
     ...(subagents.timeout !== undefined ? { timeout: subagents.timeout } : {}),
+    ...(subagents.providerOptions !== undefined
+      ? { providerOptions: subagents.providerOptions }
+      : {}),
   });
   return runWorker(agent, workerInput);
 }

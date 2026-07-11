@@ -17,16 +17,21 @@ import {
 } from '@developerz.ai/ai-claude-compat';
 import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../plan/schema.ts';
+import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
+import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
 import { prependContextBlock, type SubagentInit } from './factory.ts';
 
 export type PlannerAgent = ToolLoopAgent<never, PlannerTools>;
 
 // The Planner only surveys the repo — it gets the read-only subset of the Claude-Code-style
-// tool surface (no write/edit/bash).
+// tool surface (no write/edit/bash), plus web + time tools (issue #112). The optional fetchHtml is a
+// runtime extra (an optional tool field breaks the SDK's TypedToolCall) — see WorkerTools.
 export type PlannerTools = {
   readFile: Tool<ReadFileInput, ReadFileOutput>;
   grep: Tool<GrepInput, GrepOutput>;
   glob: Tool<GlobInput, GlobOutput>;
+  webFetch: Tool<WebFetchInput, WebFetchOutput>;
+  datetime: Tool<DatetimeInput, DatetimeOutput>;
 };
 
 export type PlannerInput = {
@@ -60,6 +65,8 @@ export const PLANNER_SYSTEM_PREFIX = [
   '- dependsOn = only the earlier groups whose code this one builds on; empty for roots. Wrong deps',
   '  serialize work that could have run in parallel.',
   '- Prefer parallel siblings over one linear chain.',
+  '- To confirm an external API, framework, or version before planning around it: `webFetch` a doc URL',
+  '  (`fetchHtml` for scraper-hostile sites, when available). `datetime` gives the current time.',
 ].join('\n');
 
 export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAgent {

@@ -109,6 +109,41 @@ test('resolve: verifyCommand is read from project, then global, and warns on nei
   }
 });
 
+test('resolve: webSearch is tri-state — undefined when unset, project over global (issue #112)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const warnings: string[] = [];
+    let loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    // Unset stays undefined (NOT false) so the adapter can tell "CI-fix only" from "never".
+    assert.equal('webSearch' in (await loader.resolve({})), false, 'omitted when unset');
+
+    await writeGlobalConfig(home.path, { webSearch: true });
+    loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn: (m) => warnings.push(m) },
+    );
+    assert.equal((await loader.resolve({})).webSearch, true, 'global applies');
+
+    // Project (false) overrides global (true) — and false must survive, not collapse to a default.
+    await writeProjectConfig(cwd.path, { webSearch: false });
+    assert.equal(
+      (await loader.resolve({})).webSearch,
+      false,
+      'project beats global; false preserved',
+    );
+    assert.equal(
+      warnings.some((w) => /unknown config key "webSearch"/.test(w)),
+      false,
+    );
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: baseURL is undefined when no source sets it', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

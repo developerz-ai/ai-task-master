@@ -135,6 +135,38 @@ test('createSubagent: builds a ToolLoopAgent registering the submit tool alongsi
   assert.deepEqual(Object.keys(agent.tools).sort(), [SUBMIT_TOOL_NAME, 'readFile'].sort());
 });
 
+test('createSubagent: providerOptions reaches the model on generate (issue #112)', async () => {
+  let seen: unknown;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      seen = opts.providerOptions;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 's',
+            toolName: 'submit',
+            input: JSON.stringify({ n: 1 }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const providerOptions = {
+    openrouter: { tools: [{ type: 'openrouter:web_search', parameters: {} }] },
+  };
+  const agent = createSubagent(
+    { model, tools: {}, systemPrompt: 'sys', submit: submitTool(OutSchema), providerOptions },
+    12,
+  );
+  await agent.generate({ messages: [{ role: 'user', content: 'go' }] });
+  // The comment-correction's regression: the providerOptions key must actually reach the wire.
+  assert.deepEqual(seen, providerOptions);
+});
+
 test('createSubagent: forwards an optional prepareStep into the agent loop (issue #102)', async () => {
   let prepareCalls = 0;
   const s = scriptedModel(() => ({ submit: JSON.stringify({ n: 1 }) }));

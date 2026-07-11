@@ -205,7 +205,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const SERVER_TOOL_STUB =
   'Local web-fetch is disabled. Use the openrouter:web_fetch server tool instead (see webFetchServerTool in src/openrouter/server-tools.ts).';
 
-export function webFetchTool(init: WebFetchInit = {}): Tool {
+export function webFetchTool(init: WebFetchInit = {}): Tool<WebFetchInput, WebFetchOutput> {
   const local = init.local ?? true;
   const headers: Record<string, string> = { ...DEFAULT_STEALTH_HEADERS, ...init.headers };
   const lookup = init.lookup ?? defaultLookup;

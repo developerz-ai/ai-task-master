@@ -150,6 +150,10 @@ export const ConfigFileSchema = z
     // Whether aitm may force-push (`--force-with-lease`, used by the CI-fix rebase flow). Default
     // true. Set false on repos that forbid all force-pushes; the CI-fix push then blocks instead.
     allowForcePush: z.boolean().optional(),
+    // Attach OpenRouter's server-side web_search tool to Worker generate calls (issue #112). Unset →
+    // enabled for CI-fix sessions only (highest lookup value, bounded cost); true → all Worker calls;
+    // false → never. See src/loop/run-loop-adapter.ts §web-search gating.
+    webSearch: z.boolean().optional(),
     // Per-repo PR body section headings (each a `## ` heading, in order). Unset → the default
     // Summary/Changes/Testing. See src/orchestrator/orchestrator.ts §resolvePrBodySections.
     prBodySections: z.array(z.string()).optional(),
@@ -215,6 +219,9 @@ export type ResolvedConfig = {
   concurrency: number;
   // Whether aitm may force-push (`--force-with-lease`). Default true.
   allowForcePush: boolean;
+  // Whether OpenRouter web_search rides Worker calls (issue #112). Tri-state, so NOT collapsed to a
+  // default: undefined → CI-fix sessions only; true → all Worker calls; false → never.
+  webSearch?: boolean | undefined;
   // Per-repo PR body section headings. Undefined → orchestrator uses its default set.
   prBodySections?: readonly string[] | undefined;
   // Effective bash deny/allow rules: configured rules (project over global) followed by the built-in

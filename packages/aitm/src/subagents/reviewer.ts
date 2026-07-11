@@ -91,6 +91,9 @@ export const REVIEWER_SYSTEM_PREFIX = [
   '- "wontfix": stale, out of scope, or you disagree. Reply with the reason via github.replyToThread,',
   '  resolve the thread via github.resolveThread. Submit { kind: "wontfix", reason }.',
   '',
+  'To verify a claim in the comment (an API, error message, spec, or changelog): `webFetch` a doc URL',
+  '(`fetchHtml` for scraper-hostile sites, when available). `datetime` gives the current time.',
+  '',
   'If earlier conversation was summarized (context compaction), continue from that summary — do not',
   'wrap up early or re-plan from scratch; resume the thread resolution where the summary leaves off.',
 ].join('\n');

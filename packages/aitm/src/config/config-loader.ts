@@ -42,6 +42,7 @@ const KNOWN_KEYS = new Set<string>([
   'maxCiFixAttempts',
   'llmStepTimeoutMs',
   'autoMerge',
+  'webSearch',
   'mergeMethod',
   'stylePath',
   'formatCommand',
@@ -223,6 +224,11 @@ export class ConfigLoader {
         global?.allowForcePush,
         DEFAULTS.allowForcePush,
       ),
+      // Tri-state (project > global), left undefined when unset so the adapter can tell "CI-fix only"
+      // (undefined) apart from "never" (false). No CLI flag, no default collapse. Issue #112.
+      ...((project?.webSearch ?? global?.webSearch) !== undefined
+        ? { webSearch: project?.webSearch ?? global?.webSearch }
+        : {}),
       ...(prBodySections !== undefined ? { prBodySections } : {}),
       ...(providerRouting !== undefined ? { providerRouting } : {}),
       ...(fallbackModels !== undefined ? { fallbackModels } : {}),

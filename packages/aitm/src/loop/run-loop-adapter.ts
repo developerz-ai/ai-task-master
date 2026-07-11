@@ -219,6 +219,38 @@ export async function persistRollingContext(
   return next;
 }
 
+// Serialized rolling-context accumulator (issue #123). WorkLoop opens a whole batch of groups with
+// `Promise.all`, so two openPr callbacks can run persistRollingContext concurrently. A plain
+// read-modify-write of a shared string would lose an update — both appends start from the same
+// snapshot and the later write clobbers the earlier group's digest. Queue every append onto a chain
+// so each one reads the context left by the previous append; `current()` always returns the newest
+// accumulated context for the worker + ci-fix live reads. Exported for unit testing.
+export type RollingContextAccumulator = {
+  current(): string;
+  append(entry: GroupDigestEntry): Promise<string>;
+};
+
+export function createRollingContextAccumulator(
+  state: Pick<AdapterStatePort, 'writeContext'>,
+  initial: string,
+): RollingContextAccumulator {
+  let liveContext = initial;
+  // Tail of the serialization chain. Its rejections are swallowed (persistRollingContext already
+  // absorbs write failures) so one bad append can never wedge the queue for later groups.
+  let tail: Promise<unknown> = Promise.resolve();
+  return {
+    current: () => liveContext,
+    append: (entry) => {
+      const step = tail.then(async () => {
+        liveContext = await persistRollingContext(state, liveContext, entry);
+        return liveContext;
+      });
+      tail = step.catch(() => undefined);
+      return step;
+    },
+  };
+}
+
 export type PlanGroupsOutcome =
   | { kind: 'ok'; groups: PrGroup[] }
   | { kind: 'blocked'; reason: string }
@@ -476,8 +508,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   const { input, mcp, rollingContext, fetchHtmlAvailable, state } = ctx;
   // Rolling context accumulates across groups within a run (issue #123): seeded from what a resumed
   // run already persisted (ctx.rollingContext), grown by openPr after each PR, and read LIVE by the
-  // worker + ci-fix bridges — so group N+1 plans against group N's digest.
-  let liveContext = rollingContext;
+  // worker + ci-fix bridges — so group N+1 plans against group N's digest. Appends are serialized so
+  // the concurrent-batch openPr path (WorkLoop's Promise.all) can't lose a group's digest.
+  const rollingCtx = createRollingContextAccumulator(state, rollingContext);
   const style = input.styleDigest ?? input.agentConfig.contents;
   // Per-step LLM deadline armed on every generate site in this bridge (issue #129).
   const stepTimeout = { stepMs: input.resolved.llmStepTimeoutMs };
@@ -597,7 +630,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         baseBranch,
         styleContents: style,
         // Live read (issue #123): the second group's manifest prompt carries the first group's digest.
-        rollingContext: liveContext,
+        rollingContext: rollingCtx.current(),
         contextBlock: harnessContextBlock(style),
         ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
         ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
@@ -613,8 +646,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       await runGit(['push', '-u', 'origin', head], { cwd: input.cwd });
       const pr = await orch.openPr(group, delivery, baseBranch);
       // Accumulate this group's deterministic digest into the live rolling context and persist it
-      // (issue #123), so the next group's Worker plans against it and a resumed run recovers it.
-      liveContext = await persistRollingContext(state, liveContext, { group, pr, delivery });
+      // (issue #123), so the next group's Worker plans against it and a resumed run recovers it. The
+      // accumulator serializes concurrent appends from a parallel group batch (no lost digest).
+      await rollingCtx.append({ group, pr, delivery });
       return pr;
     },
     runReviewer: runReviewerThreads,
@@ -645,7 +679,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           timeout: stepTimeout,
           // Live rolling context (issue #123): the fix session's Worker sees what its group shipped
           // instead of the old hardcoded ''. Omitted when empty so the render guard stays a no-op.
-          ...(liveContext.trim() !== '' ? { rollingContext: liveContext } : {}),
+          ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),
           // CI-fix Worker: web_search on by default (undefined) — a fix pass looking up an error or
           // changelog is the highest-value place for it; only an explicit `false` disables it.
           ...(ciFixProviderOptions !== undefined ? { providerOptions: ciFixProviderOptions } : {}),

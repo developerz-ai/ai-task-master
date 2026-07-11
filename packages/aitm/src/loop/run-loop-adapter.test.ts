@@ -23,6 +23,7 @@ import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import {
   type AdapterStatePort,
   branchFor,
+  createRollingContextAccumulator,
   defaultMakeOrchestrator,
   githubThreadTool,
   harnessContextBlock,
@@ -813,4 +814,53 @@ test('persistRollingContext tolerates a state port without writeContext (optiona
     delivery: delivery(),
   });
   assert.ok(out.includes('PR #3 — g1'), 'accumulates even when nothing persists it');
+});
+
+test('createRollingContextAccumulator serializes concurrent appends without losing a digest', async () => {
+  const writes: string[] = [];
+  // A staggered writeContext: the first append is made slow so a naive read-modify-write on a shared
+  // snapshot would let the second append start from the same base and clobber the first.
+  let calls = 0;
+  const state = {
+    writeContext: async (s: string) => {
+      const delay = calls++ === 0 ? 20 : 0;
+      await new Promise((r) => setTimeout(r, delay));
+      writes.push(s);
+    },
+  };
+  const acc = createRollingContextAccumulator(state, '');
+
+  const [a, b, c] = await Promise.all([
+    acc.append({ group: group('g1'), pr: pr(1), delivery: delivery() }),
+    acc.append({ group: group('g2'), pr: pr(2), delivery: delivery() }),
+    acc.append({ group: group('g3'), pr: pr(3), delivery: delivery() }),
+  ]);
+
+  // Every append reads the context left by the previous one, so each result is a strict prefix-extend
+  // of the last and the final value carries all three digests.
+  assert.ok(a.includes('PR #1 — g1'));
+  assert.ok(b.startsWith(a) && b.includes('PR #2 — g2'), 'second extends the first');
+  assert.ok(c.startsWith(b) && c.includes('PR #3 — g3'), 'third extends the second');
+  assert.equal(acc.current(), c, 'current() is the newest accumulated context');
+  for (const marker of ['PR #1 — g1', 'PR #2 — g2', 'PR #3 — g3']) {
+    assert.ok(acc.current().includes(marker), `no lost digest: ${marker}`);
+  }
+});
+
+test('createRollingContextAccumulator keeps queuing after a write failure (chain never wedges)', async () => {
+  let calls = 0;
+  const state = {
+    writeContext: async () => {
+      if (calls++ === 0) throw new Error('disk full');
+    },
+  };
+  const acc = createRollingContextAccumulator(state, '');
+  const a = await acc.append({ group: group('g1'), pr: pr(1), delivery: delivery() });
+  const b = await acc.append({ group: group('g2'), pr: pr(2), delivery: delivery() });
+  assert.ok(
+    a.includes('PR #1 — g1'),
+    'first append still returns its context despite write failure',
+  );
+  assert.ok(b.startsWith(a) && b.includes('PR #2 — g2'), 'a later append still proceeds');
+  assert.equal(acc.current(), b);
 });

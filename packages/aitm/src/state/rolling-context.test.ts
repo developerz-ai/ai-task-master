@@ -66,6 +66,28 @@ test('appendGroupDigest separates blocks with a blank line (newest last)', () =>
   assert.ok(both.indexOf('PR #1') < both.indexOf('PR #2'), 'newest last');
 });
 
+test('renderBlock collapses interior blank lines so a block never contains the separator', () => {
+  // LLM-authored summary / progress text can carry an embedded blank line; if it survived, the
+  // "\n\n" would masquerade as a block boundary and capOldestFirst() would split mid-group.
+  const first = appendGroupDigest('', {
+    group: group('a', 'A'),
+    pr: pr(1),
+    delivery: delivery({
+      branch: 'aitm/a',
+      changes: [{ path: 'f.ts', kind: 'modify', summary: 'line one\n\nline two' }],
+      progressEntries: ['- note one\n\n\n- note two'],
+    }),
+  });
+  assert.ok(!first.includes('\n\n'), 'a single block carries no internal separator');
+  const both = appendGroupDigest(first, {
+    group: group('b', 'B'),
+    pr: pr(2),
+    delivery: delivery({ branch: 'aitm/b' }),
+  });
+  assert.equal(both.split('\n\n').length, 2, 'still exactly two whole blocks after a real join');
+  assert.ok(both.startsWith(first), 'the normalized first block is preserved verbatim');
+});
+
 test('FIFO cap: appending past the budget drops OLDEST whole blocks first, never splitting one', () => {
   // Each block ~2 KB (a fat summary). Five blocks would be ~10 KB > 8 KB cap.
   const fat = 'x'.repeat(2000);

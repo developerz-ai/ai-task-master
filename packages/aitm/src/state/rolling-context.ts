@@ -28,11 +28,17 @@ export function appendGroupDigest(existing: string, entry: GroupDigestEntry): st
 }
 
 function renderBlock({ group, pr, delivery }: GroupDigestEntry): string {
+  // Change summaries and progress entries are LLM-authored, so a value may itself span multiple
+  // lines with a blank line inside. Collapse any interior blank line to a single newline: a block's
+  // own lines must never contain BLOCK_SEPARATOR, or capOldestFirst() would split mid-block and drop
+  // a partial group. This keeps "\n\n" the sole, unambiguous block boundary.
   return [
     `PR #${pr.number} — ${group.title} (group ${group.id}, branch ${delivery.branch})`,
     ...delivery.changes.map((c) => `- ${c.kind} ${c.path}: ${c.summary}`),
     ...delivery.progressEntries,
-  ].join('\n');
+  ]
+    .join('\n')
+    .replace(/\n{2,}/g, '\n');
 }
 
 // Drop oldest whole blocks until within budget, but always keep the newest block (even if it alone

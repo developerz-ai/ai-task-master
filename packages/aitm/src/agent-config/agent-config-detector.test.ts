@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import { AgentConfigDetector } from './agent-config-detector.ts';
+
+async function tempUserDir(): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  const path = await mkdtemp(join(tmpdir(), 'aitm-userhome-'));
+  return { path, cleanup: () => rm(path, { recursive: true, force: true }) };
+}
 
 test('AgentConfigDetector is constructible', () => {
   const d = new AgentConfigDetector('/tmp/repo');
@@ -161,6 +167,166 @@ test('detect: --style takes precedence over CLAUDE.md/AGENTS.md', async () => {
     assert.ok(cfg);
     assert.equal(cfg.flavor, 'custom');
     assert.equal(cfg.contents, '# override\n');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+// ---- layered discovery (issue #117) ----
+
+test('detect: user-global + root + nested → labeled blocks general→specific + sources scopes', async () => {
+  const repo = await makeTempRepo();
+  const user = await tempUserDir();
+  try {
+    await writeFile(join(user.path, 'CLAUDE.md'), 'USER-GLOBAL\n');
+    await writeFile(join(repo.path, 'CLAUDE.md'), 'PROJECT-ROOT\n');
+    await mkdir(join(repo.path, 'packages', 'core'), { recursive: true });
+    await writeFile(join(repo.path, 'packages', 'core', 'CLAUDE.md'), 'NESTED-CORE\n');
+
+    const cfg = await new AgentConfigDetector(repo.path).detect({ userConfigDir: user.path });
+    assert.ok(cfg);
+    // flavor/path describe the PROJECT pick, unchanged.
+    assert.equal(cfg.flavor, 'claude');
+    assert.equal(cfg.path, join(repo.path, 'CLAUDE.md'));
+    // Order: user → project → nested; each block labeled; deepest last (wins on conflict).
+    assert.equal(
+      cfg.contents,
+      [
+        `Contents of ${join(user.path, 'CLAUDE.md')}:\nUSER-GLOBAL\n`,
+        'Contents of CLAUDE.md:\nPROJECT-ROOT\n',
+        'Contents of packages/core/CLAUDE.md:\nNESTED-CORE\n',
+      ].join('\n\n'),
+    );
+    assert.deepEqual(cfg.sources, [
+      { path: join(user.path, 'CLAUDE.md'), scope: 'user' },
+      { path: join(repo.path, 'CLAUDE.md'), scope: 'project' },
+      { path: join(repo.path, 'packages', 'core', 'CLAUDE.md'), scope: 'nested' },
+    ]);
+  } finally {
+    await repo.cleanup();
+    await user.cleanup();
+  }
+});
+
+test('detect: root-only (no user, no nested) → contents byte-identical, single project source', async () => {
+  const repo = await makeTempRepo();
+  try {
+    await writeFile(join(repo.path, 'CLAUDE.md'), '# just the root\nstyle\n');
+    const cfg = await new AgentConfigDetector(repo.path).detect({});
+    assert.ok(cfg);
+    assert.equal(cfg.contents, '# just the root\nstyle\n', 'no label — byte-identical to today');
+    assert.deepEqual(cfg.sources, [{ path: join(repo.path, 'CLAUDE.md'), scope: 'project' }]);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('detect: user-global present but NO project file → null (CLI error path unchanged)', async () => {
+  const repo = await makeTempRepo();
+  const user = await tempUserDir();
+  try {
+    await writeFile(join(user.path, 'CLAUDE.md'), 'USER-GLOBAL\n');
+    // No CLAUDE.md/AGENTS.md at the repo root, no nested.
+    const cfg = await new AgentConfigDetector(repo.path).detect({ userConfigDir: user.path });
+    assert.equal(cfg, null, 'user-global is additive only — the project layer gates detection');
+  } finally {
+    await repo.cleanup();
+    await user.cleanup();
+  }
+});
+
+test('discoverNested: skips .git/node_modules/hidden/.ai-task-master; deterministic depth-then-path', async () => {
+  const repo = await makeTempRepo();
+  try {
+    await writeFile(join(repo.path, 'CLAUDE.md'), 'ROOT\n');
+    // Nested files that MUST be found, at varying depth.
+    await mkdir(join(repo.path, 'b'), { recursive: true });
+    await writeFile(join(repo.path, 'b', 'CLAUDE.md'), 'B\n');
+    await mkdir(join(repo.path, 'a', 'deep'), { recursive: true });
+    await writeFile(join(repo.path, 'a', 'CLAUDE.md'), 'A\n');
+    await writeFile(join(repo.path, 'a', 'deep', 'CLAUDE.md'), 'A-DEEP\n');
+    // Skipped locations.
+    for (const skip of ['node_modules', '.git', '.ai-task-master', '.hidden']) {
+      await mkdir(join(repo.path, skip), { recursive: true });
+      await writeFile(join(repo.path, skip, 'CLAUDE.md'), `SKIP-${skip}\n`);
+    }
+    const cfg = await new AgentConfigDetector(repo.path).detect({});
+    assert.ok(cfg);
+    const nested = cfg.sources.filter((s) => s.scope === 'nested').map((s) => s.path);
+    // depth 1 (a, b sorted by path) then depth 2 (a/deep) — none from skipped dirs.
+    assert.deepEqual(nested, [
+      join(repo.path, 'a', 'CLAUDE.md'),
+      join(repo.path, 'b', 'CLAUDE.md'),
+      join(repo.path, 'a', 'deep', 'CLAUDE.md'),
+    ]);
+    assert.ok(!cfg.contents.includes('SKIP-'), 'no skipped-dir content leaked in');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('discoverNested: honors the byte budget, skips the overflow, and warns', async () => {
+  const repo = await makeTempRepo();
+  const warnings: string[] = [];
+  try {
+    await writeFile(join(repo.path, 'CLAUDE.md'), 'ROOT\n');
+    // First nested file just under budget; second pushes over → skipped + warned.
+    await mkdir(join(repo.path, 'a'), { recursive: true });
+    await mkdir(join(repo.path, 'z'), { recursive: true });
+    await writeFile(join(repo.path, 'a', 'CLAUDE.md'), 'x'.repeat(64 * 1024 - 10));
+    await writeFile(join(repo.path, 'z', 'CLAUDE.md'), 'y'.repeat(100));
+    const cfg = await new AgentConfigDetector(repo.path).detect({
+      onWarn: (m) => warnings.push(m),
+    });
+    assert.ok(cfg);
+    const nested = cfg.sources.filter((s) => s.scope === 'nested').map((s) => s.path);
+    assert.deepEqual(nested, [join(repo.path, 'a', 'CLAUDE.md')], 'z skipped past budget');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? '', /budget .* exceeded; skipping z\/CLAUDE\.md/);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('detect: user-global @-imports resolve within its own dir, never the repo (issue #117 containment)', async () => {
+  const repo = await makeTempRepo();
+  const user = await tempUserDir();
+  try {
+    await writeFile(join(repo.path, 'CLAUDE.md'), 'PROJECT\n');
+    await writeFile(join(user.path, 'shared.md'), 'USER-IMPORTED\n');
+    await writeFile(join(user.path, 'CLAUDE.md'), 'top\n@shared.md\n');
+    const cfg = await new AgentConfigDetector(repo.path).detect({ userConfigDir: user.path });
+    assert.ok(cfg);
+    // The user-global import expanded from ~/.claude, not repoRoot.
+    assert.match(cfg.contents, /USER-IMPORTED/);
+  } finally {
+    await repo.cleanup();
+    await user.cleanup();
+  }
+});
+
+test('discoverNested: budget counts EXPANDED size — a tiny file with a large @-import fills it (issue #117)', async () => {
+  const repo = await makeTempRepo();
+  const warnings: string[] = [];
+  try {
+    await writeFile(join(repo.path, 'CLAUDE.md'), 'ROOT\n');
+    // a/CLAUDE.md is tiny raw (`@big.md`) but expands to ~64 KiB, so it alone consumes the budget.
+    await mkdir(join(repo.path, 'a'), { recursive: true });
+    await mkdir(join(repo.path, 'z'), { recursive: true });
+    await writeFile(join(repo.path, 'a', 'big.md'), 'x'.repeat(64 * 1024 - 40));
+    await writeFile(join(repo.path, 'a', 'CLAUDE.md'), '@big.md\n');
+    await writeFile(join(repo.path, 'z', 'CLAUDE.md'), 'y'.repeat(100));
+    const cfg = await new AgentConfigDetector(repo.path).detect({
+      onWarn: (m) => warnings.push(m),
+    });
+    assert.ok(cfg);
+    // a's EXPANDED content pushed the budget, so z (100 raw bytes) is skipped — proving the cap is on
+    // expanded, not raw (a's raw is ~8 bytes). If it counted raw, z would have fit.
+    const nested = cfg.sources.filter((s) => s.scope === 'nested').map((s) => s.path);
+    assert.deepEqual(nested, [join(repo.path, 'a', 'CLAUDE.md')]);
+    assert.match(cfg.contents, /x{1000}/, 'the @-import was expanded inline');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? '', /skipping z\/CLAUDE\.md/);
   } finally {
     await repo.cleanup();
   }

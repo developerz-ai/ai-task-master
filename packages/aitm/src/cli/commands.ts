@@ -8,7 +8,11 @@
 
 import { homedir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
-import { type AgentConfig, AgentConfigDetector } from '../agent-config/agent-config-detector.ts';
+import {
+  type AgentConfig,
+  AgentConfigDetector,
+  type DetectOptions,
+} from '../agent-config/agent-config-detector.ts';
 import { StyleDistiller } from '../agent-config/coding-style.ts';
 import { ConfigLoader } from '../config/config-loader.ts';
 import { ConfigWriter } from '../config/config-writer.ts';
@@ -196,6 +200,24 @@ export function usageSummaryLine(totals: UsageTotals): string {
   return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached), ${cost}${perRole ? ` — ${perRole}` : ''}\n`;
 }
 
+// AgentConfigDetector options from the CLI's stylePath sources + the homeDir seam (issue #117):
+// the user-global CLAUDE.md lives in <homeDir>/.claude, and a nested-file budget overflow is logged
+// to stderr. `--style-path` (start) wins over resolved config; merge-pr passes only its persisted
+// path (argStylePath undefined).
+function buildDetectOpts(
+  argStylePath: string | null | undefined,
+  fallbackStylePath: string | null,
+  homeDir: string,
+): DetectOptions {
+  const opts: DetectOptions = {
+    userConfigDir: join(homeDir, '.claude'),
+    onWarn: (message) => process.stderr.write(`${message}\n`),
+  };
+  if (argStylePath !== undefined) opts.stylePath = argStylePath;
+  else if (fallbackStylePath !== null) opts.stylePath = fallbackStylePath;
+  return opts;
+}
+
 export async function runStart(
   args: Extract<ParsedArgs, { kind: 'start' }>,
   ctx: StartCtx = {},
@@ -220,9 +242,7 @@ export async function runStart(
   const credentials = new Credentials(resolved);
 
   const detector = new AgentConfigDetector(cwd);
-  const detectOpts: { stylePath?: string | null } = {};
-  if (args.stylePath !== undefined) detectOpts.stylePath = args.stylePath;
-  else if (resolved.stylePath !== null) detectOpts.stylePath = resolved.stylePath;
+  const detectOpts = buildDetectOpts(args.stylePath, resolved.stylePath, homeDir);
 
   let agentConfig: AgentConfig | null;
   try {
@@ -454,8 +474,7 @@ export async function runMergePr(
   }
 
   const detector = new AgentConfigDetector(cwd);
-  const detectOpts: { stylePath?: string | null } = {};
-  if (runState.options.stylePath !== null) detectOpts.stylePath = runState.options.stylePath;
+  const detectOpts = buildDetectOpts(undefined, runState.options.stylePath, homeDir);
 
   let agentConfig: AgentConfig | null;
   try {

@@ -4,25 +4,33 @@
 
 ## Search order
 
-At target repo root:
+Discovery is **layered**, general → specific (issue #117). Every layer that exists is concatenated, so a more-specific convention comes later in the text and wins on conflict (deepest-wins):
 
-1. `--style <path>` CLI flag — if supplied, used verbatim. Detector skips filesystem search.
-2. `./CLAUDE.md` → style flavor `claude`.
-3. `./AGENTS.md` → style flavor `agents` (used by Codex, OpenAI tooling, and other generic agents).
-4. Both present → prefer `CLAUDE.md`. Log the choice. Override with `--prefer agents`.
-5. Neither present and no `--style` → exit 1 with instructions to create one or pass `--style`.
+1. **User-global** `~/.claude/CLAUDE.md` — operator-wide house conventions. **Additive only**: it never satisfies detection on its own.
+2. **Project-level pick** (the gate) at the target repo root:
+   - `--style <path>` CLI flag — if supplied, used verbatim (skips the root search).
+   - `./CLAUDE.md` → flavor `claude`; `./AGENTS.md` → flavor `agents`; both present → prefer `CLAUDE.md`, override with `--prefer agents`.
+   - Neither present and no `--style` → **exit 1** with instructions (unchanged — the user-global layer does not rescue this).
+3. **Nested** per-directory `CLAUDE.md`/`AGENTS.md` (same per-directory preference), discovered across the subtree. Skips `.git`, `node_modules`, hidden directories, and `.ai-task-master/`. Sorted **depth then path**, deterministically.
 
-The chosen file path and flavor are persisted to `state.json.agentConfigFile` so resumed runs use the same source.
+A total **byte budget** (64 KiB across nested files) guards monorepo blowup: once exceeded, remaining nested files are skipped and a warning is logged to stderr, so the style distiller never receives unbounded input.
+
+Each `@`-import is expanded per file with a **per-file containment root**: repo files stay confined to the repo root (as before); the user-global file expands within `~/.claude` only — its imports can never read the target repo, and vice versa.
+
+The **project-level** file path and flavor are persisted to `state.json.agentConfigFile` so resumed runs use the same source; the layered detail is exposed via `AgentConfig.sources`.
 
 ## Output contract
 
 ```
 type AgentConfig = {
-  flavor: "claude" | "agents" | "custom";
-  path: string;
-  contents: string;       // markdown of the chosen file, with @-imports expanded
+  flavor: "claude" | "agents" | "custom";  // describes the PROJECT-level pick
+  path: string;                            // the PROJECT-level pick's path
+  contents: string;                        // all layers, @-imports expanded per file
+  sources: Array<{ path: string; scope: "user" | "project" | "nested" }>;
 };
 ```
+
+**Labeling** — with more than one source, each block is prefixed `Contents of <path>:` (repo-relative for repo files, absolute for the user-global file). With **exactly one** source, `contents` is byte-identical to the un-layered single file (no label), so existing callers and the cached `.ai-task-master/coding-style.md` digest are unaffected.
 
 `Orchestrator` prepends `contents` to every subagent system prompt, then layers the role-specific prefix (`planner-system.md`, `worker-system.md`, `reviewer-system.md`) on top.
 
@@ -33,14 +41,14 @@ The chosen file's contents are passed through `expandImports` before being retur
 - **Resolution** — `@path` is expanded when `@` starts a line or follows whitespace. Paths resolve relative to the **importing file's** directory.
 - **Recursion** — imported files may themselves import, up to a depth cap (default 5). Cycles are detected and stop (the repeated reference is left as literal text).
 - **Not expanded** — `@` inside fenced code blocks or inline code spans, email-like `me@host`, escaped `@@`, and any import that does not resolve to a readable file (left as literal text).
-- **Containment (hardening)** — imports are confined to the target repo root. Absolute paths, `..` escapes, and `~`-home imports are refused (left literal). `aitm` runs against untrusted target repos, so an `@`-import must never pull a file from outside the repo into the prompt.
+- **Containment (hardening)** — imports are confined to a **per-source root**: repo files (project + nested) to the target repo root, and the user-global `~/.claude/CLAUDE.md` to its own directory (`~/.claude`). Absolute paths, `..` escapes, and `~`-home imports are refused (left literal). `aitm` runs against untrusted target repos, so a repo-side `@`-import must never pull a file from outside the repo into the prompt — and, conversely, the user-global file's imports can never reach the target repo.
 
 ## SRP
 
 | Module | Owns | Does NOT |
 | --- | --- | --- |
 | `AgentConfigDetector` | Filesystem search + return typed `AgentConfig`. | Interpret contents beyond `@`-import expansion. Choose a model. Touch credentials. |
-| `expandImports` | Expand `@path` imports within the repo root. | Filesystem search. Know about flavors or `--style`. |
+| `expandImports` | Expand `@path` imports within the caller-supplied containment root (repo root for repo files, `~/.claude` for the user-global file). | Filesystem search. Know about flavors or `--style`. Choose the root. |
 | `Orchestrator` | Compose the final system prompt per subagent. | Re-read the file. |
 
 ## Why `CLAUDE.md` does not imply Anthropic

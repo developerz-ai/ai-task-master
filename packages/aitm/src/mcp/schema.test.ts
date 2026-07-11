@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { McpServerSchema, McpServersSchema } from './schema.ts';
+import { McpRoleAllowlistSchema, McpServerSchema, McpServersSchema } from './schema.ts';
+
+test('McpRoleAllowlistSchema accepts array form, record form, and a mix; rejects bad shapes (issue #115)', () => {
+  const parsed = McpRoleAllowlistSchema.parse({
+    worker: ['filesystem', 'git'],
+    planner: { filesystem: ['read_*', 'list_*'] },
+  });
+  assert.deepEqual(parsed.worker, ['filesystem', 'git']);
+  assert.deepEqual(parsed.planner, { filesystem: ['read_*', 'list_*'] });
+  assert.equal(parsed.reviewer, undefined, 'a role absent from the object stays undefined');
+  // A record value must be string arrays, not bare strings; a role value must be array|record.
+  assert.throws(() => McpRoleAllowlistSchema.parse({ worker: { filesystem: 'read_*' } }));
+  assert.throws(() => McpRoleAllowlistSchema.parse({ worker: 5 }));
+});
 
 test('McpServerSchema accepts stdio shape (type omitted)', () => {
   const parsed = McpServerSchema.parse({

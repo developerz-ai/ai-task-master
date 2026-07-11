@@ -144,6 +144,40 @@ test('resolve: webSearch is tri-state — undefined when unset, project over glo
   }
 });
 
+test('resolve: mcpRoleAllowlist resolves project over global, no unknown-key warning (issue #115)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const warnings: string[] = [];
+    let loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    assert.equal('mcpRoleAllowlist' in (await loader.resolve({})), false, 'omitted when unset');
+
+    await writeGlobalConfig(home.path, { mcpRoleAllowlist: { worker: ['filesystem'] } });
+    loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn: (m) => warnings.push(m) },
+    );
+    assert.deepEqual((await loader.resolve({})).mcpRoleAllowlist, { worker: ['filesystem'] });
+
+    // Project (record form) wins over global (array form) wholesale.
+    await writeProjectConfig(cwd.path, {
+      mcpRoleAllowlist: { planner: { filesystem: ['read_*'] } },
+    });
+    assert.deepEqual((await loader.resolve({})).mcpRoleAllowlist, {
+      planner: { filesystem: ['read_*'] },
+    });
+    assert.equal(
+      warnings.some((w) => /unknown config key "mcpRoleAllowlist"/.test(w)),
+      false,
+    );
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: baseURL is undefined when no source sets it', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

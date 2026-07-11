@@ -79,10 +79,11 @@ test('connectAll spawns one client per server and exposes tools per role', async
   assert.equal(connected.length, 2);
   assert.deepEqual(connected.map((c) => c.transport).sort(), ['http', 'stdio']);
   const tools = m.toolsForRole('worker');
-  assert.deepEqual(Object.keys(tools).sort(), ['fs_read', 'http_get']);
+  // Namespaced `mcp__<server>__<tool>` — no un-namespaced keys (issue #115).
+  assert.deepEqual(Object.keys(tools).sort(), ['mcp__api__http_get', 'mcp__filesystem__fs_read']);
 });
 
-test('toolsForRole respects roleAllowlist (filters by server name)', async () => {
+test('toolsForRole respects roleAllowlist array form (filters by server name)', async () => {
   const { createClient } = recordingFactory({
     filesystem: { fs_read: fakeTool() },
     git: { git_status: fakeTool() },
@@ -103,10 +104,14 @@ test('toolsForRole respects roleAllowlist (filters by server name)', async () =>
   });
   await m.connectAll();
 
-  assert.deepEqual(Object.keys(m.toolsForRole('worker')), ['fs_read']);
-  assert.deepEqual(Object.keys(m.toolsForRole('reviewer')), ['git_status']);
+  assert.deepEqual(Object.keys(m.toolsForRole('worker')), ['mcp__filesystem__fs_read']);
+  assert.deepEqual(Object.keys(m.toolsForRole('reviewer')), ['mcp__git__git_status']);
   // Unlisted role (planner) sees every server.
-  assert.deepEqual(Object.keys(m.toolsForRole('planner')).sort(), ['fs_read', 'git_status', 'pay']);
+  assert.deepEqual(Object.keys(m.toolsForRole('planner')).sort(), [
+    'mcp__filesystem__fs_read',
+    'mcp__git__git_status',
+    'mcp__payments__pay',
+  ]);
 });
 
 test('connectAll logs and skips failed servers without throwing', async () => {
@@ -290,14 +295,12 @@ test('connectAll surfaces cleanup failures separately from the original error', 
   assert.ok(messages.includes('mcp server connect failed'));
 });
 
-test('toolsForRole warns and keeps the first occurrence on duplicate tool names', async () => {
-  const warnings: Array<{ msg: string; fields: Record<string, unknown> | undefined }> = [];
+test('two servers exporting the same tool name both survive as distinct namespaced keys, no warning (issue #115)', async () => {
+  const warnings: string[] = [];
   const logger: LoggerLike = {
     debug: () => {},
     info: () => {},
-    warn: (msg: string, fields?: Record<string, unknown>) => {
-      warnings.push({ msg, fields });
-    },
+    warn: (msg: string) => warnings.push(msg),
     error: () => {},
     status: () => {},
     flush: async () => {},
@@ -310,23 +313,53 @@ test('toolsForRole warns and keeps the first occurrence on duplicate tool names'
   });
 
   const m = new McpClientManager({
-    servers: {
-      alpha: { command: 'a' },
-      beta: { command: 'b' },
-    },
+    servers: { alpha: { command: 'a' }, beta: { command: 'b' } },
     createClient,
     logger,
   });
   await m.connectAll();
   const tools = m.toolsForRole('worker');
 
-  assert.deepEqual(Object.keys(tools), ['shared']);
-  assert.strictEqual(tools.shared, firstTool);
-  assert.equal(warnings.length, 1);
-  assert.equal(warnings[0]?.msg, 'duplicate mcp tool name');
-  assert.equal(warnings[0]?.fields?.tool, 'shared');
-  assert.equal(warnings[0]?.fields?.server, 'beta');
-  assert.equal(warnings[0]?.fields?.existingServer, 'alpha');
+  // Both survive under distinct namespaced keys — no drop, no duplicate warning.
+  assert.deepEqual(Object.keys(tools).sort(), ['mcp__alpha__shared', 'mcp__beta__shared']);
+  assert.strictEqual(tools.mcp__alpha__shared, firstTool);
+  assert.strictEqual(tools.mcp__beta__shared, secondTool);
+  assert.equal(warnings.length, 0);
+});
+
+test('toolsForRole record-form allowlist filters per tool per role with `*` globs (issue #115)', async () => {
+  const { createClient } = recordingFactory({
+    filesystem: { read_file: fakeTool(), list_dir: fakeTool(), write_file: fakeTool() },
+    git: { git_status: fakeTool() },
+  });
+  const m = new McpClientManager({
+    servers: { filesystem: { command: 'fs' }, git: { command: 'git-mcp' } },
+    roleAllowlist: {
+      // Planner: only the read-only filesystem tools; git absent from the record → not mounted.
+      planner: { filesystem: ['read_*', 'list_*'] },
+    },
+    createClient,
+  });
+  await m.connectAll();
+
+  assert.deepEqual(Object.keys(m.toolsForRole('planner')).sort(), [
+    'mcp__filesystem__list_dir',
+    'mcp__filesystem__read_file',
+  ]);
+  // write_file did not match; git was not a key in the record → dropped for planner.
+  assert.ok(!Object.keys(m.toolsForRole('planner')).some((k) => k.includes('write_file')));
+  assert.ok(!Object.keys(m.toolsForRole('planner')).some((k) => k.includes('git')));
+});
+
+test('server names are sanitized to the function-name charset in the namespace (issue #115)', async () => {
+  const { createClient } = recordingFactory({ 'my server.v2': { ping: fakeTool() } });
+  const m = new McpClientManager({
+    servers: { 'my server.v2': { command: 'x' } },
+    createClient,
+  });
+  await m.connectAll();
+  // Spaces and dots → `-`.
+  assert.deepEqual(Object.keys(m.toolsForRole('worker')), ['mcp__my-server-v2__ping']);
 });
 
 test('http transport propagates headers through client config', async () => {

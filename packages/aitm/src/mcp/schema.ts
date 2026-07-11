@@ -47,3 +47,22 @@ export type McpServer = z.infer<typeof McpServerSchema>;
 
 export const McpServersSchema = z.record(z.string(), McpServerSchema);
 export type McpServers = z.infer<typeof McpServersSchema>;
+
+// Per-role MCP allowlist (issue #115). Two forms per role:
+//   string[]                     — whole servers by name (existing behavior)
+//   Record<string, string[]>     — per-server un-namespaced tool patterns (`*` wildcard only)
+// A role absent from the object gets every connected server. The value union lets a config mix
+// forms across roles (e.g. worker whole-server, planner per-tool). See McpClientManager.toolsForRole.
+export const McpRoleAllowlistValueSchema = z.union([
+  z.array(z.string()),
+  z.record(z.string(), z.array(z.string())),
+]);
+export type McpRoleAllowlistValue = z.infer<typeof McpRoleAllowlistValueSchema>;
+
+export const McpRoleAllowlistSchema = z.object({
+  planner: McpRoleAllowlistValueSchema.optional(),
+  worker: McpRoleAllowlistValueSchema.optional(),
+  reviewer: McpRoleAllowlistValueSchema.optional(),
+  orchestrator: McpRoleAllowlistValueSchema.optional(),
+});
+export type McpRoleAllowlist = z.infer<typeof McpRoleAllowlistSchema>;

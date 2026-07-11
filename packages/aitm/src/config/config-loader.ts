@@ -54,6 +54,7 @@ const KNOWN_KEYS = new Set<string>([
   'fallbackModels',
   'reasoningEffort',
   'mcpServers',
+  'mcpRoleAllowlist',
 ]);
 
 // Built-in destructive-command deny rules, appended AFTER any configured rules so a repo can
@@ -234,6 +235,11 @@ export class ConfigLoader {
       ...(fallbackModels !== undefined ? { fallbackModels } : {}),
       reasoningEffort: this.resolveReasoningEffort(global, project, profile),
       bashRules,
+      // Per-role MCP allowlist — aitm config only, project over global (issue #115). Omitted when
+      // neither sets it, so every role gets every connected server.
+      ...((project?.mcpRoleAllowlist ?? global?.mcpRoleAllowlist)
+        ? { mcpRoleAllowlist: project?.mcpRoleAllowlist ?? global?.mcpRoleAllowlist }
+        : {}),
       mcpServers,
       mcpServerSources,
     };

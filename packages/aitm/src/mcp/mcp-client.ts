@@ -152,7 +152,9 @@ function namespacedName(serverName: string, toolName: string): string {
 }
 
 function sanitizeServerName(name: string): string {
-  return name.replace(/[^A-Za-z0-9_-]/g, '-');
+  // Collapse any run of 2+ underscores to `-` as well: `__` is the namespace delimiter, so a server
+  // name containing it (`my__server`) would make mcpBaseName mis-split `mcp__my__server__tool`.
+  return name.replace(/[^A-Za-z0-9_-]/g, '-').replace(/_{2,}/g, '-');
 }
 
 // Resolve the per-role, per-server tool gate (issue #115). Returns a predicate over un-namespaced
@@ -166,7 +168,9 @@ function serverToolFilter(
 ): ((toolName: string) => boolean) | null {
   if (allowed === undefined) return () => true;
   if (Array.isArray(allowed)) return allowed.includes(serverName) ? () => true : null;
-  const patterns = allowed[serverName];
+  // Own-property only: a server named `toString`/`__proto__` must not read an inherited member
+  // (which would make `.some(...)` throw and abort role resolution).
+  const patterns = Object.hasOwn(allowed, serverName) ? allowed[serverName] : undefined;
   if (patterns === undefined) return null;
   return (toolName) => patterns.some((pattern) => matchesGlob(toolName, pattern));
 }

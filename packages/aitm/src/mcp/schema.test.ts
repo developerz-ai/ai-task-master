@@ -13,6 +13,9 @@ test('McpRoleAllowlistSchema accepts array form, record form, and a mix; rejects
   // A record value must be string arrays, not bare strings; a role value must be array|record.
   assert.throws(() => McpRoleAllowlistSchema.parse({ worker: { filesystem: 'read_*' } }));
   assert.throws(() => McpRoleAllowlistSchema.parse({ worker: 5 }));
+  // Strict: a misspelled role key is rejected, not silently dropped (else the role would fall back
+  // to every server — the opposite of the intent).
+  assert.throws(() => McpRoleAllowlistSchema.parse({ workre: ['filesystem'] }));
 });
 
 test('McpServerSchema accepts stdio shape (type omitted)', () => {

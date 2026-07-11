@@ -59,10 +59,14 @@ export const McpRoleAllowlistValueSchema = z.union([
 ]);
 export type McpRoleAllowlistValue = z.infer<typeof McpRoleAllowlistValueSchema>;
 
-export const McpRoleAllowlistSchema = z.object({
-  planner: McpRoleAllowlistValueSchema.optional(),
-  worker: McpRoleAllowlistValueSchema.optional(),
-  reviewer: McpRoleAllowlistValueSchema.optional(),
-  orchestrator: McpRoleAllowlistValueSchema.optional(),
-});
+export const McpRoleAllowlistSchema = z
+  .object({
+    planner: McpRoleAllowlistValueSchema.optional(),
+    worker: McpRoleAllowlistValueSchema.optional(),
+    reviewer: McpRoleAllowlistValueSchema.optional(),
+    orchestrator: McpRoleAllowlistValueSchema.optional(),
+  })
+  // Strict: a misspelled role key (`workre`) must error, not be silently dropped — which would leave
+  // that role falling back to every connected server, the opposite of the intended scoping (#115).
+  .strict();
 export type McpRoleAllowlist = z.infer<typeof McpRoleAllowlistSchema>;

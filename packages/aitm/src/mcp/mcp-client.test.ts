@@ -351,15 +351,38 @@ test('toolsForRole record-form allowlist filters per tool per role with `*` glob
   assert.ok(!Object.keys(m.toolsForRole('planner')).some((k) => k.includes('git')));
 });
 
-test('server names are sanitized to the function-name charset in the namespace (issue #115)', async () => {
-  const { createClient } = recordingFactory({ 'my server.v2': { ping: fakeTool() } });
+test('server names are sanitized (charset + collapsed __) so the namespace round-trips (issue #115)', async () => {
+  const { createClient } = recordingFactory({
+    'my server.v2': { ping: fakeTool() },
+    my__srv: { pong: fakeTool() },
+  });
   const m = new McpClientManager({
-    servers: { 'my server.v2': { command: 'x' } },
+    servers: { 'my server.v2': { command: 'x' }, my__srv: { command: 'y' } },
     createClient,
   });
   await m.connectAll();
-  // Spaces and dots → `-`.
-  assert.deepEqual(Object.keys(m.toolsForRole('worker')), ['mcp__my-server-v2__ping']);
+  // Spaces/dots → `-`; a `__` in the name is collapsed to `-` so it can't collide with the delimiter,
+  // keeping `mcp__<server>__<tool>` splittable back to the tool.
+  assert.deepEqual(Object.keys(m.toolsForRole('worker')).sort(), [
+    'mcp__my-server-v2__ping',
+    'mcp__my-srv__pong',
+  ]);
+});
+
+test('record allowlist ignores inherited object properties (no throw on a toString server) (issue #115)', async () => {
+  const { createClient } = recordingFactory({
+    filesystem: { read_file: fakeTool() },
+    toString: { danger: fakeTool() },
+  });
+  const m = new McpClientManager({
+    servers: { filesystem: { command: 'fs' }, toString: { command: 'x' } },
+    // The record has no `toString` key; the own-property guard must not read Object.prototype.toString.
+    roleAllowlist: { worker: { filesystem: ['read_*'] } },
+    createClient,
+  });
+  await m.connectAll();
+  assert.doesNotThrow(() => m.toolsForRole('worker'));
+  assert.deepEqual(Object.keys(m.toolsForRole('worker')), ['mcp__filesystem__read_file']);
 });
 
 test('http transport propagates headers through client config', async () => {

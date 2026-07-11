@@ -120,6 +120,13 @@ test('ProfileSchema also carries reasoningEffort (issue #125)', () => {
   assert.equal(parsed.reasoningEffort?.coding, 'low');
 });
 
+test('ConfigFileSchema accepts a boolean webSearch and rejects non-booleans (issue #112)', () => {
+  assert.equal(ConfigFileSchema.parse({ webSearch: true }).webSearch, true);
+  assert.equal(ConfigFileSchema.parse({ webSearch: false }).webSearch, false);
+  assert.equal(ConfigFileSchema.parse({}).webSearch, undefined);
+  assert.throws(() => ConfigFileSchema.parse({ webSearch: 'yes' }));
+});
+
 test('ConfigFileSchema accepts formatCommand + verifyCommand as strings (issue #122)', () => {
   const parsed = ConfigFileSchema.parse({
     formatCommand: 'bun run lint:fix',

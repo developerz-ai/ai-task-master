@@ -28,6 +28,10 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
   // Per-step LLM request deadline, forwarded to createSubagent and armed at generate time (issue
   // #129). Unset → no deadline. aitm threads `{ stepMs: llmStepTimeoutMs }` from resolved config.
   timeout?: TimeoutConfiguration;
+  // Provider-specific options forwarded to createSubagent's ToolLoopAgent construction (issue #112).
+  // aitm rides OpenRouter server tools here (e.g. web_search: `{ openrouter: { tools: [...] } }`).
+  // Unset → none. The Worker's editor fanout reads the same field to merge onto its generateText.
+  providerOptions?: ToolLoopAgentSettings<never, TTools>['providerOptions'];
 };
 
 // Concrete factory implementations live next to each subagent: planner.ts, worker.ts, reviewer.ts.

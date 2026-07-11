@@ -33,7 +33,7 @@ export type DatetimeOutput = {
   timezone: string;
 };
 
-export function datetimeTool(): Tool {
+export function datetimeTool(): Tool<DatetimeInput, DatetimeOutput> {
   return tool({
     description: 'Get the current date and time, optionally formatted for a specific timezone',
     inputSchema: datetimeInputSchema,

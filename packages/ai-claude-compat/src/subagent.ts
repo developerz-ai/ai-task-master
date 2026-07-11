@@ -67,6 +67,12 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   // `PrepareStepFunction<TOOLS>` here trips its `Record<string, Tool>` constraint under
   // exactOptionalPropertyTypes, since ToolSet's element is a wider Tool union).
   prepareStep?: ToolLoopAgentSettings<never, TOOLS>['prepareStep'];
+  // Provider-specific options (the AI SDK's `providerOptions`), armed at generate time for the same
+  // reason as `timeout`: ai@6.0.182's `ToolLoopAgent.generate` overwrites constructor settings with
+  // the per-call value, so a construction-only value is dropped. Policy-free passthrough — aitm uses
+  // it to ride OpenRouter server tools (e.g. `{ openrouter: { tools: [...] } }`, issue #112). A
+  // per-call `providerOptions` on `agent.generate` wins. Omitted → no options, byte-identical.
+  providerOptions?: ToolLoopAgentSettings<never, TOOLS>['providerOptions'];
 };
 
 // Wrap a ToolLoopAgent: register the caller's tools plus the `submit` tool, and stop when the step
@@ -82,6 +88,10 @@ export function createSubagent<TOOLS extends ToolSet>(
     instructions: config.systemPrompt,
     stopWhen: [stepCountIs(config.maxSteps ?? defaultMaxSteps), hasToolCall(SUBMIT_TOOL_NAME)],
     ...(config.prepareStep ? { prepareStep: config.prepareStep } : {}),
+    // Unlike `timeout`, providerOptions is a persistent agent setting (not an AgentCallParameters
+    // per-call field), so the constructor value is forwarded on every generate — no generate-time
+    // arming needed. Omitted when unset → byte-identical.
+    ...(config.providerOptions ? { providerOptions: config.providerOptions } : {}),
   });
   if (config.timeout !== undefined) armStepTimeout(agent, config.timeout);
   return agent;

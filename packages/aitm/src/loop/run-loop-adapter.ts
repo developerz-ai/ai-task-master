@@ -42,6 +42,7 @@ import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
+import { providerOptionsWithServerTools, webSearchTool } from '../openrouter/server-tools.ts';
 import { Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
@@ -68,6 +69,9 @@ import {
   WORKER_SYSTEM_PREFIX,
   type WorkerTools,
 } from '../subagents/worker.ts';
+import { datetimeTool } from '../tools/datetime.ts';
+import { type FetchHtmlInput, fetchHtmlTool, isFetchHtmlAvailable } from '../tools/fetch-html.ts';
+import { type WebFetchOutput, webFetchTool } from '../tools/web-fetch.ts';
 import { runGit } from '../workspace/git-exec.ts';
 import { WorktreePool } from '../workspace/worktree-pool.ts';
 import { runFixSession } from './ci-fix.ts';
@@ -93,7 +97,30 @@ function makeStaleReminderProvider(fileState: FileStateTracker, cwd: string): Re
   return () => staleFileReminders(fileState, cwd);
 }
 
-export function localEditTools(cwd: string, rules?: readonly CommandRule[]): WorkerTools {
+// fetchHtml is a RUNTIME-ONLY extra on the core tool sets: an optional tool *field* on a ToolLoopAgent
+// generic injects `undefined` into the SDK's TypedToolCall union (issue #112), so it never sits on
+// WorkerTools/PlannerTools. The local builders return the core set plus this optional extra; the
+// model still gets the tool at runtime, and resolvers cast back to the core type.
+type WithFetchHtml<T> = T & { fetchHtml?: Tool<FetchHtmlInput, WebFetchOutput> };
+
+// Web + time function tools mounted into every subagent tool set (issue #112). webFetch (stealthed
+// local fetch, SSRF-guarded) and datetime are always present; fetchHtml (curl-impersonate) only when
+// its binary is available.
+function webFunctionTools(
+  fetchHtmlAvailable: boolean,
+): WithFetchHtml<Pick<WorkerTools, 'webFetch' | 'datetime'>> {
+  return {
+    webFetch: webFetchTool(),
+    datetime: datetimeTool(),
+    ...(fetchHtmlAvailable ? { fetchHtml: fetchHtmlTool() } : {}),
+  };
+}
+
+export function localEditTools(
+  cwd: string,
+  rules?: readonly CommandRule[],
+  fetchHtmlAvailable = false,
+): WithFetchHtml<WorkerTools> {
   // One FileStateTracker per tool set (per subagent invocation) so read-before-edit enforcement is
   // scoped to a single run — the four file tools share it (issue #104).
   const fileState = new FileStateTracker();
@@ -109,17 +136,22 @@ export function localEditTools(cwd: string, rules?: readonly CommandRule[]): Wor
     glob: globTool({ cwd }),
     bash: bashTool(bashInit),
     multiBash: multiBashTool(bashInit),
+    ...webFunctionTools(fetchHtmlAvailable),
   };
 }
 
-// Read-only subset for the Planner — survey the repo without write/edit/bash.
-export function localReadTools(cwd: string): PlannerTools {
+// Read-only subset for the Planner — survey the repo without write/edit/bash (plus the web tools).
+export function localReadTools(
+  cwd: string,
+  fetchHtmlAvailable = false,
+): WithFetchHtml<PlannerTools> {
   const fileState = new FileStateTracker();
   const staleReminders = makeStaleReminderProvider(fileState, cwd);
   return {
     readFile: withReminders(readFileTool({ cwd, fileState }), staleReminders),
     grep: grepTool({ cwd }),
     glob: globTool({ cwd }),
+    ...webFunctionTools(fetchHtmlAvailable),
   };
 }
 
@@ -172,10 +204,17 @@ export type OrchestratorBridgeCtx = {
   input: RunLoopInput;
   mcp: McpClientManager;
   rollingContext: string;
+  // Whether the curl-impersonate binary is present, resolved once per run (isFetchHtmlAvailable is
+  // async; the orchestrator builder is sync). Gates the optional fetchHtml tool (issue #112).
+  fetchHtmlAvailable: boolean;
 };
 
 export type RunLoopAdapterSeams = {
-  planGroups?: (input: RunLoopInput, mcp: McpClientManager) => Promise<PlanGroupsOutcome>;
+  planGroups?: (
+    input: RunLoopInput,
+    mcp: McpClientManager,
+    fetchHtmlAvailable: boolean,
+  ) => Promise<PlanGroupsOutcome>;
   makeOrchestrator?: (
     ctx: OrchestratorBridgeCtx,
   ) => WorkLoopOrchestrator | Promise<WorkLoopOrchestrator>;
@@ -210,6 +249,11 @@ export async function runLoopAdapter(
     const current = await state.read();
     const rollingContext = (await state.readContext?.()) ?? '';
 
+    // Resolve ONCE per run (a subprocess probe): the fetchHtml tool is mounted only when the
+    // curl-impersonate binary is present. Threaded into both the Planner (planGroups) and the sync
+    // orchestrator builder so the probe never runs twice (issue #112).
+    const fetchHtmlAvailable = await isFetchHtmlAvailable();
+
     // ---- Plan (fresh) or resume (prior prGroups present) -------------------
     let groups: PrGroup[];
     if (current.prGroups.length > 0) {
@@ -227,7 +271,7 @@ export async function runLoopAdapter(
       }
     } else {
       const planFn = seams.planGroups ?? defaultPlanGroups;
-      const outcome = await planFn(input, mcp);
+      const outcome = await planFn(input, mcp, fetchHtmlAvailable);
       if (outcome.kind === 'blocked') {
         return { kind: 'blocked', reason: outcome.reason, outcomes: [] };
       }
@@ -273,6 +317,7 @@ export async function runLoopAdapter(
       input,
       mcp,
       rollingContext,
+      fetchHtmlAvailable,
     });
 
     const loop = new WorkLoop({
@@ -354,11 +399,12 @@ export function planToPrGroups(plan: Plan, branch?: string): PrGroup[] {
 async function defaultPlanGroups(
   input: RunLoopInput,
   mcp: McpClientManager,
+  fetchHtmlAvailable: boolean,
 ): Promise<PlanGroupsOutcome> {
   const style = input.styleDigest ?? input.agentConfig.contents;
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
-    tools: resolvePlannerTools(mcp.toolsForRole('planner'), input.cwd),
+    tools: resolvePlannerTools(mcp.toolsForRole('planner'), input.cwd, fetchHtmlAvailable),
     systemPrompt: reminderAgentSystemPrompt(style, PLANNER_SYSTEM_PREFIX, input.cwd),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
   });
@@ -377,8 +423,19 @@ async function defaultPlanGroups(
 
 // ---- Orchestrator bridge ---------------------------------------------------
 
+// web_search server-tool gating (issue #112). webSearch undefined → CI-fix sessions only (highest
+// lookup value, bounded cost); true → all Worker calls; false → never. Returns the providerOptions
+// fragment (openrouter namespace) or undefined when web_search should not attach. Exported for tests.
+export function webSearchProviderOptions(
+  webSearch: boolean | undefined,
+  ciFix: boolean,
+): ReturnType<typeof providerOptionsWithServerTools> | undefined {
+  const enabled = webSearch === true || (ciFix && webSearch !== false);
+  return enabled ? providerOptionsWithServerTools([webSearchTool()]) : undefined;
+}
+
 export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
-  const { input, mcp, rollingContext } = ctx;
+  const { input, mcp, rollingContext, fetchHtmlAvailable } = ctx;
   const style = input.styleDigest ?? input.agentConfig.contents;
   // Per-step LLM deadline armed on every generate site in this bridge (issue #129).
   const stepTimeout = { stepMs: input.resolved.llmStepTimeoutMs };
@@ -423,6 +480,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       worktree.path,
       github,
       input.resolved.bashRules,
+      fetchHtmlAvailable,
     );
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
@@ -451,7 +509,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         mcp.toolsForRole('worker'),
         worktree.path,
         input.resolved.bashRules,
+        fetchHtmlAvailable,
       );
+      // Regular Worker: web_search only when explicitly enabled (webSearch: true).
+      const providerOptions = webSearchProviderOptions(input.resolved.webSearch, false);
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
         tools,
@@ -461,6 +522,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           modelId: input.credentials.modelIdFor('worker'),
         }),
         timeout: stepTimeout,
+        ...(providerOptions !== undefined ? { providerOptions } : {}),
       });
       return runWorkerSubagent(agent, {
         group,
@@ -489,6 +551,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     // the coding-capability Worker pointed at them, rebase onto origin/<base>, force-with-lease push.
     runCiFix: async ({ group, pr, worktree, baseBranch }) => {
       const priorHandle = ciFixHandles.get(group.id);
+      const ciFixProviderOptions = webSearchProviderOptions(input.resolved.webSearch, true);
       const result = await runFixSession({
         github: input.github,
         prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
@@ -498,10 +561,14 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             mcp.toolsForRole('worker'),
             worktree.path,
             input.resolved.bashRules,
+            fetchHtmlAvailable,
           ),
           styleContents: style,
           compactor,
           timeout: stepTimeout,
+          // CI-fix Worker: web_search on by default (undefined) — a fix pass looking up an error or
+          // changelog is the highest-value place for it; only an explicit `false` disables it.
+          ...(ciFixProviderOptions !== undefined ? { providerOptions: ciFixProviderOptions } : {}),
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
         },
@@ -550,8 +617,11 @@ function resolveWorkerTools(
   set: ToolSet,
   cwd: string,
   rules?: readonly CommandRule[],
+  fetchHtmlAvailable = false,
 ): WorkerTools {
-  const local = localEditTools(cwd, rules);
+  const local = localEditTools(cwd, rules, fetchHtmlAvailable);
+  // fetchHtml is optional: keep the key only when MCP supplies one or the local binary is available.
+  const fetchHtml = set.fetchHtml ?? local.fetchHtml;
   return {
     readFile: set.readFile ?? local.readFile,
     writeFile: set.writeFile ?? local.writeFile,
@@ -561,6 +631,9 @@ function resolveWorkerTools(
     glob: set.glob ?? local.glob,
     bash: set.bash ?? local.bash,
     multiBash: set.multiBash ?? local.multiBash,
+    webFetch: set.webFetch ?? local.webFetch,
+    datetime: set.datetime ?? local.datetime,
+    ...(fetchHtml ? { fetchHtml } : {}),
   } as WorkerTools;
 }
 
@@ -569,20 +642,25 @@ function resolveReviewerTools(
   cwd: string,
   github: Tool<GithubToolInput, GithubToolOutput>,
   rules?: readonly CommandRule[],
+  fetchHtmlAvailable = false,
 ): ReviewerTools {
-  return { ...resolveWorkerTools(set, cwd, rules), github };
+  return { ...resolveWorkerTools(set, cwd, rules, fetchHtmlAvailable), github };
 }
 
 // The Planner gets only the read-only subset, partial-filled the same way. This is also the fix
 // for the latent no-MCP bug: previously the Planner was handed the raw MCP ToolSet with no local
 // fallback, so a bare `aitm start` left it with zero tools despite its prompt promising
 // readFile/grep/glob.
-function resolvePlannerTools(set: ToolSet, cwd: string): PlannerTools {
-  const local = localReadTools(cwd);
+function resolvePlannerTools(set: ToolSet, cwd: string, fetchHtmlAvailable = false): PlannerTools {
+  const local = localReadTools(cwd, fetchHtmlAvailable);
+  const fetchHtml = set.fetchHtml ?? local.fetchHtml;
   return {
     readFile: set.readFile ?? local.readFile,
     grep: set.grep ?? local.grep,
     glob: set.glob ?? local.glob,
+    webFetch: set.webFetch ?? local.webFetch,
+    datetime: set.datetime ?? local.datetime,
+    ...(fetchHtml ? { fetchHtml } : {}),
   } as PlannerTools;
 }
 

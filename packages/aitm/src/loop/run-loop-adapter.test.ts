@@ -27,12 +27,14 @@ import {
   githubThreadTool,
   harnessContextBlock,
   localEditTools,
+  localReadTools,
   type PlanGroupsOutcome,
   planToPrGroups,
   type RunLoopAdapterSeams,
   reminderAgentSystemPrompt,
   runLoopAdapter,
   sanitizeBranchComponent,
+  webSearchProviderOptions,
 } from './run-loop-adapter.ts';
 import type { WorkLoopGithub, WorkLoopOrchestrator, WorkLoopPool } from './work-loop.ts';
 
@@ -710,3 +712,36 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
 // each factory's own stall test (planner/worker/reviewer.test.ts) fires the deadline and surfaces the
 // StepTimeoutError, ci-fix.test.ts covers FixSessionSubagents.timeout, and commands.test.ts proves the
 // resolved value reaches RunLoopInput. The fan-out wiring itself is type-checked.
+
+// ---- web tools + web_search gating (issue #112) ----
+
+test('localEditTools mounts webFetch + datetime; fetchHtml only when its binary is available', () => {
+  const tools = localEditTools('/tmp/x');
+  assert.ok(tools.webFetch, 'webFetch present');
+  assert.ok(tools.datetime, 'datetime present');
+  assert.equal('fetchHtml' in tools, false, 'no fetchHtml when unavailable (default)');
+  const withHtml = localEditTools('/tmp/x', undefined, true);
+  assert.ok(withHtml.fetchHtml, 'fetchHtml mounted when available');
+});
+
+test('localReadTools (planner) mounts webFetch + datetime alongside the read-only set', () => {
+  const tools = localReadTools('/tmp/x');
+  assert.ok(tools.readFile && tools.grep && tools.glob, 'read-only core present');
+  assert.ok(tools.webFetch && tools.datetime, 'web + time tools present');
+  assert.equal('fetchHtml' in tools, false);
+  assert.ok(localReadTools('/tmp/x', true).fetchHtml, 'fetchHtml mounted when available');
+});
+
+test('webSearchProviderOptions: unset → CI-fix only; true → all Worker calls; false → never (issue #112)', () => {
+  const hasWebSearch = (po: ReturnType<typeof webSearchProviderOptions>): boolean =>
+    (po?.openrouter?.tools ?? []).some((t) => t.type === 'openrouter:web_search');
+  // unset (undefined): CI-fix on, regular off.
+  assert.equal(hasWebSearch(webSearchProviderOptions(undefined, true)), true, 'unset → CI-fix on');
+  assert.equal(webSearchProviderOptions(undefined, false), undefined, 'unset → regular off');
+  // true: on for both.
+  assert.equal(hasWebSearch(webSearchProviderOptions(true, true)), true);
+  assert.equal(hasWebSearch(webSearchProviderOptions(true, false)), true, 'true → regular on');
+  // false: off for both, including CI-fix.
+  assert.equal(webSearchProviderOptions(false, true), undefined, 'false → CI-fix off');
+  assert.equal(webSearchProviderOptions(false, false), undefined, 'false → regular off');
+});

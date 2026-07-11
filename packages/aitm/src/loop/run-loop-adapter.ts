@@ -210,7 +210,11 @@ export type OrchestratorBridgeCtx = {
 };
 
 export type RunLoopAdapterSeams = {
-  planGroups?: (input: RunLoopInput, mcp: McpClientManager) => Promise<PlanGroupsOutcome>;
+  planGroups?: (
+    input: RunLoopInput,
+    mcp: McpClientManager,
+    fetchHtmlAvailable: boolean,
+  ) => Promise<PlanGroupsOutcome>;
   makeOrchestrator?: (
     ctx: OrchestratorBridgeCtx,
   ) => WorkLoopOrchestrator | Promise<WorkLoopOrchestrator>;
@@ -245,6 +249,11 @@ export async function runLoopAdapter(
     const current = await state.read();
     const rollingContext = (await state.readContext?.()) ?? '';
 
+    // Resolve ONCE per run (a subprocess probe): the fetchHtml tool is mounted only when the
+    // curl-impersonate binary is present. Threaded into both the Planner (planGroups) and the sync
+    // orchestrator builder so the probe never runs twice (issue #112).
+    const fetchHtmlAvailable = await isFetchHtmlAvailable();
+
     // ---- Plan (fresh) or resume (prior prGroups present) -------------------
     let groups: PrGroup[];
     if (current.prGroups.length > 0) {
@@ -262,7 +271,7 @@ export async function runLoopAdapter(
       }
     } else {
       const planFn = seams.planGroups ?? defaultPlanGroups;
-      const outcome = await planFn(input, mcp);
+      const outcome = await planFn(input, mcp, fetchHtmlAvailable);
       if (outcome.kind === 'blocked') {
         return { kind: 'blocked', reason: outcome.reason, outcomes: [] };
       }
@@ -304,9 +313,6 @@ export async function runLoopAdapter(
         input.resolved.concurrency,
       );
     const github = seams.makeGithub?.(input) ?? input.github;
-    // Resolve once per run (a subprocess probe): the fetchHtml tool is mounted only when the
-    // curl-impersonate binary is present. Threaded into the sync orchestrator builder (issue #112).
-    const fetchHtmlAvailable = await isFetchHtmlAvailable();
     const orchestrator = await (seams.makeOrchestrator ?? defaultMakeOrchestrator)({
       input,
       mcp,
@@ -393,9 +399,9 @@ export function planToPrGroups(plan: Plan, branch?: string): PrGroup[] {
 async function defaultPlanGroups(
   input: RunLoopInput,
   mcp: McpClientManager,
+  fetchHtmlAvailable: boolean,
 ): Promise<PlanGroupsOutcome> {
   const style = input.styleDigest ?? input.agentConfig.contents;
-  const fetchHtmlAvailable = await isFetchHtmlAvailable();
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
     tools: resolvePlannerTools(mcp.toolsForRole('planner'), input.cwd, fetchHtmlAvailable),

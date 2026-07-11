@@ -41,14 +41,14 @@ The chosen file's contents are passed through `expandImports` before being retur
 - **Resolution** — `@path` is expanded when `@` starts a line or follows whitespace. Paths resolve relative to the **importing file's** directory.
 - **Recursion** — imported files may themselves import, up to a depth cap (default 5). Cycles are detected and stop (the repeated reference is left as literal text).
 - **Not expanded** — `@` inside fenced code blocks or inline code spans, email-like `me@host`, escaped `@@`, and any import that does not resolve to a readable file (left as literal text).
-- **Containment (hardening)** — imports are confined to the target repo root. Absolute paths, `..` escapes, and `~`-home imports are refused (left literal). `aitm` runs against untrusted target repos, so an `@`-import must never pull a file from outside the repo into the prompt.
+- **Containment (hardening)** — imports are confined to a **per-source root**: repo files (project + nested) to the target repo root, and the user-global `~/.claude/CLAUDE.md` to its own directory (`~/.claude`). Absolute paths, `..` escapes, and `~`-home imports are refused (left literal). `aitm` runs against untrusted target repos, so a repo-side `@`-import must never pull a file from outside the repo into the prompt — and, conversely, the user-global file's imports can never reach the target repo.
 
 ## SRP
 
 | Module | Owns | Does NOT |
 | --- | --- | --- |
 | `AgentConfigDetector` | Filesystem search + return typed `AgentConfig`. | Interpret contents beyond `@`-import expansion. Choose a model. Touch credentials. |
-| `expandImports` | Expand `@path` imports within the repo root. | Filesystem search. Know about flavors or `--style`. |
+| `expandImports` | Expand `@path` imports within the caller-supplied containment root (repo root for repo files, `~/.claude` for the user-global file). | Filesystem search. Know about flavors or `--style`. Choose the root. |
 | `Orchestrator` | Compose the final system prompt per subagent. | Re-read the file. |
 
 ## Why `CLAUDE.md` does not imply Anthropic

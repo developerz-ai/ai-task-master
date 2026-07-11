@@ -7,7 +7,7 @@
 // Import expansion (#87) runs per file with a per-file containment root, so the user-global file can
 // never read the target repo and vice versa.
 
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { expandImports } from './expand-imports.ts';
 
@@ -43,7 +43,7 @@ const SKIP_DIRS = new Set(['node_modules']);
 
 type Layer = { path: string; scope: ConfigScope; contents: string };
 type ProjectLayer = Layer & { flavor: AgentConfigFlavor };
-type FilePick = { flavor: AgentConfigFlavor; path: string; raw: string };
+type FilePick = { flavor: AgentConfigFlavor; path: string };
 
 export class AgentConfigDetector {
   constructor(private readonly repoRoot: string) {}
@@ -97,16 +97,21 @@ export class AgentConfigDetector {
 
     const picked = await pickInDir(this.repoRoot, options.prefer);
     if (picked === null) return null;
-    const contents = await expandImports(picked.raw, this.repoRoot, {
+    const raw = await readFile(picked.path, 'utf8');
+    const contents = await expandImports(raw, this.repoRoot, {
       root: this.repoRoot,
       sourcePath: picked.path,
     });
     return { flavor: picked.flavor, path: picked.path, scope: 'project', contents };
   }
 
-  // Walk subdirectories (depth ≥ 1) for per-directory CLAUDE.md/AGENTS.md picks, deepest last,
-  // deterministic (depth then path). Skips .git/node_modules/hidden/.ai-task-master and symlinks.
-  // Enforces the nested byte budget across the sorted set; expands each within repoRoot.
+  // Discover nested per-directory picks (depth ≥ 1), deepest last, deterministic (depth then path).
+  // Skips .git/node_modules/hidden/.ai-task-master and symlinks. The walk collects PATHS only (an
+  // existence check, no content read); files are then read + expanded one at a time and the budget
+  // is enforced on the EXPANDED size (what the distiller actually receives, so a small file that
+  // @-imports large content still counts). A raw-size pre-gate skips a file whose raw text alone
+  // overflows without reading it, bounding I/O and memory to roughly the budget. On overflow the
+  // rest are skipped and onWarn fires. (A per-@-import output cap is expand-imports' domain, #87.)
   private async discoverNested(options: DetectOptions, projectPath: string): Promise<Layer[]> {
     const picks: Array<FilePick & { depth: number }> = [];
     const walk = async (dir: string, depth: number): Promise<void> => {
@@ -129,19 +134,30 @@ export class AgentConfigDetector {
 
     const layers: Layer[] = [];
     let used = 0;
+    const skip = (path: string): void =>
+      options.onWarn?.(
+        `nested CLAUDE.md budget (${NESTED_BYTE_BUDGET} bytes) exceeded; skipping ${relative(this.repoRoot, path)} and any further nested files`,
+      );
     for (const pick of picks) {
-      const size = byteLength(pick.raw);
-      if (used + size > NESTED_BYTE_BUDGET) {
-        options.onWarn?.(
-          `nested CLAUDE.md budget (${NESTED_BYTE_BUDGET} bytes) exceeded; skipping ${relative(this.repoRoot, pick.path)} and any further nested files`,
-        );
+      // Raw-size pre-gate: expansion only ever adds bytes, so a file whose raw text already overflows
+      // can be dropped without reading or expanding it.
+      const rawSize = await fileSize(pick.path);
+      if (rawSize === null) continue; // vanished between discovery and read — skip it
+      if (used + rawSize > NESTED_BYTE_BUDGET) {
+        skip(pick.path);
         break;
       }
-      used += size;
-      const contents = await expandImports(pick.raw, dirname(pick.path), {
+      const raw = await readFile(pick.path, 'utf8');
+      const contents = await expandImports(raw, dirname(pick.path), {
         root: this.repoRoot,
         sourcePath: pick.path,
       });
+      const size = byteLength(contents);
+      if (used + size > NESTED_BYTE_BUDGET) {
+        skip(pick.path);
+        break;
+      }
+      used += size;
       layers.push({ path: pick.path, scope: 'nested', contents });
     }
     return layers;
@@ -161,23 +177,43 @@ async function detectUser(userConfigDir: string): Promise<Layer | null> {
   return { path, scope: 'user', contents };
 }
 
-// The per-directory pick: CLAUDE.md over AGENTS.md, honoring `prefer` when both exist.
+// The per-directory pick: CLAUDE.md over AGENTS.md, honoring `prefer` when both exist. Existence
+// only (no content read) — callers read the picked path lazily, so a big subtree never buffers every
+// candidate's content at once.
 async function pickInDir(
   dir: string,
   prefer: 'claude' | 'agents' | undefined,
 ): Promise<FilePick | null> {
   const claudePath = join(dir, 'CLAUDE.md');
   const agentsPath = join(dir, 'AGENTS.md');
-  const claude = await readIfExists(claudePath);
-  const agents = await readIfExists(agentsPath);
-  if (claude !== null && agents !== null) {
+  const hasClaude = await fileExists(claudePath);
+  const hasAgents = await fileExists(agentsPath);
+  if (hasClaude && hasAgents) {
     return prefer === 'agents'
-      ? { flavor: 'agents', path: agentsPath, raw: agents }
-      : { flavor: 'claude', path: claudePath, raw: claude };
+      ? { flavor: 'agents', path: agentsPath }
+      : { flavor: 'claude', path: claudePath };
   }
-  if (claude !== null) return { flavor: 'claude', path: claudePath, raw: claude };
-  if (agents !== null) return { flavor: 'agents', path: agentsPath, raw: agents };
+  if (hasClaude) return { flavor: 'claude', path: claudePath };
+  if (hasAgents) return { flavor: 'agents', path: agentsPath };
   return null;
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isFile();
+  } catch (err) {
+    if (isNotFound(err)) return false;
+    throw err;
+  }
+}
+
+// Raw byte size, or null if the file vanished/errored between discovery and read (skip it).
+async function fileSize(path: string): Promise<number | null> {
+  try {
+    return (await stat(path)).size;
+  } catch {
+    return null;
+  }
 }
 
 // Concatenate layers. With exactly one source, the output is byte-identical to the un-layered

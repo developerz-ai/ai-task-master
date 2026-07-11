@@ -304,3 +304,30 @@ test('detect: user-global @-imports resolve within its own dir, never the repo (
     await user.cleanup();
   }
 });
+
+test('discoverNested: budget counts EXPANDED size — a tiny file with a large @-import fills it (issue #117)', async () => {
+  const repo = await makeTempRepo();
+  const warnings: string[] = [];
+  try {
+    await writeFile(join(repo.path, 'CLAUDE.md'), 'ROOT\n');
+    // a/CLAUDE.md is tiny raw (`@big.md`) but expands to ~64 KiB, so it alone consumes the budget.
+    await mkdir(join(repo.path, 'a'), { recursive: true });
+    await mkdir(join(repo.path, 'z'), { recursive: true });
+    await writeFile(join(repo.path, 'a', 'big.md'), 'x'.repeat(64 * 1024 - 40));
+    await writeFile(join(repo.path, 'a', 'CLAUDE.md'), '@big.md\n');
+    await writeFile(join(repo.path, 'z', 'CLAUDE.md'), 'y'.repeat(100));
+    const cfg = await new AgentConfigDetector(repo.path).detect({
+      onWarn: (m) => warnings.push(m),
+    });
+    assert.ok(cfg);
+    // a's EXPANDED content pushed the budget, so z (100 raw bytes) is skipped — proving the cap is on
+    // expanded, not raw (a's raw is ~8 bytes). If it counted raw, z would have fit.
+    const nested = cfg.sources.filter((s) => s.scope === 'nested').map((s) => s.path);
+    assert.deepEqual(nested, [join(repo.path, 'a', 'CLAUDE.md')]);
+    assert.match(cfg.contents, /x{1000}/, 'the @-import was expanded inline');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? '', /skipping z\/CLAUDE\.md/);
+  } finally {
+    await repo.cleanup();
+  }
+});

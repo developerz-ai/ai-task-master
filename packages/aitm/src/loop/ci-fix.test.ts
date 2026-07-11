@@ -301,6 +301,46 @@ test('runFixSession: threads verifyCommand into the fix Worker input (issue #122
   assert.equal((captured as WorkerInput).formatCommand, 'bun run lint:fix');
 });
 
+test('runFixSession: threads the live rolling context into the fix Worker input (issue #123)', async () => {
+  let captured: WorkerInput | null = null;
+  const rolling =
+    'PR #1 — Auth (group auth, branch aitm/auth)\n- create src/user.ts: adds User model';
+  const result = await runFixSession(
+    baseInput({
+      runCmd: recordingRunCmd().runCmd,
+      subagents: baseSubagents({
+        rollingContext: rolling,
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'fixed');
+  assert.equal(
+    (captured as WorkerInput).rollingContext,
+    rolling,
+    'fix Worker sees what earlier groups shipped',
+  );
+});
+
+test('runFixSession: an unset rolling context falls back to empty (prior behavior)', async () => {
+  let captured: WorkerInput | null = null;
+  await runFixSession(
+    baseInput({
+      runCmd: recordingRunCmd().runCmd,
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  assert.equal((captured as WorkerInput).rollingContext, '', 'defaults to empty when omitted');
+});
+
 test('runFixSession: threads a prior handle into the fix Worker and returns the updated handle (issue #107)', async () => {
   let captured: WorkerInput | null = null;
   const priorHandle = stubHandle('PRIOR-CONVERSATION');

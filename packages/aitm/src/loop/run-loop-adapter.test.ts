@@ -30,6 +30,7 @@ import {
   localReadTools,
   mcpTool,
   type PlanGroupsOutcome,
+  persistRollingContext,
   planToPrGroups,
   type RunLoopAdapterSeams,
   reminderAgentSystemPrompt,
@@ -760,4 +761,56 @@ test('webSearchProviderOptions: unset → CI-fix only; true → all Worker calls
   // false: off for both, including CI-fix.
   assert.equal(webSearchProviderOptions(false, true), undefined, 'false → CI-fix off');
   assert.equal(webSearchProviderOptions(false, false), undefined, 'false → regular off');
+});
+
+// ---- persistRollingContext (issue #123) ------------------------------------
+
+test('persistRollingContext accumulates across groups and persists the running total', async () => {
+  const writes: string[] = [];
+  const state = { writeContext: async (s: string) => void writes.push(s) };
+
+  const after1 = await persistRollingContext(state, '', {
+    group: group('g1'),
+    pr: pr(1),
+    delivery: delivery(),
+  });
+  assert.ok(after1.includes('PR #1 — g1'), 'first digest present');
+  assert.equal(writes.length, 1, 'persisted once');
+  assert.equal(writes[0], after1, 'persisted the accumulated value, not a bare block');
+
+  const after2 = await persistRollingContext(state, after1, {
+    group: group('g2'),
+    pr: pr(2),
+    delivery: delivery(),
+  });
+  assert.ok(after2.startsWith(after1), "second write extends the first, doesn't replace it");
+  assert.ok(after2.includes('PR #2 — g2'), 'second digest appended');
+  assert.equal(writes[1], after2, 'persisted the running total');
+});
+
+test('persistRollingContext is failure-tolerant: a writeContext rejection never propagates', async () => {
+  const state = {
+    writeContext: async () => {
+      throw new Error('disk full');
+    },
+  };
+  // Must resolve (not reject) so the caller's openPr still returns the already-open PR.
+  const out = await persistRollingContext(state, '', {
+    group: group('g1'),
+    pr: pr(7),
+    delivery: delivery(),
+  });
+  assert.ok(
+    out.includes('PR #7 — g1'),
+    'still returns the accumulated context despite the write failure',
+  );
+});
+
+test('persistRollingContext tolerates a state port without writeContext (optional method omitted)', async () => {
+  const out = await persistRollingContext({}, '', {
+    group: group('g1'),
+    pr: pr(3),
+    delivery: delivery(),
+  });
+  assert.ok(out.includes('PR #3 — g1'), 'accumulates even when nothing persists it');
 });

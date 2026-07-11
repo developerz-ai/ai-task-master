@@ -83,6 +83,9 @@ export type FixSessionSubagents = {
   providerOptions?: SubagentInit<WorkerTools>['providerOptions'];
   // Usage sink forwarded to the CI-fix Worker agent, recorded under the worker role (#114). Unset → none.
   onUsage?: SubagentInit<WorkerTools>['onUsage'];
+  // Live rolling context — what earlier groups shipped, threaded into the fix Worker's manifest
+  // prompt (issue #123). Unset → '' (the render guard makes it a no-op), matching prior behavior.
+  rollingContext?: string;
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
@@ -197,7 +200,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     worktreePath,
     baseBranch,
     styleContents: subagents.styleContents,
-    rollingContext: '',
+    rollingContext: subagents.rollingContext ?? '',
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
     ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),

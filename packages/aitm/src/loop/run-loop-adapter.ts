@@ -49,6 +49,7 @@ import { PlanGraph } from '../plan/plan-graph.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { Plan } from '../plan/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
+import { appendGroupDigest, type GroupDigestEntry } from '../state/rolling-context.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import {
   createPlannerAgent,
@@ -191,10 +192,32 @@ export type AdapterStatePort = {
   read(): Promise<RunState>;
   update(mutator: (s: RunState) => RunState): Promise<RunState>;
   readContext?(): Promise<string | null>;
+  // Persist the accumulated rolling context (context.md) after each PR opens (issue #123). Optional
+  // like readContext; StateStore satisfies it verbatim (atomic write), test stubs may omit it.
+  writeContext?(summary: string): Promise<void>;
   // Persist plan groups as the loop marks tasks done; StateStore renders them to plan.md.
   // Optional so in-memory test stubs can omit it; StateStore supplies it in production.
   writePlan?(groups: readonly PlanMarkdownGroup[]): Promise<void>;
 };
+
+// Append one group's digest to the live rolling context and persist it (issue #123). Failure-tolerant:
+// a writeContext rejection is warned to stderr, never propagated — persisting context must never fail
+// the PR-open path (the PR is already open; a lost digest only costs the next group some freshness).
+export async function persistRollingContext(
+  state: Pick<AdapterStatePort, 'writeContext'>,
+  liveContext: string,
+  entry: GroupDigestEntry,
+): Promise<string> {
+  const next = appendGroupDigest(liveContext, entry);
+  try {
+    await state.writeContext?.(next);
+  } catch (err) {
+    process.stderr.write(
+      `warning: failed to persist rolling context: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+  return next;
+}
 
 export type PlanGroupsOutcome =
   | { kind: 'ok'; groups: PrGroup[] }
@@ -208,6 +231,8 @@ export type OrchestratorBridgeCtx = {
   // Whether the curl-impersonate binary is present, resolved once per run (isFetchHtmlAvailable is
   // async; the orchestrator builder is sync). Gates the optional fetchHtml tool (issue #112).
   fetchHtmlAvailable: boolean;
+  // State port so the bridge can persist the accumulated rolling context after each PR opens (#123).
+  state: AdapterStatePort;
 };
 
 export type RunLoopAdapterSeams = {
@@ -324,6 +349,7 @@ export async function runLoopAdapter(
       mcp,
       rollingContext,
       fetchHtmlAvailable,
+      state,
     });
 
     const loop = new WorkLoop({
@@ -447,7 +473,11 @@ export function webSearchProviderOptions(
 }
 
 export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
-  const { input, mcp, rollingContext, fetchHtmlAvailable } = ctx;
+  const { input, mcp, rollingContext, fetchHtmlAvailable, state } = ctx;
+  // Rolling context accumulates across groups within a run (issue #123): seeded from what a resumed
+  // run already persisted (ctx.rollingContext), grown by openPr after each PR, and read LIVE by the
+  // worker + ci-fix bridges — so group N+1 plans against group N's digest.
+  let liveContext = rollingContext;
   const style = input.styleDigest ?? input.agentConfig.contents;
   // Per-step LLM deadline armed on every generate site in this bridge (issue #129).
   const stepTimeout = { stepMs: input.resolved.llmStepTimeoutMs };
@@ -566,7 +596,8 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         worktreePath: worktree.path,
         baseBranch,
         styleContents: style,
-        rollingContext,
+        // Live read (issue #123): the second group's manifest prompt carries the first group's digest.
+        rollingContext: liveContext,
         contextBlock: harnessContextBlock(style),
         ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
         ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
@@ -580,7 +611,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // isn't on the remote ("No commits between … / Head ref must be a branch").
       const head = group.branch ?? `aitm/${group.id}`;
       await runGit(['push', '-u', 'origin', head], { cwd: input.cwd });
-      return orch.openPr(group, delivery, baseBranch);
+      const pr = await orch.openPr(group, delivery, baseBranch);
+      // Accumulate this group's deterministic digest into the live rolling context and persist it
+      // (issue #123), so the next group's Worker plans against it and a resumed run recovers it.
+      liveContext = await persistRollingContext(state, liveContext, { group, pr, delivery });
+      return pr;
     },
     runReviewer: runReviewerThreads,
     // ci-failed stage → shared fix session: download failed logs + comments to the state dir, run
@@ -608,6 +643,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           styleContents: style,
           compactor,
           timeout: stepTimeout,
+          // Live rolling context (issue #123): the fix session's Worker sees what its group shipped
+          // instead of the old hardcoded ''. Omitted when empty so the render guard stays a no-op.
+          ...(liveContext.trim() !== '' ? { rollingContext: liveContext } : {}),
           // CI-fix Worker: web_search on by default (undefined) — a fix pass looking up an error or
           // changelog is the highest-value place for it; only an explicit `false` disables it.
           ...(ciFixProviderOptions !== undefined ? { providerOptions: ciFixProviderOptions } : {}),

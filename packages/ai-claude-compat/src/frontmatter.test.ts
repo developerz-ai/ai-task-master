@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { asString, asStringArray, parseFrontmatter } from './frontmatter.ts';
+import { asRecord, asString, asStringArray, parseFrontmatter } from './frontmatter.ts';
 
 test('parseFrontmatter: scalar fields + body', () => {
   const { data, body } = parseFrontmatter(
@@ -19,6 +19,27 @@ test('parseFrontmatter: flow array', () => {
 test('parseFrontmatter: block sequence', () => {
   const { data } = parseFrontmatter('---\ntools:\n  - Read\n  - Bash\n---\nbody');
   assert.deepEqual(data.tools, ['Read', 'Bash']);
+});
+
+test('parseFrontmatter: one level of nested map (issue #118)', () => {
+  const { data } = parseFrontmatter(
+    '---\nname: flaky-ci\ndescription: retry the e2e job\nmetadata:\n  type: project\n  scope: repo\n---\nbody',
+  );
+  assert.equal(data.name, 'flaky-ci');
+  assert.deepEqual(data.metadata, { type: 'project', scope: 'repo' });
+  assert.equal(asRecord(data.metadata)?.type, 'project');
+});
+
+test('parseFrontmatter: a bare key with neither map nor sequence stays an empty array', () => {
+  const { data } = parseFrontmatter('---\nname: x\nmetadata:\n---\nbody');
+  assert.deepEqual(data.metadata, []);
+});
+
+test('asRecord: returns nested maps, undefined for scalars/arrays/absent', () => {
+  assert.deepEqual(asRecord({ type: 'project' }), { type: 'project' });
+  assert.equal(asRecord('scalar'), undefined);
+  assert.equal(asRecord(['a', 'b']), undefined);
+  assert.equal(asRecord(undefined), undefined);
 });
 
 test('parseFrontmatter: strips quotes and skips comments', () => {

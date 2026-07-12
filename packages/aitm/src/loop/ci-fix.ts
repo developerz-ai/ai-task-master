@@ -16,7 +16,7 @@
 // SRP: this is one fix pass — no polling, no iteration cap, no merge. Callers own the wait/re-poll
 // loop and decide what to do with the result (advance to waiting-ci, or block).
 
-import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
+import type { MemoryIndexEntry, SubagentHandle } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, TimeoutConfiguration } from 'ai';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../config/schema.ts';
@@ -87,6 +87,8 @@ export type FixSessionSubagents = {
   // Live rolling context — what earlier groups shipped, threaded into the fix Worker's manifest
   // prompt (issue #123). Unset → '' (the render guard makes it a no-op), matching prior behavior.
   rollingContext?: string;
+  // Per-repo memory index injected into the fix Worker's prompt (issue #118). Unset → no memory block.
+  memoryIndex?: readonly MemoryIndexEntry[];
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
@@ -189,6 +191,9 @@ function buildFixTask(
     '',
     'Fix EVERY CI failure those logs report, and address every review comment that needs a code',
     'change. Run the project test/lint commands locally to verify before staging.',
+    '',
+    'If you learn a durable repo fact while fixing this — a flaky check, the real format/verify',
+    'command, a build quirk — record it with the `memory` tool (write) so the next run has it.',
   ].join('\n');
   return { id: `${group.id}-ci-fix`, text, complexity: 'complex', done: false };
 }
@@ -225,6 +230,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
       cwd: worktreePath,
       maxSteps: WORKER_MAX_STEPS,
       modelId: subagents.credentials.modelIdForCapability('coding'),
+      ...(subagents.memoryIndex ? { memoryIndex: subagents.memoryIndex } : {}),
     }),
     ...(prepareStep ? { prepareStep } : {}),
     ...(subagents.timeout !== undefined ? { timeout: subagents.timeout } : {}),

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { makeTempRepo } from '../testing/temp-repo.ts';
@@ -391,6 +391,28 @@ test('cleanupOnSuccess removes everything except logs/', async () => {
     const remaining = (await readdir(dir)).sort();
     assert.deepEqual(remaining, ['logs']);
     assert.equal(await readFile(join(dir, 'logs', 'run-x.log'), 'utf8'), 'log line\n');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('cleanupOnSuccess preserves memory/ alongside logs/ (issue #118)', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+    await store.writeContext('ctx');
+    // Seed a durable memory under the accessor path.
+    assert.equal(store.memoryDir(), join(dir, 'memory'));
+    await mkdir(store.memoryDir(), { recursive: true });
+    await writeFile(join(store.memoryDir(), 'flaky-ci.md'), 'fact\n');
+
+    await store.cleanupOnSuccess();
+
+    const remaining = (await readdir(dir)).sort();
+    assert.deepEqual(remaining, ['logs', 'memory']);
+    assert.equal(await readFile(join(store.memoryDir(), 'flaky-ci.md'), 'utf8'), 'fact\n');
   } finally {
     await repo.cleanup();
   }

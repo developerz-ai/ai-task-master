@@ -413,11 +413,17 @@ function buildManifestPrompt(input: WorkerInput): string {
   return prependContextBlock(input.contextBlock, lines.join('\n'));
 }
 
-// Editors never nest surveys (issue #126): strip the runtime-only `explore` extra the adapter may
-// have mounted on the Worker tool set before the per-file fanout. Absent → returned unchanged.
+// Strip the runtime-only extras the adapter may have mounted on the Worker tool set before the
+// per-file fanout: editors never nest surveys (`explore`, issue #126) and never touch durable memory
+// (`memory`, issue #118) — those belong to the manifest/ci-fix level. Absent → returned unchanged.
 export function editorToolSet(tools: WorkerTools): WorkerTools {
-  const { explore: _explore, ...rest } = tools as WorkerTools & {
+  const {
+    explore: _explore,
+    memory: _memory,
+    ...rest
+  } = tools as WorkerTools & {
     explore?: Tool<unknown, unknown>;
+    memory?: Tool<unknown, unknown>;
   };
   return rest as WorkerTools;
 }

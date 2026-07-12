@@ -7,7 +7,11 @@
 // This is adapter-local glue (same precedent as the Reviewer's `github` slot): the child model is a
 // concrete injected handle and the read tools are worktree-confined — never sourced from MCP.
 
-import { type AgentToolInput, makeAgentTool } from '@developerz.ai/ai-claude-compat';
+import {
+  AgentToolConstructionError,
+  type AgentToolInput,
+  makeAgentTool,
+} from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, Tool, ToolSet } from 'ai';
 
 // The tool name the model invokes and the ToolSet key it mounts under.
@@ -44,6 +48,15 @@ export type ExploreToolInit = {
 };
 
 export function buildExploreTool(init: ExploreToolInit): Tool<AgentToolInput, string> {
+  // The allowlist in makeAgentTool rejects EXTRA tools but does not require the trio to be present;
+  // an explore child missing readFile/grep/glob would construct yet be unable to survey. Require all
+  // three up front so a mis-wired caller fails loudly at construction, not silently at survey time.
+  const missing = EXPLORE_ALLOWED_TOOLS.filter((name) => !(name in init.readTools));
+  if (missing.length > 0) {
+    throw new AgentToolConstructionError(
+      `explore tool requires the read-only trio; missing: ${missing.join(', ')}`,
+    );
+  }
   return makeAgentTool(
     {
       name: EXPLORE_TOOL_NAME,

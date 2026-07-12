@@ -89,7 +89,13 @@ export function makeAgentTool(
   }
 
   const maxSteps = opts.maxSteps ?? DEFAULT_AGENT_TOOL_MAX_STEPS;
-  const maxOutputChars = opts.maxOutputChars ?? DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS;
+  // A non-finite or non-positive cap would silently disable truncation; fall back to the default so
+  // the bound can never be turned off by accident.
+  const requestedMax = opts.maxOutputChars ?? DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS;
+  const maxOutputChars =
+    Number.isFinite(requestedMax) && requestedMax > 0
+      ? requestedMax
+      : DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS;
 
   return tool({
     description: spec.description,
@@ -115,9 +121,10 @@ export function makeAgentTool(
         );
         const text = result.text.trim();
         if (text === '') return AGENT_TOOL_NO_CONCLUSION;
-        return text.length > maxOutputChars
-          ? text.slice(0, maxOutputChars) + AGENT_TOOL_TRUNCATION_MARKER
-          : text;
+        if (text.length <= maxOutputChars) return text;
+        // Reserve room for the marker so the returned string never exceeds the advertised cap.
+        const budget = Math.max(0, maxOutputChars - AGENT_TOOL_TRUNCATION_MARKER.length);
+        return text.slice(0, budget) + AGENT_TOOL_TRUNCATION_MARKER;
       } catch (err) {
         return `${AGENT_TOOL_ERROR_PREFIX}${err instanceof Error ? err.message : String(err)}`;
       }

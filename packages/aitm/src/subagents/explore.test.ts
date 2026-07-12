@@ -65,3 +65,23 @@ test('buildExploreTool enforces the read-only allowlist: a write-capable tool fa
       err instanceof AgentToolConstructionError && /writeFile/.test((err as Error).message),
   );
 });
+
+test('buildExploreTool requires the full trio: a missing read tool fails construction', () => {
+  for (const omit of EXPLORE_ALLOWED_TOOLS) {
+    const partial: ToolSet = { ...trio };
+    delete partial[omit];
+    assert.throws(
+      () => buildExploreTool({ model: textModel('x'), readTools: partial }),
+      (err: unknown) =>
+        err instanceof AgentToolConstructionError && new RegExp(omit).test((err as Error).message),
+      `omitting ${omit} must throw naming it`,
+    );
+  }
+});
+
+test('buildExploreTool rejects an empty toolset (no silent no-op survey child)', () => {
+  assert.throws(
+    () => buildExploreTool({ model: textModel('x'), readTools: {} }),
+    (err: unknown) => err instanceof AgentToolConstructionError,
+  );
+});

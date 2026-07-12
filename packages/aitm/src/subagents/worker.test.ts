@@ -143,30 +143,28 @@ test('WORKER_SYSTEM_PREFIX carries the explore delegation guidance, gated on ava
 });
 
 test('editorToolSet strips the runtime explore extra so editors never nest surveys (issue #126)', () => {
-  const readFile = tool({
-    description: 'r',
-    inputSchema: z.object({ p: z.string() }),
-    execute: async () => 'x',
-  });
   const explore = tool({
     description: 'e',
     inputSchema: z.object({ prompt: z.string() }),
     execute: async () => 'a',
   });
-  const withExplore = { readFile, explore } as unknown as WorkerTools;
+  // Reuse the complete WorkerTools fixture and add the runtime-only explore extra, exactly as the
+  // adapter mounts it — no `as unknown as` bypass of the contract.
+  const withExplore = { ...makeTools().tools, explore };
   const stripped = editorToolSet(withExplore);
   assert.equal('explore' in stripped, false, 'explore removed');
   assert.equal('readFile' in stripped, true, 'other tools retained');
 });
 
 test('editorToolSet returns a set without explore unchanged (no-op when the extra is absent)', () => {
-  const readFile = tool({
-    description: 'r',
-    inputSchema: z.object({ p: z.string() }),
-    execute: async () => 'x',
-  });
-  const noExplore = { readFile } as unknown as WorkerTools;
-  assert.deepEqual(Object.keys(editorToolSet(noExplore)), ['readFile']);
+  const tools = makeTools().tools;
+  const result = editorToolSet(tools);
+  assert.equal('explore' in result, false, 'no explore to strip');
+  assert.deepEqual(
+    Object.keys(result).sort(),
+    Object.keys(tools).sort(),
+    'every original tool retained',
+  );
 });
 
 test('runWorker: prepends the contextBlock to the manifest (first user) message, ahead of the task text (issue #106)', async () => {

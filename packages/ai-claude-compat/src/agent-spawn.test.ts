@@ -9,6 +9,7 @@ import {
   AGENT_TOOL_TRUNCATION_MARKER,
   AgentToolConstructionError,
   type AgentToolSpec,
+  DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS,
   makeAgentTool,
 } from './agent-spawn.ts';
 
@@ -97,19 +98,43 @@ test('makeAgentTool: a call runs in a fresh context (only its own prompt) and re
   );
 });
 
-test('makeAgentTool: output beyond maxOutputChars is truncated with the marker', async () => {
+test('makeAgentTool: output beyond maxOutputChars is truncated to WITHIN the cap, marker included', async () => {
+  const cap = 50;
   const long = 'a'.repeat(100);
   const { model } = textModel(long);
   const t = makeAgentTool(SPEC, {
     model,
     tools: readTools,
     allowedTools: ['readFile', 'grep'],
-    maxOutputChars: 20,
+    maxOutputChars: cap,
   });
 
   const out = await run(t, 'q');
-  assert.equal(out, `${'a'.repeat(20)}${AGENT_TOOL_TRUNCATION_MARKER}`);
+  // The marker's space is reserved inside the cap — the whole string never exceeds maxOutputChars.
+  assert.ok(out.length <= cap, `stays within the advertised cap (got ${out.length})`);
   assert.ok(out.endsWith(AGENT_TOOL_TRUNCATION_MARKER), 'marker present');
+  assert.equal(
+    out,
+    `${'a'.repeat(cap - AGENT_TOOL_TRUNCATION_MARKER.length)}${AGENT_TOOL_TRUNCATION_MARKER}`,
+  );
+});
+
+test('makeAgentTool: a non-finite maxOutputChars falls back to the default cap (bound cannot be disabled)', async () => {
+  const long = 'a'.repeat(DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS + 100);
+  const { model } = textModel(long);
+  const t = makeAgentTool(SPEC, {
+    model,
+    tools: readTools,
+    allowedTools: ['readFile', 'grep'],
+    maxOutputChars: Number.POSITIVE_INFINITY,
+  });
+
+  const out = await run(t, 'q');
+  assert.ok(
+    out.length <= DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS,
+    'an invalid cap falls back to the default bound instead of disabling truncation',
+  );
+  assert.ok(out.endsWith(AGENT_TOOL_TRUNCATION_MARKER), 'truncation still applied');
 });
 
 test('makeAgentTool: a child that produces no final text returns the no-conclusion line (never empty)', async () => {

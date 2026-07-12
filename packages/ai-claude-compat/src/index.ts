@@ -83,6 +83,7 @@ export {
   type Memory,
   type MemoryIndexEntry,
   type MemoryType,
+  MemoryValidationError,
   memoryFileStem,
   readMemory,
   removeMemory,

@@ -16,13 +16,13 @@ import { z } from 'zod';
 
 export const MEMORY_TOOL_NAME = 'memory';
 
-const memoryInputSchema = z.object({
+export const memoryInputSchema = z.object({
   action: z
     .enum(['read', 'write', 'remove'])
     .describe('read one memory, write (upsert) one, or remove one'),
   name: z
     .string()
-    .min(1)
+    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'name must be kebab-case (lowercase, hyphen-separated)')
     .describe('kebab-case memory name; reuse an existing name to UPDATE it in place'),
   description: z.string().optional().describe('one-phrase index description (required for write)'),
   type: z

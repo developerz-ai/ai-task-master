@@ -6,11 +6,19 @@ import { test } from 'node:test';
 import {
   loadMemoryIndex,
   MEMORY_INDEX_FILE,
+  MemoryValidationError,
   memoryFileStem,
   readMemory,
   removeMemory,
   upsertMemory,
 } from './memory-loader.ts';
+
+async function fileExists(path: string): Promise<boolean> {
+  return readFile(path, 'utf8').then(
+    () => true,
+    () => false,
+  );
+}
 
 async function tmp(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'aitm-memory-'));
@@ -114,6 +122,53 @@ test('loadMemoryIndex skips the header and any non-index lines', async () => {
     );
     const index = await loadMemoryIndex(dir);
     assert.deepEqual(index, [{ file: 'a.md', description: 'desc a' }]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('upsertMemory rejects an empty-stem name and single-line-field line breaks (issue #118 CR)', async () => {
+  const dir = await tmp();
+  try {
+    await assert.rejects(
+      () => upsertMemory(dir, { name: '///', description: 'd', body: 'b' }),
+      MemoryValidationError,
+    );
+    await assert.rejects(
+      () => upsertMemory(dir, { name: 'ok', description: 'line\nbreak', body: 'b' }),
+      MemoryValidationError,
+    );
+    assert.deepEqual(await loadMemoryIndex(dir), [], 'nothing written on rejection');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('concurrent upserts do not drop index entries — per-dir serialization (issue #118 CR)', async () => {
+  const dir = await tmp();
+  try {
+    await Promise.all(
+      ['a', 'b', 'c', 'd', 'e'].map((n) =>
+        upsertMemory(dir, { name: n, description: n.toUpperCase(), type: 'project', body: n }),
+      ),
+    );
+    const index = await loadMemoryIndex(dir);
+    assert.deepEqual(
+      index.map((e) => e.file).sort(),
+      ['a.md', 'b.md', 'c.md', 'd.md', 'e.md'],
+      'every concurrent write survived in the index',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('removeMemory on an uninitialized dir is a true no-op — no MEMORY.md scaffolded (issue #118 CR)', async () => {
+  const dir = await tmp();
+  try {
+    await removeMemory(dir, 'whatever'); // existing empty dir, no index — must not throw
+    assert.equal(await fileExists(join(dir, MEMORY_INDEX_FILE)), false, 'no index scaffolded');
+    await removeMemory('/tmp/aitm-memory-nonexistent-xyz', 'x'); // missing dir — must not throw
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

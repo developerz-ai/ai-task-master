@@ -7,12 +7,53 @@
 // any file write/delete, so index and directory never drift; nothing is scaffolded until the first
 // write (a missing dir/index reads as empty, never throws).
 
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { asRecord, asString, parseFrontmatter } from './frontmatter.ts';
 
 export const MEMORY_INDEX_FILE = 'MEMORY.md';
 const MEMORY_INDEX_HEADER = '# Memory Index';
+
+// Thrown by a write whose name/description can't be safely serialized (empty filename stem, or a line
+// break that would corrupt the frontmatter or forge an index row).
+export class MemoryValidationError extends Error {
+  override readonly name = 'MemoryValidationError';
+}
+
+// Per-directory mutex: upsert/remove do a read-modify-write of MEMORY.md, and concurrent group
+// Workers (WorkLoop's Promise.all batch) can race. Serialize all mutations for a dir onto one chain so
+// the last writer can't drop another's entry. The tail swallows errors so one failure can't wedge it.
+const dirLocks = new Map<string, Promise<unknown>>();
+
+function withDirLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  const prev = dirLocks.get(dir) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  dirLocks.set(
+    dir,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
+}
+
+// Atomic file replace: write a sibling temp file, then rename over the target (rename is atomic on a
+// single filesystem). Callers hold the per-dir lock, so a fixed temp suffix never collides.
+async function atomicWrite(path: string, content: string): Promise<void> {
+  const tmp = `${path}.tmp`;
+  await writeFile(tmp, content, 'utf8');
+  await rename(tmp, path);
+}
+
+function isMissing(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+  );
+}
 
 export const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'] as const;
 export type MemoryType = (typeof MEMORY_TYPES)[number];
@@ -48,25 +89,31 @@ function renderIndexLine(name: string, file: string, description: string): strin
   return `- [${name}](${file}) — ${description}`;
 }
 
+// null only for a genuinely absent file/dir (ENOENT/ENOTDIR). A permission or transient I/O error is
+// rethrown — treating it as "empty" would let a later write rebuild MEMORY.md without its real entries.
 async function readFileOrNull(path: string): Promise<string | null> {
   try {
     return await readFile(path, 'utf8');
-  } catch {
-    return null;
+  } catch (error) {
+    if (isMissing(error)) return null;
+    throw error;
   }
 }
 
-// Parse MEMORY.md into index entries. A missing dir/file (or one with only a header) → []. Never
-// throws — a memory dir that isn't there yet is a normal empty state, not an error.
-export async function loadMemoryIndex(dir: string): Promise<MemoryIndexEntry[]> {
-  const raw = await readFileOrNull(join(dir, MEMORY_INDEX_FILE));
-  if (raw === null) return [];
+function parseIndex(raw: string): MemoryIndexEntry[] {
   const entries: MemoryIndexEntry[] = [];
   for (const line of raw.split('\n')) {
     const m = INDEX_LINE.exec(line.trim());
     if (m) entries.push({ file: m[1] ?? '', description: m[2] ?? '' });
   }
   return entries;
+}
+
+// Parse MEMORY.md into index entries. A missing dir/file (or one with only a header) → []. Never
+// throws for an absent index — a memory dir that isn't there yet is a normal empty state.
+export async function loadMemoryIndex(dir: string): Promise<MemoryIndexEntry[]> {
+  const raw = await readFileOrNull(join(dir, MEMORY_INDEX_FILE));
+  return raw === null ? [] : parseIndex(raw);
 }
 
 function coerceType(value: string | undefined): MemoryType | undefined {
@@ -101,16 +148,33 @@ function renderMemoryFile(memory: Memory): string {
   return lines.join('\n');
 }
 
+// Reject a memory whose name can't form a filename or whose single-line fields carry a line break
+// (which would corrupt the frontmatter or forge extra index rows).
+function validateMemory(memory: Memory): void {
+  if (memoryFileStem(memory.name) === '') {
+    throw new MemoryValidationError(
+      `memory name "${memory.name}" has no usable filename characters`,
+    );
+  }
+  if (/[\r\n]/.test(memory.name) || /[\r\n]/.test(memory.description)) {
+    throw new MemoryValidationError('memory name and description must be single-line');
+  }
+}
+
 // Write (or update in place) a memory file and keep MEMORY.md in sync in the same operation. A write
 // whose name maps to an existing file overwrites that file and its single index line — never a
-// duplicate. Creates the memory dir on first write; no scaffold exists before that.
+// duplicate. Creates the memory dir on first write; no scaffold exists before that. Serialized per
+// directory and written atomically so concurrent Workers can't drop each other's index entries.
 export async function upsertMemory(dir: string, memory: Memory): Promise<void> {
-  await mkdir(dir, { recursive: true });
-  const file = memoryFileName(memory.name);
-  await writeFile(join(dir, file), renderMemoryFile(memory), 'utf8');
-  const entries = (await loadMemoryIndex(dir)).filter((e) => e.file !== file);
-  entries.push({ file, description: memory.description });
-  await writeFile(join(dir, MEMORY_INDEX_FILE), renderIndexFromEntries(entries), 'utf8');
+  validateMemory(memory);
+  await withDirLock(dir, async () => {
+    await mkdir(dir, { recursive: true });
+    const file = memoryFileName(memory.name);
+    await atomicWrite(join(dir, file), renderMemoryFile(memory));
+    const entries = (await loadMemoryIndex(dir)).filter((e) => e.file !== file);
+    entries.push({ file, description: memory.description });
+    await atomicWrite(join(dir, MEMORY_INDEX_FILE), renderIndexFromEntries(entries));
+  });
 }
 
 function renderIndexFromEntries(entries: MemoryIndexEntry[]): string {
@@ -120,11 +184,16 @@ function renderIndexFromEntries(entries: MemoryIndexEntry[]): string {
   return [MEMORY_INDEX_HEADER, '', ...body, ''].join('\n');
 }
 
-// Remove a memory file and its index line together. A missing file is a no-op (still reconciles the
-// index), so removing an already-gone memory never throws.
+// Remove a memory file and its index line together. Serialized per directory. When no index exists
+// (uninitialized memory dir) it's a true no-op — the file is best-effort deleted and no index is
+// scaffolded — so removing from an empty/absent dir never throws.
 export async function removeMemory(dir: string, name: string): Promise<void> {
-  const file = memoryFileName(name);
-  await rm(join(dir, file), { force: true });
-  const remaining = (await loadMemoryIndex(dir)).filter((e) => e.file !== file);
-  await writeFile(join(dir, MEMORY_INDEX_FILE), renderIndexFromEntries(remaining), 'utf8');
+  await withDirLock(dir, async () => {
+    const file = memoryFileName(name);
+    await rm(join(dir, file), { force: true });
+    const raw = await readFileOrNull(join(dir, MEMORY_INDEX_FILE));
+    if (raw === null) return;
+    const remaining = parseIndex(raw).filter((e) => e.file !== file);
+    await atomicWrite(join(dir, MEMORY_INDEX_FILE), renderIndexFromEntries(remaining));
+  });
 }

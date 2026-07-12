@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { loadMemoryIndex } from '@developerz.ai/ai-claude-compat';
-import { buildMemoryTool, type MemoryToolInput } from './memory-tool.ts';
+import { buildMemoryTool, type MemoryToolInput, memoryInputSchema } from './memory-tool.ts';
 
 async function tmp(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'aitm-memtool-'));
@@ -43,6 +43,16 @@ test('memory tool write → read → remove round-trips against the state dir', 
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('memory tool name schema enforces strict kebab-case (issue #118 CR)', () => {
+  const ok = (name: string) => memoryInputSchema.safeParse({ action: 'read', name }).success;
+  assert.equal(ok('flaky-e2e'), true);
+  assert.equal(ok('a1-b2'), true);
+  assert.equal(ok('a_b'), false, 'underscore rejected (aliases a-b)');
+  assert.equal(ok('---'), false, 'punctuation-only rejected (empty stem)');
+  assert.equal(ok('Has Space'), false);
+  assert.equal(ok('../escape'), false);
 });
 
 test('memory tool read of a missing memory returns a not-found line, not a throw', async () => {

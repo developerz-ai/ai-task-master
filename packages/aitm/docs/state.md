@@ -76,7 +76,7 @@ All run state lives in `.ai-task-master/` at the target repo root (mirrors the o
 
 | Terminal status | Action on `.ai-task-master/` |
 | --- | --- |
-| `success` | Delete everything except `logs/`. |
+| `success` | Delete everything except `logs/` and `memory/`. |
 | `blocked` | Keep everything. Next `aitm start` resumes. |
 | `failed` | Keep everything. Inspect, then re-run. |
 | SIGINT (exit 2) | Keep everything. |

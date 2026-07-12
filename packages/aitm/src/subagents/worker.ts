@@ -39,7 +39,6 @@ import type {
 } from '@developerz.ai/ai-claude-compat';
 import {
   callWithStepTimeout,
-  composeSystemPrompt,
   continueSubagent,
   correctiveMessage,
   createSubagent,
@@ -56,6 +55,7 @@ import type { PrGroup, Task } from '../state/schema.ts';
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
 import { type OnUsage, prependContextBlock, reportUsage, type SubagentInit } from './factory.ts';
+import { buildRolePrompt } from './role-prompt.ts';
 
 // The Claude-Code-style tool surface (from @developerz.ai/ai-claude-compat) the Worker drives:
 // read/write whole files, edit by exact string replace (single + atomic batch), and search the
@@ -194,6 +194,11 @@ const EDITOR_SYSTEM_PREFIX = [
   'specific: `adds retry+backoff to fetchUser`, not `done`.',
 ].join('\n');
 
+// Worker step budgets — single-sourced so each step-budget reminder (issue #105) matches the real
+// cap. The manifest pass gets 30; each per-file editor fan-out gets 12.
+export const WORKER_MAX_STEPS = 30;
+export const EDITOR_MAX_STEPS = 12;
+
 // Module-private link from a Worker agent back to its init, so runWorker can spawn editor
 // sub-agents with the same model + tool handles without exposing them on the public surface.
 const workerInitRegistry = new WeakMap<WorkerAgent, SubagentInit<WorkerTools>>();
@@ -214,7 +219,7 @@ export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent 
       ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
       ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
     },
-    30,
+    WORKER_MAX_STEPS,
   );
   workerInitRegistry.set(agent, init);
   return agent;
@@ -427,9 +432,14 @@ async function runEditor(
       generateText({
         model: init.model,
         tools: editorToolSet(init.tools),
-        system: composeSystemPrompt(input.styleContents, EDITOR_SYSTEM_PREFIX, input.worktreePath),
+        system: buildRolePrompt({
+          style: input.styleContents,
+          roleGuidance: EDITOR_SYSTEM_PREFIX,
+          cwd: input.worktreePath,
+          maxSteps: EDITOR_MAX_STEPS,
+        }),
         prompt: buildEditorPrompt(file, input),
-        stopWhen: stepCountIs(12),
+        stopWhen: stepCountIs(EDITOR_MAX_STEPS),
         // web_search (issue #112) rides providerOptions.openrouter when the adapter enabled it for
         // this Worker. The old `{ openai: { parallelToolCalls: true } }` was dead — the OpenRouter
         // provider ignores the `openai` namespace, and parallelToolCalls is already an OpenRouter

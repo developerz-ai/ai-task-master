@@ -20,7 +20,6 @@
 // docs/vendor/ai-sdk/chunk-09.md §"Subagents" — Reviewer/Worker are built ad-hoc per loop
 // iteration because their tool bindings (worktree, threads) change each iteration.
 
-import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, TimeoutConfiguration } from 'ai';
 import { CiFailed } from '../github/errors.ts';
 import {
@@ -35,14 +34,17 @@ import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup } from '../state/schema.ts';
 import {
   createReviewerAgent,
+  REVIEWER_MAX_STEPS,
   REVIEWER_SYSTEM_PREFIX,
   type ReviewerResult,
   type ReviewerTools,
   runReviewer,
 } from '../subagents/reviewer.ts';
+import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
   runWorker,
+  WORKER_MAX_STEPS,
   WORKER_SYSTEM_PREFIX,
   type WorkerInput,
   type WorkerResult,
@@ -318,11 +320,12 @@ async function runReviewerThreads(
   const agent = createReviewerAgent({
     model: input.subagents.reviewerModel,
     tools: input.subagents.reviewerTools,
-    systemPrompt: composeSystemPrompt(
-      input.subagents.styleContents,
-      REVIEWER_SYSTEM_PREFIX,
-      input.worktreePath,
-    ),
+    systemPrompt: buildRolePrompt({
+      style: input.subagents.styleContents,
+      roleGuidance: REVIEWER_SYSTEM_PREFIX,
+      cwd: input.worktreePath,
+      maxSteps: REVIEWER_MAX_STEPS,
+    }),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
   });
   return runReviewer(agent, {
@@ -379,11 +382,12 @@ async function runWorkerCiFix(
   const agent = createWorkerAgent({
     model: input.subagents.workerModel,
     tools: input.subagents.workerTools,
-    systemPrompt: composeSystemPrompt(
-      input.subagents.styleContents,
-      WORKER_SYSTEM_PREFIX,
-      input.worktreePath,
-    ),
+    systemPrompt: buildRolePrompt({
+      style: input.subagents.styleContents,
+      roleGuidance: WORKER_SYSTEM_PREFIX,
+      cwd: input.worktreePath,
+      maxSteps: WORKER_MAX_STEPS,
+    }),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
   });
   return runWorker(agent, workerInput);

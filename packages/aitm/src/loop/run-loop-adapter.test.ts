@@ -9,7 +9,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SYSTEM_REMINDER_CONTRACT } from '@developerz.ai/ai-claude-compat';
+import {
+  AUTONOMY_CONTRACT_TEXT,
+  COMMUNICATION_CONTRACT_TEXT,
+  SYSTEM_REMINDER_CONTRACT,
+} from '@developerz.ai/ai-claude-compat';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
@@ -628,11 +632,22 @@ test('harnessContextBlock: one envelope carrying the claudeMd and currentDate se
   assert.match(block, /may or may not be relevant/);
 });
 
-test('reminderAgentSystemPrompt: appends the provenance contract to the base system prompt (issue #106)', () => {
-  const prompt = reminderAgentSystemPrompt('# style', '\n## Role: Planner', '/repo');
+test('reminderAgentSystemPrompt: block pipeline + provenance contract (issues #105/#106)', () => {
+  const prompt = reminderAgentSystemPrompt({
+    style: '# style',
+    roleGuidance: 'You are the Planner.',
+    cwd: '/repo',
+    maxSteps: 20,
+    modelId: 'anthropic/claude-sonnet-4',
+  });
   assert.match(prompt, /# style/, 'carries the style payload');
-  assert.match(prompt, /## Role: Planner/, 'carries the role prefix');
+  assert.match(prompt, /You are the Planner\./, 'carries the role guidance');
   assert.ok(prompt.includes(SYSTEM_REMINDER_CONTRACT), 'carries the system-reminder contract');
+  // #105: the always-on behavioral contracts are woven into every main-loop subagent prompt.
+  assert.ok(prompt.includes(COMMUNICATION_CONTRACT_TEXT), 'carries the communication contract');
+  assert.ok(prompt.includes(AUTONOMY_CONTRACT_TEXT), 'carries the autonomy contract');
+  assert.match(prompt, /budget of 20 tool steps/, 'carries the role step-budget reminder');
+  assert.match(prompt, /anthropic\/claude-sonnet-4/, 'self-identifies the routed model');
 });
 
 // ---- githubThreadTool ------------------------------------------------------

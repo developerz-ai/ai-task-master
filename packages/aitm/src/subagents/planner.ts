@@ -72,6 +72,10 @@ export const PLANNER_SYSTEM_PREFIX = [
   '  (`fetchHtml` for scraper-hostile sites, when available). `datetime` gives the current time.',
 ].join('\n');
 
+// Planner step budget — single-sourced so the step-budget reminder (issue #105) and the actual
+// createSubagent cap can never drift apart.
+export const PLANNER_MAX_STEPS = 20;
+
 // Link a Planner agent back to its init so runPlanner can reach the optional onUsage sink (#114)
 // without threading it through PlannerInput — mirrors the worker/reviewer WeakMap pattern.
 const plannerInitRegistry = new WeakMap<PlannerAgent, SubagentInit<PlannerTools>>();
@@ -90,7 +94,7 @@ export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAge
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
       ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
     },
-    20,
+    PLANNER_MAX_STEPS,
   );
   plannerInitRegistry.set(agent, init);
   return agent;

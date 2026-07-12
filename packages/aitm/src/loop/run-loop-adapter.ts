@@ -18,7 +18,6 @@ import {
   type AgentToolInput,
   bashTool,
   type CommandRule,
-  composeSystemPrompt,
   contextReminder,
   editFileTool,
   FileStateTracker,
@@ -55,6 +54,7 @@ import type { PrGroup, RunState } from '../state/schema.ts';
 import { buildExploreTool } from '../subagents/explore.ts';
 import {
   createPlannerAgent,
+  PLANNER_MAX_STEPS,
   PLANNER_SYSTEM_PREFIX,
   type PlannerTools,
   runPlanner,
@@ -63,13 +63,16 @@ import {
   createReviewerAgent,
   type GithubToolInput,
   type GithubToolOutput,
+  REVIEWER_MAX_STEPS,
   REVIEWER_SYSTEM_PREFIX,
   type ReviewerTools,
   runReviewer as runReviewerSubagent,
 } from '../subagents/reviewer.ts';
+import { buildRolePrompt, type RolePromptInput } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
   runWorker as runWorkerSubagent,
+  WORKER_MAX_STEPS,
   WORKER_SYSTEM_PREFIX,
   type WorkerTools,
 } from '../subagents/worker.ts';
@@ -204,11 +207,11 @@ export function harnessContextBlock(styleContents: string): string {
   ]);
 }
 
-// System prompt for an agent whose tool set is decorated with reminders (issue #106): the base
-// prompt plus the provenance contract, so the model treats <system-reminder> content as advisory
-// harness context, not user intent. Folds into #105's prompt-block pipeline once that lands.
-export function reminderAgentSystemPrompt(style: string, rolePrefix: string, cwd: string): string {
-  return `${composeSystemPrompt(style, rolePrefix, cwd)}\n\n${SYSTEM_REMINDER_CONTRACT}`;
+// System prompt for a main-loop agent whose tool set is decorated with reminders (issue #106): the
+// role's block-pipeline prompt (issue #105) plus the provenance contract, so the model treats
+// <system-reminder> content as advisory harness context, not user intent.
+export function reminderAgentSystemPrompt(input: RolePromptInput): string {
+  return `${buildRolePrompt(input)}\n\n${SYSTEM_REMINDER_CONTRACT}`;
 }
 
 // Narrow state surface the adapter drives. StateStore satisfies it; tests pass an in-memory stub.
@@ -505,7 +508,13 @@ async function defaultPlanGroups(
       fetchHtmlAvailable,
       buildExploreFor(input, input.cwd),
     ),
-    systemPrompt: reminderAgentSystemPrompt(style, PLANNER_SYSTEM_PREFIX, input.cwd),
+    systemPrompt: reminderAgentSystemPrompt({
+      style,
+      roleGuidance: PLANNER_SYSTEM_PREFIX,
+      cwd: input.cwd,
+      maxSteps: PLANNER_MAX_STEPS,
+      modelId: input.credentials.modelIdFor('planner'),
+    }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
   });
@@ -613,7 +622,13 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
       tools,
-      systemPrompt: reminderAgentSystemPrompt(style, REVIEWER_SYSTEM_PREFIX, worktree.path),
+      systemPrompt: reminderAgentSystemPrompt({
+        style,
+        roleGuidance: REVIEWER_SYSTEM_PREFIX,
+        cwd: worktree.path,
+        maxSteps: REVIEWER_MAX_STEPS,
+        modelId: input.credentials.modelIdFor('reviewer'),
+      }),
       prepareStep: buildCompactionStep<ReviewerTools>({
         compactor,
         modelId: input.credentials.modelIdFor('reviewer'),
@@ -646,7 +661,13 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
         tools,
-        systemPrompt: reminderAgentSystemPrompt(style, WORKER_SYSTEM_PREFIX, worktree.path),
+        systemPrompt: reminderAgentSystemPrompt({
+          style,
+          roleGuidance: WORKER_SYSTEM_PREFIX,
+          cwd: worktree.path,
+          maxSteps: WORKER_MAX_STEPS,
+          modelId: input.credentials.modelIdFor('worker'),
+        }),
         prepareStep: buildCompactionStep<WorkerTools>({
           compactor,
           modelId: input.credentials.modelIdFor('worker'),

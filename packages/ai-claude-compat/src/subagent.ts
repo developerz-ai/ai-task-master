@@ -22,25 +22,39 @@ import {
 } from 'ai';
 import type { z } from 'zod';
 import { detectGitRepo, type EnvInfo, envBlock } from './env-block.ts';
+import { type PromptBlock, renderPromptBlocks } from './prompt-blocks.ts';
 
 // The tool a subagent calls to deliver its final structured result.
 export const SUBMIT_TOOL_NAME = 'submit';
 
-// Build a subagent system prompt: caller style/context + role prefix + an <env> system-context
-// block (so the model knows the worktree cwd, platform, runtime, date). The cwd is per-worktree,
-// so this is composed at the wiring site rather than baked into a static role prefix. Pass a
-// string cwd for the common case, or a full EnvInfo to control the git/date fields.
+// Build a subagent system prompt. Two shapes (issue #105):
+//
+//   composeSystemPrompt(blocks)                 — the ordered prompt-block pipeline: cross-cutting
+//                                                 contracts + role/style/env blocks render in one
+//                                                 canonical order (see prompt-blocks.ts).
+//   composeSystemPrompt(style, rolePrefix, env) — the legacy 3-arg concatenation, kept byte-identical
+//                                                 so remaining callers migrate incrementally.
+//
+// The <env> block gives the model the worktree cwd, platform, runtime, and date; the cwd is
+// per-worktree, so the prompt is composed at the wiring site rather than baked into a static prefix.
+export function composeSystemPrompt(blocks: readonly PromptBlock[]): string;
 export function composeSystemPrompt(
   style: string,
   rolePrefix: string,
   env: string | EnvInfo,
+): string;
+export function composeSystemPrompt(
+  styleOrBlocks: readonly PromptBlock[] | string,
+  rolePrefix = '',
+  env: string | EnvInfo = '',
 ): string {
+  if (typeof styleOrBlocks !== 'string') return renderPromptBlocks(styleOrBlocks);
   const info: EnvInfo = typeof env === 'string' ? { cwd: env } : env;
   // Detect the git flag rather than asserting it — the string shorthand (every production call site)
   // and a full EnvInfo that leaves isGitRepo unset both resolve it from the cwd (issue #116).
   const resolved: EnvInfo =
     info.isGitRepo === undefined ? { ...info, isGitRepo: detectGitRepo(info.cwd) } : info;
-  return `${style}${rolePrefix}\n${envBlock(resolved)}`;
+  return `${styleOrBlocks}${rolePrefix}\n${envBlock(resolved)}`;
 }
 
 export type SubagentConfig<TOOLS extends ToolSet> = {

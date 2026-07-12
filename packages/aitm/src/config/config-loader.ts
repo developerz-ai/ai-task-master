@@ -150,6 +150,14 @@ export class ConfigLoader {
     const fallbackModels =
       project?.fallbackModels ?? global?.fallbackModels ?? profile?.fallbackModels;
 
+    // Hooks execute shell commands, so a repo-shippable project config must never supply them (issue
+    // #121 CR). Surface the ignored project hooks so an operator isn't silently surprised.
+    if (project?.hooks) {
+      this.warn(
+        'hooks in ./.ai-task-master/config.json are ignored — hooks run shell commands and are honored only from the user-owned ~/.aitm.json',
+      );
+    }
+
     return {
       openrouterApiKey: apiKey,
       apiKeySource,
@@ -241,9 +249,11 @@ export class ConfigLoader {
       ...((project?.mcpRoleAllowlist ?? global?.mcpRoleAllowlist)
         ? { mcpRoleAllowlist: project?.mcpRoleAllowlist ?? global?.mcpRoleAllowlist }
         : {}),
-      // Tool-registry hooks — aitm config only, project over global (issue #121). Omitted when neither
-      // sets it, so tool behavior is unchanged.
-      ...((project?.hooks ?? global?.hooks) ? { hooks: project?.hooks ?? global?.hooks } : {}),
+      // Tool-registry hooks (issue #121). Hooks run shell commands with the operator's privileges, so
+      // they are honored ONLY from the user-owned global config (~/.aitm.json) — NEVER from the
+      // per-repo project config, which an untrusted repo could ship (CR: arbitrary code execution). A
+      // project that sets `hooks` is warned and ignored (see the warn above).
+      ...(global?.hooks ? { hooks: global.hooks } : {}),
       mcpServers,
       mcpServerSources,
     };

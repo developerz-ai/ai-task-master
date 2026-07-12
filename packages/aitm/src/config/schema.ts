@@ -180,9 +180,10 @@ export const ConfigFileSchema = z
     // patterns. aitm-config-only (project > global); the Claude Code interop sources contribute
     // mcpServers alone. See src/mcp/schema.ts and src/mcp/mcp-client.ts.
     mcpRoleAllowlist: McpRoleAllowlistSchema.optional(),
-    // PreToolUse/PostToolUse shell hooks on the tool registry (issue #121). Operator-owned governance
-    // escape hatch; sourced only from aitm's own config (never the worked-on repo). Resolved wholesale
-    // (project over global). See src/loop/run-loop-adapter.ts and ai-claude-compat withHooks.
+    // PreToolUse/PostToolUse shell hooks on the tool registry (issue #121). Hooks run shell commands
+    // with operator privileges, so they are honored ONLY from the user-owned global config
+    // (~/.aitm.json); the same key in a repo-shippable project config is parsed but ignored + warned.
+    // See config-loader.ts, src/loop/run-loop-adapter.ts, and ai-claude-compat withHooks.
     hooks: ToolHooksSchema.optional(),
   })
   .passthrough();
@@ -255,8 +256,9 @@ export type ResolvedConfig = {
   // Per-role MCP allowlist (issue #115), aitm-config-only (project > global). Undefined → every role
   // gets every connected server. Passed into McpClientManager.
   mcpRoleAllowlist?: import('../mcp/schema.ts').McpRoleAllowlist | undefined;
-  // Tool-registry hooks (issue #121), aitm-config-only (project > global). Undefined → no hooks;
-  // behavior unchanged. Applied over the resolved tool records in run-loop-adapter via withHooks.
+  // Tool-registry hooks (issue #121). Global config only (~/.aitm.json) — project hooks are ignored
+  // as a code-execution trust boundary. Undefined → no hooks; behavior unchanged. Applied over the
+  // resolved tool records in run-loop-adapter via withHooks.
   hooks?: z.infer<typeof ToolHooksSchema> | undefined;
   // One label per server name explaining where the entry came from. Useful for the
   // snapshot, `aitm config list`, and "duplicate name shadowed by X" warnings.

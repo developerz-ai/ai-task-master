@@ -112,9 +112,9 @@ PreToolUse/PostToolUse shell hooks on the tool registry (issue #121) — the pro
 
 - **PreToolUse** runs before the tool executes, receiving `{"event":"PreToolUse","toolName","input","cwd"}` on stdin. Exit 2 **blocks** the call (the model sees a typed denial — the `bashRules` exit-126 shape for `bash`/`multiBash`, a `{ok:false,blockedByHook:true,reason}` object otherwise); exit 0 with a stdout `{"input":…}` **rewrites** the tool input (a rewrite failing the tool's schema is discarded with a warning); any other non-zero exit, timeout, or spawn failure **fails open** with a logged warning — a hook can never crash or hang the run.
 - **PostToolUse** runs after the tool, receiving the result too; non-empty stdout is surfaced to the model as a delimited feedback block. It cannot block or rewrite.
-- Applied after the MCP/local partial-fill, so both MCP-supplied and local tools are covered. Resolved project-over-global, wholesale.
+- Applied after the MCP/local partial-fill, so both MCP-supplied and local tools are covered.
 
-**Trust boundary:** hooks are read only from aitm's own config (`~/.aitm.json`, `./.ai-task-master/config.json`) — never from the worked-on repo's `.claude/settings.json` or any repo-shipped file. Hook commands run with the operator's privileges, so sourcing them from repo content would be arbitrary code execution.
+**Trust boundary:** hook commands run shell commands with the operator's privileges, so hooks are honored **only from the user-owned global config `~/.aitm.json`**. The same `hooks` key in the per-repo `./.ai-task-master/config.json` — which an untrusted repo could ship — is parsed but **ignored and warned**, and the worked-on repo's `.claude/settings.json` (or any repo-shipped file) is never consulted. This keeps a cloned repo from executing code as the operator.
 
 **Bypass limitation:** hooks intercept the tool boundary only. Child processes of a single `bash` call are visible to PreToolUse only as the text of that one command, and harness-side subprocesses (e.g. `gh pr merge` in `GitHubClient.mergePr`) never cross the tool boundary at all. Hooks are a governance seam, not a sandbox.
 

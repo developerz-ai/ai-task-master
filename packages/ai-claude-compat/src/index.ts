@@ -150,6 +150,7 @@ export {
   type HookExec,
   type HookSpec,
   hookMatches,
+  MAX_HOOK_FEEDBACK_CHARS,
   type ToolHooks,
   type WithHooksInit,
   withHooks,

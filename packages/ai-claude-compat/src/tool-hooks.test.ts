@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { type ToolSet, tool } from 'ai';
 import { z } from 'zod';
-import { type HookExec, hookMatches, withHooks } from './tool-hooks.ts';
+import { type HookExec, hookMatches, MAX_HOOK_FEEDBACK_CHARS, withHooks } from './tool-hooks.ts';
 
 type ExecResult = { exitCode?: number; stdout?: string; stderr?: string; timedOut?: boolean };
 
@@ -169,6 +169,49 @@ test('PostToolUse stdout is surfaced: appended for string results, hookFeedback 
   };
   assert.equal(objOut.ok, true);
   assert.equal(objOut.hookFeedback, 'lint: 2 warnings');
+});
+
+test('a failed (non-zero) PostToolUse hook fails open — its stdout is NOT surfaced (issue #121 CR)', async () => {
+  const strTool = tool({
+    description: 's',
+    inputSchema: z.object({ x: z.string() }),
+    execute: async () => 'result text',
+  });
+  const warns: string[] = [];
+  const { exec } = fakeExec({ exitCode: 1, stdout: 'partial/error output' });
+  const wrapped = withHooks(
+    { s: strTool },
+    { postToolUse: [{ command: './notice' }] },
+    { exec, onWarn: (m) => warns.push(m) },
+  );
+  const out = (await run(wrapped.s, { x: '1' })) as string;
+  assert.equal(out, 'result text', 'failed post-hook output never reaches the model');
+  assert.ok(
+    warns.some((w) => /ignoring its output/.test(w)),
+    'warned',
+  );
+});
+
+test('oversized PostToolUse stdout is truncated with a marker and warned (issue #121 CR)', async () => {
+  const strTool = tool({
+    description: 's',
+    inputSchema: z.object({ x: z.string() }),
+    execute: async () => 'r',
+  });
+  const warns: string[] = [];
+  const { exec } = fakeExec({ exitCode: 0, stdout: 'a'.repeat(MAX_HOOK_FEEDBACK_CHARS + 500) });
+  const wrapped = withHooks(
+    { s: strTool },
+    { postToolUse: [{ command: './noisy' }] },
+    { exec, onWarn: (m) => warns.push(m) },
+  );
+  const out = (await run(wrapped.s, { x: '1' })) as string;
+  assert.ok(out.length < MAX_HOOK_FEEDBACK_CHARS + 200, 'feedback bounded, not the full payload');
+  assert.match(out, /\[hook output truncated\]/);
+  assert.ok(
+    warns.some((w) => /truncated to/.test(w)),
+    'truncation warned',
+  );
 });
 
 test('a hook that exits non-2 non-zero, times out, or crashes fails open (execute runs with original input)', async () => {

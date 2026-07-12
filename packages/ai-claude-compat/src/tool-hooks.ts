@@ -45,6 +45,11 @@ export type WithHooksInit = {
 
 export const DEFAULT_HOOK_TIMEOUT_MS = 30_000;
 
+// Cap on PostToolUse stdout surfaced to the model, so a noisy hook can't bloat every tool result and
+// push the agent over its context window. Output past this is truncated with a marker.
+export const MAX_HOOK_FEEDBACK_CHARS = 4_000;
+const HOOK_FEEDBACK_TRUNCATION_MARKER = '\n[hook output truncated]';
+
 // The bash-family tools whose blocked result must take the #113 BashOutput shape (exit 126). Every
 // other tool gets the generic blocked-result object.
 const BASH_TOOL_NAMES = new Set(['bash', 'multiBash']);
@@ -108,10 +113,25 @@ async function runHook(
       return { kind: 'proceed' };
     }
     if (isPost) {
-      if (exitCode !== 0) init.onWarn(`PostToolUse hook \`${hook.command}\` exited ${exitCode}`);
-      return stdout.trim() !== ''
-        ? { kind: 'feedback', stdout: stdout.trim() }
-        : { kind: 'proceed' };
+      // Fail open: a non-zero post-hook's (partial/error) output must not reach the model.
+      if (exitCode !== 0) {
+        init.onWarn(
+          `PostToolUse hook \`${hook.command}\` exited ${exitCode} — ignoring its output`,
+        );
+        return { kind: 'proceed' };
+      }
+      const trimmed = stdout.trim();
+      if (trimmed === '') return { kind: 'proceed' };
+      if (trimmed.length > MAX_HOOK_FEEDBACK_CHARS) {
+        init.onWarn(
+          `PostToolUse hook \`${hook.command}\` emitted ${trimmed.length} chars — truncated to ${MAX_HOOK_FEEDBACK_CHARS}`,
+        );
+        return {
+          kind: 'feedback',
+          stdout: trimmed.slice(0, MAX_HOOK_FEEDBACK_CHARS) + HOOK_FEEDBACK_TRUNCATION_MARKER,
+        };
+      }
+      return { kind: 'feedback', stdout: trimmed };
     }
     if (exitCode === 2) return { kind: 'block', stderr };
     if (exitCode === 0) {

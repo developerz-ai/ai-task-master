@@ -75,6 +75,22 @@ export {
   type WriteFileOutput,
   writeFileTool,
 } from './fs-tools.ts';
+export {
+  AUTONOMY_CONTRACT_TEXT,
+  autonomyBlock,
+  COMMUNICATION_CONTRACT_TEXT,
+  communicationContractBlock,
+  defaultContractBlocks,
+  HARNESS_CONTRACT_TEXT,
+  harnessContractBlock,
+  identityBlock,
+  PROMPT_BLOCK_ORDER,
+  type PromptBlock,
+  type PromptBlockKind,
+  renderPromptBlocks,
+  selfIdBlock,
+  stepBudgetLine,
+} from './prompt-blocks.ts';
 export { resolveInside } from './safe-path.ts';
 export {
   type GlobInput,

@@ -17,7 +17,6 @@
 // loop and decide what to do with the result (advance to waiting-ci, or block).
 
 import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
-import { composeSystemPrompt } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, TimeoutConfiguration } from 'ai';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../config/schema.ts';
@@ -26,9 +25,11 @@ import type { ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
 import type { SubagentInit } from '../subagents/factory.ts';
+import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
   runWorker,
+  WORKER_MAX_STEPS,
   WORKER_SYSTEM_PREFIX,
   type WorkerInput,
   type WorkerResult,
@@ -218,7 +219,13 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
   const agent = createWorkerAgent({
     model: subagents.credentials.modelForCapability('coding'),
     tools: subagents.workerTools,
-    systemPrompt: composeSystemPrompt(subagents.styleContents, WORKER_SYSTEM_PREFIX, worktreePath),
+    systemPrompt: buildRolePrompt({
+      style: subagents.styleContents,
+      roleGuidance: WORKER_SYSTEM_PREFIX,
+      cwd: worktreePath,
+      maxSteps: WORKER_MAX_STEPS,
+      modelId: subagents.credentials.modelIdForCapability('coding'),
+    }),
     ...(prepareStep ? { prepareStep } : {}),
     ...(subagents.timeout !== undefined ? { timeout: subagents.timeout } : {}),
     ...(subagents.providerOptions !== undefined

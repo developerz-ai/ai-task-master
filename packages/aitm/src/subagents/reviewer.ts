@@ -98,6 +98,10 @@ export const REVIEWER_SYSTEM_PREFIX = [
   'wrap up early or re-plan from scratch; resume the thread resolution where the summary leaves off.',
 ].join('\n');
 
+// Reviewer step budget — single-sourced so the step-budget reminder (issue #105) and the actual
+// createSubagent cap stay in lockstep.
+export const REVIEWER_MAX_STEPS = 20;
+
 // Module-private link from agent to its init so runReviewer can drive bash commits with the
 // same tools without exposing them on the public agent surface (worker uses the same pattern).
 const reviewerInitRegistry = new WeakMap<ReviewerAgent, SubagentInit<ReviewerTools>>();
@@ -118,7 +122,7 @@ export function createReviewerAgent(init: SubagentInit<ReviewerTools>): Reviewer
       ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
       ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
     },
-    20,
+    REVIEWER_MAX_STEPS,
   );
   reviewerInitRegistry.set(agent, init);
   return agent;

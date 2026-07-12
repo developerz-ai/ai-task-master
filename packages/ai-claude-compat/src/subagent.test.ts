@@ -6,6 +6,8 @@ import { test } from 'node:test';
 import { ToolLoopAgent, tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
+import { envBlock } from './env-block.ts';
+import { communicationContractBlock, identityBlock } from './prompt-blocks.ts';
 import {
   callWithStepTimeout,
   composeSystemPrompt,
@@ -112,6 +114,17 @@ test('composeSystemPrompt: accepts a full EnvInfo', () => {
   const out = composeSystemPrompt('S', 'R', { cwd: '/r', isGitRepo: false, date: '2026-05-28' });
   assert.match(out, /Is directory a git repo: No/);
   assert.match(out, /Today's date: 2026-05-28/);
+});
+
+test('composeSystemPrompt: the 3-arg overload stays byte-identical to style+prefix+\\n+envBlock (issue #105)', () => {
+  const env = { cwd: '/r', isGitRepo: false, date: '2026-05-28' };
+  assert.equal(composeSystemPrompt('STYLE', '\nROLE', env), `STYLE\nROLE\n${envBlock(env)}`);
+});
+
+test('composeSystemPrompt: the block-pipeline overload renders blocks in canonical order (issue #105)', () => {
+  // Shuffled input; the pipeline sorts identity before communicationContract regardless.
+  const out = composeSystemPrompt([communicationContractBlock(), identityBlock('You are X.')]);
+  assert.ok(out.indexOf('You are X.') < out.indexOf('Communication contract'), 'identity first');
 });
 
 // --- createSubagent (submit-contract shape) ---

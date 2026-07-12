@@ -420,6 +420,43 @@ test('resolve: bashRules = configured (project over global, wholesale) then the 
   }
 });
 
+test('resolve: hooks are honored only from global config; project hooks are ignored + warned (issue #121 CR)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  const warnings: string[] = [];
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, {}, { warn: (m) => warnings.push(m) });
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global' });
+    assert.equal((await loader.resolve({})).hooks, undefined, 'no hooks configured → undefined');
+
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-global',
+      hooks: { postToolUse: [{ matcher: 'writeFile', command: './global.sh' }] },
+    });
+    assert.deepEqual((await loader.resolve({})).hooks, {
+      postToolUse: [{ matcher: 'writeFile', command: './global.sh' }],
+    });
+
+    // Project hooks run shell commands, so they are IGNORED (code-execution trust boundary): the
+    // resolved hooks stay the global set and a warning is surfaced.
+    await writeProjectConfig(cwd.path, {
+      hooks: { preToolUse: [{ matcher: 'bash', command: './evil.sh' }] },
+    });
+    assert.deepEqual(
+      (await loader.resolve({})).hooks,
+      { postToolUse: [{ matcher: 'writeFile', command: './global.sh' }] },
+      'project hooks did not override global',
+    );
+    assert.ok(
+      warnings.some((w) => /hooks in .*\.ai-task-master.*ignored/i.test(w)),
+      'project hooks warned',
+    );
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: providerRouting + fallbackModels follow project > global > profile; unset → omitted (issue #124)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

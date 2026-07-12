@@ -144,3 +144,14 @@ export {
   withReminders,
   wrapReminder,
 } from './system-reminder.ts';
+export {
+  DEFAULT_HOOK_TIMEOUT_MS,
+  type HookBlockedResult,
+  type HookExec,
+  type HookSpec,
+  hookMatches,
+  MAX_HOOK_FEEDBACK_CHARS,
+  type ToolHooks,
+  type WithHooksInit,
+  withHooks,
+} from './tool-hooks.ts';

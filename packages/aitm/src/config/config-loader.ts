@@ -55,6 +55,7 @@ const KNOWN_KEYS = new Set<string>([
   'reasoningEffort',
   'mcpServers',
   'mcpRoleAllowlist',
+  'hooks',
 ]);
 
 // Built-in destructive-command deny rules, appended AFTER any configured rules so a repo can
@@ -240,6 +241,9 @@ export class ConfigLoader {
       ...((project?.mcpRoleAllowlist ?? global?.mcpRoleAllowlist)
         ? { mcpRoleAllowlist: project?.mcpRoleAllowlist ?? global?.mcpRoleAllowlist }
         : {}),
+      // Tool-registry hooks — aitm config only, project over global (issue #121). Omitted when neither
+      // sets it, so tool behavior is unchanged.
+      ...((project?.hooks ?? global?.hooks) ? { hooks: project?.hooks ?? global?.hooks } : {}),
       mcpServers,
       mcpServerSources,
     };

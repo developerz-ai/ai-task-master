@@ -97,6 +97,27 @@ LLM output is rarely byte-identical to a project's formatter, so on a repo with 
 
 The first time any test or lint runs against a Worker's diff is otherwise on GitHub CI, after the PR is already open — every avoidable red-CI cycle costs a full remote round-trip plus a coding-tier fix session. Set `verifyCommand` to a shell command (e.g. `"bun test"` or `"bun run lint && bun test"`); the Worker runs it in the worktree **after the editor fanout and after `formatCommand`, before `git add`**. On a non-zero exit the Worker runs **one** bounded local fix pass (a task-scoped manifest+editor re-run fed the tail of the verify output), then re-verifies. Exit 0 → commit as usual; still non-zero → the group **blocks without committing** and no PR is opened, so a red diff never reaches the remote. The verify call is given a 600s timeout (the bash tool's ceiling) so real test suites aren't cut off. The same gate is inherited by the CI-fix session and the `merge-pr` take-over fix pass. Project/global config only — not a CLI flag. Unset → no verify step (current behavior).
 
+## hooks
+
+PreToolUse/PostToolUse shell hooks on the tool registry (issue #121) — the programmable governance escape hatch above the declarative `bashRules` deny/allow engine. Each hook is a shell command gated by an optional `matcher` (a `*`-glob on the tool name; omitted = all tools) with an optional per-hook `timeoutMs` (default 30s).
+
+```jsonc
+{
+  "hooks": {
+    "preToolUse":  [{ "matcher": "bash", "command": "./scripts/guard.sh", "timeoutMs": 30000 }],
+    "postToolUse": [{ "matcher": "writeFile", "command": "./scripts/lint-notice.sh" }]
+  }
+}
+```
+
+- **PreToolUse** runs before the tool executes, receiving `{"event":"PreToolUse","toolName","input","cwd"}` on stdin. Exit 2 **blocks** the call (the model sees a typed denial — the `bashRules` exit-126 shape for `bash`/`multiBash`, a `{ok:false,blockedByHook:true,reason}` object otherwise); exit 0 with a stdout `{"input":…}` **rewrites** the tool input (a rewrite failing the tool's schema is discarded with a warning); any other non-zero exit, timeout, or spawn failure **fails open** with a logged warning — a hook can never crash or hang the run.
+- **PostToolUse** runs after the tool, receiving the result too; non-empty stdout is surfaced to the model as a delimited feedback block. It cannot block or rewrite.
+- Applied after the MCP/local partial-fill, so both MCP-supplied and local tools are covered. Resolved project-over-global, wholesale.
+
+**Trust boundary:** hooks are read only from aitm's own config (`~/.aitm.json`, `./.ai-task-master/config.json`) — never from the worked-on repo's `.claude/settings.json` or any repo-shipped file. Hook commands run with the operator's privileges, so sourcing them from repo content would be arbitrary code execution.
+
+**Bypass limitation:** hooks intercept the tool boundary only. Child processes of a single `bash` call are visible to PreToolUse only as the text of that one command, and harness-side subprocesses (e.g. `gh pr merge` in `GitHubClient.mergePr`) never cross the tool boundary at all. Hooks are a governance seam, not a sandbox.
+
 ## Per-role models
 
 Each subagent can run on a different OpenRouter model. Use a cheap fast model for `Planner`, a strong model for `Worker`, a critical model for `Reviewer` — or pin one model everywhere via `models.default`.

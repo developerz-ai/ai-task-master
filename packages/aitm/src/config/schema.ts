@@ -12,6 +12,19 @@ import { McpRoleAllowlistSchema, McpServersSchema } from '../mcp/schema.ts';
 
 // A model-facing bash deny/allow rule (issue #113). Structurally the compat CommandRule; the schema
 // validates config-file input and ResolvedConfig carries the compat type.
+// One PreToolUse/PostToolUse hook (issue #121): a shell command gated by an optional glob matcher on
+// the tool name, with an optional per-hook timeout. Mirrors the compat ToolHooks shape.
+export const HookSpecSchema = z.object({
+  matcher: z.string().optional(),
+  command: z.string().min(1),
+  timeoutMs: z.number().int().positive().optional(),
+});
+
+export const ToolHooksSchema = z.object({
+  preToolUse: z.array(HookSpecSchema).optional(),
+  postToolUse: z.array(HookSpecSchema).optional(),
+});
+
 export const CommandRuleSchema = z.object({
   // Trim before the length check: a whitespace-only pattern would split to zero tokens and silently
   // never match — a fail-open deny rule. Reject it at config-parse time instead (issue #113).
@@ -167,6 +180,10 @@ export const ConfigFileSchema = z
     // patterns. aitm-config-only (project > global); the Claude Code interop sources contribute
     // mcpServers alone. See src/mcp/schema.ts and src/mcp/mcp-client.ts.
     mcpRoleAllowlist: McpRoleAllowlistSchema.optional(),
+    // PreToolUse/PostToolUse shell hooks on the tool registry (issue #121). Operator-owned governance
+    // escape hatch; sourced only from aitm's own config (never the worked-on repo). Resolved wholesale
+    // (project over global). See src/loop/run-loop-adapter.ts and ai-claude-compat withHooks.
+    hooks: ToolHooksSchema.optional(),
   })
   .passthrough();
 
@@ -238,6 +255,9 @@ export type ResolvedConfig = {
   // Per-role MCP allowlist (issue #115), aitm-config-only (project > global). Undefined → every role
   // gets every connected server. Passed into McpClientManager.
   mcpRoleAllowlist?: import('../mcp/schema.ts').McpRoleAllowlist | undefined;
+  // Tool-registry hooks (issue #121), aitm-config-only (project > global). Undefined → no hooks;
+  // behavior unchanged. Applied over the resolved tool records in run-loop-adapter via withHooks.
+  hooks?: z.infer<typeof ToolHooksSchema> | undefined;
   // One label per server name explaining where the entry came from. Useful for the
   // snapshot, `aitm config list`, and "duplicate name shadowed by X" warnings.
   mcpServerSources: Record<string, McpServerSource>;

@@ -31,6 +31,8 @@ import {
   readFileTool,
   type SubagentHandle,
   SYSTEM_REMINDER_CONTRACT,
+  type ToolHooks,
+  withHooks,
   withReminders,
   writeFileTool,
 } from '@developerz.ai/ai-claude-compat';
@@ -158,6 +160,16 @@ async function memoryIndexFor(
 ): Promise<MemoryIndexEntry[]> {
   const dir = state.memoryDir?.();
   return dir ? loadMemoryIndex(dir) : [];
+}
+
+// Apply operator-configured PreToolUse/PostToolUse hooks over a resolved tool record (issue #121),
+// after the MCP/local partial-fill so both MCP-supplied and local tools are covered. No hooks
+// configured → the record is returned untouched. Exported for tests.
+export function applyHooks<T extends ToolSet>(tools: T, input: RunLoopInput, cwd: string): T {
+  // The zod-inferred config type spells optional fields as `T | undefined`; withHooks reads them
+  // with `?? []`, so the shapes are runtime-identical — the cast only reconciles exactOptional.
+  const hooks = input.resolved.hooks as ToolHooks | undefined;
+  return hooks ? withHooks(tools, hooks, { cwd }) : tools;
 }
 
 // Web + time function tools mounted into every subagent tool set (issue #112). webFetch (stealthed
@@ -534,11 +546,15 @@ async function defaultPlanGroups(
   const memoryIndex = await memoryIndexFor(input.state);
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
-    tools: resolvePlannerTools(
-      mcp.toolsForRole('planner'),
+    tools: applyHooks(
+      resolvePlannerTools(
+        mcp.toolsForRole('planner'),
+        input.cwd,
+        fetchHtmlAvailable,
+        buildExploreFor(input, input.cwd),
+      ),
+      input,
       input.cwd,
-      fetchHtmlAvailable,
-      buildExploreFor(input, input.cwd),
     ),
     systemPrompt: reminderAgentSystemPrompt({
       style,
@@ -645,12 +661,16 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // autoMergeFlow (runReviewer) and the stage machine (addressReviews).
   const runReviewerThreads = ({ pr, threads, worktree }: ReviewerInvocation) => {
     const github = githubThreadTool(input.github);
-    const tools = resolveReviewerTools(
-      mcp.toolsForRole('reviewer'),
+    const tools = applyHooks(
+      resolveReviewerTools(
+        mcp.toolsForRole('reviewer'),
+        worktree.path,
+        github,
+        input.resolved.bashRules,
+        fetchHtmlAvailable,
+      ),
+      input,
       worktree.path,
-      github,
-      input.resolved.bashRules,
-      fetchHtmlAvailable,
     );
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
@@ -683,13 +703,17 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
       // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
       // memory (#118) is mounted on the manifest Worker so it can record durable repo facts.
-      const tools = resolveWorkerTools(
-        mcp.toolsForRole('worker'),
+      const tools = applyHooks(
+        resolveWorkerTools(
+          mcp.toolsForRole('worker'),
+          worktree.path,
+          input.resolved.bashRules,
+          fetchHtmlAvailable,
+          buildExploreFor(input, worktree.path),
+          memoryToolFor(state),
+        ),
+        input,
         worktree.path,
-        input.resolved.bashRules,
-        fetchHtmlAvailable,
-        buildExploreFor(input, worktree.path),
-        memoryToolFor(state),
       );
       const memoryIndex = await memoryIndexFor(state);
       // Regular Worker: web_search only when explicitly enabled (webSearch: true).
@@ -759,13 +783,17 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
         subagents: {
           credentials: input.credentials,
-          workerTools: resolveWorkerTools(
-            mcp.toolsForRole('worker'),
+          workerTools: applyHooks(
+            resolveWorkerTools(
+              mcp.toolsForRole('worker'),
+              worktree.path,
+              input.resolved.bashRules,
+              fetchHtmlAvailable,
+              buildExploreFor(input, worktree.path),
+              memoryToolFor(state),
+            ),
+            input,
             worktree.path,
-            input.resolved.bashRules,
-            fetchHtmlAvailable,
-            buildExploreFor(input, worktree.path),
-            memoryToolFor(state),
           ),
           styleContents: style,
           compactor,

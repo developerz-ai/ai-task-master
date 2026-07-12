@@ -420,6 +420,35 @@ test('resolve: bashRules = configured (project over global, wholesale) then the 
   }
 });
 
+test('resolve: hooks = project over global (wholesale), undefined when neither sets them (issue #121)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, {});
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global' });
+    assert.equal((await loader.resolve({})).hooks, undefined, 'no hooks configured → undefined');
+
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-global',
+      hooks: { postToolUse: [{ matcher: 'writeFile', command: './global.sh' }] },
+    });
+    assert.deepEqual((await loader.resolve({})).hooks, {
+      postToolUse: [{ matcher: 'writeFile', command: './global.sh' }],
+    });
+
+    // Project replaces global wholesale.
+    await writeProjectConfig(cwd.path, {
+      hooks: { preToolUse: [{ matcher: 'bash', command: './project.sh', timeoutMs: 5000 }] },
+    });
+    assert.deepEqual((await loader.resolve({})).hooks, {
+      preToolUse: [{ matcher: 'bash', command: './project.sh', timeoutMs: 5000 }],
+    });
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: providerRouting + fallbackModels follow project > global > profile; unset → omitted (issue #124)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

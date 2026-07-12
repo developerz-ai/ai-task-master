@@ -28,6 +28,7 @@ import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import {
   type AdapterStatePort,
+  applyHooks,
   branchFor,
   createRollingContextAccumulator,
   defaultMakeOrchestrator,
@@ -936,6 +937,24 @@ const stubMemory = () =>
     inputSchema: z.object({ action: z.string(), name: z.string() }),
     execute: async () => 'ok',
   });
+
+test('applyHooks wraps the tool record when hooks are configured, no-op otherwise (issue #121)', () => {
+  const base = resolveWorkerTools({}, '/tmp/wt');
+  assert.equal(applyHooks(base, makeInput(), '/tmp/wt'), base, 'no hooks → same record reference');
+
+  const input = makeInput();
+  const hooked = {
+    ...input,
+    resolved: { ...input.resolved, hooks: { preToolUse: [{ command: './guard.sh' }] } },
+  };
+  const wrapped = applyHooks(base, hooked, '/tmp/wt');
+  assert.notEqual(wrapped, base, 'hooks configured → a new wrapped record');
+  assert.deepEqual(
+    Object.keys(wrapped).sort(),
+    Object.keys(base).sort(),
+    'same tool names preserved',
+  );
+});
 
 test('resolveWorkerTools mounts memory only when the caller wires it (never MCP-filled) — issue #118', () => {
   const withMemory = resolveWorkerTools({}, '/tmp/wt', undefined, false, undefined, stubMemory());

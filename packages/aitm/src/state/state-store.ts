@@ -16,6 +16,9 @@ const PROGRESS_FILE = 'progress.md';
 const CONTEXT_FILE = 'context.md';
 const CODING_STYLE_FILE = 'coding-style.md';
 const LOGS_DIR = 'logs';
+// Durable cross-run memory (issue #118). Like logs/, it survives cleanupOnSuccess() — the one place
+// under .ai-task-master/ that outlives the run whose knowledge it holds.
+const MEMORY_DIR = 'memory';
 
 export class StateStore {
   // Chained promise serializes concurrent update() calls so they observe linear semantics.
@@ -117,9 +120,15 @@ export class StateStore {
       throw err;
     }
     for (const entry of entries) {
-      if (entry === LOGS_DIR) continue;
+      if (entry === LOGS_DIR || entry === MEMORY_DIR) continue;
       await rm(this.path(entry), { recursive: true, force: true });
     }
+  }
+
+  // The per-repo memory directory (issue #118). Handed out here so nothing rebuilds the path ad hoc;
+  // the memory-loader (compat) reads/writes under it. Not created until the first memory write.
+  memoryDir(): string {
+    return this.path(MEMORY_DIR);
   }
 
   private path(name: string): string {

@@ -142,17 +142,15 @@ test('WORKER_SYSTEM_PREFIX carries the explore delegation guidance, gated on ava
   assert.match(WORKER_SYSTEM_PREFIX, /in parallel/);
 });
 
-test('editorToolSet strips the runtime explore extra so editors never nest surveys (issue #126)', () => {
-  const explore = tool({
-    description: 'e',
-    inputSchema: z.object({ prompt: z.string() }),
-    execute: async () => 'a',
-  });
-  // Reuse the complete WorkerTools fixture and add the runtime-only explore extra, exactly as the
-  // adapter mounts it — no `as unknown as` bypass of the contract.
-  const withExplore = { ...makeTools().tools, explore };
-  const stripped = editorToolSet(withExplore);
+test('editorToolSet strips the runtime explore + memory extras so editors never nest surveys or touch memory (issues #126/#118)', () => {
+  const stub = (desc: string) =>
+    tool({ description: desc, inputSchema: z.object({ x: z.string() }), execute: async () => 'a' });
+  // Reuse the complete WorkerTools fixture and add the runtime-only extras, exactly as the adapter
+  // mounts them — no `as unknown as` bypass of the contract.
+  const withExtras = { ...makeTools().tools, explore: stub('e'), memory: stub('m') };
+  const stripped = editorToolSet(withExtras);
   assert.equal('explore' in stripped, false, 'explore removed');
+  assert.equal('memory' in stripped, false, 'memory removed');
   assert.equal('readFile' in stripped, true, 'other tools retained');
 });
 

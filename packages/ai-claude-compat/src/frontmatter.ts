@@ -1,10 +1,11 @@
-// Minimal YAML-frontmatter parser for `.claude/` extension files (SKILL.md, agents/*.md).
-// Handles only what those files use — scalar strings, flow arrays (`[a, b]`), and block
-// sequences (`- a` lines) — so the lib stays dependency-free rather than pulling a full YAML
-// engine. Anything outside that shape is ignored, not errored, so a malformed field never
-// blocks discovery of the rest.
+// Minimal YAML-frontmatter parser for `.claude/` extension files (SKILL.md, agents/*.md) and the
+// memory format (issue #118). Handles only what those files use — scalar strings, flow arrays
+// (`[a, b]`), block sequences (`- a` lines), and one level of nested map (indented `key: value`
+// lines under a bare parent key) — so the lib stays dependency-free rather than pulling a full YAML
+// engine. Anything outside that shape is ignored, not errored, so a malformed field never blocks
+// discovery of the rest.
 
-export type FrontmatterValue = string | string[];
+export type FrontmatterValue = string | string[] | Record<string, string>;
 export type Frontmatter = { data: Record<string, FrontmatterValue>; body: string };
 
 const FRONTMATTER = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n([\s\S]*))?$/;
@@ -26,13 +27,24 @@ function parseBlock(raw: string): Record<string, FrontmatterValue> {
     const key = m[1] ?? '';
     const rest = (m[2] ?? '').trim();
     if (rest === '') {
-      // A bare `key:` may head a block sequence on the following `- item` lines.
-      const items: string[] = [];
-      while (i + 1 < lines.length && /^[ \t]*-[ \t]+/.test(lines[i + 1] ?? '')) {
-        i += 1;
-        items.push(stripQuotes((lines[i] ?? '').replace(/^[ \t]*-[ \t]+/, '').trim()));
+      // A bare `key:` heads either a nested map (indented `subkey: value` lines) or a block
+      // sequence (`- item` lines). An indented `key:` line wins — it's a map, not a sequence item.
+      if (/^[ \t]+[A-Za-z0-9_-]+:/.test(lines[i + 1] ?? '')) {
+        const map: Record<string, string> = {};
+        while (i + 1 < lines.length && /^[ \t]+[A-Za-z0-9_-]+:/.test(lines[i + 1] ?? '')) {
+          i += 1;
+          const sub = /^[ \t]+([A-Za-z0-9_-]+):[ \t]*(.*)$/.exec(lines[i] ?? '');
+          if (sub) map[sub[1] ?? ''] = stripQuotes((sub[2] ?? '').trim());
+        }
+        data[key] = map;
+      } else {
+        const items: string[] = [];
+        while (i + 1 < lines.length && /^[ \t]*-[ \t]+/.test(lines[i + 1] ?? '')) {
+          i += 1;
+          items.push(stripQuotes((lines[i] ?? '').replace(/^[ \t]*-[ \t]+/, '').trim()));
+        }
+        data[key] = items;
       }
-      data[key] = items;
     } else if (rest.startsWith('[') && rest.endsWith(']')) {
       const inner = rest.slice(1, -1).trim();
       data[key] = inner === '' ? [] : inner.split(',').map((s) => stripQuotes(s.trim()));
@@ -66,5 +78,11 @@ export function asStringArray(value: FrontmatterValue | undefined): string[] | u
   if (typeof value === 'string' && value.trim() !== '') {
     return value.split(',').map((s) => s.trim());
   }
+  return undefined;
+}
+
+// Coerce a parsed value to a nested map (issue #118). Scalars, arrays, and absent → undefined.
+export function asRecord(value: FrontmatterValue | undefined): Record<string, string> | undefined {
+  if (value !== undefined && typeof value === 'object' && !Array.isArray(value)) return value;
   return undefined;
 }

@@ -23,6 +23,8 @@ import {
   FileStateTracker,
   globTool,
   grepTool,
+  loadMemoryIndex,
+  type MemoryIndexEntry,
   multiBashTool,
   multiEditTool,
   type ReminderProvider,
@@ -52,6 +54,7 @@ import { PrContextStore } from '../state/pr-context-store.ts';
 import { appendGroupDigest, type GroupDigestEntry } from '../state/rolling-context.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { buildExploreTool } from '../subagents/explore.ts';
+import { buildMemoryTool, type MemoryToolInput } from '../subagents/memory-tool.ts';
 import {
   createPlannerAgent,
   PLANNER_MAX_STEPS,
@@ -116,6 +119,11 @@ type WithFetchHtml<T> = T & { fetchHtml?: Tool<FetchHtmlInput, WebFetchOutput> }
 // (take-over flow, orchestrator-as-tool, test stubs) compiles and behaves exactly as today.
 type WithExplore<T> = T & { explore?: Tool<AgentToolInput, string> };
 
+// `memory` (issue #118) is a runtime-only extra for the same reason: it needs the StateStore memory
+// dir (state context compat's local builders don't have), and a static optional field would trip the
+// #112 TypedToolCall union. Present on the Worker set only when the state port hands out a memory dir.
+type WithMemory<T> = T & { memory?: Tool<MemoryToolInput, string> };
+
 // The worktree-confined read-only trio the explore child surveys with — picked from localReadTools
 // so it inherits the same resolveInside confinement, minus the web/datetime tools (the child's
 // allowlist is readFile/grep/glob only). Rooted at the invoking agent's cwd/worktree.
@@ -132,6 +140,24 @@ function buildExploreFor(input: RunLoopInput, cwd: string): Tool<AgentToolInput,
     model: input.credentials.modelForCapability('fast'),
     readTools: exploreReadTools(cwd),
   });
+}
+
+// The Worker's `memory` tool (issue #118), rooted at the state port's memory dir. Undefined when the
+// port hands out no dir (test stubs), so memory features stay entirely off with no scaffold.
+function memoryToolFor(
+  state: Pick<AdapterStatePort, 'memoryDir'>,
+): Tool<MemoryToolInput, string> | undefined {
+  const dir = state.memoryDir?.();
+  return dir ? buildMemoryTool(dir) : undefined;
+}
+
+// Load the current memory index for prompt injection (issue #118). Read fresh per prompt build so a
+// memory a Worker wrote in an earlier group is visible to the next. Empty when no memory dir.
+async function memoryIndexFor(
+  state: Pick<AdapterStatePort, 'memoryDir'>,
+): Promise<MemoryIndexEntry[]> {
+  const dir = state.memoryDir?.();
+  return dir ? loadMemoryIndex(dir) : [];
 }
 
 // Web + time function tools mounted into every subagent tool set (issue #112). webFetch (stealthed
@@ -227,6 +253,9 @@ export type AdapterStatePort = {
   // Persist plan groups as the loop marks tasks done; StateStore renders them to plan.md.
   // Optional so in-memory test stubs can omit it; StateStore supplies it in production.
   writePlan?(groups: readonly PlanMarkdownGroup[]): Promise<void>;
+  // The per-repo memory dir (issue #118). Optional: a port that omits it turns memory off entirely
+  // (no index block, no memory tool). StateStore supplies it in production.
+  memoryDir?(): string;
 };
 
 // Append one group's digest to the live rolling context and persist it (issue #123). Failure-tolerant:
@@ -500,6 +529,9 @@ async function defaultPlanGroups(
     'planner',
     input.credentials.modelIdFor('planner'),
   );
+  // Planner gets the memory index (issue #118) but no memory tool: its read tools are rooted at the
+  // repo cwd, so it reads memory files directly and stays read-only.
+  const memoryIndex = await memoryIndexFor(input.state);
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
     tools: resolvePlannerTools(
@@ -514,6 +546,7 @@ async function defaultPlanGroups(
       cwd: input.cwd,
       maxSteps: PLANNER_MAX_STEPS,
       modelId: input.credentials.modelIdFor('planner'),
+      memoryIndex,
     }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
@@ -649,13 +682,16 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     runWorker: async ({ group, task, worktree, baseBranch }) => {
       // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
       // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
+      // memory (#118) is mounted on the manifest Worker so it can record durable repo facts.
       const tools = resolveWorkerTools(
         mcp.toolsForRole('worker'),
         worktree.path,
         input.resolved.bashRules,
         fetchHtmlAvailable,
         buildExploreFor(input, worktree.path),
+        memoryToolFor(state),
       );
+      const memoryIndex = await memoryIndexFor(state);
       // Regular Worker: web_search only when explicitly enabled (webSearch: true).
       const providerOptions = webSearchProviderOptions(input.resolved.webSearch, false);
       const agent = createWorkerAgent({
@@ -667,6 +703,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           cwd: worktree.path,
           maxSteps: WORKER_MAX_STEPS,
           modelId: input.credentials.modelIdFor('worker'),
+          memoryIndex,
         }),
         prepareStep: buildCompactionStep<WorkerTools>({
           compactor,
@@ -716,6 +753,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         'worker',
         input.credentials.modelIdForCapability('coding'),
       );
+      const ciFixMemoryIndex = await memoryIndexFor(state);
       const result = await runFixSession({
         github: input.github,
         prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
@@ -727,10 +765,13 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             input.resolved.bashRules,
             fetchHtmlAvailable,
             buildExploreFor(input, worktree.path),
+            memoryToolFor(state),
           ),
           styleContents: style,
           compactor,
           timeout: stepTimeout,
+          // Memory index for the fix session's Worker (issue #118); it also records CI facts it learns.
+          ...(ciFixMemoryIndex.length > 0 ? { memoryIndex: ciFixMemoryIndex } : {}),
           // Live rolling context (issue #123): the fix session's Worker sees what its group shipped
           // instead of the old hardcoded ''. Omitted when empty so the render guard stays a no-op.
           ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),
@@ -807,7 +848,8 @@ export function resolveWorkerTools(
   rules?: readonly CommandRule[],
   fetchHtmlAvailable = false,
   explore?: Tool<AgentToolInput, string>,
-): WithExplore<WorkerTools> {
+  memory?: Tool<MemoryToolInput, string>,
+): WithExplore<WorkerTools> & WithMemory<WorkerTools> {
   const local = localEditTools(cwd, rules, fetchHtmlAvailable);
   // fetchHtml is optional: keep the key only when MCP supplies one or the local binary is available.
   const fetchHtml = mcpTool(set, 'fetchHtml') ?? local.fetchHtml;
@@ -823,9 +865,11 @@ export function resolveWorkerTools(
     webFetch: mcpTool(set, 'webFetch') ?? local.webFetch,
     datetime: mcpTool(set, 'datetime') ?? local.datetime,
     ...(fetchHtml ? { fetchHtml } : {}),
-    // explore (#126) is never MCP-filled — adapter-local glue, present only when the caller wired it.
+    // explore (#126) + memory (#118) are never MCP-filled — adapter-local glue, present only when
+    // the caller wired them.
     ...(explore ? { explore } : {}),
-  } as WithExplore<WorkerTools>;
+    ...(memory ? { memory } : {}),
+  } as WithExplore<WorkerTools> & WithMemory<WorkerTools>;
 }
 
 function resolveReviewerTools(

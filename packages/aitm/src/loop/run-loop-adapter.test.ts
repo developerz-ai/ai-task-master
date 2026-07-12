@@ -727,7 +727,7 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
 
   // Constructing the bridge builds OpenRouterClient + ModelLimitsRegistry + Compactor (lazily, no
   // network) — proving they are live in the production path, not dead exports.
-  const orch = defaultMakeOrchestrator({ input, mcp, rollingContext: '' } as never);
+  const orch = defaultMakeOrchestrator({ input, mcp, rollingContext: '', state: {} } as never);
   assert.equal(typeof orch.runWorker, 'function');
 
   const res = await orch.runWorker({
@@ -930,9 +930,25 @@ test('resolveWorkerTools mounts explore only when the caller wires it (never MCP
   assert.equal('explore' in withoutExplore, false, 'absent when not wired');
 });
 
+const stubMemory = () =>
+  tool({
+    description: 'stub memory',
+    inputSchema: z.object({ action: z.string(), name: z.string() }),
+    execute: async () => 'ok',
+  });
+
+test('resolveWorkerTools mounts memory only when the caller wires it (never MCP-filled) — issue #118', () => {
+  const withMemory = resolveWorkerTools({}, '/tmp/wt', undefined, false, undefined, stubMemory());
+  assert.equal('memory' in withMemory, true, 'memory present when wired');
+  const withoutMemory = resolveWorkerTools({}, '/tmp/wt');
+  assert.equal('memory' in withoutMemory, false, 'absent when not wired');
+});
+
 test('resolvePlannerTools mounts explore only when the caller wires it', () => {
   const withExplore = resolvePlannerTools({}, '/tmp/repo', false, stubExplore());
   assert.equal('explore' in withExplore, true);
   const withoutExplore = resolvePlannerTools({}, '/tmp/repo');
   assert.equal('explore' in withoutExplore, false);
+  // The Planner never gets a memory tool — it reads memory files directly (issue #118).
+  assert.equal('memory' in withExplore, false, 'planner has no memory tool');
 });

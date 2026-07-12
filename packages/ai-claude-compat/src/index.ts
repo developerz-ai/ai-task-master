@@ -58,6 +58,7 @@ export {
 export { detectGitRepo, type EnvInfo, envBlock } from './env-block.ts';
 export { type FileOp, FileStateTracker, hashContent, hashFile } from './file-state.ts';
 export {
+  asRecord,
   asString,
   asStringArray,
   type Frontmatter,
@@ -76,6 +77,18 @@ export {
   writeFileTool,
 } from './fs-tools.ts';
 export {
+  loadMemoryIndex,
+  MEMORY_INDEX_FILE,
+  MEMORY_TYPES,
+  type Memory,
+  type MemoryIndexEntry,
+  type MemoryType,
+  memoryFileStem,
+  readMemory,
+  removeMemory,
+  upsertMemory,
+} from './memory-loader.ts';
+export {
   AUTONOMY_CONTRACT_TEXT,
   autonomyBlock,
   COMMUNICATION_CONTRACT_TEXT,
@@ -84,6 +97,8 @@ export {
   HARNESS_CONTRACT_TEXT,
   harnessContractBlock,
   identityBlock,
+  MEMORY_INDEX_PREAMBLE,
+  memoryIndexBlock,
   PROMPT_BLOCK_ORDER,
   type PromptBlock,
   type PromptBlockKind,

@@ -54,6 +54,27 @@ test('buildRolePrompt omits the self-id block when no modelId is supplied (take-
   assert.match(prompt, /You are the Reviewer\./, 'role guidance still present');
 });
 
+test('buildRolePrompt injects the memory index (with staleness framing) when memories exist, else nothing (issue #118)', () => {
+  const withMemory = buildRolePrompt({
+    style: 'S',
+    roleGuidance: 'ROLE',
+    cwd: '/tmp/does-not-exist-worktree',
+    maxSteps: 30,
+    memoryIndex: [{ file: 'flaky.md', description: 'e2e flakes on cold cache' }],
+  });
+  assert.match(withMemory, /point-in-time/i, 'staleness framing present');
+  assert.match(withMemory, /e2e flakes on cold cache/, 'index entry present');
+
+  const withoutMemory = buildRolePrompt({
+    style: 'S',
+    roleGuidance: 'ROLE',
+    cwd: '/tmp/does-not-exist-worktree',
+    maxSteps: 30,
+    memoryIndex: [],
+  });
+  assert.ok(!/point-in-time/i.test(withoutMemory), 'no memory block when the index is empty');
+});
+
 test('buildRolePrompt omits an empty style block (no blank-line artifact)', () => {
   const prompt = buildRolePrompt({
     style: '',

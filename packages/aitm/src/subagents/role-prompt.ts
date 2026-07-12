@@ -12,6 +12,8 @@ import {
   defaultContractBlocks,
   detectGitRepo,
   envBlock,
+  type MemoryIndexEntry,
+  memoryIndexBlock,
   type PromptBlock,
   selfIdBlock,
   stepBudgetLine,
@@ -31,12 +33,15 @@ export type RolePromptInput = {
   modelId?: string;
   // Optional knowledge cutoff for the selfId block; no production source wires one yet.
   knowledgeCutoff?: string;
+  // Per-repo memory index (issue #118). Empty/absent → no memory block at all.
+  memoryIndex?: readonly MemoryIndexEntry[];
 };
 
 // Assemble a subagent system prompt from the ordered block pipeline: the always-on contract blocks
 // (harness / communication / autonomy) + optional self-id + the role guidance (with its step budget)
 // + style + env. Canonical order and separation are the pipeline's job.
 export function buildRolePrompt(input: RolePromptInput): string {
+  const memoryBlock = input.memoryIndex ? memoryIndexBlock(input.memoryIndex) : null;
   const blocks: PromptBlock[] = [
     ...defaultContractBlocks(),
     ...(input.modelId ? [selfIdBlock(input.modelId, input.knowledgeCutoff)] : []),
@@ -46,6 +51,7 @@ export function buildRolePrompt(input: RolePromptInput): string {
     },
     { kind: 'style', text: input.style },
     { kind: 'env', text: envBlock({ cwd: input.cwd, isGitRepo: detectGitRepo(input.cwd) }) },
+    ...(memoryBlock ? [memoryBlock] : []),
   ];
   return composeSystemPrompt(blocks);
 }

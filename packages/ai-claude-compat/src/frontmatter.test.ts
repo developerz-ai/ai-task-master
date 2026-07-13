@@ -113,3 +113,20 @@ test('parseFrontmatter: `key: >text` on one line stays a plain scalar, not a blo
   const { data } = parseFrontmatter('---\narrow: >text here\n---\nb');
   assert.equal(data.arrow, '>text here');
 });
+
+test('parseFrontmatter: a folded block scalar strips CRLF carriage returns from every line', () => {
+  const { data } = parseFrontmatter(
+    '---\r\ndescription: >-\r\n  line one\r\n  line two\r\n---\r\nbody\r\n',
+  );
+  assert.equal(data.description, 'line one line two', 'no stray \\r in the folded value');
+});
+
+test('parseFrontmatter: a literal block scalar strips CRLF carriage returns from every line', () => {
+  const { data } = parseFrontmatter('---\r\nsteps: |-\r\n  a\r\n  b\r\n---\r\nbody\r\n');
+  assert.equal(data.steps, 'a\nb', 'interior newline preserved, no \\r');
+});
+
+test('parseFrontmatter: `>+` (keep) is unsupported — it stays a plain scalar, not a block header', () => {
+  const { data } = parseFrontmatter('---\ndesc: >+\n  content\n---\nb');
+  assert.equal(data.desc, '>+', 'the header does not match; the value is the literal marker');
+});

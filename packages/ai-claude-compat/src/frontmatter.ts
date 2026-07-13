@@ -19,7 +19,10 @@ export function parseFrontmatter(content: string): Frontmatter {
 
 function parseBlock(raw: string): Record<string, FrontmatterValue> {
   const data: Record<string, FrontmatterValue> = {};
-  const lines = raw.split('\n');
+  // Split on CRLF or LF so a Windows-authored / CRLF-checked-out SKILL.md doesn't leave a trailing
+  // `\r` on every line — it would fail the key-line match outright and, for block scalars (whose
+  // value skips the usual `.trim()`), embed `\r` inside the parsed text.
+  const lines = raw.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
     if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
@@ -62,9 +65,12 @@ function parseBlock(raw: string): Record<string, FrontmatterValue> {
   return data;
 }
 
-// A block-scalar header is a lone `|` or `>` (literal / folded) with an optional `+`/`-` chomping
-// indicator. `key: >text` is a plain scalar, not a block — the header must stand alone.
-const BLOCK_SCALAR = /^([|>])([+-]?)$/;
+// A block-scalar header is a lone `|` or `>` (literal / folded) with an optional `-` (strip)
+// chomping indicator. `key: >text` is a plain scalar, not a block — the header must stand alone.
+// `+` (keep) is intentionally unsupported: `>+` fails this match and falls through to the plain
+// scalar path rather than being silently treated as clip (its behavior can't be produced here, since
+// trailing blank lines are always popped below).
+const BLOCK_SCALAR = /^([|>])(-?)$/;
 
 // Consume the indented lines following a `key: |` / `key: >` header into a single string. `folded`
 // (`>`) joins lines with spaces and blank lines with newlines; literal (`|`) keeps every newline.

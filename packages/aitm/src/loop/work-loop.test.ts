@@ -812,9 +812,11 @@ test('CI-fix cap: an unfixable red PR blocks after exactly maxCiFixAttempts fix 
   }
 });
 
-test('CI-fix cap: a CiFailed poll timeout consumes an attempt just like a red status (issue #128)', async () => {
-  // The other route into ci-failed is waitForChecks throwing CiFailed (checks never settled). It
-  // must count against the cap too, else a perpetually-timing-out PR loops forever.
+test('CI-fix cap: a CiFailed poll timeout blocks without a fix pass (issue #128, block-on-timeout)', async () => {
+  // A waitForChecks CiFailed (checks never settled within CHECKS_TIMEOUT_MS) no longer routes to the
+  // fix loop — it blocks the group directly (block-not-merge on timeout, feat 62f0b7a), so a
+  // perpetually-timing-out PR never loops and never runs a fix pass. A real red *status* still routes
+  // to ci-failed (covered above). `--admin` force-advances the timeout to reviews (stage-handlers.test).
   const g = redCiGroup('cap-timeout', 9);
   const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 9 });
   const { github } = makeGithub({
@@ -829,10 +831,10 @@ test('CI-fix cap: a CiFailed poll timeout consumes an attempt just like a red st
   );
   const result = await loop.run();
 
-  assert.equal(orchCalls.runCiFix.length, 2, 'a CiFailed timeout counts against the cap');
+  assert.equal(orchCalls.runCiFix.length, 0, 'a CiFailed timeout blocks — no fix pass runs');
   assert.equal(result.kind, 'blocked');
   if (result.kind === 'blocked') {
-    assert.match(result.reason, /CI fix attempts exhausted after 2 passes/);
+    assert.match(result.reason, /blocked at stage 'waiting-ci'/);
   }
 });
 

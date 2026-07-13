@@ -77,3 +77,37 @@ test('loadSkills: missing skills dir yields []', async () => {
     await dir.cleanup();
   }
 });
+
+test('loadSkills: carries unrecognized keys in extra and round-trips a folded description (issue #120)', async () => {
+  const dir = await tempDir();
+  try {
+    const claude = join(dir.path, '.claude');
+    await writeSkill(
+      claude,
+      'triage',
+      [
+        '---',
+        'name: triage',
+        'description: >-',
+        '  Use when a CI job fails and you need to',
+        '  classify the failure before editing.',
+        'allowed-tools: [Read, Bash]',
+        'disable-model-invocation: false',
+        '---',
+        'read the logs bottom-up',
+        '',
+      ].join('\n'),
+    );
+    const [skill] = await loadSkills(claude);
+    assert.equal(
+      skill?.description,
+      'Use when a CI job fails and you need to classify the failure before editing.',
+    );
+    assert.deepEqual(skill?.extra['allowed-tools'], ['Read', 'Bash']);
+    assert.equal(skill?.extra['disable-model-invocation'], 'false');
+    assert.equal(skill?.extra.name, undefined, 'name is not duplicated into extra');
+    assert.equal(skill?.extra.description, undefined, 'description is not duplicated into extra');
+  } finally {
+    await dir.cleanup();
+  }
+});

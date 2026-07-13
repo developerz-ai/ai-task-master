@@ -72,3 +72,44 @@ test('asStringArray: passes arrays, splits scalars, undefined when absent', () =
   assert.equal(asStringArray(undefined), undefined);
   assert.equal(asStringArray(''), undefined);
 });
+
+// ---- block scalars (issue #120) ----
+
+test('parseFrontmatter: folded block scalar (>) joins lines with spaces, clip keeps one newline', () => {
+  const { data } = parseFrontmatter('---\ndescription: >\n  line one\n  line two\n---\nbody');
+  assert.equal(data.description, 'line one line two\n');
+});
+
+test('parseFrontmatter: folded strip (>-) drops the trailing newline', () => {
+  const { data } = parseFrontmatter('---\ndescription: >-\n  line one\n  line two\n---\nbody');
+  assert.equal(data.description, 'line one line two');
+});
+
+test('parseFrontmatter: literal block scalar (|) preserves interior newlines', () => {
+  const { data } = parseFrontmatter('---\nsteps: |\n  first\n  second\n---\nbody');
+  assert.equal(data.steps, 'first\nsecond\n');
+});
+
+test('parseFrontmatter: literal strip (|-) keeps interior newlines but strips the trailing one', () => {
+  const { data } = parseFrontmatter('---\nsteps: |-\n  a\n  b\n---\nbody');
+  assert.equal(data.steps, 'a\nb');
+});
+
+test('parseFrontmatter: a folded blank line becomes a paragraph break', () => {
+  const { data } = parseFrontmatter('---\ndesc: >-\n  para one\n\n  para two\n---\nb');
+  assert.equal(data.desc, 'para one\npara two');
+});
+
+test('parseFrontmatter: a block scalar ends at the next top-level key, which still parses', () => {
+  const { data } = parseFrontmatter(
+    '---\nname: s\ndescription: >-\n  folded value\n  continues\nallowed-tools: [Read]\n---\nbody',
+  );
+  assert.equal(data.name, 's');
+  assert.equal(data.description, 'folded value continues');
+  assert.deepEqual(data['allowed-tools'], ['Read']);
+});
+
+test('parseFrontmatter: `key: >text` on one line stays a plain scalar, not a block header', () => {
+  const { data } = parseFrontmatter('---\narrow: >text here\n---\nb');
+  assert.equal(data.arrow, '>text here');
+});

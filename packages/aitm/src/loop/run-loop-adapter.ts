@@ -36,7 +36,7 @@ import {
   withReminders,
   writeFileTool,
 } from '@developerz.ai/ai-claude-compat';
-import { type Tool, type ToolSet, tool } from 'ai';
+import { type ModelMessage, type Tool, type ToolSet, tool } from 'ai';
 import { z } from 'zod';
 // Type-only import — no runtime cycle with commands.ts, which imports this module's value.
 import type { RunLoopInput } from '../cli/commands.ts';
@@ -54,7 +54,13 @@ import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { Plan } from '../plan/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
 import { appendGroupDigest, type GroupDigestEntry } from '../state/rolling-context.ts';
-import type { PrGroup, RunState } from '../state/schema.ts';
+import type { GroupStage, PrGroup, RunState } from '../state/schema.ts';
+import type {
+  RunEndOutcome,
+  TranscriptRecorder,
+  TranscriptStore,
+  TranscriptTarget,
+} from '../state/transcript-store.ts';
 import { buildExploreTool } from '../subagents/explore.ts';
 import { buildMemoryTool, type MemoryToolInput } from '../subagents/memory-tool.ts';
 import {
@@ -160,6 +166,43 @@ async function memoryIndexFor(
 ): Promise<MemoryIndexEntry[]> {
   const dir = state.memoryDir?.();
   return dir ? loadMemoryIndex(dir) : [];
+}
+
+// Resume messages for an interrupted (group, stage) transcript (issue #108) — looked up BEFORE a new
+// recorder is begun for this run, so it can never self-resume from its own fresh (empty) file. Null
+// when there is no store or nothing resumable. Reconstruction failures already return null in-store,
+// so resume never blocks the run.
+async function resumeMessagesFor(
+  store: TranscriptStore | undefined,
+  group: string,
+  stage: GroupStage,
+): Promise<ModelMessage[] | null> {
+  if (!store) return null;
+  const found = await store.findResumable(group, stage);
+  return found ? found.messages : null;
+}
+
+// Map a subagent result kind to the transcript run-end outcome (issue #108).
+function runEndOutcome(kind: string): RunEndOutcome {
+  return kind === 'ok' ? 'submitted' : kind === 'error' ? 'error' : 'no-submission';
+}
+
+// Begin a transcript recorder, best-effort (issue #108 CR): a mkdir/readdir failure in begin() falls
+// back to null instead of aborting the run — transcripts are optional observability, and the recorder
+// itself already swallows write failures. Null store → null (no recording).
+async function beginTranscript(
+  store: TranscriptStore | undefined,
+  target: TranscriptTarget,
+): Promise<TranscriptRecorder | null> {
+  if (!store) return null;
+  try {
+    return await store.begin(target);
+  } catch (err) {
+    process.stderr.write(
+      `warning: transcript begin failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return null;
+  }
 }
 
 // Apply operator-configured PreToolUse/PostToolUse hooks over a resolved tool record (issue #121),
@@ -268,6 +311,9 @@ export type AdapterStatePort = {
   // The per-repo memory dir (issue #118). Optional: a port that omits it turns memory off entirely
   // (no index block, no memory tool). StateStore supplies it in production.
   memoryDir?(): string;
+  // Per-subagent transcript store (issue #108). Optional: a port that omits it records nothing and
+  // resumes nothing, so test stubs are untouched. StateStore supplies it in production.
+  transcripts?(): TranscriptStore;
 };
 
 // Append one group's digest to the live rolling context and persist it (issue #123). Failure-tolerant:
@@ -544,6 +590,8 @@ async function defaultPlanGroups(
   // Planner gets the memory index (issue #118) but no memory tool: its read tools are rooted at the
   // repo cwd, so it reads memory files directly and stays read-only.
   const memoryIndex = await memoryIndexFor(input.state);
+  // Transcript (issue #108): the planner run is recorded (never resumed — it always cold-starts).
+  const plannerRecorder = await beginTranscript(input.state.transcripts?.(), { planner: true });
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
     tools: applyHooks(
@@ -566,6 +614,9 @@ async function defaultPlanGroups(
     }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
+    ...(plannerRecorder
+      ? { onStepFinish: (event) => plannerRecorder.step(event.response.messages, event.usage) }
+      : {}),
   });
   const result = await runPlanner(agent, {
     goal: input.goal,
@@ -574,6 +625,7 @@ async function defaultPlanGroups(
     contextBlock: harnessContextBlock(style),
     ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
   });
+  await plannerRecorder?.end(runEndOutcome(result.kind));
   if (result.kind === 'ok')
     return { kind: 'ok', groups: planToPrGroups(result.plan, input.branch) };
   if (result.kind === 'blocked') return { kind: 'blocked', reason: result.reason };
@@ -658,8 +710,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   });
 
   // Build + run the Reviewer over a thread set in the given worktree. Shared by the prPerTask
-  // autoMergeFlow (runReviewer) and the stage machine (addressReviews).
-  const runReviewerThreads = ({ pr, threads, worktree }: ReviewerInvocation) => {
+  // autoMergeFlow (runReviewer) and the stage machine (addressReviews). The reviewer is recorded
+  // (issue #108) but never resumed — resume applies only to 'working'/'ci-failed'. The per-thread
+  // conversations share one agent, so this records them into one transcript rather than one-per-thread.
+  const runReviewerThreads = async ({ pr, threads, worktree }: ReviewerInvocation) => {
     const github = githubThreadTool(input.github);
     const tools = applyHooks(
       resolveReviewerTools(
@@ -672,6 +726,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       input,
       worktree.path,
     );
+    const recorder = await beginTranscript(state.transcripts?.(), {
+      group: worktree.groupId,
+      stage: 'addressing-reviews',
+    });
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
       tools,
@@ -688,14 +746,19 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       }),
       timeout: stepTimeout,
       ...(reviewerUsage ? { onUsage: reviewerUsage } : {}),
+      ...(recorder
+        ? { onStepFinish: (event) => recorder.step(event.response.messages, event.usage) }
+        : {}),
     });
-    return runReviewerSubagent(agent, {
+    const result = await runReviewerSubagent(agent, {
       pr,
       threads,
       worktreePath: worktree.path,
       styleContents: style,
       contextBlock: harnessContextBlock(style),
     });
+    await recorder?.end(runEndOutcome(result.kind));
+    return result;
   };
 
   return {
@@ -716,6 +779,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         worktree.path,
       );
       const memoryIndex = await memoryIndexFor(state);
+      // Transcript (issue #108): resume from an interrupted 'working' transcript for this group if one
+      // exists — looked up BEFORE we begin the new one so it can't self-resume — then record this run.
+      const store = state.transcripts?.();
+      const resumeMessages = await resumeMessagesFor(store, group.id, 'working');
+      const recorder = await beginTranscript(store, { group: group.id, stage: 'working' });
       // Regular Worker: web_search only when explicitly enabled (webSearch: true).
       const providerOptions = webSearchProviderOptions(input.resolved.webSearch, false);
       const agent = createWorkerAgent({
@@ -736,8 +804,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         timeout: stepTimeout,
         ...(providerOptions !== undefined ? { providerOptions } : {}),
         ...(workerUsage ? { onUsage: workerUsage } : {}),
+        ...(recorder
+          ? { onStepFinish: (event) => recorder.step(event.response.messages, event.usage) }
+          : {}),
       });
-      return runWorkerSubagent(agent, {
+      const result = await runWorkerSubagent(agent, {
         group,
         ...(task ? { task } : {}),
         worktreePath: worktree.path,
@@ -748,7 +819,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         contextBlock: harnessContextBlock(style),
         ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
         ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
+        // Resume (issue #108): continue the interrupted conversation from its retained messages
+        // instead of cold-starting, reusing the #107 priorHandle continuation seam.
+        ...(resumeMessages ? { priorHandle: { agent, messages: resumeMessages } } : {}),
       });
+      await recorder?.end(runEndOutcome(result.kind));
+      return result;
     },
     finalizeCommit: (group, delivery, worktreePath) =>
       orch.finalizeCommit(group, delivery, worktreePath),
@@ -778,6 +854,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         input.credentials.modelIdForCapability('coding'),
       );
       const ciFixMemoryIndex = await memoryIndexFor(state);
+      // Transcript (issue #108): resume an interrupted ci-fix transcript when no in-memory handle
+      // survived (fresh process), and record this fix pass. Look up before begin so it can't
+      // self-resume; the in-memory priorHandle still wins over a transcript inside ci-fix.
+      const ciStore = state.transcripts?.();
+      const ciResume = priorHandle ? null : await resumeMessagesFor(ciStore, group.id, 'ci-failed');
+      const ciRecorder = await beginTranscript(ciStore, { group: group.id, stage: 'ci-failed' });
       const result = await runFixSession({
         github: input.github,
         prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
@@ -810,6 +892,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           ...(ciFixUsage ? { onUsage: ciFixUsage } : {}),
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
+          ...(ciRecorder
+            ? { onStepFinish: (event) => ciRecorder.step(event.response.messages, event.usage) }
+            : {}),
+          ...(ciResume ? { resumeMessages: ciResume } : {}),
         },
         group,
         pr,
@@ -818,6 +904,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         allowForcePush: input.resolved.allowForcePush,
         ...(priorHandle ? { priorHandle } : {}),
       });
+      await ciRecorder?.end(result.kind === 'fixed' ? 'submitted' : 'no-submission');
       if (result.kind === 'fixed') {
         // Retain this pass's conversation so the next fix pass for the group continues it (#107).
         ciFixHandles.set(group.id, result.handle);

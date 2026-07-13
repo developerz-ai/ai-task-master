@@ -418,6 +418,27 @@ test('cleanupOnSuccess preserves memory/ alongside logs/ (issue #118)', async ()
   }
 });
 
+test('cleanupOnSuccess removes transcripts/ along with the rest of the state dir (issue #108)', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+    // Record a transcript, then confirm cleanup wipes it (unlike logs/ and memory/, it is not exempt).
+    const rec = await store.transcripts().begin({ group: 'core', stage: 'working' });
+    await rec.step([{ role: 'user', content: 'goal' }]);
+    assert.ok(await readFile(join(dir, 'transcripts', 'core', 'working-1.jsonl'), 'utf8'));
+
+    await store.cleanupOnSuccess();
+
+    const remaining = (await readdir(dir)).sort();
+    assert.ok(!remaining.includes('transcripts'), 'transcripts/ wiped on success');
+    assert.deepEqual(remaining, ['logs']);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('cleanupOnSuccess is a no-op when stateDir does not exist', async () => {
   const repo = await makeTempRepo();
   try {

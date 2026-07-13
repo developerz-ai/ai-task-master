@@ -17,7 +17,7 @@
 // loop and decide what to do with the result (advance to waiting-ci, or block).
 
 import type { MemoryIndexEntry, SubagentHandle } from '@developerz.ai/ai-claude-compat';
-import type { LanguageModel, TimeoutConfiguration } from 'ai';
+import type { LanguageModel, ModelMessage, TimeoutConfiguration } from 'ai';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../config/schema.ts';
 import { defaultRunCmd, type RunCmd, type RunCmdResult } from '../github/github-client.ts';
@@ -89,6 +89,12 @@ export type FixSessionSubagents = {
   rollingContext?: string;
   // Per-repo memory index injected into the fix Worker's prompt (issue #118). Unset → no memory block.
   memoryIndex?: readonly MemoryIndexEntry[];
+  // Per-step transcript recorder callback (issue #108), forwarded to the fix Worker agent. Unset →
+  // nothing recorded.
+  onStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
+  // Reconstructed messages from an interrupted ci-fix transcript (issue #108). When present and no
+  // in-memory priorHandle exists, the fix Worker resumes from them instead of cold-starting.
+  resumeMessages?: readonly ModelMessage[];
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
@@ -200,7 +206,7 @@ function buildFixTask(
 
 async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerResult> {
   const { subagents, group, baseBranch, worktreePath } = input;
-  const workerInput: WorkerInput = {
+  const baseInput: WorkerInput = {
     group,
     task,
     worktreePath,
@@ -210,9 +216,13 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
     ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),
-    ...(input.priorHandle ? { priorHandle: input.priorHandle } : {}),
   };
-  if (subagents.runWorkerOverride) return subagents.runWorkerOverride(workerInput);
+  if (subagents.runWorkerOverride) {
+    return subagents.runWorkerOverride({
+      ...baseInput,
+      ...(input.priorHandle ? { priorHandle: input.priorHandle } : {}),
+    });
+  }
   // Summarize-and-continue when the coding-tier context window fills (issue #102).
   const prepareStep = subagents.compactor
     ? buildCompactionStep<WorkerTools>({
@@ -238,8 +248,17 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
       ? { providerOptions: subagents.providerOptions }
       : {}),
     ...(subagents.onUsage !== undefined ? { onUsage: subagents.onUsage } : {}),
+    ...(subagents.onStepFinish ? { onStepFinish: subagents.onStepFinish } : {}),
   });
-  return runWorker(agent, workerInput);
+  // priorHandle precedence (issue #108): an in-memory handle from an earlier pass this run wins;
+  // otherwise, resume from an interrupted transcript's messages (built against this fresh agent).
+  const priorHandle =
+    input.priorHandle ??
+    (subagents.resumeMessages ? { agent, messages: [...subagents.resumeMessages] } : undefined);
+  return runWorker(agent, {
+    ...baseInput,
+    ...(priorHandle ? { priorHandle } : {}),
+  });
 }
 
 // The one push path for the whole repo: rebase onto origin/<base>, then `git push --force-with-lease`

@@ -180,6 +180,10 @@ export const ConfigFileSchema = z
     // patterns. aitm-config-only (project > global); the Claude Code interop sources contribute
     // mcpServers alone. See src/mcp/schema.ts and src/mcp/mcp-client.ts.
     mcpRoleAllowlist: McpRoleAllowlistSchema.optional(),
+    // Defer a role's MCP tools to name-only stubs + `tool_search` once their count exceeds this
+    // (issue #119), keeping their JSON schemas out of every request. Default 20; 0 = always defer.
+    // aitm-config-only (project > global). See src/mcp/mcp-client.ts and src/mcp/tool-search.ts.
+    mcpDeferToolsOver: z.number().int().min(0).optional(),
     // PreToolUse/PostToolUse shell hooks on the tool registry (issue #121). Hooks run shell commands
     // with operator privileges, so they are honored ONLY from the user-owned global config
     // (~/.aitm.json); the same key in a repo-shippable project config is parsed but ignored + warned.
@@ -256,6 +260,9 @@ export type ResolvedConfig = {
   // Per-role MCP allowlist (issue #115), aitm-config-only (project > global). Undefined → every role
   // gets every connected server. Passed into McpClientManager.
   mcpRoleAllowlist?: import('../mcp/schema.ts').McpRoleAllowlist | undefined;
+  // Threshold above which a role's MCP tools are deferred (issue #119). Default
+  // DEFAULT_MCP_DEFER_TOOLS_OVER; 0 = always defer. Passed into McpClientManager.
+  mcpDeferToolsOver: number;
   // Tool-registry hooks (issue #121). Global config only (~/.aitm.json) — project hooks are ignored
   // as a code-execution trust boundary. Undefined → no hooks; behavior unchanged. Applied over the
   // resolved tool records in run-loop-adapter via withHooks.

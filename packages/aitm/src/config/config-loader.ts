@@ -9,6 +9,7 @@ import { ZodError, z } from 'zod';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../loop/constants.ts';
+import { DEFAULT_MCP_DEFER_TOOLS_OVER } from '../mcp/mcp-client.ts';
 import { type McpServers, McpServersSchema } from '../mcp/schema.ts';
 import { DEFAULT_LLM_STEP_TIMEOUT_MS } from '../subagents/factory.ts';
 import {
@@ -55,6 +56,7 @@ const KNOWN_KEYS = new Set<string>([
   'reasoningEffort',
   'mcpServers',
   'mcpRoleAllowlist',
+  'mcpDeferToolsOver',
   'hooks',
 ]);
 
@@ -85,6 +87,7 @@ const DEFAULTS = {
   logLevel: 'info' as const,
   concurrency: 1,
   allowForcePush: true,
+  mcpDeferToolsOver: DEFAULT_MCP_DEFER_TOOLS_OVER,
 };
 
 type WarnFn = (msg: string) => void;
@@ -249,6 +252,14 @@ export class ConfigLoader {
       ...((project?.mcpRoleAllowlist ?? global?.mcpRoleAllowlist)
         ? { mcpRoleAllowlist: project?.mcpRoleAllowlist ?? global?.mcpRoleAllowlist }
         : {}),
+      // Defer-tools threshold — aitm config only, project over global (issue #119). pick() treats a
+      // configured 0 as set (!== undefined), so "always defer" survives the default.
+      mcpDeferToolsOver: pick(
+        undefined,
+        project?.mcpDeferToolsOver,
+        global?.mcpDeferToolsOver,
+        DEFAULTS.mcpDeferToolsOver,
+      ),
       // Tool-registry hooks (issue #121). Hooks run shell commands with the operator's privileges, so
       // they are honored ONLY from the user-owned global config (~/.aitm.json) — NEVER from the
       // per-repo project config, which an untrusted repo could ship (CR: arbitrary code execution). A

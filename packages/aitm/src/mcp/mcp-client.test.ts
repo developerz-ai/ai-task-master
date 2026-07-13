@@ -409,3 +409,79 @@ test('http transport propagates headers through client config', async () => {
   assert.equal(transport.url, 'https://example.com/mcp');
   assert.equal(transport.headers?.Authorization, 'Bearer xyz');
 });
+
+// ---- toolSurfaceForRole: deferred-loading split (issue #119) ----
+
+test('toolSurfaceForRole: at or below the threshold, every tool mounts direct — no deferral (issue #119)', async () => {
+  const { createClient } = recordingFactory({ srv: { a: fakeTool(), b: fakeTool() } });
+  const m = new McpClientManager({
+    servers: { srv: { command: 'x' } },
+    deferToolsOver: 2,
+    createClient,
+  });
+  await m.connectAll();
+  const surface = m.toolSurfaceForRole('worker');
+  assert.deepEqual(Object.keys(surface.direct).sort(), ['mcp__srv__a', 'mcp__srv__b']);
+  assert.deepEqual(surface.deferred, {});
+  await m.close();
+});
+
+test('toolSurfaceForRole: above the threshold, the whole surplus defers (issue #119)', async () => {
+  const { createClient } = recordingFactory({
+    srv: { a: fakeTool(), b: fakeTool(), c: fakeTool() },
+  });
+  const m = new McpClientManager({
+    servers: { srv: { command: 'x' } },
+    deferToolsOver: 2,
+    createClient,
+  });
+  await m.connectAll();
+  const surface = m.toolSurfaceForRole('worker');
+  assert.deepEqual(surface.direct, {});
+  assert.deepEqual(Object.keys(surface.deferred).sort(), [
+    'mcp__srv__a',
+    'mcp__srv__b',
+    'mcp__srv__c',
+  ]);
+  await m.close();
+});
+
+test('toolSurfaceForRole: threshold 0 always defers any surplus (issue #119)', async () => {
+  const { createClient } = recordingFactory({ srv: { only: fakeTool() } });
+  const m = new McpClientManager({
+    servers: { srv: { command: 'x' } },
+    deferToolsOver: 0,
+    createClient,
+  });
+  await m.connectAll();
+  const surface = m.toolSurfaceForRole('worker');
+  assert.deepEqual(surface.direct, {});
+  assert.deepEqual(Object.keys(surface.deferred), ['mcp__srv__only']);
+  await m.close();
+});
+
+test('toolSurfaceForRole: no threshold set uses the default (20) — a small registry stays direct (issue #119)', async () => {
+  const { createClient } = recordingFactory({ srv: { a: fakeTool() } });
+  const m = new McpClientManager({ servers: { srv: { command: 'x' } }, createClient });
+  await m.connectAll();
+  const surface = m.toolSurfaceForRole('worker');
+  assert.deepEqual(Object.keys(surface.direct), ['mcp__srv__a']);
+  assert.deepEqual(surface.deferred, {});
+  await m.close();
+});
+
+test('toolSurfaceForRole: the split honors the per-role allowlist (issue #119)', async () => {
+  const { createClient } = recordingFactory({ a: { x: fakeTool() }, b: { y: fakeTool() } });
+  const m = new McpClientManager({
+    servers: { a: { command: 'x' }, b: { command: 'y' } },
+    roleAllowlist: { worker: ['a'] },
+    deferToolsOver: 0,
+    createClient,
+  });
+  await m.connectAll();
+  const surface = m.toolSurfaceForRole('worker');
+  // Only server `a` is mounted for the worker, so only its tool appears — then defers at threshold 0.
+  assert.deepEqual(Object.keys(surface.deferred), ['mcp__a__x']);
+  assert.deepEqual(surface.direct, {});
+  await m.close();
+});

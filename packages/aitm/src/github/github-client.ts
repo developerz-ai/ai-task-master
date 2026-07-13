@@ -81,9 +81,11 @@ export const defaultSleep: Sleep = (ms) =>
 export const CHECKS_INITIAL_DELAY_MS = 1000;
 export const CHECKS_MAX_DELAY_MS = 60_000;
 // Hard ceiling on how long waitForChecks polls before giving up — ports claude-task-master's
-// wait_for_ci_complete 90-minute timeout. Reaching it is the only remaining throw path now that
-// failures are returned, not thrown (hence CiFailed is kept strictly for the timeout case).
-export const CHECKS_TIMEOUT_MS = 90 * 60_000;
+// CI_POLL_TIMEOUT (120 min). Big CIs can run for a long time; reaching this is the only remaining
+// throw path now that failures are returned, not thrown (hence CiFailed is kept strictly for the
+// timeout case). On timeout the caller blocks rather than merging a PR whose CI never finished,
+// unless --admin is set — see handleWaitingCi.
+export const CHECKS_TIMEOUT_MS = 120 * 60_000;
 
 // waitForChecks collapses the per-check buckets into one of three states; callers branch on it
 // instead of catching a throw. failedChecks is populated only when state is 'failure' (one entry

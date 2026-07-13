@@ -475,6 +475,7 @@ export class WorkLoop {
       orchestrator,
       github,
       state: this.deps.state,
+      adminMerge: this.deps.adminMerge ?? false,
       ...(this.deps.prContext ? { prContext: this.deps.prContext } : {}),
       ...(this.deps.sleep ? { sleep: this.deps.sleep } : {}),
     };

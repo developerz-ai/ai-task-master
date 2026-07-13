@@ -23,9 +23,9 @@ import type { Capability } from '../config/schema.ts';
 // `baseURL` (a non-OpenRouter endpoint) also drops caching — cache_control is an OpenRouter directive.
 export const DEFAULT_MODELS: Record<Capability, string> = {
   fast: 'anthropic/claude-haiku-4.5',
-  generic: 'anthropic/claude-sonnet-4.6',
-  smart: 'anthropic/claude-opus-4.7',
-  coding: 'anthropic/claude-opus-4.7',
+  generic: 'anthropic/claude-sonnet-5',
+  smart: 'anthropic/claude-opus-4.8',
+  coding: 'anthropic/claude-opus-4.8',
 };
 
 // Recommended reasoning-effort tiers (issue #125) — DOCUMENTED, not defaulted. Shipping a default

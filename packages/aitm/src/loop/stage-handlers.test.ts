@@ -217,7 +217,7 @@ test('handleWaitingCi: does not wait the review grace when CI is not success', a
   assert.deepEqual(slept, []);
 });
 
-test('handleWaitingCi: CiFailed → ci-failed', async () => {
+test('handleWaitingCi: CiFailed timeout → blocked (no admin)', async () => {
   const deps = makeDeps({
     github: makeGithub({
       waitForChecks: async () => {
@@ -225,7 +225,22 @@ test('handleWaitingCi: CiFailed → ci-failed', async () => {
       },
     }),
   });
-  assert.equal(await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })), 'ci-failed');
+  assert.equal(await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })), 'blocked');
+});
+
+test('handleWaitingCi: CiFailed timeout → waiting-reviews with --admin', async () => {
+  const deps = makeDeps({
+    adminMerge: true,
+    github: makeGithub({
+      waitForChecks: async () => {
+        throw new CiFailed('boom');
+      },
+    }),
+  });
+  assert.equal(
+    await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })),
+    'waiting-reviews',
+  );
 });
 
 test('handleWaitingCi: non-success status → ci-failed', async () => {

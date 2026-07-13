@@ -17,8 +17,8 @@ test('CI_START_WAIT: 60 second grace period before initial CI poll', () => {
   assert.equal(CI_START_WAIT, 60_000);
 });
 
-test('CI_POLL_TIMEOUT: 10 minute total timeout', () => {
-  assert.equal(CI_POLL_TIMEOUT, 600_000);
+test('CI_POLL_TIMEOUT: 120 minute total timeout', () => {
+  assert.equal(CI_POLL_TIMEOUT, 7_200_000);
 });
 
 test('MERGE_STATE_WAIT: 60 second grace before checking merge state', () => {

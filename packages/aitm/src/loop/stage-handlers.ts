@@ -79,6 +79,10 @@ export type StageDeps = {
   // Delay primitive for the post-CI review grace. Optional — defaults to a real timer; tests inject
   // a no-op so they don't block on the 2-minute wait.
   sleep?: Sleep;
+  // When true, a CI-poll timeout force-advances to reviews (a policy override) instead of blocking.
+  // Threaded from `--admin`. Default false: a timeout blocks rather than merging a PR whose CI never
+  // finished. Only affects the timeout path — a real CI failure still routes to the fix loop.
+  adminMerge?: boolean;
 };
 
 export type StageHandler = (deps: StageDeps, group: PrGroup) => Promise<GroupStage>;
@@ -101,8 +105,9 @@ export const handlePrOpen: StageHandler = async (deps, group) => {
   return 'waiting-ci';
 };
 
-// waiting-ci: block on checks. Success → review; a 'failure'/'pending' state or a CiFailed timeout
-// → ci-failed for the fix loop.
+// waiting-ci: block on checks. Success → review; a 'failure' state → ci-failed for the fix loop. A
+// CiFailed timeout (CI never finished within CHECKS_TIMEOUT_MS) → block, so we don't merge a PR whose
+// CI never completed — unless --admin is set, which force-advances to reviews as a policy override.
 export const handleWaitingCi: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'waiting-ci');
   try {
@@ -114,7 +119,7 @@ export const handleWaitingCi: StageHandler = async (deps, group) => {
     await (deps.sleep ?? defaultSleep)(REVIEW_COMMENTS_GRACE);
     return 'waiting-reviews';
   } catch (err) {
-    if (err instanceof CiFailed) return 'ci-failed';
+    if (err instanceof CiFailed) return deps.adminMerge ? 'waiting-reviews' : 'blocked';
     throw err;
   }
 };

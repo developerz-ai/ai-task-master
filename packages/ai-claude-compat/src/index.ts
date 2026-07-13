@@ -117,6 +117,13 @@ export {
   globToRegExp,
   grepTool,
 } from './search-tools.ts';
+export {
+  SKILL_INVOCATION_CONTRACT,
+  type SkillToolInput,
+  type SkillToolOutput,
+  skillIndexBlock,
+  skillTool,
+} from './skill-tool.ts';
 export { loadSkills, type SkillDefinition } from './skills-loader.ts';
 export {
   callWithStepTimeout,

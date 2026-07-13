@@ -4,7 +4,7 @@
 
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { asString, parseFrontmatter } from './frontmatter.ts';
+import { asString, type FrontmatterValue, parseFrontmatter } from './frontmatter.ts';
 
 export type SkillDefinition = {
   name: string;
@@ -13,6 +13,9 @@ export type SkillDefinition = {
   body: string;
   // Absolute path to the SKILL.md, for reading sibling files the skill references.
   path: string;
+  // Every frontmatter key other than name/description (e.g. `allowed-tools`,
+  // `disable-model-invocation`), so callers can honor them (issue #120).
+  extra: Record<string, FrontmatterValue>;
 };
 
 // Load every skill under `<claudeDir>/skills/*/SKILL.md`. `claudeDir` is a `.claude` directory.
@@ -29,11 +32,16 @@ export async function loadSkills(claudeDir: string): Promise<SkillDefinition[]> 
     const content = await readFile(path, 'utf8').catch(() => null);
     if (content === null) continue;
     const { data, body } = parseFrontmatter(content);
+    const extra: Record<string, FrontmatterValue> = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (key !== 'name' && key !== 'description') extra[key] = value;
+    }
     skills.push({
       name: asString(data.name) || entry.name,
       description: asString(data.description),
       body: body.trim(),
       path,
+      extra,
     });
   }
   skills.sort((a, b) => a.name.localeCompare(b.name));

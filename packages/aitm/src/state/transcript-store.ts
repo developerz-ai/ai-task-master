@@ -87,7 +87,10 @@ export function reconstructTranscript(
 class FileRecorder implements TranscriptRecorder {
   private chain: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly file: string) {}
+  constructor(
+    private readonly file: string,
+    private readonly onWarn: (message: string) => void,
+  ) {}
 
   step(messages: readonly ModelMessage[], usage?: LanguageModelUsage): Promise<void> {
     return this.append({ kind: 'step', messages, ...(usage ? { usage } : {}) });
@@ -101,10 +104,19 @@ class FileRecorder implements TranscriptRecorder {
     return this.append({ kind: 'run-end', outcome });
   }
 
+  // Best-effort (issue #108 CR): a serialize or disk failure warns and resolves — a transcript write
+  // must never reject into and abort the agent loop. The serialize runs inside the try so a
+  // synchronous JSON.stringify failure is caught too, and the chain still advances so ordering holds.
   private append(record: Record<string, unknown>): Promise<void> {
-    const line = `${JSON.stringify(Logger.redact({ ts: new Date().toISOString(), ...record }))}\n`;
-    const step = this.chain.then(() => appendFile(this.file, line));
-    this.chain = step.catch(() => undefined);
+    const step = this.chain.then(async () => {
+      try {
+        const line = `${JSON.stringify(Logger.redact({ ts: new Date().toISOString(), ...record }))}\n`;
+        await appendFile(this.file, line);
+      } catch (err) {
+        this.onWarn(`transcript write failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+    this.chain = step;
     return step;
   }
 }
@@ -127,7 +139,7 @@ export class TranscriptStore {
     const dir = join(this.dir(), subdir);
     await mkdir(dir, { recursive: true });
     const ordinal = await this.nextOrdinal(dir, prefix);
-    return new FileRecorder(join(dir, `${prefix}-${ordinal}.jsonl`));
+    return new FileRecorder(join(dir, `${prefix}-${ordinal}.jsonl`), this.onWarn);
   }
 
   private async nextOrdinal(dir: string, prefix: string): Promise<number> {

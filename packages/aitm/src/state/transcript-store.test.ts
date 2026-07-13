@@ -121,13 +121,46 @@ test('records redact key/token/secret/authorization fields before serialization'
   try {
     const store = new TranscriptStore(dir);
     const rec = await store.begin({ group: 'g', stage: 'working' });
+    // A real assistant tool-call whose input nests an `authorization` field — a valid ModelMessage,
+    // so no `as unknown as` (banned by CLAUDE.md); redact recurses into the input and masks it.
     await rec.step([
-      { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
-      { authorization: 'Bearer sk-secret' } as unknown as ModelMessage,
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'c',
+            toolName: 'fetch',
+            input: { authorization: 'Bearer sk-secret' },
+          },
+        ],
+      },
     ]);
     const raw = await readFile(join(dir, 'transcripts', 'g', 'working-1.jsonl'), 'utf8');
     assert.match(raw, /\[REDACTED\]/);
     assert.ok(!raw.includes('sk-secret'), 'secret value not persisted');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a transcript write that fails to serialize warns and resolves — never rejects into the agent loop (issue #108 CR)', async () => {
+  const dir = await tmp();
+  const warns: string[] = [];
+  try {
+    const store = new TranscriptStore(dir, (m) => warns.push(m));
+    const rec = await store.begin({ group: 'g', stage: 'working' });
+    // A BigInt makes JSON.stringify throw; append() must catch it, warn, and resolve — not reject.
+    await rec.step([
+      {
+        role: 'assistant',
+        content: [{ type: 'tool-call', toolCallId: 'c', toolName: 't', input: { big: 1n } }],
+      },
+    ]);
+    assert.ok(
+      warns.some((w) => /transcript write failed/.test(w)),
+      'the serialize failure warned instead of throwing',
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

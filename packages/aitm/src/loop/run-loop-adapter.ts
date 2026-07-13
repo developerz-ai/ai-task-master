@@ -55,7 +55,12 @@ import type { Plan } from '../plan/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
 import { appendGroupDigest, type GroupDigestEntry } from '../state/rolling-context.ts';
 import type { GroupStage, PrGroup, RunState } from '../state/schema.ts';
-import type { RunEndOutcome, TranscriptStore } from '../state/transcript-store.ts';
+import type {
+  RunEndOutcome,
+  TranscriptRecorder,
+  TranscriptStore,
+  TranscriptTarget,
+} from '../state/transcript-store.ts';
 import { buildExploreTool } from '../subagents/explore.ts';
 import { buildMemoryTool, type MemoryToolInput } from '../subagents/memory-tool.ts';
 import {
@@ -180,6 +185,24 @@ async function resumeMessagesFor(
 // Map a subagent result kind to the transcript run-end outcome (issue #108).
 function runEndOutcome(kind: string): RunEndOutcome {
   return kind === 'ok' ? 'submitted' : kind === 'error' ? 'error' : 'no-submission';
+}
+
+// Begin a transcript recorder, best-effort (issue #108 CR): a mkdir/readdir failure in begin() falls
+// back to null instead of aborting the run — transcripts are optional observability, and the recorder
+// itself already swallows write failures. Null store → null (no recording).
+async function beginTranscript(
+  store: TranscriptStore | undefined,
+  target: TranscriptTarget,
+): Promise<TranscriptRecorder | null> {
+  if (!store) return null;
+  try {
+    return await store.begin(target);
+  } catch (err) {
+    process.stderr.write(
+      `warning: transcript begin failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return null;
+  }
 }
 
 // Apply operator-configured PreToolUse/PostToolUse hooks over a resolved tool record (issue #121),
@@ -568,9 +591,7 @@ async function defaultPlanGroups(
   // repo cwd, so it reads memory files directly and stays read-only.
   const memoryIndex = await memoryIndexFor(input.state);
   // Transcript (issue #108): the planner run is recorded (never resumed — it always cold-starts).
-  const plannerRecorder = input.state.transcripts
-    ? await input.state.transcripts().begin({ planner: true })
-    : null;
+  const plannerRecorder = await beginTranscript(input.state.transcripts?.(), { planner: true });
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
     tools: applyHooks(
@@ -705,10 +726,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       input,
       worktree.path,
     );
-    const store = state.transcripts?.();
-    const recorder = store
-      ? await store.begin({ group: worktree.groupId, stage: 'addressing-reviews' })
-      : null;
+    const recorder = await beginTranscript(state.transcripts?.(), {
+      group: worktree.groupId,
+      stage: 'addressing-reviews',
+    });
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
       tools,
@@ -762,7 +783,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // exists — looked up BEFORE we begin the new one so it can't self-resume — then record this run.
       const store = state.transcripts?.();
       const resumeMessages = await resumeMessagesFor(store, group.id, 'working');
-      const recorder = store ? await store.begin({ group: group.id, stage: 'working' }) : null;
+      const recorder = await beginTranscript(store, { group: group.id, stage: 'working' });
       // Regular Worker: web_search only when explicitly enabled (webSearch: true).
       const providerOptions = webSearchProviderOptions(input.resolved.webSearch, false);
       const agent = createWorkerAgent({
@@ -838,9 +859,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // self-resume; the in-memory priorHandle still wins over a transcript inside ci-fix.
       const ciStore = state.transcripts?.();
       const ciResume = priorHandle ? null : await resumeMessagesFor(ciStore, group.id, 'ci-failed');
-      const ciRecorder = ciStore
-        ? await ciStore.begin({ group: group.id, stage: 'ci-failed' })
-        : null;
+      const ciRecorder = await beginTranscript(ciStore, { group: group.id, stage: 'ci-failed' });
       const result = await runFixSession({
         github: input.github,
         prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),

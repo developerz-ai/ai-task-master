@@ -232,7 +232,31 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
         exitCode: raw.exitCode,
       };
     },
+    // Plain-text: stdout, then a stderr section / exit-code line only when relevant (issue #127).
+    toModelOutput: ({ output }) => ({ type: 'text', value: renderBashSection(output) }),
   });
+}
+
+// Shared plain-text rendering for a single command result (issue #127): stdout, a `stderr:` section
+// only when stderr is non-empty, an `exit code: N` line only when non-zero, and `(no output)` when
+// nothing ran to show (empty stdout+stderr on a clean exit).
+function renderBashSection(o: { stdout: string; stderr: string; exitCode: number }): string {
+  const parts: string[] = [];
+  if (o.stdout !== '') parts.push(o.stdout);
+  if (o.stderr !== '') parts.push(`stderr:\n${o.stderr}`);
+  if (o.exitCode !== 0) parts.push(`exit code: ${o.exitCode}`);
+  return parts.length > 0 ? parts.join('\n') : '(no output)';
+}
+
+// Plain-text rendering for a multi-command run (issue #127): one labeled section per command that
+// ran, and — when the sequence stopped on a failure — a line naming the failing command's index.
+function renderMultiBash(output: MultiBashOutput): string {
+  const sections = output.results.map((r) => `$ ${r.command}\n${renderBashSection(r)}`);
+  if (output.failedAt !== null) {
+    const failed = output.results[output.failedAt];
+    sections.push(`[command #${output.failedAt + 1} failed${failed ? `: ${failed.command}` : ''}]`);
+  }
+  return sections.length > 0 ? sections.join('\n\n') : '(no output)';
 }
 
 // Run a sequence of commands one after another, each in a fresh `bash -c` with cwd reset to the
@@ -272,5 +296,6 @@ export function multiBashTool(init: BashToolInit): Tool<MultiBashInput, MultiBas
       }
       return { results, exitCode: 0, failedAt: null };
     },
+    toModelOutput: ({ output }) => ({ type: 'text', value: renderMultiBash(output) }),
   });
 }

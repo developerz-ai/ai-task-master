@@ -36,6 +36,32 @@ async function run<I, O>(t: { execute?: unknown }, input: I): Promise<O> {
   )) as O;
 }
 
+function textOf(t: { toModelOutput?: unknown }, input: unknown, output: unknown): string {
+  const fn = t.toModelOutput;
+  if (typeof fn !== 'function') throw new Error('tool has no toModelOutput');
+  const part = (
+    fn as (o: { toolCallId: string; input: unknown; output: unknown }) => {
+      type: string;
+      value: string;
+    }
+  )({ toolCallId: 'c', input, output });
+  assert.equal(part.type, 'text');
+  return part.value;
+}
+
+test('toModelOutput: edit/multiEdit confirm the replacement count and carry the numbered snippet (issue #127)', () => {
+  const { edit, multiEdit } = tools('/tmp/x');
+  const one = textOf(
+    edit,
+    { path: 'a.ts' },
+    { ok: true, replacements: 1, snippet: '1\tconst a = 2' },
+  );
+  assert.match(one, /Applied 1 replacement to a\.ts\./);
+  assert.match(one, /1\tconst a = 2/, 'numbered snippet included verbatim');
+  const many = textOf(multiEdit, { path: 'b.ts' }, { ok: true, replacements: 3, snippet: '4\tx' });
+  assert.match(many, /Applied 3 replacements to b\.ts\./, 'plural count');
+});
+
 // ---- applyEdit (pure) ----
 
 test('applyEdit: replaces a unique occurrence', () => {

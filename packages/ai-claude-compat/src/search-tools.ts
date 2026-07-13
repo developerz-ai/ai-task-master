@@ -145,7 +145,19 @@ export function grepTool(init: ToolInit): Tool<GrepInput, GrepOutput> {
       }
       return { matches, truncated };
     },
+    // Newline-joined matches as plain text, not a JSON array (issue #127).
+    toModelOutput: ({ output }) => ({
+      type: 'text',
+      value: renderSearchOutput(output.matches, output.truncated),
+    }),
   });
+}
+
+// Shared plain-text rendering for grep/glob (issue #127): the entries newline-joined, with an
+// explicit truncation notice line only when the result was capped.
+function renderSearchOutput(items: readonly string[], truncated: boolean): string {
+  const body = items.length > 0 ? items.join('\n') : '(no matches)';
+  return truncated ? `${body}\n[results truncated — refine the query or raise the limit]` : body;
 }
 
 export function globTool(init: ToolInit): Tool<GlobInput, GlobOutput> {
@@ -177,6 +189,10 @@ export function globTool(init: ToolInit): Tool<GlobInput, GlobOutput> {
       );
       return { files: withMtime.map((f) => f.rel), truncated };
     },
+    toModelOutput: ({ output }) => ({
+      type: 'text',
+      value: renderSearchOutput(output.files, output.truncated),
+    }),
   });
 }
 

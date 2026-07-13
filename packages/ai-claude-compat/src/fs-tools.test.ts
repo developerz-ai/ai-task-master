@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { FileStateTracker } from './file-state.ts';
 import { readFileTool, writeFileTool } from './fs-tools.ts';
+import { withReminders } from './system-reminder.ts';
 
 async function tempDir(
   prefix = 'compat-fs-',
@@ -34,6 +35,49 @@ async function run<I, O>(t: { execute?: unknown }, input: I): Promise<O> {
     },
   )) as O;
 }
+
+// Render a tool's model-visible text via its toModelOutput (issue #127), with a synthetic call.
+function textOf(t: { toModelOutput?: unknown }, input: unknown, output: unknown): string {
+  const fn = t.toModelOutput;
+  if (typeof fn !== 'function') throw new Error('tool has no toModelOutput');
+  const part = (
+    fn as (o: { toolCallId: string; input: unknown; output: unknown }) => {
+      type: string;
+      value: string;
+    }
+  )({ toolCallId: 'c', input, output });
+  assert.equal(part.type, 'text');
+  return part.value;
+}
+
+test('toModelOutput: read renders content as raw text (no JSON escaping); write confirms the path (issue #127)', () => {
+  const { read, write } = tools('/tmp/x');
+  const readText = textOf(read, { path: 'a.ts' }, { content: '1\tconst a = 1\n2\tconst b = 2' });
+  assert.equal(readText, '1\tconst a = 1\n2\tconst b = 2', 'raw content, verbatim');
+  assert.ok(!readText.includes('\\n') && !readText.includes('\\t'), 'no literal escape sequences');
+  assert.equal(textOf(write, { path: 'out/x.ts' }, { ok: true }), 'Wrote out/x.ts');
+});
+
+test('toModelOutput composes with #106 withReminders: plain-text base, then the reminder envelope (issue #127)', async () => {
+  const { read } = tools('/tmp/x');
+  const decorated = withReminders(read, () => ['a note']);
+  const fn = decorated.toModelOutput;
+  assert.equal(typeof fn, 'function');
+  // withReminders' toModelOutput is async (it awaits the reminder provider), unlike the sync base.
+  const part = await (
+    fn as (o: { toolCallId: string; input: unknown; output: unknown }) => Promise<{
+      type: string;
+      value: string;
+    }>
+  )({ toolCallId: 'c', input: { path: 'a.ts' }, output: { content: 'raw content' } });
+  assert.equal(part.type, 'text');
+  assert.match(part.value, /^raw content/, 'the #127 plain-text base comes first');
+  assert.match(
+    part.value,
+    /<system-reminder>\na note\n<\/system-reminder>/,
+    'the #106 envelope is appended',
+  );
+});
 
 type ReadIn = { path: string; offset?: number; limit?: number };
 type ReadOut = { content: string };

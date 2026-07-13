@@ -7,6 +7,57 @@ import type { execa } from 'execa';
 import { ProcessManager, type SpawnFn } from './background-process.ts';
 import { type BashOutput, bashTool, MAX_BASH_OUTPUT_CHARS, multiBashTool } from './bash-tool.ts';
 
+function textOf(t: { toModelOutput?: unknown }, input: unknown, output: unknown): string {
+  const fn = t.toModelOutput;
+  if (typeof fn !== 'function') throw new Error('tool has no toModelOutput');
+  const part = (
+    fn as (o: { toolCallId: string; input: unknown; output: unknown }) => {
+      type: string;
+      value: string;
+    }
+  )({ toolCallId: 'c', input, output });
+  assert.equal(part.type, 'text');
+  return part.value;
+}
+
+test('toModelOutput: bash renders stdout/stderr/exit conditionally; clean empty → (no output) (issue #127)', () => {
+  const bash = bashTool({ cwd: '/tmp/x' });
+  assert.equal(
+    textOf(bash, { command: 'x' }, { stdout: 'hello\n', stderr: '', exitCode: 0 }),
+    'hello\n',
+  );
+  assert.equal(
+    textOf(bash, { command: 'x' }, { stdout: '', stderr: '', exitCode: 0 }),
+    '(no output)',
+  );
+  assert.ok(
+    !/exit code/.test(textOf(bash, { command: 'x' }, { stdout: 'ok', stderr: '', exitCode: 0 })),
+    'no exit-code line on success',
+  );
+  const failed = textOf(bash, { command: 'x' }, { stdout: 'out', stderr: 'boom', exitCode: 2 });
+  assert.match(failed, /stderr:\nboom/);
+  assert.match(failed, /exit code: 2/);
+});
+
+test('toModelOutput: multiBash renders labeled per-command sections and names the failing command (issue #127)', () => {
+  const mb = multiBashTool({ cwd: '/tmp/x' });
+  const out = textOf(
+    mb,
+    { commands: ['a', 'b'] },
+    {
+      results: [
+        { command: 'a', stdout: 'ok', stderr: '', exitCode: 0 },
+        { command: 'b', stdout: '', stderr: 'nope', exitCode: 1 },
+      ],
+      exitCode: 1,
+      failedAt: 1,
+    },
+  );
+  assert.match(out, /\$ a\nok/);
+  assert.match(out, /\$ b\nstderr:\nnope\nexit code: 1/);
+  assert.match(out, /\[command #2 failed: b\]/);
+});
+
 async function tempDir(
   prefix = 'compat-bash-',
 ): Promise<{ path: string; cleanup: () => Promise<void> }> {

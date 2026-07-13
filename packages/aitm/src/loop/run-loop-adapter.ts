@@ -29,6 +29,7 @@ import {
   multiEditTool,
   type ReminderProvider,
   readFileTool,
+  SUBMIT_TOOL_NAME,
   type SubagentHandle,
   SYSTEM_REMINDER_CONTRACT,
   type ToolHooks,
@@ -36,14 +37,15 @@ import {
   withReminders,
   writeFileTool,
 } from '@developerz.ai/ai-claude-compat';
-import { type ModelMessage, type Tool, type ToolSet, tool } from 'ai';
+import { type ModelMessage, type Tool, type ToolLoopAgentSettings, type ToolSet, tool } from 'ai';
 import { z } from 'zod';
 // Type-only import — no runtime cycle with commands.ts, which imports this module's value.
 import type { RunLoopInput } from '../cli/commands.ts';
 import { buildCompactionStep } from '../compaction/compaction-step.ts';
 import { Compactor } from '../compaction/compactor.ts';
 import type { GitHubClient } from '../github/github-client.ts';
-import { McpClientManager } from '../mcp/mcp-client.ts';
+import { McpClientManager, type ToolSurface } from '../mcp/mcp-client.ts';
+import { guardDeferred, TOOL_SEARCH_TOOL_NAME, toolSearch } from '../mcp/tool-search.ts';
 import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
@@ -715,17 +717,28 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // conversations share one agent, so this records them into one transcript rather than one-per-thread.
   const runReviewerThreads = async ({ pr, threads, worktree }: ReviewerInvocation) => {
     const github = githubThreadTool(input.github);
+    // Surplus MCP tools beyond the fixed slots reach the Reviewer too, deferred above the threshold
+    // (issue #119). The Reviewer's local `github` glue is a fixed slot, never deferred.
+    const reviewerSurface = mcp.toolSurfaceForRole('reviewer');
+    const reviewerMount = mountDeferredTools(reviewerSurface);
     const tools = applyHooks(
-      resolveReviewerTools(
-        mcp.toolsForRole('reviewer'),
-        worktree.path,
-        github,
-        input.resolved.bashRules,
-        fetchHtmlAvailable,
-      ),
+      {
+        ...resolveReviewerTools(
+          mcp.toolsForRole('reviewer'),
+          worktree.path,
+          github,
+          input.resolved.bashRules,
+          fetchHtmlAvailable,
+        ),
+        ...reviewerMount.extraTools,
+      } as ReviewerTools,
       input,
       worktree.path,
     );
+    const reviewerCompaction = buildCompactionStep<ReviewerTools>({
+      compactor,
+      modelId: input.credentials.modelIdFor('reviewer'),
+    });
     const recorder = await beginTranscript(state.transcripts?.(), {
       group: worktree.groupId,
       stage: 'addressing-reviews',
@@ -733,17 +746,25 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
       tools,
-      systemPrompt: reminderAgentSystemPrompt({
-        style,
-        roleGuidance: REVIEWER_SYSTEM_PREFIX,
-        cwd: worktree.path,
-        maxSteps: REVIEWER_MAX_STEPS,
-        modelId: input.credentials.modelIdFor('reviewer'),
-      }),
-      prepareStep: buildCompactionStep<ReviewerTools>({
-        compactor,
-        modelId: input.credentials.modelIdFor('reviewer'),
-      }),
+      systemPrompt: appendIndexBlock(
+        reminderAgentSystemPrompt({
+          style,
+          roleGuidance: REVIEWER_SYSTEM_PREFIX,
+          cwd: worktree.path,
+          maxSteps: REVIEWER_MAX_STEPS,
+          modelId: input.credentials.modelIdFor('reviewer'),
+        }),
+        reviewerMount.indexBlock,
+      ),
+      prepareStep:
+        reviewerMount.activated === null
+          ? reviewerCompaction
+          : withActiveTools<ReviewerTools>(
+              reviewerCompaction,
+              tools,
+              reviewerMount.deferredNames,
+              reviewerMount.activated,
+            ),
       timeout: stepTimeout,
       ...(reviewerUsage ? { onUsage: reviewerUsage } : {}),
       ...(recorder
@@ -766,18 +787,29 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
       // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
       // memory (#118) is mounted on the manifest Worker so it can record durable repo facts.
+      // Surplus MCP tools beyond the fixed slots are mounted too (issue #119): directly below the
+      // defer threshold, else name-only + `tool_search`.
+      const workerSurface = mcp.toolSurfaceForRole('worker');
+      const workerMount = mountDeferredTools(workerSurface);
       const tools = applyHooks(
-        resolveWorkerTools(
-          mcp.toolsForRole('worker'),
-          worktree.path,
-          input.resolved.bashRules,
-          fetchHtmlAvailable,
-          buildExploreFor(input, worktree.path),
-          memoryToolFor(state),
-        ),
+        {
+          ...resolveWorkerTools(
+            mcp.toolsForRole('worker'),
+            worktree.path,
+            input.resolved.bashRules,
+            fetchHtmlAvailable,
+            buildExploreFor(input, worktree.path),
+            memoryToolFor(state),
+          ),
+          ...workerMount.extraTools,
+        } as WithExplore<WorkerTools> & WithMemory<WorkerTools>,
         input,
         worktree.path,
       );
+      const workerCompaction = buildCompactionStep<WorkerTools>({
+        compactor,
+        modelId: input.credentials.modelIdFor('worker'),
+      });
       const memoryIndex = await memoryIndexFor(state);
       // Transcript (issue #108): resume from an interrupted 'working' transcript for this group if one
       // exists — looked up BEFORE we begin the new one so it can't self-resume — then record this run.
@@ -789,18 +821,26 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
         tools,
-        systemPrompt: reminderAgentSystemPrompt({
-          style,
-          roleGuidance: WORKER_SYSTEM_PREFIX,
-          cwd: worktree.path,
-          maxSteps: WORKER_MAX_STEPS,
-          modelId: input.credentials.modelIdFor('worker'),
-          memoryIndex,
-        }),
-        prepareStep: buildCompactionStep<WorkerTools>({
-          compactor,
-          modelId: input.credentials.modelIdFor('worker'),
-        }),
+        systemPrompt: appendIndexBlock(
+          reminderAgentSystemPrompt({
+            style,
+            roleGuidance: WORKER_SYSTEM_PREFIX,
+            cwd: worktree.path,
+            maxSteps: WORKER_MAX_STEPS,
+            modelId: input.credentials.modelIdFor('worker'),
+            memoryIndex,
+          }),
+          workerMount.indexBlock,
+        ),
+        prepareStep:
+          workerMount.activated === null
+            ? workerCompaction
+            : withActiveTools<WorkerTools>(
+                workerCompaction,
+                tools,
+                workerMount.deferredNames,
+                workerMount.activated,
+              ),
         timeout: stepTimeout,
         ...(providerOptions !== undefined ? { providerOptions } : {}),
         ...(workerUsage ? { onUsage: workerUsage } : {}),
@@ -955,6 +995,110 @@ function mcpBaseName(key: string): string | undefined {
   const parts = key.split('__');
   if (parts.length < 3 || parts[0] !== 'mcp') return undefined;
   return parts.slice(2).join('__');
+}
+
+// Fixed-slot canonical names that resolveWorkerTools/resolvePlannerTools partial-fill. An MCP tool
+// whose base name is one of these is consumed into that slot (never dropped), so it is not part of
+// the "surplus" deferred loading operates on (issue #119).
+const FIXED_SLOT_NAMES = new Set<string>([
+  'readFile',
+  'writeFile',
+  'editFile',
+  'multiEdit',
+  'grep',
+  'glob',
+  'bash',
+  'multiBash',
+  'webFetch',
+  'datetime',
+  'fetchHtml',
+]);
+
+// The role's surplus MCP tools — everything beyond the fixed slots. Deferred loading operates on
+// these; today they are dropped by the fixed-record resolvers (issue #119).
+function surplusMcpTools(set: ToolSet): ToolSet {
+  const out: ToolSet = {};
+  for (const [key, entry] of Object.entries(set)) {
+    if (!FIXED_SLOT_NAMES.has(mcpBaseName(key) ?? key)) out[key] = entry;
+  }
+  return out;
+}
+
+type PrepareStep<TOOLS extends ToolSet> = NonNullable<
+  ToolLoopAgentSettings<never, TOOLS>['prepareStep']
+>;
+
+// Deferred-loading mount for a role (issue #119). Splits the surface's surplus into directly-mounted
+// (full schema) vs. deferred (name-only + `tool_search` + guard). Below the threshold nothing is
+// deferred: the direct surplus still mounts, but there is no tool_search, no index block, and
+// `activated` is null so the caller keeps its plain compaction prepareStep — the surface is
+// byte-identical to today for that role.
+type DeferredMount = {
+  extraTools: ToolSet;
+  indexBlock: string;
+  deferredNames: ReadonlySet<string>;
+  activated: ReadonlySet<string> | null;
+};
+
+export function mountDeferredTools(surface: ToolSurface): DeferredMount {
+  const directSurplus = surplusMcpTools(surface.direct);
+  const deferredSurplus = surplusMcpTools(surface.deferred);
+  const deferredKeys = Object.keys(deferredSurplus);
+  if (deferredKeys.length === 0) {
+    return {
+      extraTools: directSurplus,
+      indexBlock: '',
+      deferredNames: new Set(),
+      activated: null,
+    };
+  }
+  const search = toolSearch(deferredSurplus);
+  const guarded: ToolSet = {};
+  for (const [name, entry] of Object.entries(deferredSurplus)) {
+    guarded[name] = guardDeferred(name, entry, search.activated);
+  }
+  return {
+    extraTools: { ...directSurplus, ...guarded, [TOOL_SEARCH_TOOL_NAME]: search.tool },
+    indexBlock: search.indexBlock,
+    deferredNames: new Set(deferredKeys),
+    activated: search.activated,
+  };
+}
+
+// The active-tool subset for a step: every mounted tool (plus `submit`) except deferred tools not
+// yet activated. Grows as activations accumulate within one invocation.
+export function activeToolNames(
+  tools: ToolSet,
+  deferredNames: ReadonlySet<string>,
+  activated: ReadonlySet<string>,
+): string[] {
+  return [...Object.keys(tools), SUBMIT_TOOL_NAME].filter(
+    (name) => !deferredNames.has(name) || activated.has(name),
+  );
+}
+
+// Compose activeTools onto the #102 compaction prepareStep: one function returns `activeTools` every
+// step and the compaction `messages` override when it triggers (issue #119 §"Activation plumbing").
+// activeTools is recomputed per step so newly activated deferred tools become callable.
+function withActiveTools<TOOLS extends ToolSet>(
+  base: PrepareStep<TOOLS>,
+  tools: ToolSet,
+  deferredNames: ReadonlySet<string>,
+  activated: ReadonlySet<string>,
+): PrepareStep<TOOLS> {
+  return async (options) => {
+    const result = await base(options);
+    return {
+      ...(result ?? {}),
+      activeTools: activeToolNames(tools, deferredNames, activated) as Array<keyof TOOLS>,
+    };
+  };
+}
+
+// Append the deferred-tool index block to a role's system prompt, or return it unchanged when the
+// role has nothing deferred (issue #119).
+function appendIndexBlock(prompt: string, indexBlock: string): string {
+  return indexBlock ? `${prompt}\n\n${indexBlock}` : prompt;
 }
 
 export function resolveWorkerTools(

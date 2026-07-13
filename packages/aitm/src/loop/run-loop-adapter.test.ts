@@ -12,8 +12,10 @@ import { test } from 'node:test';
 import {
   AUTONOMY_CONTRACT_TEXT,
   COMMUNICATION_CONTRACT_TEXT,
+  SUBMIT_TOOL_NAME,
   SYSTEM_REMINDER_CONTRACT,
 } from '@developerz.ai/ai-claude-compat';
+import type { ToolSet } from 'ai';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
@@ -21,6 +23,8 @@ import type { RunLoopInput } from '../cli/commands.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { GitHubClient } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
+import { McpClientManager } from '../mcp/mcp-client.ts';
+import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
@@ -28,6 +32,7 @@ import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import {
   type AdapterStatePort,
+  activeToolNames,
   applyHooks,
   branchFor,
   createRollingContextAccumulator,
@@ -38,6 +43,7 @@ import {
   localEditTools,
   localReadTools,
   mcpTool,
+  mountDeferredTools,
   type PlanGroupsOutcome,
   persistRollingContext,
   planToPrGroups,
@@ -713,7 +719,10 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
     },
     modelIdForCapability: () => 'openai/gpt-5',
   };
-  const mcp = { toolsForRole: () => ({}) };
+  const mcp = {
+    toolsForRole: () => ({}),
+    toolSurfaceForRole: () => ({ direct: {}, deferred: {} }),
+  };
   const input = {
     cwd: '/tmp/adapter-compaction',
     resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
@@ -970,4 +979,108 @@ test('resolvePlannerTools mounts explore only when the caller wires it', () => {
   assert.equal('explore' in withoutExplore, false);
   // The Planner never gets a memory tool — it reads memory files directly (issue #118).
   assert.equal('memory' in withExplore, false, 'planner has no memory tool');
+});
+
+// ---- deferred MCP tool loading (issue #119) ----
+
+function mcpFake(desc: string): ToolSet[string] {
+  return { description: desc, inputSchema: { type: 'object' } } as ToolSet[string];
+}
+
+test('mountDeferredTools: below threshold (nothing deferred) mounts surplus direct, no tool_search (issue #119)', () => {
+  const mount = mountDeferredTools({
+    direct: { mcp__gh__create_issue: mcpFake('Create an issue.') },
+    deferred: {},
+  });
+  assert.deepEqual(Object.keys(mount.extraTools), ['mcp__gh__create_issue']);
+  assert.equal(mount.indexBlock, '');
+  assert.equal(mount.activated, null);
+  assert.equal(mount.deferredNames.size, 0);
+  assert.equal(
+    TOOL_SEARCH_TOOL_NAME in mount.extraTools,
+    false,
+    'no tool_search when nothing deferred',
+  );
+});
+
+test('mountDeferredTools: above threshold defers surplus behind tool_search + a name-only index (issue #119)', () => {
+  const mount = mountDeferredTools({
+    direct: {},
+    deferred: {
+      mcp__gh__create_issue: mcpFake('Create an issue.'),
+      mcp__db__query: mcpFake('Query the DB.'),
+    },
+  });
+  assert.ok(TOOL_SEARCH_TOOL_NAME in mount.extraTools, 'tool_search mounted');
+  assert.ok(
+    'mcp__gh__create_issue' in mount.extraTools,
+    'deferred tool guard-wrapped into the record',
+  );
+  assert.ok('mcp__db__query' in mount.extraTools);
+  assert.match(mount.indexBlock, /mcp__gh__create_issue: Create an issue\./);
+  assert.notEqual(mount.activated, null);
+  assert.deepEqual([...mount.deferredNames].sort(), ['mcp__db__query', 'mcp__gh__create_issue']);
+});
+
+test('mountDeferredTools: fixed-slot-named MCP tools are not surplus — excluded from the mount (issue #119)', () => {
+  const mount = mountDeferredTools({
+    direct: {},
+    deferred: { mcp__fs__readFile: mcpFake('read'), mcp__gh__x: mcpFake('x') },
+  });
+  // readFile is a fixed slot (partial-filled elsewhere) → not deferred here; only true surplus is.
+  assert.deepEqual([...mount.deferredNames], ['mcp__gh__x']);
+  assert.equal('mcp__fs__readFile' in mount.extraTools, false);
+});
+
+test('activeToolNames: hides un-activated deferred tools, always keeps submit + non-deferred (issue #119)', () => {
+  const tools: ToolSet = {
+    readFile: mcpFake('r'),
+    mcp__gh__x: mcpFake('x'),
+    [TOOL_SEARCH_TOOL_NAME]: mcpFake('search'),
+  };
+  const deferredNames = new Set(['mcp__gh__x']);
+  const before = activeToolNames(tools, deferredNames, new Set());
+  assert.equal(before.includes('mcp__gh__x'), false, 'deferred tool inactive until fetched');
+  assert.ok(before.includes('readFile') && before.includes(TOOL_SEARCH_TOOL_NAME));
+  assert.ok(before.includes(SUBMIT_TOOL_NAME), 'submit always active');
+  const after = activeToolNames(tools, deferredNames, new Set(['mcp__gh__x']));
+  assert.ok(after.includes('mcp__gh__x'), 'an activated deferred tool becomes active');
+});
+
+test('deferred loading end-to-end: an over-threshold MCP server surfaces name-only + tool_search on the Worker (issue #119)', async () => {
+  const surplus: ToolSet = {
+    create_issue: mcpFake('Create a GitHub issue.'),
+    list_prs: mcpFake('List PRs.'),
+  };
+  const mcp = new McpClientManager({
+    servers: { gh: { command: 'gh-mcp' } },
+    deferToolsOver: 1, // 2 surplus tools > 1 → deferred
+    createClient: (async () =>
+      ({ tools: async () => surplus, close: async () => {} }) as never) as never,
+  });
+  await mcp.connectAll();
+  const mount = mountDeferredTools(mcp.toolSurfaceForRole('worker'));
+  // resolveWorkerTools fills the fixed slots (local, since the server supplies none); the surplus is
+  // added by the mount — proving tools beyond the fixed slots now reach the Worker (dropped pre-#119).
+  const workerTools: ToolSet = {
+    ...resolveWorkerTools(mcp.toolsForRole('worker'), '/tmp/wt'),
+    ...mount.extraTools,
+  };
+  assert.ok(TOOL_SEARCH_TOOL_NAME in workerTools, 'tool_search reaches the Worker');
+  assert.ok(
+    'mcp__gh__create_issue' in workerTools,
+    'surplus tools reach the Worker (were dropped before #119)',
+  );
+  assert.ok('readFile' in workerTools, 'fixed slots still present');
+  const active = activeToolNames(workerTools, mount.deferredNames, mount.activated ?? new Set());
+  assert.equal(
+    active.includes('mcp__gh__create_issue'),
+    false,
+    'deferred schema absent from active tools until fetched',
+  );
+  assert.ok(
+    active.includes('readFile') && active.includes(SUBMIT_TOOL_NAME),
+    'fixed slots + submit stay active',
+  );
+  await mcp.close();
 });

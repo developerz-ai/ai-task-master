@@ -20,12 +20,24 @@ export type TransportKind = 'stdio' | 'http' | 'sse';
 
 export type CreateMcpClient = (config: MCPClientConfig) => Promise<MCPClient>;
 
+// Above this many role-visible MCP tools, the surplus is deferred (name-only stubs + a `tool_search`
+// tool) instead of mounted directly, so their JSON schemas stay out of every request (issue #119).
+// `0` = always defer. Overridable via the `mcpDeferToolsOver` config key.
+export const DEFAULT_MCP_DEFER_TOOLS_OVER = 20;
+
+// The role's MCP tools split by how they enter the agent: `direct` are mounted with full schemas;
+// `deferred` are surfaced name-only and fetched on demand through `tool_search` (issue #119).
+export type ToolSurface = { direct: ToolSet; deferred: ToolSet };
+
 export type McpClientInit = {
   servers: McpServers;
   // Optional per-role allowlist (issue #115). Per role, either whole servers by name
   // (`{ worker: ['filesystem'] }`) or per-server tool patterns with `*` wildcards
   // (`{ planner: { filesystem: ['read_*', 'list_*'] } }`). Unlisted roles get every connected server.
   roleAllowlist?: McpRoleAllowlist;
+  // Defer a role's MCP tools once their count exceeds this (issue #119). Default
+  // DEFAULT_MCP_DEFER_TOOLS_OVER; 0 = always defer. See toolSurfaceForRole.
+  deferToolsOver?: number;
   // Injection seam for tests — defaults to the AI SDK factory.
   createClient?: CreateMcpClient;
   logger?: LoggerLike;
@@ -90,6 +102,17 @@ export class McpClientManager {
       }
     }
     return merged;
+  }
+
+  // Split the role's MCP tools into directly-mounted vs. deferred (issue #119). At or below the
+  // threshold the whole set is `direct` — byte-identical to plain mounting, no stubs, no tool_search.
+  // Above it the whole surplus is `deferred`, surfaced name-only and fetched via tool_search. The
+  // fixed local slots (readFile, bash, …) live in the adapter, not here, so every MCP tool counts.
+  toolSurfaceForRole(role: Role): ToolSurface {
+    const tools = this.toolsForRole(role);
+    const threshold = this.init.deferToolsOver ?? DEFAULT_MCP_DEFER_TOOLS_OVER;
+    if (Object.keys(tools).length <= threshold) return { direct: tools, deferred: {} };
+    return { direct: {}, deferred: tools };
   }
 
   async close(): Promise<void> {

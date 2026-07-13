@@ -63,6 +63,25 @@ Per-role allowlists scope which servers reach which subagent. Useful for sandbox
 
 Unlisted servers default to all roles. Optional — most users skip this.
 
+## Deferred tool loading
+
+Mounting a large MCP registry (a GitHub, browser, or database server can expose dozens of tools) would serialize every tool's full JSON schema into every request, on every step — burning context window and per-step cost on schemas the subagent never calls. `mcpDeferToolsOver` bounds that: once a role's MCP tools (beyond the fixed local slots like `readFile`/`bash`) exceed the threshold, the surplus is **deferred** — presented name-only in the system prompt, with schemas absent from requests until fetched.
+
+```jsonc
+{
+  "mcpServers": { /* ... */ },
+  "mcpDeferToolsOver": 20 // default 20; 0 = always defer surplus tools
+}
+```
+
+At or below the threshold, surplus tools mount directly (full schema) — identical to plain mounting. Above it:
+
+- The system prompt carries a name-only index (`<name>: <first sentence>` per tool) plus a fetch-before-call contract.
+- A `tool_search` tool is mounted. `select:mcp__server__tool,…` fetches those exact tools by name; any other query is keyword-ranked over names + descriptions (capped by `max_results`, default 5). Each match's full schema is returned and the tool becomes callable on subsequent steps.
+- Calling a deferred tool before fetching its schema returns a typed "fetch it via `tool_search` first" result — never a provider-level error.
+
+Activation is scoped to one subagent invocation; a fresh invocation starts fully deferred again. Applies to the **Worker** and **Reviewer** surfaces (the Planner keeps its read-only trio; the CI-fix session keeps its fixed record). Config-only, resolved project > global. See `src/mcp/tool-search.ts` and `src/loop/run-loop-adapter.ts`.
+
 ## Lifecycle
 
 `McpClientManager` (`src/mcp/mcp-client.ts`) owns the lifecycle:

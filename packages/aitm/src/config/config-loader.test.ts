@@ -58,7 +58,25 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     assert.equal(resolved.logLevel, 'info');
     assert.equal(resolved.concurrency, 1);
     assert.equal(resolved.allowForcePush, true);
+    assert.equal(resolved.mcpDeferToolsOver, 20);
     assert.deepEqual(resolved.models, DEFAULT_MODELS);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: mcpDeferToolsOver is project over global, and a configured 0 is honored (issue #119)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, { mcpDeferToolsOver: 50 });
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    assert.equal((await loader.resolve({})).mcpDeferToolsOver, 50, 'global applies');
+
+    // 0 means "always defer" — pick() must treat it as set, not fall through to the default.
+    await writeProjectConfig(cwd.path, { mcpDeferToolsOver: 0 });
+    assert.equal((await loader.resolve({})).mcpDeferToolsOver, 0, 'project 0 wins over global');
   } finally {
     await home.cleanup();
     await cwd.cleanup();

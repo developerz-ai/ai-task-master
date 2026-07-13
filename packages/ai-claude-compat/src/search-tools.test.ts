@@ -11,6 +11,37 @@ import {
   grepTool,
 } from './search-tools.ts';
 
+function textOf(t: { toModelOutput?: unknown }, input: unknown, output: unknown): string {
+  const fn = t.toModelOutput;
+  if (typeof fn !== 'function') throw new Error('tool has no toModelOutput');
+  const part = (
+    fn as (o: { toolCallId: string; input: unknown; output: unknown }) => {
+      type: string;
+      value: string;
+    }
+  )({ toolCallId: 'c', input, output });
+  assert.equal(part.type, 'text');
+  return part.value;
+}
+
+test('toModelOutput: grep/glob render newline-joined, with a truncation notice only when capped (issue #127)', () => {
+  const grep = grepTool({ cwd: '/tmp/x' });
+  assert.equal(
+    textOf(grep, { pattern: 'x' }, { matches: ['a.ts:1:x', 'b.ts:2:x'], truncated: false }),
+    'a.ts:1:x\nb.ts:2:x',
+  );
+  assert.match(
+    textOf(grep, { pattern: 'x' }, { matches: ['a.ts:1:x'], truncated: true }),
+    /\[results truncated/,
+  );
+  const glob = globTool({ cwd: '/tmp/x' });
+  assert.equal(
+    textOf(glob, { pattern: '*' }, { files: ['a.ts', 'b.ts'], truncated: false }),
+    'a.ts\nb.ts',
+  );
+  assert.equal(textOf(glob, { pattern: '*' }, { files: [], truncated: false }), '(no matches)');
+});
+
 async function tempDir(
   prefix = 'compat-search-',
 ): Promise<{ path: string; cleanup: () => Promise<void> }> {

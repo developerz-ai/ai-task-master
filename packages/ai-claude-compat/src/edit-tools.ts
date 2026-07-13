@@ -48,6 +48,11 @@ export function editFileTool(init: FileToolInit): Tool<EditFileInput, EditFileOu
       init.fileState.record(safe, hashContent(next), 'edit');
       return { ok: true, replacements: count, snippet: editSnippet(original, next) };
     },
+    // Plain-text confirmation + the numbered snippet, not a JSON envelope (issue #127).
+    toModelOutput: ({ input, output }) => ({
+      type: 'text',
+      value: renderEditOutput(input.path, output),
+    }),
   });
 }
 
@@ -74,7 +79,18 @@ export function multiEditTool(init: FileToolInit): Tool<MultiEditInput, MultiEdi
       init.fileState.record(safe, hashContent(content), 'edit');
       return { ok: true, replacements: total, snippet: editSnippet(original, content) };
     },
+    toModelOutput: ({ input, output }) => ({
+      type: 'text',
+      value: renderEditOutput(input.path, output),
+    }),
   });
+}
+
+// Shared plain-text rendering for editFile/multiEdit (issue #127): a confirmation line carrying the
+// replacement count, followed by the numbered snippet of the edited region verbatim.
+function renderEditOutput(path: string, output: { replacements: number; snippet: string }): string {
+  const noun = output.replacements === 1 ? 'replacement' : 'replacements';
+  return `Applied ${output.replacements} ${noun} to ${path}.\n${output.snippet}`;
 }
 
 // Enforce the read-before-edit + not-stale contract, returning the on-disk content to edit against.

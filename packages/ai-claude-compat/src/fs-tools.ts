@@ -83,6 +83,9 @@ export function readFileTool(init: FileToolInit): Tool<ReadFileInput, ReadFileOu
       init.fileState.record(safe, await hashFile(safe), 'read');
       return { content: renderReadBody(input.path, window, offset) };
     },
+    // The model sees the file content as raw text, not a JSON-escaped `{"content":"…"}` envelope
+    // (issue #127) — the `cat -n` window rides inside `content` verbatim.
+    toModelOutput: ({ output }) => ({ type: 'text', value: output.content }),
   });
 }
 
@@ -103,6 +106,8 @@ export function writeFileTool(init: FileToolInit): Tool<WriteFileInput, WriteFil
       init.fileState.record(safe, hashContent(input.content), 'write');
       return { ok: true };
     },
+    // Plain-text confirmation naming the written path (issue #127).
+    toModelOutput: ({ input }) => ({ type: 'text', value: `Wrote ${input.path}` }),
   });
 }
 

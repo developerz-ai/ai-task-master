@@ -93,6 +93,7 @@ export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAge
       }),
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
       ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
+      ...(init.onStepFinish ? { onStepFinish: init.onStepFinish } : {}),
     },
     PLANNER_MAX_STEPS,
   );

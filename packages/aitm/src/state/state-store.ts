@@ -7,6 +7,7 @@ import { ZodError } from 'zod';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { type PlanMarkdownGroup, renderPlanMarkdown } from '../plan/plan-markdown.ts';
 import { type GroupStage, type RunState, RunStateSchema, type Task } from './schema.ts';
+import { TranscriptStore } from './transcript-store.ts';
 
 const STATE_FILE = 'state.json';
 const GOAL_FILE = 'goal.txt';
@@ -129,6 +130,12 @@ export class StateStore {
   // the memory-loader (compat) reads/writes under it. Not created until the first memory write.
   memoryDir(): string {
     return this.path(MEMORY_DIR);
+  }
+
+  // Per-subagent conversation transcripts (issue #108), scoped to this run's state dir. Wiped by
+  // cleanupOnSuccess along with the rest of the dir (not exempted, unlike memory/logs).
+  transcripts(): TranscriptStore {
+    return new TranscriptStore(this.stateDir);
   }
 
   private path(name: string): string {

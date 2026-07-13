@@ -46,6 +46,9 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
   // Per-call token-usage sink (issue #114). The runners read it from this init to record each
   // generate's totalUsage; unset → no accounting. Fire-and-forget, never breaks the run.
   onUsage?: OnUsage;
+  // Agent-wide per-step callback forwarded to createSubagent (issue #108). aitm appends each step to
+  // a persisted transcript here. Unset → not registered, behavior unchanged.
+  onStepFinish?: ToolLoopAgentSettings<never, TTools>['onStepFinish'];
 };
 
 // Concrete factory implementations live next to each subagent: planner.ts, worker.ts, reviewer.ts.

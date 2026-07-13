@@ -88,6 +88,10 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   // it to ride OpenRouter server tools (e.g. `{ openrouter: { tools: [...] } }`, issue #112). A
   // per-call `providerOptions` on `agent.generate` wins. Omitted → no options, byte-identical.
   providerOptions?: ToolLoopAgentSettings<never, TOOLS>['providerOptions'];
+  // Per-step callback (the AI SDK's agent-wide `onStepFinish`). Policy-free passthrough: aitm uses it
+  // to append each completed step to a persisted transcript (issue #108). Omitted → not registered,
+  // behavior byte-identical.
+  onStepFinish?: ToolLoopAgentSettings<never, TOOLS>['onStepFinish'];
 };
 
 // Wrap a ToolLoopAgent: register the caller's tools plus the `submit` tool, and stop when the step
@@ -107,6 +111,8 @@ export function createSubagent<TOOLS extends ToolSet>(
     // per-call field), so the constructor value is forwarded on every generate — no generate-time
     // arming needed. Omitted when unset → byte-identical.
     ...(config.providerOptions ? { providerOptions: config.providerOptions } : {}),
+    // Agent-wide per-step callback (issue #108). Omitted when unset → not registered.
+    ...(config.onStepFinish ? { onStepFinish: config.onStepFinish } : {}),
   });
   if (config.timeout !== undefined) armStepTimeout(agent, config.timeout);
   return agent;

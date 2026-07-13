@@ -129,6 +129,29 @@ test('composeSystemPrompt: the block-pipeline overload renders blocks in canonic
 
 // --- createSubagent (submit-contract shape) ---
 
+test('createSubagent: forwards onStepFinish to the agent, fired per step with response messages + usage (issue #108)', async () => {
+  const { model } = scriptedModel(() => ({ submit: '{"n":1}' }));
+  const steps: Array<{ messagesIsArray: boolean; hasUsage: boolean }> = [];
+  const agent = createSubagent(
+    {
+      model,
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStepFinish: (event) => {
+        steps.push({
+          messagesIsArray: Array.isArray(event.response.messages),
+          hasUsage: event.usage !== undefined,
+        });
+      },
+    },
+    12,
+  );
+  await runSubagent(agent, 'go');
+  assert.ok(steps.length >= 1, 'onStepFinish fired at least once');
+  assert.deepEqual(steps[0], { messagesIsArray: true, hasUsage: true });
+});
+
 test('createSubagent: builds a ToolLoopAgent registering the submit tool alongside caller tools', () => {
   const readFile = tool({
     description: 'read',

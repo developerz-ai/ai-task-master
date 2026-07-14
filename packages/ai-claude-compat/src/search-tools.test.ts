@@ -72,9 +72,20 @@ async function fixture(root: string): Promise<void> {
 
 // ---- globToRegExp ----
 
-test('globToRegExp: * stays within a path segment', () => {
-  assert.match('a.ts', globToRegExp('*.ts'));
-  assert.doesNotMatch('x/a.ts', globToRegExp('*.ts'));
+test('globToRegExp: a slash-free pattern matches the basename at any depth (issue #178)', () => {
+  const re = globToRegExp('*.ts');
+  assert.match('a.ts', re, 'root file');
+  assert.match('x/a.ts', re, 'nested file matched by basename (ripgrep semantics)');
+  assert.match('x/y/a.ts', re, 'deeply nested');
+  assert.doesNotMatch('a.tsx', re, 'extension still anchored to the path end');
+  assert.doesNotMatch('a/b.js', re, 'wrong extension at any depth');
+});
+
+test('globToRegExp: a pattern containing a slash stays anchored to the full relative path (issue #178)', () => {
+  const re = globToRegExp('src/*.ts');
+  assert.match('src/a.ts', re);
+  assert.doesNotMatch('src/sub/b.ts', re, '`*` does not cross a directory boundary');
+  assert.doesNotMatch('other/a.ts', re, 'anchored to the full path, not basename-matched');
 });
 
 test('globToRegExp: **/ spans directories incl. zero', () => {
@@ -99,6 +110,20 @@ test('globTool: lists matching files, skips node_modules', async () => {
       pattern: '**/*.ts',
     });
     // Order is mtime-driven now; assert the set (skips node_modules).
+    assert.deepEqual([...out.files].sort(), ['src/a.ts', 'src/sub/b.ts']);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('globTool: a slash-free pattern matches nested files by basename (issue #178)', async () => {
+  const dir = await tempDir();
+  try {
+    await fixture(dir.path); // only nested .ts files (src/a.ts, src/sub/b.ts)
+    const out = await run<{ pattern: string }, { files: string[] }>(globTool({ cwd: dir.path }), {
+      pattern: '*.ts',
+    });
+    // Pre-fix `^[^/]*\.ts$` matched neither (both nested) → empty; now both match at depth.
     assert.deepEqual([...out.files].sort(), ['src/a.ts', 'src/sub/b.ts']);
   } finally {
     await dir.cleanup();
@@ -132,6 +157,27 @@ test('grepTool: ignoreCase + glob filter', async () => {
       { matches: string[] }
     >(grepTool({ cwd: dir.path }), { pattern: 'secret', ignoreCase: true, glob: 'src/*.ts' });
     assert.deepEqual(out.matches, ['src/a.ts:2:const secret = 2;']);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('grepTool: a slash-free glob filter matches root AND nested files (issue #178)', async () => {
+  const dir = await tempDir();
+  try {
+    await writeFile(join(dir.path, 'root.ts'), 'const needle = 1;\n');
+    await mkdir(join(dir.path, 'src'), { recursive: true });
+    await writeFile(join(dir.path, 'src', 'nested.ts'), 'const needle = 2;\n');
+    await writeFile(join(dir.path, 'skip.js'), 'const needle = 3;\n');
+    const out = await run<{ pattern: string; glob: string }, { matches: string[] }>(
+      grepTool({ cwd: dir.path }),
+      { pattern: 'needle', glob: '*.ts' },
+    );
+    assert.deepEqual(
+      [...out.matches].sort(),
+      ['root.ts:1:const needle = 1;', 'src/nested.ts:1:const needle = 2;'],
+      'both root and nested .ts match; the .js is filtered out',
+    );
   } finally {
     await dir.cleanup();
   }

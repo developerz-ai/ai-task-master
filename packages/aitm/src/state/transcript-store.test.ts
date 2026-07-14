@@ -61,6 +61,23 @@ test('reconstructTranscript skips unknown kinds (forward compatible)', () => {
   assert.deepEqual(reconstructTranscript(raw).messages, [msg('assistant', 'a')]);
 });
 
+test('reconstructTranscript: de-overlaps a pre-#175 cumulative transcript (no duplicated context)', () => {
+  // Files written before #175 stored step.messages as the CUMULATIVE response list: each record
+  // re-includes everything so far ([a,b], then [a,b,c,d]). Naive concatenation duplicated the prefix.
+  const a = msg('user', 'goal');
+  const b = msg('assistant', 'a1');
+  const c = msg('tool', 'r1');
+  const d = msg('assistant', 'a2');
+  const raw = [
+    JSON.stringify({ kind: 'step', ts: 't1', messages: [a, b] }),
+    JSON.stringify({ kind: 'step', ts: 't2', messages: [a, b, c, d] }),
+    JSON.stringify({ kind: 'run-end', ts: 't3', outcome: 'submitted' }),
+  ].join('\n');
+  const { messages, complete } = reconstructTranscript(raw);
+  assert.deepEqual(messages, [a, b, c, d], 'the overlapping prefix is dropped — 4 messages, not 6');
+  assert.equal(complete, true);
+});
+
 // --- TranscriptStore (fs) ---
 
 test('append/replay round-trip: a recorded run reconstructs to the message array the agent last held', async () => {

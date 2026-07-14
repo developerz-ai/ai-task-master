@@ -53,10 +53,26 @@ function ordinalOf(file: string, prefix: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+// True when `prefix` is a leading run of `arr` (deep-equal, element by element with an early exit).
+// Used to drop the cumulative overlap in pre-#175 transcripts during reconstruction.
+function isLeadingRun(arr: readonly ModelMessage[], prefix: readonly ModelMessage[]): boolean {
+  if (prefix.length === 0) return true;
+  if (arr.length < prefix.length) return false;
+  for (let i = 0; i < prefix.length; i++) {
+    if (JSON.stringify(arr[i]) !== JSON.stringify(prefix[i])) return false;
+  }
+  return true;
+}
+
 // Reconstruct the message array the agent would see next from a transcript's raw JSONL, plus whether
 // the run completed (a `run-end` record present). `step` messages concatenate; a `compaction` record
 // replaces the accumulated array (its summary subsumes earlier steps), and steps after it append. A
 // corrupt/truncated line is skipped with a warning; unknown `kind`s are ignored (forward-compatible).
+//
+// Transcripts written before issue #175 stored `step.messages` as the CUMULATIVE response list per
+// step (each record re-includes the whole conversation), so a record whose leading run equals the
+// accumulated messages is de-overlapped to just its new suffix. Post-fix (per-step-delta) records
+// don't overlap and append whole — the same rule handles both, keeping resume context duplicate-free.
 export function reconstructTranscript(
   raw: string,
   onWarn: (message: string) => void = () => {},
@@ -74,7 +90,10 @@ export function reconstructTranscript(
     }
     if (!isRecord(record)) continue;
     if (record.kind === 'step' && Array.isArray(record.messages)) {
-      messages.push(...(record.messages as ModelMessage[]));
+      const recorded = record.messages as ModelMessage[];
+      messages.push(
+        ...(isLeadingRun(recorded, messages) ? recorded.slice(messages.length) : recorded),
+      );
     } else if (record.kind === 'compaction' && Array.isArray(record.messages)) {
       messages = [...(record.messages as ModelMessage[])];
     } else if (record.kind === 'run-end') {

@@ -142,6 +142,47 @@ test('editFileTool: rejects an edit against content changed on disk since the re
   }
 });
 
+test('editFileTool: a non-UTF-8-byte file survives Read → Edit — no permanent stale-read loop (issue #177)', async () => {
+  const dir = await tempDir();
+  try {
+    // 0xE9 (Latin-1 'é') is not valid standalone UTF-8: readFile('utf8') decodes it to U+FFFD. Read
+    // must fingerprint the same decode Edit compares, or the two hashes never agree and the pair locks
+    // into a permanent "modified since you read it" loop.
+    const file = join(dir.path, 'latin1.txt');
+    await writeFile(file, Buffer.from([0x68, 0x69, 0x20, 0xe9, 0x20, 0x62, 0x79, 0x65, 0x0a])); // "hi é bye\n"
+    const t = tools(dir.path);
+    await run(t.read, { path: 'latin1.txt' });
+    const out = await run<
+      { path: string; oldString: string; newString: string },
+      { replacements: number }
+    >(t.edit, { path: 'latin1.txt', oldString: 'hi', newString: 'yo' });
+    assert.equal(
+      out.replacements,
+      1,
+      'edit lands — read-before-edit hash matched despite non-UTF-8 bytes',
+    );
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('editFileTool: a genuine external modification after Read is still rejected on a non-UTF-8 file (issue #177)', async () => {
+  const dir = await tempDir();
+  try {
+    const file = join(dir.path, 'latin1.txt');
+    await writeFile(file, Buffer.from([0x68, 0x69, 0x20, 0xe9, 0x0a])); // "hi é\n"
+    const t = tools(dir.path);
+    await run(t.read, { path: 'latin1.txt' });
+    await writeFile(file, Buffer.from([0x62, 0x79, 0x65, 0x20, 0xe9, 0x0a])); // externally → "bye é\n"
+    await assert.rejects(
+      () => run(t.edit, { path: 'latin1.txt', oldString: 'bye', newString: 'x' }),
+      /modified since you read it/,
+    );
+  } finally {
+    await dir.cleanup();
+  }
+});
+
 test('editFileTool: an immediate follow-up edit needs no re-read (issue #104)', async () => {
   const dir = await tempDir();
   try {

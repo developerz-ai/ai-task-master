@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { type ToolSet, tool } from 'ai';
 import { z } from 'zod';
+import { withReminders } from './system-reminder.ts';
 import { type HookExec, hookMatches, MAX_HOOK_FEEDBACK_CHARS, withHooks } from './tool-hooks.ts';
 
 type ExecResult = { exitCode?: number; stdout?: string; stderr?: string; timedOut?: boolean };
@@ -48,6 +49,36 @@ const writeTool = (record: unknown[]) =>
       return { ok: true };
     },
   });
+
+// A #127-style custom-renderer tool: object output, a toModelOutput that reads its own typed field.
+const readTool = () =>
+  tool({
+    description: 'read',
+    inputSchema: z.object({ path: z.string() }),
+    execute: async () => ({ content: 'FILE BODY' }),
+    toModelOutput: ({ output }) => ({
+      type: 'text',
+      value: (output as { content: string }).content,
+    }),
+  });
+
+// Run execute (applying hooks), then render the model-visible text via the tool's toModelOutput.
+async function modelText(
+  t: { execute?: unknown; toModelOutput?: unknown },
+  input: unknown,
+): Promise<string> {
+  const output = await run(t as ReturnType<typeof withHooks>[string], input);
+  const fn = t.toModelOutput;
+  assert.equal(typeof fn, 'function', 'toModelOutput is decorated');
+  const rendered = await (
+    fn as (ctx: { toolCallId: string; input: unknown; output: unknown }) => Promise<{
+      type: string;
+      value: string;
+    }>
+  )({ toolCallId: 'c', input, output });
+  assert.equal(rendered.type, 'text');
+  return rendered.value;
+}
 
 test('hookMatches: glob on the tool name (* wildcard, omitted = all)', () => {
   assert.equal(hookMatches(undefined, 'bash'), true);
@@ -266,4 +297,64 @@ test('the PreToolUse payload carries event/toolName/input/cwd', async () => {
     input: { command: 'ls' },
     cwd: '/work',
   });
+});
+
+// ---- toModelOutput decoration (issue #180) ----
+
+test('withHooks toModelOutput: a blocked custom-renderer tool renders the block reason, not undefined (issue #180)', async () => {
+  const { exec } = fakeExec({ exitCode: 2, stderr: 'reading secrets is not allowed' });
+  const wrapped = withHooks({ read: readTool() }, { preToolUse: [{ command: 'guard' }] }, { exec });
+  const text = await modelText(wrapped.read, { path: 'secrets.env' });
+  assert.match(text, /blocked by a PreToolUse hook/);
+  assert.match(text, /reading secrets is not allowed/);
+  assert.match(text, /Adjust your approach — do not retry/);
+  assert.doesNotMatch(
+    text,
+    /undefined/,
+    'the base renderer alone would have shown output.content=undefined',
+  );
+});
+
+test('withHooks toModelOutput: PostToolUse feedback on an object result is model-visible after the base output (issue #180)', async () => {
+  const { exec } = fakeExec({ exitCode: 0, stdout: 'post-hook: reviewed' });
+  const wrapped = withHooks(
+    { read: readTool() },
+    { postToolUse: [{ command: 'notice' }] },
+    { exec },
+  );
+  const text = await modelText(wrapped.read, { path: 'a.ts' });
+  assert.match(text, /^FILE BODY/, 'the base render comes first');
+  assert.match(text, /<hook-feedback>\npost-hook: reviewed\n<\/hook-feedback>/);
+});
+
+test('withHooks toModelOutput: the typed execute output is unchanged — programmatic callers see the object bit-identical (issue #180)', async () => {
+  const { exec } = fakeExec({ exitCode: 0, stdout: 'note' });
+  const wrapped = withHooks({ read: readTool() }, { postToolUse: [{ command: 'n' }] }, { exec });
+  const out = await run(wrapped.read, { path: 'a.ts' });
+  assert.deepEqual(out, { content: 'FILE BODY', hookFeedback: 'note' });
+});
+
+test('withHooks toModelOutput composes with withReminders in both wrap orders (issue #180)', async () => {
+  // Order A: withHooks(withReminders(tool)) — reminder is the base, feedback appended over it.
+  const a = withHooks(
+    { read: withReminders(readTool(), () => ['a reminder']) },
+    { postToolUse: [{ command: 'n' }] },
+    { exec: fakeExec({ exitCode: 0, stdout: 'hook note' }).exec },
+  );
+  const textA = await modelText(a.read, { path: 'x' });
+  assert.match(textA, /FILE BODY/);
+  assert.match(textA, /a reminder/);
+  assert.match(textA, /hook note/);
+
+  // Order B: withReminders(withHooks(tool)) — hooks render the base (incl. feedback), reminder appended.
+  const hooked = withHooks(
+    { read: readTool() },
+    { postToolUse: [{ command: 'n' }] },
+    { exec: fakeExec({ exitCode: 0, stdout: 'hook note' }).exec },
+  );
+  const b = withReminders(hooked.read, () => ['a reminder']);
+  const textB = await modelText(b, { path: 'x' });
+  assert.match(textB, /FILE BODY/);
+  assert.match(textB, /a reminder/);
+  assert.match(textB, /hook note/);
 });

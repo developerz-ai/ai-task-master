@@ -185,6 +185,74 @@ function applyFeedback(result: unknown, feedback: string[]): unknown {
   return result;
 }
 
+// The model-visible output union a tool's `toModelOutput` may return (text / json / error / content).
+type ModelOutput = Awaited<ReturnType<NonNullable<Tool['toModelOutput']>>>;
+type ModelOutputCtx = { toolCallId: string; input: unknown; output: unknown };
+
+function isBlockedResult(out: unknown): out is HookBlockedResult {
+  return (
+    typeof out === 'object' &&
+    out !== null &&
+    (out as { blockedByHook?: unknown }).blockedByHook === true &&
+    typeof (out as { reason?: unknown }).reason === 'string'
+  );
+}
+
+// PostToolUse feedback that applyFeedback attached to an OBJECT result as an additive `hookFeedback`
+// field (string results already carry it inline in the string). undefined when absent.
+function objectHookFeedback(out: unknown): string | undefined {
+  if (typeof out === 'object' && out !== null && 'hookFeedback' in out) {
+    const feedback = (out as { hookFeedback?: unknown }).hookFeedback;
+    if (typeof feedback === 'string') return feedback;
+  }
+  return undefined;
+}
+
+// The base rendering the SDK would show — the tool's own toModelOutput, or the SDK default (text for
+// a string result, json otherwise). Mirrors withReminders' baseModelOutput; may be async.
+async function baseModelOutput(
+  base: NonNullable<Tool['toModelOutput']> | undefined,
+  ctx: ModelOutputCtx,
+): Promise<ModelOutput> {
+  if (base) return await base(ctx);
+  return typeof ctx.output === 'string'
+    ? { type: 'text', value: ctx.output }
+    : {
+        type: 'json',
+        value: (ctx.output ?? null) as Extract<ModelOutput, { type: 'json' }>['value'],
+      };
+}
+
+// Append a `<hook-feedback>` section after the base output (issue #180). A text base stays text; any
+// other base becomes the `content` variant with the base as a text part followed by the section, so
+// the base output always comes first. Parallels withReminders' appendReminders (a different envelope).
+function appendHookFeedback(base: ModelOutput, feedback: string): ModelOutput {
+  const section = `<hook-feedback>\n${feedback}\n</hook-feedback>`;
+  if (base.type === 'text') return { type: 'text', value: `${base.value}\n\n${section}` };
+  const baseParts =
+    base.type === 'content'
+      ? base.value
+      : [{ type: 'text' as const, text: nonContentBaseAsText(base) }];
+  return { type: 'content', value: [...baseParts, { type: 'text' as const, text: section }] };
+}
+
+function nonContentBaseAsText(base: Exclude<ModelOutput, { type: 'text' | 'content' }>): string {
+  switch (base.type) {
+    case 'json':
+    case 'error-json':
+      return JSON.stringify(base.value ?? null);
+    case 'error-text':
+      return base.value;
+    case 'execution-denied':
+      return base.reason ?? 'tool execution denied';
+    default:
+      // Compile-time exhaustiveness: a new `ai` variant makes `base` non-`never` → a type error, not
+      // a silent drop. Runtime stays fail-open (empty string) if one ever slips through.
+      base satisfies never;
+      return '';
+  }
+}
+
 function wrapTool<TOOL extends Tool>(
   name: string,
   tool: TOOL,
@@ -235,10 +303,21 @@ function wrapTool<TOOL extends Tool>(
     }
     return feedback.length > 0 ? applyFeedback(result, feedback) : result;
   };
-  // The spread + execute override is sound at runtime; the cast is only to sidestep the SDK Tool
-  // union's `execute?: never` output-tool variant under exactOptionalPropertyTypes (same need as
+
+  // Decorate toModelOutput too (issue #180): hook artifacts live at the typed-output layer, but every
+  // #127 tool renders from its own output shape and would drop them at the model-visible layer — a
+  // blocked call renders undefined fields, and PostToolUse feedback never reaches the model. Surface
+  // the block reason for a blocked call, and append feedback attached to an object result.
+  const decoratedToModelOutput: NonNullable<Tool['toModelOutput']> = async (ctx) => {
+    if (isBlockedResult(ctx.output)) return { type: 'text', value: ctx.output.reason };
+    const base = await baseModelOutput(tool.toModelOutput, ctx);
+    const feedback = objectHookFeedback(ctx.output);
+    return feedback === undefined ? base : appendHookFeedback(base, feedback);
+  };
+  // The spread + execute/toModelOutput override is sound at runtime; the cast only sidesteps the SDK
+  // Tool union's `execute?: never` output-tool variant under exactOptionalPropertyTypes (same need as
   // withReminders' toModelOutput override).
-  return { ...tool, execute } as TOOL;
+  return { ...tool, execute, toModelOutput: decoratedToModelOutput } as TOOL;
 }
 
 // Decorate a tool registry with PreToolUse/PostToolUse hooks. Same-shaped record out; a tool with no

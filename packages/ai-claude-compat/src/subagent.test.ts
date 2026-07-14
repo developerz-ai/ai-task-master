@@ -366,6 +366,36 @@ test('submittedOutput: invalid on a raw-string input left by a JSON-parse failur
   if (!out.ok) assert.equal(out.reason, 'invalid');
 });
 
+test('submittedOutput: salvages a stringified-JSON submit that validates (issue #185)', () => {
+  // The live failure shape: submit("{\"n\": 7}") instead of submit({ n: 7 }).
+  const result = { steps: [{ toolCalls: [{ toolName: SUBMIT_TOOL_NAME, input: '{"n": 7}' }] }] };
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 7 } });
+});
+
+test('submittedOutput: salvages a ```-fenced JSON submit (issue #185)', () => {
+  const result = {
+    steps: [{ toolCalls: [{ toolName: SUBMIT_TOOL_NAME, input: '```json\n{"n": 7}\n```' }] }],
+  };
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 7 } });
+});
+
+test('submittedOutput: a stringified payload that parses but fails the schema stays invalid, with the parsed value issues (issue #185)', () => {
+  const result = {
+    steps: [{ toolCalls: [{ toolName: SUBMIT_TOOL_NAME, input: '{"n": "nope"}' }] }],
+  };
+  const out = submittedOutput(result, OutSchema);
+  assert.equal(out.ok, false);
+  if (!out.ok && out.reason === 'invalid') {
+    assert.equal(
+      out.issues[0]?.path[0],
+      'n',
+      'issues reflect the parsed object, not the raw string',
+    );
+  } else {
+    assert.fail(`expected invalid, got ${JSON.stringify(out)}`);
+  }
+});
+
 // --- runWithSchemaRetry ---
 
 test('runWithSchemaRetry: corrects an invalid submit on retry; corrective message quotes the Zod issues', async () => {

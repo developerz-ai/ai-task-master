@@ -7,13 +7,13 @@
 // content. Output is `cat -n` numbered, windowed to a default of 2000 lines.
 
 import { createReadStream } from 'node:fs';
-import { mkdir, stat } from 'node:fs/promises';
+import { mkdir, readFile, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { type Tool, tool } from 'ai';
 import { z } from 'zod';
 import { atomicWriteFile } from './atomic-write.ts';
-import { type FileStateTracker, hashContent, hashFile } from './file-state.ts';
+import { type FileStateTracker, hashContent } from './file-state.ts';
 import { resolveInside } from './safe-path.ts';
 
 export type ToolInit = {
@@ -78,9 +78,11 @@ export function readFileTool(init: FileToolInit): Tool<ReadFileInput, ReadFileOu
       const offset = input.offset ?? 1;
       const limit = input.limit ?? DEFAULT_READ_LINES;
       const window = await readNumberedWindow(safe, offset, limit);
-      // Fingerprint the WHOLE file (hashFile streams it) even for a windowed read, so a later Edit
-      // can tell whether the on-disk content changed since this read.
-      init.fileState.record(safe, await hashFile(safe), 'read');
+      // Fingerprint the WHOLE file even for a windowed read, so a later Edit can tell whether the
+      // on-disk content changed since this read. Hash the UTF-8 DECODE (not raw bytes) so it matches
+      // what Edit compares (`hashContent(readFile(utf8))`) — otherwise a non-UTF-8-roundtrippable file
+      // never agrees between Read and Edit and locks into a permanent stale-read loop (issue #177).
+      init.fileState.record(safe, hashContent(await readFile(safe, 'utf8')), 'read');
       return { content: renderReadBody(input.path, window, offset) };
     },
     // The model sees the file content as raw text, not a JSON-escaped `{"content":"…"}` envelope

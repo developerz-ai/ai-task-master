@@ -215,12 +215,25 @@ async function baseModelOutput(
   ctx: ModelOutputCtx,
 ): Promise<ModelOutput> {
   if (base) return await base(ctx);
-  return typeof ctx.output === 'string'
-    ? { type: 'text', value: ctx.output }
-    : {
-        type: 'json',
-        value: (ctx.output ?? null) as Extract<ModelOutput, { type: 'json' }>['value'],
-      };
+  if (typeof ctx.output === 'string') return { type: 'text', value: ctx.output };
+  // Strip the hook-injected `hookFeedback` field before the default json render, or a tool with no
+  // custom toModelOutput would echo the feedback inside the json blob AND again in the appended
+  // <hook-feedback> section — the model would see it twice (issue #180). The real tool output is
+  // preserved; custom-renderer tools (which never read hookFeedback) are unaffected.
+  const value = stripHookFeedback(ctx.output);
+  return {
+    type: 'json',
+    value: (value ?? null) as Extract<ModelOutput, { type: 'json' }>['value'],
+  };
+}
+
+function stripHookFeedback(output: unknown): unknown {
+  if (typeof output === 'object' && output !== null && 'hookFeedback' in output) {
+    return Object.fromEntries(
+      Object.entries(output as Record<string, unknown>).filter(([key]) => key !== 'hookFeedback'),
+    );
+  }
+  return output;
 }
 
 // Append a `<hook-feedback>` section after the base output (issue #180). A text base stays text; any

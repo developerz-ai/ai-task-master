@@ -358,3 +358,28 @@ test('withHooks toModelOutput composes with withReminders in both wrap orders (i
   assert.match(textB, /a reminder/);
   assert.match(textB, /hook note/);
 });
+
+test('withHooks toModelOutput: a default-renderer tool shows PostToolUse feedback exactly once, not twice (issue #180)', async () => {
+  // A tool with NO custom toModelOutput + an object result. applyFeedback embeds `hookFeedback` in the
+  // object; the base json render must strip it so the feedback appears only in the <hook-feedback>
+  // section — not echoed inside the json blob as well. Pre-fix this rendered the feedback twice.
+  const plainTool = tool({
+    description: 'p',
+    inputSchema: z.object({ x: z.string() }),
+    execute: async () => ({ ok: true }),
+  });
+  const { exec } = fakeExec({ exitCode: 0, stdout: 'FEEDBACK_MARKER' });
+  const wrapped = withHooks({ p: plainTool }, { postToolUse: [{ command: 'n' }] }, { exec });
+  const output = await run(wrapped.p, { x: '1' });
+  const fn = wrapped.p.toModelOutput;
+  assert.equal(typeof fn, 'function');
+  const rendered = await (
+    fn as (ctx: { toolCallId: string; input: unknown; output: unknown }) => Promise<unknown>
+  )({ toolCallId: 'c', input: { x: '1' }, output });
+  const occurrences = (JSON.stringify(rendered).match(/FEEDBACK_MARKER/g) ?? []).length;
+  assert.equal(
+    occurrences,
+    1,
+    'feedback appears once — in the hook-feedback section, not the json base',
+  );
+});

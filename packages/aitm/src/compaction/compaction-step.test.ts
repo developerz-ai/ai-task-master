@@ -5,12 +5,13 @@ import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import { buildCompactionStep, type CompactorLike } from './compaction-step.ts';
 import { type CompactionDecision, Compactor } from './compactor.ts';
 
-// A prepareStep `steps` entry: only the field the builder reads for the tail cut — the count of
-// response messages the step produced (sizing is off the live `messages`, not step usage).
-function step(responseMsgCount: number) {
+// A prepareStep `steps` entry. `ai@6` exposes `response.messages` as the CUMULATIVE response list up
+// to that step (not a per-step delta), so `cumulativeCount` is the running total — callers pass an
+// increasing sequence (e.g. step(2), step(4), step(6)) to mirror the real SDK shape (issue #176).
+function step(cumulativeCount: number) {
   return {
     response: {
-      messages: Array.from({ length: responseMsgCount }, (_, i) => ({
+      messages: Array.from({ length: cumulativeCount }, (_, i) => ({
         role: 'assistant',
         content: `resp-${i}`,
       })),
@@ -72,8 +73,10 @@ function captureLogger(events: Array<Record<string, unknown>>) {
 }
 
 test('buildCompactionStep: above threshold → [summary user msg, ...keepLastSteps tail], cut at a step boundary', async () => {
-  // 4 steps × 2 response messages = 8 step-messages, plus the initial user prompt = 9 total.
-  const steps = [step(2), step(2), step(2), step(2)];
+  // 4 steps, cumulative response counts [2, 4, 6, 8] (SDK shape) = 8 step-messages, plus the initial
+  // user prompt = 9 total. With the pre-fix code this summed the last 2 arrays (6+8=14 > 9) → splitAt
+  // pinned to 0 → pass-through: this test is the regression proof that compaction fires (issue #176).
+  const steps = [step(2), step(4), step(6), step(8)];
   const messages = [{ role: 'user', content: 'goal' }, ...msgs(8)];
   let compactedOlder: unknown[] = [];
   const compactor = stubCompactor({
@@ -87,7 +90,8 @@ test('buildCompactionStep: above threshold → [summary user msg, ...keepLastSte
     prepInput(steps, messages),
   );
   assert.ok(result && Array.isArray(result.messages));
-  // keepLastSteps=2 → last 2 steps carry 2+2=4 messages → tail = last 4; summary(1)+tail(4)=5.
+  // keepLastSteps=2 → last 2 steps' delta = cumulative 8 − 4 = 4 messages → tail = last 4;
+  // summary(1)+tail(4)=5.
   assert.equal(result.messages.length, 5);
   assert.equal(result.messages[0].role, 'user');
   assert.match(String(result.messages[0].content), /TIGHT SUMMARY/);
@@ -130,7 +134,7 @@ test('buildCompactionStep sizes off the live messages via a real Compactor: larg
   // Large live context (~200 tokens vs a 100 window) → crosses 0.7 → real summarizer runs.
   const big = 'x'.repeat(400);
   const large = await build(
-    prepInput([step(1), step(1)], [msg('user', big), msg('assistant', big), msg('tool', 'r')]),
+    prepInput([step(1), step(2)], [msg('user', big), msg('assistant', big), msg('tool', 'r')]),
   );
   assert.ok(large && Array.isArray(large.messages));
   assert.match(String(large.messages[0].content), /REAL SUMMARY/);
@@ -159,6 +163,22 @@ test('buildCompactionStep: empty message array → pass-through (nothing to send
     await buildCompactionStep({ compactor, modelId: 'm' })(prepInput([], [])),
     undefined,
   );
+});
+
+test('buildCompactionStep: continuation edge — no completed steps → pass-through, live tail never summarized (issue #176)', async () => {
+  // A #107 continuation's first prepareStep sees steps=[] but a full injected history in `messages`.
+  // Sizing off cumulative deltas with steps=[] would make the whole history `older` and drop the live
+  // tail; the guard passes through instead. Threshold says compact, so only the guard prevents it.
+  let compactCalls = 0;
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 2, contextLength: 100_000 },
+    onCompact: () => {
+      compactCalls++;
+    },
+  });
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(prepInput([], msgs(10)));
+  assert.equal(result, undefined);
+  assert.equal(compactCalls, 0, 'summarizer never runs on the first continuation step');
 });
 
 test('buildCompactionStep: nothing older than the kept tail → pass-through', async () => {
@@ -196,7 +216,7 @@ test('buildCompactionStep: summarizer failure → pass-through + warning (non-fa
     compactor,
     modelId: 'm',
     logger: captureLogger(events),
-  })(prepInput([step(2), step(2)], msgs(5)));
+  })(prepInput([step(2), step(4)], msgs(5)));
   assert.equal(result, undefined);
   assert.ok(events.some((e) => e.level === 'warn' && /summarizer failed/i.test(String(e.msg))));
 });

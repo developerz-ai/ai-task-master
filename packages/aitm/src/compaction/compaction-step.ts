@@ -67,11 +67,23 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
     }
     if (decision.kind === 'skip') return undefined;
 
-    // Cut at a step boundary: keep the response messages of the last keepLastSteps steps verbatim,
-    // so an assistant tool-call and its tool-result (which live in the same step) are never split.
-    const tailCount = steps
-      .slice(-decision.keepLastSteps)
-      .reduce((n, step) => n + step.response.messages.length, 0);
+    // No completed steps yet — the first prepareStep of a run, or of a #107 `priorHandle`
+    // continuation. There is no step boundary to cut, and a continuation's live tail must not be
+    // summarized away (cumulative math below would treat the whole injected history as `older`).
+    // Pass through; compaction resumes once a step has run.
+    if (steps.length === 0) return undefined;
+
+    // Cut at a step boundary: keep the response messages of the last keepLastSteps steps verbatim, so
+    // an assistant tool-call and its tool-result (same step) are never split. `ai@6` exposes
+    // `step.response.messages` as the CUMULATIVE response list up to that step, not a per-step delta
+    // (verified against a live run: per-step lengths [2, 4, 6]). So the last-K-steps message count is
+    // the final cumulative total minus the cumulative total keepLastSteps steps earlier — NOT the sum
+    // of those arrays, which overcounts so far that `splitAt` pins to 0 and compaction never fires
+    // (issue #176).
+    const cumulativeAt = (index: number): number =>
+      index >= 0 ? (steps[index]?.response.messages.length ?? 0) : 0;
+    const last = steps.length - 1;
+    const tailCount = cumulativeAt(last) - cumulativeAt(last - decision.keepLastSteps);
     const splitAt = Math.max(0, messages.length - tailCount);
     const older = messages.slice(0, splitAt);
     const tail = messages.slice(splitAt);

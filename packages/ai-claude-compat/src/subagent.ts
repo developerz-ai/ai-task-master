@@ -206,8 +206,36 @@ export function submittedOutput<OUTPUT>(
     .find((toolCall) => toolCall.toolName === SUBMIT_TOOL_NAME);
   if (!call) return { ok: false, reason: 'no-submission' };
   const parsed = outputSchema.safeParse(call.input);
-  if (!parsed.success) return { ok: false, reason: 'invalid', issues: parsed.error.issues };
-  return { ok: true, value: parsed.data };
+  if (parsed.success) return { ok: true, value: parsed.data };
+  // Weak models often call submit with a JSON STRING (optionally ```-fenced) instead of the object
+  // the schema expects (issue #185; live: a run died at pr-open, one step from success). Salvage that
+  // shape upstream of the #101 retry kernel — parse and re-validate — so retries only spend on
+  // genuinely wrong payloads. A non-string, non-parsing, or still-invalid value keeps the existing
+  // typed `invalid` result (with the parsed value's issues when it parsed but didn't validate).
+  if (typeof call.input === 'string') {
+    const salvaged = salvageJsonString(call.input);
+    if (salvaged.parsed) {
+      const reparsed = outputSchema.safeParse(salvaged.value);
+      return reparsed.success
+        ? { ok: true, value: reparsed.data }
+        : { ok: false, reason: 'invalid', issues: reparsed.error.issues };
+    }
+  }
+  return { ok: false, reason: 'invalid', issues: parsed.error.issues };
+}
+
+// Parse a submit payload that arrived as a JSON string, tolerating a single ```-fenced wrapper (the
+// two dominant weak-model fumble shapes). `{ parsed: false }` when it isn't valid JSON, so the caller
+// keeps the raw-value validation issues. See issue #185.
+function salvageJsonString(raw: string): { parsed: true; value: unknown } | { parsed: false } {
+  const trimmed = raw.trim();
+  const fenced = /^```[^\n]*\n([\s\S]*?)\n```$/.exec(trimmed);
+  const body = (fenced ? (fenced[1] ?? '') : trimmed).trim();
+  try {
+    return { parsed: true, value: JSON.parse(body) };
+  } catch {
+    return { parsed: false };
+  }
 }
 
 // Human-readable one-line rendering of Zod issues, for a caller's blocked/error/wontfix reason

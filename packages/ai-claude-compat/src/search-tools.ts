@@ -27,7 +27,12 @@ export const grepInputSchema = z
   .object({
     pattern: z.string().min(1),
     path: z.string().optional(),
-    glob: z.string().optional(),
+    glob: z
+      .string()
+      .optional()
+      .describe(
+        'Restrict to files matching this glob. A slash-free pattern (`*.ts`) matches the basename at any depth; a pattern with a slash (`src/*.ts`, `**/*.ts`) matches the whole worktree-relative path. Supports `*`, `**`, `?`, `{a,b}`.',
+      ),
     ignoreCase: z.boolean().optional(),
     filesWithMatches: z.boolean().optional(),
     // Per-file match counts (`path:count`) instead of content. Mutually exclusive with filesWithMatches.
@@ -312,7 +317,12 @@ function compileRegExp(pattern: string, flags: string): RegExp {
 // split respecting nesting; alternates may hold globs and nested braces). An unmatched `{` stays
 // literal. Other regex metacharacters are escaped so they match literally.
 export function globToRegExp(glob: string): RegExp {
-  return new RegExp(`^${translateGlob(glob)}$`);
+  // A slash-free pattern (`*.ts`) matches the basename at ANY depth — ripgrep's semantics, the shape
+  // models emit most often, and what gitignore.ts already does for unanchored rules. Anchoring it to
+  // the whole relative path (`^…$`) silently dropped every nested file (issue #178). A pattern that
+  // contains `/` (`src/*.ts`, `**/*.ts`) keeps full-path anchoring.
+  const prefix = glob.includes('/') ? '^' : '(?:^|.*/)';
+  return new RegExp(`${prefix}${translateGlob(glob)}$`);
 }
 
 // Regex body (no anchors) for a glob fragment; recursion handles brace alternates.

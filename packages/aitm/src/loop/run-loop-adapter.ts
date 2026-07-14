@@ -207,6 +207,25 @@ async function beginTranscript(
   }
 }
 
+// An `onStepFinish` handler that records only the per-step message delta (issue #175). `ai@6` hands
+// the callback the CUMULATIVE response-message list each step (per-step lengths [2, 4, 6] on a live
+// run), not a delta — recording it verbatim grew transcript files O(N²) and made resume replay a
+// duplicated conversation. Tracking the count already recorded and slicing keeps each record a true
+// delta. One handler per recorder (fresh closure state); exported for tests.
+export function recordStepDeltas(
+  recorder: TranscriptRecorder,
+): (event: {
+  response: { messages: readonly ModelMessage[] };
+  usage?: Parameters<TranscriptRecorder['step']>[1];
+}) => void {
+  let recorded = 0;
+  return (event) => {
+    const delta = event.response.messages.slice(recorded);
+    recorded = event.response.messages.length;
+    if (delta.length > 0) void recorder.step(delta, event.usage);
+  };
+}
+
 // Apply operator-configured PreToolUse/PostToolUse hooks over a resolved tool record (issue #121),
 // after the MCP/local partial-fill so both MCP-supplied and local tools are covered. No hooks
 // configured → the record is returned untouched. Exported for tests.
@@ -616,9 +635,7 @@ async function defaultPlanGroups(
     }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
-    ...(plannerRecorder
-      ? { onStepFinish: (event) => plannerRecorder.step(event.response.messages, event.usage) }
-      : {}),
+    ...(plannerRecorder ? { onStepFinish: recordStepDeltas(plannerRecorder) } : {}),
   });
   const result = await runPlanner(agent, {
     goal: input.goal,
@@ -767,9 +784,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             ),
       timeout: stepTimeout,
       ...(reviewerUsage ? { onUsage: reviewerUsage } : {}),
-      ...(recorder
-        ? { onStepFinish: (event) => recorder.step(event.response.messages, event.usage) }
-        : {}),
+      ...(recorder ? { onStepFinish: recordStepDeltas(recorder) } : {}),
     });
     const result = await runReviewerSubagent(agent, {
       pr,
@@ -844,9 +859,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         timeout: stepTimeout,
         ...(providerOptions !== undefined ? { providerOptions } : {}),
         ...(workerUsage ? { onUsage: workerUsage } : {}),
-        ...(recorder
-          ? { onStepFinish: (event) => recorder.step(event.response.messages, event.usage) }
-          : {}),
+        ...(recorder ? { onStepFinish: recordStepDeltas(recorder) } : {}),
       });
       const result = await runWorkerSubagent(agent, {
         group,
@@ -932,9 +945,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           ...(ciFixUsage ? { onUsage: ciFixUsage } : {}),
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
-          ...(ciRecorder
-            ? { onStepFinish: (event) => ciRecorder.step(event.response.messages, event.usage) }
-            : {}),
+          ...(ciRecorder ? { onStepFinish: recordStepDeltas(ciRecorder) } : {}),
           ...(ciResume ? { resumeMessages: ciResume } : {}),
         },
         group,

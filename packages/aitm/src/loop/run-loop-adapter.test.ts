@@ -28,6 +28,7 @@ import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
+import type { TranscriptRecorder } from '../state/transcript-store.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import {
@@ -48,6 +49,7 @@ import {
   persistRollingContext,
   planToPrGroups,
   type RunLoopAdapterSeams,
+  recordStepDeltas,
   reminderAgentSystemPrompt,
   resolvePlannerTools,
   resolveWorkerTools,
@@ -1083,4 +1085,49 @@ test('deferred loading end-to-end: an over-threshold MCP server surfaces name-on
     'fixed slots + submit stay active',
   );
   await mcp.close();
+});
+
+// ---- recordStepDeltas: per-step transcript deltas from cumulative SDK events (issue #175) ----
+
+test('recordStepDeltas: records only the per-step delta from cumulative onStepFinish events (issue #175)', () => {
+  const recorded: Array<{ count: number; usage: unknown }> = [];
+  const recorder: TranscriptRecorder = {
+    step: async (messages, usage) => {
+      recorded.push({ count: messages.length, usage });
+    },
+    compaction: async () => {},
+    end: async () => {},
+  };
+  const onStep = recordStepDeltas(recorder);
+  const m = (i: number) => ({ role: 'assistant' as const, content: `m${i}` });
+  // ai@6 hands the callback the CUMULATIVE response list each step: [m0,m1], [m0..m3], [m0..m5].
+  onStep({ response: { messages: [m(0), m(1)] }, usage: { totalTokens: 7 } });
+  onStep({ response: { messages: [m(0), m(1), m(2), m(3)] } });
+  onStep({ response: { messages: [m(0), m(1), m(2), m(3), m(4), m(5)] } });
+  assert.deepEqual(
+    recorded.map((r) => r.count),
+    [2, 2, 2],
+    'per-step deltas, not the cumulative [2, 4, 6]',
+  );
+  assert.equal(
+    (recorded[0]?.usage as { totalTokens?: number } | undefined)?.totalTokens,
+    7,
+    'usage forwarded with the first delta',
+  );
+});
+
+test('recordStepDeltas: a step with no new messages records nothing (issue #175)', () => {
+  let calls = 0;
+  const recorder: TranscriptRecorder = {
+    step: async () => {
+      calls += 1;
+    },
+    compaction: async () => {},
+    end: async () => {},
+  };
+  const onStep = recordStepDeltas(recorder);
+  const m = (i: number) => ({ role: 'assistant' as const, content: `m${i}` });
+  onStep({ response: { messages: [m(0)] } });
+  onStep({ response: { messages: [m(0)] } }); // unchanged cumulative → empty delta → no write
+  assert.equal(calls, 1);
 });

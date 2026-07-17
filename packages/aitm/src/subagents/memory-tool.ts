@@ -1,6 +1,6 @@
 // The Worker's `memory` tool (issue #118): read/write/remove durable per-repo memories rooted at the
-// StateStore memory dir. Load-bearing, not a convenience — the Worker's fs tools are confined to its
-// worktree (under .ai-task-master/worktrees/<group>/), so the memory dir is otherwise unreachable via
+// StateStore memory dir. Load-bearing, not a convenience — the Worker's fs tools are confined to the
+// repo checkout, so the memory dir is otherwise unreachable via
 // readFile. Adapter-local glue, like the explore/github slots: the memory dir is an injected path,
 // never sourced from MCP.
 

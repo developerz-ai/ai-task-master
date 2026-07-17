@@ -6,11 +6,11 @@
 //     batch = ready.slice(0, free worker slots)
 //     await Promise.all(batch.map(g => runGroup(g)))
 //
-// Each runGroup acquires a WorktreePool slot, runs Worker, and on PR open hands off to
+// Each runGroup acquires the checkout home's single slot, runs Worker, and on PR open hands off to
 // the merge-pr flow (CI wait + Reviewer + GitHubClient.mergePr).
 //
 // Deps are structural ports — concrete classes (Orchestrator, GitHubClient, StateStore,
-// WorktreePool, PlanGraph) satisfy them at runtime; tests pass literal stubs.
+// InPlaceCheckout, PlanGraph) satisfy them at runtime; tests pass literal stubs.
 
 import { CiFailed } from '../github/errors.ts';
 import type { CiResult, MergeMethod, Sleep } from '../github/github-client.ts';
@@ -22,7 +22,7 @@ import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../stat
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import { perTaskBranch } from '../workspace/branch-name.ts';
-import type { Worktree } from '../workspace/worktree-pool.ts';
+import type { Checkout } from '../workspace/in-place-checkout.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
 import type { SelfReviewResult } from './self-review.ts';
 import {
@@ -45,20 +45,20 @@ export type WorkerInvocation = {
   // The specific task being worked this pass. Omitted by the CI-fix invocation in autoMergeFlow,
   // which re-runs the Worker over the whole group rather than a single task.
   task?: Task;
-  worktree: Worktree;
+  checkout: Checkout;
   baseBranch: string;
 };
 
 export type ReviewerInvocation = {
   pr: number;
   threads: ReviewThread[];
-  worktree: Worktree;
+  checkout: Checkout;
 };
 
 export type CiFixInvocation = {
   group: PrGroup;
   pr: number;
-  worktree: Worktree;
+  checkout: Checkout;
   baseBranch: string;
 };
 
@@ -66,13 +66,13 @@ export type SelfReviewInvocation = {
   group: PrGroup;
   // The just-produced delivery (the work about to become a PR) — context for the review.
   delivery: WorkerDelivery;
-  worktree: Worktree;
+  checkout: Checkout;
   baseBranch: string;
 };
 
 export type WorkLoopOrchestrator = {
   runWorker(input: WorkerInvocation): Promise<WorkerResult>;
-  finalizeCommit(group: PrGroup, delivery: WorkerDelivery, worktreePath: string): Promise<string>;
+  finalizeCommit(group: PrGroup, delivery: WorkerDelivery, checkoutPath: string): Promise<string>;
   openPr(group: PrGroup, delivery: WorkerDelivery, baseBranch: string): Promise<PullRequest>;
   // Pre-PR self-review: adversarially review + verify + fix the just-committed diff, committing any
   // fixes onto the group branch BEFORE openPr. Optional so existing stubs compile and so a run with
@@ -94,15 +94,15 @@ export type WorkLoopGithub = {
   mergePr(pr: number, method: MergeMethod, opts?: { admin?: boolean }): Promise<void>;
 };
 
-export type WorkLoopPool = {
-  acquire(groupId: string, branch: string, baseBranch: string): Promise<Worktree>;
+export type CheckoutHome = {
+  acquire(groupId: string, branch: string, baseBranch: string): Promise<Checkout>;
   release(groupId: string): Promise<void>;
   // Re-point the group's checkout to a fresh branch started from the up-to-date remote base
   // (git fetch origin <baseBranch> → checkout -B <branch> origin/<baseBranch>). prPerTask + autoMerge
   // calls it per task so each task's PR branches off the previous task's MERGED result rather than the
   // prior task's tip (which, after a squash merge, would re-include the prior task's changes). Optional:
-  // a pool that omits it — or a --no-automerge run — keeps the single group branch (documented fallback).
-  resetToBase?(groupId: string, branch: string, baseBranch: string): Promise<Worktree>;
+  // a home that omits it — or a --no-automerge run — keeps the single group branch (documented fallback).
+  resetToBase?(groupId: string, branch: string, baseBranch: string): Promise<Checkout>;
 };
 
 export type WorkLoopState = {
@@ -129,7 +129,7 @@ export type WorkLoopDeps = {
   orchestrator: WorkLoopOrchestrator;
   github: WorkLoopGithub;
   state: WorkLoopState;
-  pool: WorkLoopPool;
+  home: CheckoutHome;
   graph: WorkLoopGraph;
   // Drives the addressing-reviews dedup. Optional — without it the review loop still terminates
   // once threads are resolved, but a replied-but-unresolved thread would be re-handled each poll.
@@ -207,7 +207,7 @@ export function mergeDeliveries(deliveries: readonly WorkerDelivery[]): WorkerDe
 }
 
 // Synthesize a delivery for work recovered from a prior run: some tasks are already `done` — their
-// commits persist on the branch the WorktreePool reuses on resume — but no PR was opened and this
+// commits persist on the branch the checkout home reuses on resume — but no PR was opened and this
 // pass produced no fresh delivery (it blocked, or every task was already done). A done task only
 // reaches that state after its commit is finalized, so `done` is a reliable proxy for "committed";
 // this lets openPr surface the recovered work instead of stranding it. Returns null when a PR
@@ -288,7 +288,7 @@ export class WorkLoop {
 
   // Run a single group. The group-as-PR default drives the PR lifecycle through the persisted
   // stage machine (driveStages); prPerTask opens — and under autoMerge merges — a PR per task
-  // (processGroup). Both acquire a worktree, persist an in-progress entry, and release on exit.
+  // (processGroup). Both acquire a checkout, persist an in-progress entry, and release on exit.
   async runGroup(group: PrGroup): Promise<void> {
     const branch = group.branch ?? `aitm/${group.id}`;
     let acquired = false;
@@ -302,21 +302,21 @@ export class WorkLoop {
         'in-progress',
         this.deps.prPerTask ? { branch } : { branch, stage: startStage },
       );
-      const worktree = await this.deps.pool.acquire(group.id, branch, baseBranch);
+      const checkout = await this.deps.home.acquire(group.id, branch, baseBranch);
       acquired = true;
       try {
         if (this.deps.prPerTask) {
-          await this.processGroup({ ...group, branch }, worktree, baseBranch);
+          await this.processGroup({ ...group, branch }, checkout, baseBranch);
         } else {
           const outcome = await this.driveStages(
             { ...group, branch, stage: startStage },
-            worktree,
+            checkout,
             baseBranch,
           );
           this.outcomes.push(outcome);
         }
       } finally {
-        await this.deps.pool.release(group.id);
+        await this.deps.home.release(group.id);
         acquired = false;
       }
     } catch (err) {
@@ -324,7 +324,7 @@ export class WorkLoop {
         // best-effort release if processGroup itself threw before the inner finally ran;
         // the inner finally would have run already in normal flow, so this is defensive.
         try {
-          await this.deps.pool.release(group.id);
+          await this.deps.home.release(group.id);
         } catch {
           /* swallow */
         }
@@ -360,13 +360,13 @@ export class WorkLoop {
   // task must start from the freshly-merged base. Otherwise, with the default squash merge, task N's
   // original branch commit is not an ancestor of the base's new squash commit, and task N+1's PR —
   // opened from the same branch — re-includes task N's changes (each successive PR grows). So under
-  // autoMerge every task gets its OWN branch reset off origin/<base> via pool.resetToBase, mirroring
+  // autoMerge every task gets its OWN branch reset off origin/<base> via home.resetToBase, mirroring
   // claudetm's fresh `git checkout -b` per task. Without autoMerge there is no merged base to branch
-  // from mid-group, and a pool without resetToBase (test stubs) can't reset either — both fall back to
+  // from mid-group, and a home without resetToBase (test stubs) can't reset either — both fall back to
   // the single group branch, opening a PR per task off it.
   private async processGroup(
     group: PrGroup,
-    worktree: Worktree,
+    checkout: Checkout,
     baseBranch: string,
   ): Promise<void> {
     let remaining = group.tasks.filter((t) => !t.done).length;
@@ -383,23 +383,23 @@ export class WorkLoop {
       return;
     }
 
-    // Keep the pool reference and call resetToBase AS A METHOD — extracting it to a bare local
-    // (`const fn = pool.resetToBase`) drops the `this` binding, and the real InPlaceCheckout/WorktreePool
-    // read `this.current`/`this.worktrees`, so a detached call throws "undefined is not an object".
-    const pool = this.deps.pool;
-    const canResetToBase = this.deps.autoMerge && typeof pool.resetToBase === 'function';
+    // Keep the home reference and call resetToBase AS A METHOD — extracting it to a bare local
+    // (`const fn = home.resetToBase`) drops the `this` binding, and the real InPlaceCheckout reads
+    // `this.current`, so a detached call throws "undefined is not an object".
+    const home = this.deps.home;
+    const canResetToBase = this.deps.autoMerge && typeof home.resetToBase === 'function';
     const groupBranch = group.branch ?? `aitm/${group.id}`;
     let worked = group;
-    let wt = worktree;
+    let co = checkout;
     for (const task of group.tasks) {
       if (task.done) continue;
-      if (canResetToBase && pool.resetToBase) {
+      if (canResetToBase && home.resetToBase) {
         // Fresh branch off the merged base for this task's isolated PR (see method doc).
         const branch = perTaskBranch(groupBranch, task.id);
-        wt = await pool.resetToBase(group.id, branch, baseBranch);
+        co = await home.resetToBase(group.id, branch, baseBranch);
         worked = { ...worked, branch };
       }
-      const result = await this.runOneTask(worked, task, wt, baseBranch);
+      const result = await this.runOneTask(worked, task, co, baseBranch);
       if (result.kind === 'blocked') {
         // Surface the reason live — this prPerTask task-blocked path otherwise marks the group
         // blocked SILENTLY (no progress line), so a failed task looks like the group just vanished.
@@ -417,7 +417,7 @@ export class WorkLoop {
       // after an earlier task's PR would strand the still-undone tasks: a crash there leaves a
       // terminal group PlanGraph.ready() won't reschedule. While tasks remain, the group stays
       // in-progress (schedulable on resume).
-      await this.openAndMaybeMerge(worked, result.delivery, wt, baseBranch, remaining === 0);
+      await this.openAndMaybeMerge(worked, result.delivery, co, baseBranch, remaining === 0);
     }
   }
 
@@ -428,11 +428,11 @@ export class WorkLoop {
   // its persisted stage, so prior stages (working, pr-open) are never redone.
   private async driveStages(
     group: PrGroup,
-    worktree: Worktree,
+    checkout: Checkout,
     baseBranch: string,
   ): Promise<GroupOutcome> {
     const ctx: StageCtx = { group, delivery: null, blockedReason: undefined, fixAttempts: 0 };
-    const deps = this.buildStageDeps(ctx, worktree, baseBranch);
+    const deps = this.buildStageDeps(ctx, checkout, baseBranch);
     let stage: GroupStage = group.stage;
 
     while (true) {
@@ -493,11 +493,11 @@ export class WorkLoop {
   }
 
   // Bridge the WorkLoop's ports to the narrow surfaces the stage handlers drive. The handlers
-  // stay worktree-agnostic; this closure owns the worktree, base branch and the per-run StageCtx.
-  private buildStageDeps(ctx: StageCtx, worktree: Worktree, baseBranch: string): StageDeps {
+  // stay checkout-agnostic; this closure owns the checkout, base branch and the per-run StageCtx.
+  private buildStageDeps(ctx: StageCtx, checkout: Checkout, baseBranch: string): StageDeps {
     const orchestrator: StageOrchestrator = {
       work: async () => {
-        const result = await this.workTasks(ctx.group, worktree, baseBranch);
+        const result = await this.workTasks(ctx.group, checkout, baseBranch);
         if (result.kind === 'blocked') {
           // A task couldn't complete this pass and nothing was committed this pass. If a prior run
           // already committed earlier tasks on the (reused) branch, open a PR for that recovered
@@ -531,15 +531,15 @@ export class WorkLoop {
         if (ctx.delivery === null) {
           throw new Error(`group ${ctx.group.id} reached pr-open without a worker delivery`);
         }
-        await this.maybeSelfReview(ctx.group, ctx.delivery, worktree, baseBranch);
+        await this.maybeSelfReview(ctx.group, ctx.delivery, checkout, baseBranch);
         const pr = await this.deps.orchestrator.openPr(ctx.group, ctx.delivery, baseBranch);
         ctx.group = { ...ctx.group, pr: pr.number };
         return pr.number;
       },
       fixCi: (group) =>
-        this.deps.orchestrator.runCiFix({ group, pr: prNumberOf(group), worktree, baseBranch }),
+        this.deps.orchestrator.runCiFix({ group, pr: prNumberOf(group), checkout, baseBranch }),
       addressReviews: (group, threads) =>
-        this.deps.orchestrator.addressReviews({ pr: prNumberOf(group), threads, worktree }),
+        this.deps.orchestrator.addressReviews({ pr: prNumberOf(group), threads, checkout }),
     };
     const github: StageGithub = {
       waitForChecks: (pr) => this.deps.github.waitForChecks(pr),
@@ -567,7 +567,7 @@ export class WorkLoop {
   // nothing has been committed.
   private async workTasks(
     group: PrGroup,
-    worktree: Worktree,
+    checkout: Checkout,
     baseBranch: string,
   ): Promise<
     | { kind: 'ok'; group: PrGroup; delivery: WorkerDelivery | null }
@@ -577,7 +577,7 @@ export class WorkLoop {
     const deliveries: WorkerDelivery[] = [];
     for (const task of group.tasks) {
       if (task.done) continue;
-      const result = await this.runOneTask(worked, task, worktree, baseBranch);
+      const result = await this.runOneTask(worked, task, checkout, baseBranch);
       if (result.kind === 'blocked') {
         // A task couldn't complete. If earlier tasks in this group already committed work on this
         // pass, don't discard it: open a PR for what landed instead of stranding those commits on
@@ -601,16 +601,16 @@ export class WorkLoop {
   private async runOneTask(
     group: PrGroup,
     task: Task,
-    worktree: Worktree,
+    checkout: Checkout,
     baseBranch: string,
   ): Promise<
     { kind: 'ok'; group: PrGroup; delivery: WorkerDelivery } | { kind: 'blocked'; reason: string }
   > {
-    const result = await this.deps.orchestrator.runWorker({ group, task, worktree, baseBranch });
+    const result = await this.deps.orchestrator.runWorker({ group, task, checkout, baseBranch });
     if (result.kind !== 'ok') {
       return { kind: 'blocked', reason: result.kind === 'blocked' ? result.reason : result.error };
     }
-    await this.deps.orchestrator.finalizeCommit(group, result.delivery, worktree.path);
+    await this.deps.orchestrator.finalizeCommit(group, result.delivery, checkout.path);
     const next = await this.completeTask(group, task.id);
     return { kind: 'ok', group: next, delivery: result.delivery };
   }
@@ -648,7 +648,7 @@ export class WorkLoop {
   private async maybeSelfReview(
     group: PrGroup,
     delivery: WorkerDelivery,
-    worktree: Worktree,
+    checkout: Checkout,
     baseBranch: string,
   ): Promise<void> {
     if (this.deps.selfReview === false) return;
@@ -656,7 +656,7 @@ export class WorkLoop {
     if (!run) return;
     const step = this.stepFor(group.id, 'self-review');
     try {
-      const result = await run({ group, delivery, worktree, baseBranch });
+      const result = await run({ group, delivery, checkout, baseBranch });
       this.deps.progress?.(selfReviewProgress(group.id, result), step);
     } catch (err) {
       // A crash in the safety net must never strand the committed work or gate the PR.
@@ -677,11 +677,11 @@ export class WorkLoop {
   private async openAndMaybeMerge(
     group: PrGroup,
     delivery: WorkerDelivery,
-    worktree: Worktree,
+    checkout: Checkout,
     baseBranch: string,
     final: boolean,
   ): Promise<void> {
-    await this.maybeSelfReview(group, delivery, worktree, baseBranch);
+    await this.maybeSelfReview(group, delivery, checkout, baseBranch);
     const pr = await this.deps.orchestrator.openPr(group, delivery, baseBranch);
     await this.persistAfterSideEffect(
       { groupId: group.id, status: 'awaiting-pr', pr: pr.number },
@@ -693,7 +693,7 @@ export class WorkLoop {
       return;
     }
 
-    await this.autoMergeFlow(group, pr, worktree, baseBranch);
+    await this.autoMergeFlow(group, pr, checkout, baseBranch);
     await this.persistAfterSideEffect({ groupId: group.id, status: 'merged', pr: pr.number }, () =>
       this.markStatus(group.id, final ? 'merged' : 'in-progress'),
     );
@@ -746,7 +746,7 @@ export class WorkLoop {
   private async autoMergeFlow(
     group: PrGroup,
     pr: PullRequest,
-    worktree: Worktree,
+    checkout: Checkout,
     baseBranch: string,
   ): Promise<void> {
     const { orchestrator, github } = this.deps;
@@ -755,12 +755,12 @@ export class WorkLoop {
     // propagates. Still-red after the fix is fatal for this flow.
     const ci = await github.waitForChecks(pr.number);
     if (ci.state === 'failure') {
-      const fix = await orchestrator.runWorker({ group, worktree, baseBranch });
+      const fix = await orchestrator.runWorker({ group, checkout, baseBranch });
       if (fix.kind !== 'ok') {
         const reason = fix.kind === 'blocked' ? fix.reason : fix.error;
         throw new Error(`worker CI fix failed: ${reason}`);
       }
-      await orchestrator.finalizeCommit(group, fix.delivery, worktree.path);
+      await orchestrator.finalizeCommit(group, fix.delivery, checkout.path);
       const recheck = await github.waitForChecks(pr.number);
       if (recheck.state === 'failure') {
         throw new CiFailed(`PR #${pr.number} still failing after worker CI fix`);
@@ -770,7 +770,7 @@ export class WorkLoop {
     // Review: resolve any unresolved threads via Reviewer.
     const threads = await github.listUnresolvedThreads(pr.number);
     if (threads.length > 0) {
-      const review = await orchestrator.runReviewer({ pr: pr.number, threads, worktree });
+      const review = await orchestrator.runReviewer({ pr: pr.number, threads, checkout });
       if (review.kind !== 'ok') {
         const reason = review.kind === 'blocked' ? review.reason : review.error;
         throw new Error(`reviewer failed: ${reason}`);

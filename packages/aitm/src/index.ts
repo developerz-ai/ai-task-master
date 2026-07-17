@@ -42,4 +42,4 @@ export {
   type WebSearchResult,
   webSearchTool,
 } from './tools/web-search.ts';
-export { WorktreePool } from './workspace/worktree-pool.ts';
+export { branchExists, type Checkout, InPlaceCheckout } from './workspace/in-place-checkout.ts';

@@ -24,7 +24,7 @@ export type RolePromptInput = {
   style: string;
   // The role's session guidance — today's role-prefix constant. Rendered as the sessionGuidance block.
   roleGuidance: string;
-  // Worktree cwd for the <env> block.
+  // Checkout cwd for the <env> block.
   cwd: string;
   // The role's effective step budget, surfaced as the step-budget reminder so exhaustion isn't silent.
   maxSteps: number;

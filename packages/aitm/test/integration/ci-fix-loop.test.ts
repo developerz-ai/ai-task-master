@@ -115,7 +115,7 @@ test('ci-fix-loop: CI fails once, Worker fixes, re-poll succeeds, PR merges → 
         runMergeFlow: async (input: RunMergeFlowInput): Promise<WorkLoopResult> => {
           const flowResult = await runTakeOverFlow({
             pr: 1,
-            worktreePath: repo.path,
+            checkoutPath: repo.path,
             baseBranch: 'main',
             github: {
               waitForChecks: async (): Promise<CiResult> => {
@@ -213,7 +213,7 @@ test('ci-fix-loop: maxIterations=1 exhausted with always-failing CI → exit 1',
         runMergeFlow: async (input: RunMergeFlowInput): Promise<WorkLoopResult> => {
           const flowResult = await runTakeOverFlow({
             pr: 2,
-            worktreePath: repo.path,
+            checkoutPath: repo.path,
             baseBranch: 'main',
             github: {
               waitForChecks: async (): Promise<CiResult> => ({
@@ -288,7 +288,7 @@ test('ci-fix-loop: MergeConflict thrown by mergePr propagates to exit 1', async 
         runMergeFlow: async (input: RunMergeFlowInput): Promise<WorkLoopResult> => {
           const flowResult = await runTakeOverFlow({
             pr: 3,
-            worktreePath: repo.path,
+            checkoutPath: repo.path,
             baseBranch: 'main',
             github: {
               waitForChecks: async (): Promise<CiResult> => ({
@@ -355,7 +355,7 @@ test('ci-fix-loop: pre-aborted AbortSignal yields exit 2 (cancelled)', async () 
         runMergeFlow: async (input: RunMergeFlowInput): Promise<WorkLoopResult> => {
           const flowResult = await runTakeOverFlow({
             pr: 4,
-            worktreePath: repo.path,
+            checkoutPath: repo.path,
             baseBranch: 'main',
             github: {
               waitForChecks: async (): Promise<CiResult> => ({

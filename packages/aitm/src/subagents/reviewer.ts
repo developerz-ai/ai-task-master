@@ -62,7 +62,7 @@ export type ReviewerAgent = ToolLoopAgent<never, ReviewerTools>;
 export type ReviewerInput = {
   pr: number;
   threads: ReviewThread[];
-  worktreePath: string;
+  checkoutPath: string;
   styleContents: string;
   // Optional harness context block prepended to each thread's first user message (issue #106).
   contextBlock?: string;
@@ -181,7 +181,7 @@ async function resolveOneThread(
     case 'fixed': {
       // commitMessage is optional on the flat schema; fall back to a generic subject.
       const message = out.commitMessage?.trim() || `fix: address review thread ${thread.id}`;
-      const commitSha = await commitFix(init.tools.bash, input.worktreePath, message);
+      const commitSha = await commitFix(init.tools.bash, input.checkoutPath, message);
       return { threadId: thread.id, kind: 'fixed', commitSha };
     }
     case 'replied':
@@ -196,7 +196,7 @@ async function resolveOneThread(
 }
 
 function buildThreadPrompt(input: ReviewerInput, thread: ReviewThread): string {
-  const lines = [`PR: #${input.pr}`, `Worktree: ${input.worktreePath}`, `Thread id: ${thread.id}`];
+  const lines = [`PR: #${input.pr}`, `Checkout: ${input.checkoutPath}`, `Thread id: ${thread.id}`];
   if (thread.path) lines.push(`File: ${thread.path}`);
   lines.push('', 'Conversation:');
   for (const c of thread.comments) {
@@ -211,14 +211,14 @@ function buildThreadPrompt(input: ReviewerInput, thread: ReviewThread): string {
 
 async function commitFix(
   bash: Tool<BashInput, BashOutput>,
-  worktreePath: string,
+  checkoutPath: string,
   message: string,
 ): Promise<string> {
   const exec = bash.execute;
   if (typeof exec !== 'function') {
     throw new Error('bash tool is missing an execute function');
   }
-  const wt = shQuote(worktreePath);
+  const wt = shQuote(checkoutPath);
   // Never commit aitm's own state dir (in-place mode keeps it at the repo root). add -A skips it when
   // gitignored; the reset drops it when it isn't. See stageAndCommit in worker.ts.
   await runBash(exec, `git -C ${wt} add -A`);

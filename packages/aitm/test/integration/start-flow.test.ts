@@ -2,7 +2,7 @@
 //
 // - makeTempRepo({ withClaudeMd: true }) seeds a real git repo
 // - MockLanguageModelV3 stubs Credentials.modelFor for Orchestrator.finalizeCommit's generateText
-// - WorkLoop / PlanGraph / WorktreePool run against real git operations
+// - WorkLoop / PlanGraph / InPlaceCheckout run against real git operations
 // - Worker writes files directly (canned), bypassing the AI planner
 // - GhClient is stubbed — no real GitHub calls
 //
@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
-import { join, resolve as resolvePath } from 'node:path';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
@@ -29,7 +29,7 @@ import type { PrGroup, RunState } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
 import type { WorkerDelivery } from '../../src/subagents/worker.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
-import { WorktreePool } from '../../src/workspace/worktree-pool.ts';
+import { InPlaceCheckout } from '../../src/workspace/in-place-checkout.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -60,7 +60,7 @@ function makeMockModel(): MockLanguageModelV3 {
 }
 
 /**
- * runLoop fixture: wires WorkLoop / PlanGraph / WorktreePool with real git operations.
+ * runLoop fixture: wires WorkLoop / PlanGraph / InPlaceCheckout with real git operations.
  * Worker writes hello.ts directly (no Planner AI call). Orchestrator.finalizeCommit
  * runs with the injected MockLanguageModelV3 — the only real AI SDK boundary exercised.
  * GitHubClient is stubbed so no gh binary calls are made.
@@ -69,7 +69,6 @@ function makeRunLoop(
   mockModel: MockLanguageModelV3,
 ): (input: RunLoopInput) => Promise<WorkLoopResult> {
   return async (input: RunLoopInput): Promise<WorkLoopResult> => {
-    const stateDir = resolvePath(input.cwd, '.ai-task-master');
 
     // Hardcode one PR group — bypass the Planner subagent for this integration test.
     const planGroup: PrGroup = {
@@ -113,7 +112,7 @@ function makeRunLoop(
     });
     const defaultBranch = rawBranch.trim();
 
-    const pool = new WorktreePool(input.cwd, stateDir, input.resolved.concurrency);
+    const home = new InPlaceCheckout(input.cwd);
 
     // Orchestrator instance used only for finalizeCommit — exercises generateText at the
     // model boundary with MockLanguageModelV3.
@@ -131,12 +130,12 @@ function makeRunLoop(
 
     const stubOrchestrator: WorkLoopOrchestrator = {
       /** Writes hello.ts and creates an initial commit — simulates the Worker subagent. */
-      runWorker: async ({ worktree }) => {
-        await writeFile(join(worktree.path, 'hello.ts'), 'export const hello = "hello";\n');
-        await execa('git', ['add', 'hello.ts'], { cwd: worktree.path });
-        await execa('git', ['commit', '-m', 'wip: add hello'], { cwd: worktree.path });
+      runWorker: async ({ checkout }) => {
+        await writeFile(join(checkout.path, 'hello.ts'), 'export const hello = "hello";\n');
+        await execa('git', ['add', 'hello.ts'], { cwd: checkout.path });
+        await execa('git', ['commit', '-m', 'wip: add hello'], { cwd: checkout.path });
         const delivery: WorkerDelivery = {
-          branch: worktree.branch,
+          branch: checkout.branch,
           draftCommitMessage: 'feat: add hello',
           changes: [{ path: 'hello.ts', kind: 'create', summary: 'creates hello export' }],
           progressEntries: ['- created hello.ts'],
@@ -144,8 +143,8 @@ function makeRunLoop(
         return { kind: 'ok', delivery };
       },
       /** Real Orchestrator.finalizeCommit — calls generateText with the mock model. */
-      finalizeCommit: (group, delivery, worktreePath) =>
-        orchForFinalize.finalizeCommit(group, delivery, worktreePath),
+      finalizeCommit: (group, delivery, checkoutPath) =>
+        orchForFinalize.finalizeCommit(group, delivery, checkoutPath),
       /** Stub: return a fake PR number without calling gh. */
       openPr: async (group, _delivery, baseBranch): Promise<PullRequest> => ({
         number: 1,
@@ -168,7 +167,7 @@ function makeRunLoop(
       orchestrator: stubOrchestrator,
       github,
       state: workLoopState,
-      pool,
+      home,
       graph,
       concurrency: input.resolved.concurrency,
       autoMerge: false,
@@ -186,7 +185,7 @@ function makeRunLoop(
 test('start-flow: plan→work→PR open transitions prGroups[0].status to awaiting-pr', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   try {
-    // An initial commit is required so `git worktree add` has a base branch to check out from.
+    // An initial commit is required so `git checkout add` has a base branch to check out from.
     await execa('git', ['add', 'CLAUDE.md'], { cwd: repo.path });
     await execa('git', ['commit', '-m', 'initial commit'], { cwd: repo.path });
 
@@ -259,7 +258,6 @@ test('start-flow: 2-task group writes [x] per completed task in plan.md', async 
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
         runLoop: async (input: RunLoopInput): Promise<WorkLoopResult> => {
-          const stateDir = resolvePath(input.cwd, '.ai-task-master');
 
           const planGroup: PrGroup = {
             id: 'hello-world',
@@ -303,7 +301,7 @@ test('start-flow: 2-task group writes [x] per completed task in plan.md', async 
           });
           const defaultBranch = rawBranch.trim();
 
-          const pool = new WorktreePool(input.cwd, stateDir, input.resolved.concurrency);
+          const home = new InPlaceCheckout(input.cwd);
 
           const orchForFinalize = new Orchestrator({
             credentials: { modelFor: () => mockModel },
@@ -320,18 +318,18 @@ test('start-flow: 2-task group writes [x] per completed task in plan.md', async 
           // Track call count so each task writes a distinct file (hello.ts, world.ts).
           let workerCallCount = 0;
           const stubOrchestrator: WorkLoopOrchestrator = {
-            runWorker: async ({ worktree }) => {
+            runWorker: async ({ checkout }) => {
               const fileName = workerCallCount === 0 ? 'hello.ts' : 'world.ts';
               workerCallCount++;
               const exportName = fileName.replace('.ts', '');
               await writeFile(
-                join(worktree.path, fileName),
+                join(checkout.path, fileName),
                 `export const ${exportName} = '${exportName}';\n`,
               );
-              await execa('git', ['add', fileName], { cwd: worktree.path });
-              await execa('git', ['commit', '-m', `wip: add ${fileName}`], { cwd: worktree.path });
+              await execa('git', ['add', fileName], { cwd: checkout.path });
+              await execa('git', ['commit', '-m', `wip: add ${fileName}`], { cwd: checkout.path });
               const delivery: WorkerDelivery = {
-                branch: worktree.branch,
+                branch: checkout.branch,
                 draftCommitMessage: `feat: add ${fileName}`,
                 changes: [
                   { path: fileName, kind: 'create', summary: `creates ${exportName} export` },
@@ -340,8 +338,8 @@ test('start-flow: 2-task group writes [x] per completed task in plan.md', async 
               };
               return { kind: 'ok', delivery };
             },
-            finalizeCommit: (group, delivery, worktreePath) =>
-              orchForFinalize.finalizeCommit(group, delivery, worktreePath),
+            finalizeCommit: (group, delivery, checkoutPath) =>
+              orchForFinalize.finalizeCommit(group, delivery, checkoutPath),
             openPr: async (group, _delivery, baseBranch): Promise<PullRequest> => ({
               number: 2,
               state: 'OPEN',
@@ -363,7 +361,7 @@ test('start-flow: 2-task group writes [x] per completed task in plan.md', async 
             orchestrator: stubOrchestrator,
             github,
             state: workLoopState,
-            pool,
+            home,
             graph,
             concurrency: input.resolved.concurrency,
             autoMerge: false,

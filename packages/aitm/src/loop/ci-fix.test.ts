@@ -96,7 +96,7 @@ function baseInput(overrides: Partial<FixSessionInput> = {}): FixSessionInput {
     group: baseGroup(),
     pr: 7,
     baseBranch: 'main',
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     runCmd: recordingRunCmd().runCmd,
     ...overrides,
   };

@@ -124,12 +124,12 @@ export type OrchestratorInit = {
 };
 
 // Per-group state needed to wire the subagent tools. Built fresh for each Orchestrator
-// invocation since worktreePath / group / pr / threads vary between groups.
+// invocation since checkoutPath / group / pr / threads vary between groups.
 export type OrchestratorBuildContext = {
   plannerTools: PlannerTools;
   workerTools: WorkerTools;
   reviewerTools: ReviewerTools;
-  worktreePath: string;
+  checkoutPath: string;
   baseBranch: string;
   group: PrGroup;
   pr: number;
@@ -250,14 +250,14 @@ export class Orchestrator {
       worker: makeWorkerTool({
         ...commonDeps,
         workerTools: context.workerTools,
-        worktreePath: context.worktreePath,
+        checkoutPath: context.checkoutPath,
         baseBranch: context.baseBranch,
         group: context.group,
       }),
       reviewer: makeReviewerTool({
         ...commonDeps,
         reviewerTools: context.reviewerTools,
-        worktreePath: context.worktreePath,
+        checkoutPath: context.checkoutPath,
         pr: context.pr,
         threads: context.threads,
       }),
@@ -275,19 +275,19 @@ export class Orchestrator {
   }
 
   // Re-write the Worker's draft commit message via the orchestrator model, then
-  // `git commit --amend` on the active worktree. Returns the new HEAD SHA.
+  // `git commit --amend` on the active checkout. Returns the new HEAD SHA.
   async finalizeCommit(
     group: PrGroup,
     delivery: WorkerDelivery,
-    worktreePath: string,
+    checkoutPath: string,
   ): Promise<string> {
     const refined = await this.refineCommitMessage(group, delivery);
     const runCmd = this.init.runCmd ?? defaultRunCmd;
-    const amend = await runCmd('git', ['commit', '--amend', '-m', refined], { cwd: worktreePath });
+    const amend = await runCmd('git', ['commit', '--amend', '-m', refined], { cwd: checkoutPath });
     if (amend.exitCode !== 0) {
       throw new Error(`git commit --amend failed: ${amend.stderr.trim() || amend.stdout.trim()}`);
     }
-    const sha = await runCmd('git', ['rev-parse', 'HEAD'], { cwd: worktreePath });
+    const sha = await runCmd('git', ['rev-parse', 'HEAD'], { cwd: checkoutPath });
     if (sha.exitCode !== 0) {
       throw new Error(`git rev-parse HEAD failed: ${sha.stderr.trim() || sha.stdout.trim()}`);
     }

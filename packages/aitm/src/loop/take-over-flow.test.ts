@@ -87,7 +87,7 @@ function baseInput(
 ): TakeOverFlowInput {
   return {
     pr: 42,
-    worktreePath: '/tmp/repo',
+    checkoutPath: '/tmp/repo',
     baseBranch: 'main',
     github,
     mergeMethod: 'squash',

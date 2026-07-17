@@ -19,8 +19,8 @@ export type StartArgs = {
   // Cap on CI-fix passes per PR group before it blocks for a human. From `--max-fix-attempts`. #128.
   maxFixAttempts?: number;
   // Caller-specified branch for the PR(s). When the plan yields a single group it is used
-  // verbatim; with multiple groups it becomes a prefix (`<branch>/<group-id>`) so concurrent
-  // worktrees don't collide. When absent, branches default to `aitm/<group-id>`.
+  // verbatim; with multiple groups it becomes a prefix (`<branch>/<group-id>`) so the
+  // groups' branches don't collide. When absent, branches default to `aitm/<group-id>`.
   branch?: string;
 };
 
@@ -188,7 +188,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
 }
 
 // Git ref-name check that mirrors the component rules `git check-ref-format --branch` enforces,
-// so an invalid `--branch` is rejected up front instead of failing later at `git worktree add -b`.
+// so an invalid `--branch` is rejected up front instead of failing later at `git checkout -B`.
 export function isValidBranchName(name: string): boolean {
   if (name.length === 0 || name.length > 255) return false;
   if (name.startsWith('-')) return false;

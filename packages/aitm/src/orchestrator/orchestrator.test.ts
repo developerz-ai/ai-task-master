@@ -185,7 +185,7 @@ function baseContext(): OrchestratorBuildContext {
     plannerTools: {},
     workerTools: workerToolsStub(),
     reviewerTools: reviewerToolsStub(),
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     group: baseGroup(),
     pr: 0,

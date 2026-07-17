@@ -13,12 +13,12 @@
 //     sleep(cooldown)  # let CI restart
 //   mergePr(pr)
 //
-// Unlike WorkLoop.autoMergeFlow, this does NOT acquire a `git worktree`. The user is
-// expected to be on the PR branch in their cwd; everything happens in-place. That's
-// the simpler model and matches how a human reviewer would handle it.
+// Like WorkLoop, this works in-place: the user is expected to be on the PR branch in their
+// cwd; everything happens in the current checkout. That's the simpler model and matches how
+// a human reviewer would handle it.
 //
 // docs/vendor/ai-sdk/chunk-09.md §"Subagents" — Reviewer/Worker are built ad-hoc per loop
-// iteration because their tool bindings (worktree, threads) change each iteration.
+// iteration because their tool bindings (checkout, threads) change each iteration.
 
 import type { LanguageModel, TimeoutConfiguration } from 'ai';
 import { CiFailed } from '../github/errors.ts';
@@ -105,7 +105,7 @@ export type TakeOverSubagents = {
   runReviewerOverride?: (input: {
     pr: number;
     threads: ReviewThread[];
-    worktreePath: string;
+    checkoutPath: string;
     styleContents: string;
   }) => Promise<ReviewerResult>;
   // Receives the full WorkerInput the real path would build (incl. formatCommand/verifyCommand/
@@ -119,7 +119,7 @@ export type TakeOverSubagents = {
 
 export type TakeOverFlowInput = {
   pr: number;
-  worktreePath: string;
+  checkoutPath: string;
   baseBranch: string;
   github: TakeOverGithub;
   subagents: TakeOverSubagents;
@@ -259,7 +259,7 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
       // and retried; only an unresolvable one aborts the rebase and blocks the run cleanly (exit 1).
       const pushed = await rebaseAndForcePush(
         runCmd,
-        input.worktreePath,
+        input.checkoutPath,
         input.baseBranch,
         input.pr,
         log,
@@ -325,7 +325,7 @@ async function runReviewerThreads(
     return input.subagents.runReviewerOverride({
       pr: input.pr,
       threads,
-      worktreePath: input.worktreePath,
+      checkoutPath: input.checkoutPath,
       styleContents: input.subagents.styleContents,
     });
   }
@@ -335,7 +335,7 @@ async function runReviewerThreads(
     systemPrompt: buildRolePrompt({
       style: input.subagents.styleContents,
       roleGuidance: REVIEWER_SYSTEM_PREFIX,
-      cwd: input.worktreePath,
+      cwd: input.checkoutPath,
       maxSteps: REVIEWER_MAX_STEPS,
     }),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
@@ -346,14 +346,14 @@ async function runReviewerThreads(
   return runReviewer(agent, {
     pr: input.pr,
     threads,
-    worktreePath: input.worktreePath,
+    checkoutPath: input.checkoutPath,
     styleContents: input.subagents.styleContents,
   });
 }
 
 // Worker CI-fix path. Build a synthetic PR group whose only task is "fix CI on this PR",
 // then run the regular Worker. Worker emits a FileManifest and runs per-file editors —
-// suitable for "test failed, fix it" if Worker has enough context from the worktree.
+// suitable for "test failed, fix it" if Worker has enough context from the checkout.
 async function runWorkerCiFix(
   input: TakeOverFlowInput,
   ciLogsDir: string | null,
@@ -383,7 +383,7 @@ async function runWorkerCiFix(
   };
   const workerInput: WorkerInput = {
     group,
-    worktreePath: input.worktreePath,
+    checkoutPath: input.checkoutPath,
     baseBranch: input.baseBranch,
     styleContents: input.subagents.styleContents,
     rollingContext: '',
@@ -400,7 +400,7 @@ async function runWorkerCiFix(
     systemPrompt: buildRolePrompt({
       style: input.subagents.styleContents,
       roleGuidance: WORKER_SYSTEM_PREFIX,
-      cwd: input.worktreePath,
+      cwd: input.checkoutPath,
       maxSteps: WORKER_MAX_STEPS,
     }),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),

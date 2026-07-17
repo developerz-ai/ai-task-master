@@ -95,7 +95,7 @@ export async function runE2ESmoke(cfg: SmokeConfig, log: (s: string) => void): P
     const pr = state.currentPr;
     log(`start opened PR #${pr}`);
 
-    // merge-pr operates in cwd; be on the PR branch (the worktree branch lives elsewhere).
+    // merge-pr operates in cwd; be on the PR branch (the checkout branch lives elsewhere).
     await execa('gh', ['pr', 'checkout', String(pr)], { cwd: dir });
 
     // ---- aitm merge-pr (resume from state) → drive CI + threads → merge ------------------

@@ -147,11 +147,11 @@ export const ConfigFileSchema = z
     autoMerge: z.boolean().optional(),
     mergeMethod: MergeMethodSchema.optional(),
     stylePath: z.string().nullable().optional(),
-    // Shell command run in the worktree by the Worker before `git add -A`, so the committed
+    // Shell command run in the checkout by the Worker before `git add -A`, so the committed
     // diff matches the project's formatter (e.g. "bun run lint:fix"). Unset → no format step.
     // See src/subagents/worker.ts §commitOnBranch and issue #48.
     formatCommand: z.string().optional(),
-    // Shell command run in the worktree by the Worker after the editor fanout + formatCommand and
+    // Shell command run in the checkout by the Worker after the editor fanout + formatCommand and
     // before `git add`, so a diff that fails tests/lint never opens a red PR. A non-zero exit
     // triggers one bounded local fix pass; if it still fails the group blocks without committing.
     // Unset → no verify step. See src/subagents/worker.ts and issue #122.
@@ -168,15 +168,11 @@ export const ConfigFileSchema = z
     resolveConflicts: z.boolean().optional(),
     logLevel: LogLevelSchema.optional(),
     // How many PR groups may have a Worker running at the same time. Default 1 = sequential.
-    // See src/loop/work-loop.ts and src/workspace/worktree-pool.ts.
+    // See src/loop/work-loop.ts and src/workspace/in-place-checkout.ts.
     concurrency: z.number().int().positive().optional(),
     // Whether aitm may force-push (`--force-with-lease`, used by the CI-fix rebase flow). Default
     // true. Set false on repos that forbid all force-pushes; the CI-fix push then blocks instead.
     allowForcePush: z.boolean().optional(),
-    // Isolate each group in its own `git worktree` (default true). When false, aitm works IN PLACE in
-    // the single repo checkout — switching branches with `git checkout` — and forces concurrency to 1
-    // so the subagent team is scheduled sequentially instead of isolated. See in-place-checkout.ts.
-    worktrees: z.boolean().optional(),
     // Attach OpenRouter's server-side web_search tool to Worker generate calls (issue #112). Unset →
     // enabled for CI-fix sessions only (highest lookup value, bounded cost); true → all Worker calls;
     // false → never. See src/loop/run-loop-adapter.ts §web-search gating.
@@ -265,9 +261,6 @@ export type ResolvedConfig = {
   concurrency: number;
   // Whether aitm may force-push (`--force-with-lease`). Default true.
   allowForcePush: boolean;
-  // Isolate groups in git worktrees (default true) or work in-place in the one checkout with
-  // concurrency forced to 1. See src/workspace/in-place-checkout.ts.
-  worktrees: boolean;
   // Whether OpenRouter web_search rides Worker calls (issue #112). Tri-state, so NOT collapsed to a
   // default: undefined → CI-fix sessions only; true → all Worker calls; false → never.
   webSearch?: boolean | undefined;

@@ -120,7 +120,7 @@ export type FixSessionInput = {
   pr: number;
   baseBranch: string;
   // Where the group's branch is checked out — the Worker edits here and all git runs with this cwd.
-  worktreePath: string;
+  checkoutPath: string;
   // git/gh shim — defaults to execa. Stubbed in unit tests to assert command shape (fetch/rebase/
   // push --force-with-lease) without spawning processes.
   runCmd?: RunCmd;
@@ -147,7 +147,7 @@ export type PushResult = { kind: 'fixed' } | { kind: 'blocked'; reason: string }
 // (preserving BOTH sides) and `git add`s them — it must NOT run `git rebase --continue`/`--abort`,
 // `git commit`, or `git checkout`; rebaseAndForcePush drives the rebase state machine and verifies.
 export type ConflictResolutionInput = {
-  worktreePath: string;
+  checkoutPath: string;
   baseBranch: string;
   conflictedFiles: readonly string[];
   attempt: number;
@@ -166,7 +166,7 @@ export type ConflictResolver = (input: ConflictResolutionInput) => Promise<Confl
 export const MAX_CONFLICT_RESOLVE_ATTEMPTS = 2;
 
 export async function runFixSession(input: FixSessionInput): Promise<FixSessionResult> {
-  const { github, prContext, group, pr, baseBranch, worktreePath } = input;
+  const { github, prContext, group, pr, baseBranch, checkoutPath } = input;
   const runCmd = input.runCmd ?? defaultRunCmd;
   const log = input.logger;
 
@@ -196,7 +196,7 @@ export async function runFixSession(input: FixSessionInput): Promise<FixSessionR
   // 3. Rebase onto the latest base, then force-with-lease push so CI re-runs on fresh ground.
   const pushed = await rebaseAndForcePush(
     runCmd,
-    worktreePath,
+    checkoutPath,
     baseBranch,
     pr,
     log,
@@ -242,11 +242,11 @@ function buildFixTask(
 }
 
 async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerResult> {
-  const { subagents, group, baseBranch, worktreePath } = input;
+  const { subagents, group, baseBranch, checkoutPath } = input;
   const baseInput: WorkerInput = {
     group,
     task,
-    worktreePath,
+    checkoutPath,
     baseBranch,
     styleContents: subagents.styleContents,
     rollingContext: subagents.rollingContext ?? '',
@@ -274,7 +274,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     systemPrompt: buildRolePrompt({
       style: subagents.styleContents,
       roleGuidance: WORKER_SYSTEM_PREFIX,
-      cwd: worktreePath,
+      cwd: checkoutPath,
       maxSteps: WORKER_MAX_STEPS,
       modelId: subagents.credentials.modelIdForCapability('coding'),
       ...(subagents.memoryIndex ? { memoryIndex: subagents.memoryIndex } : {}),
@@ -307,7 +307,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
 // loop so every force-push goes through the same rebase-first guard.
 export async function rebaseAndForcePush(
   runCmd: RunCmd,
-  worktreePath: string,
+  checkoutPath: string,
   baseBranch: string,
   pr: number,
   log: LoggerLike | undefined,
@@ -324,7 +324,7 @@ export async function rebaseAndForcePush(
         'force-push the CI fix. The fix is committed on the branch locally — land the PR manually.',
     };
   }
-  const cwd = { cwd: worktreePath };
+  const cwd = { cwd: checkoutPath };
   const fetch = await runCmd('git', ['fetch', 'origin', baseBranch], cwd);
   if (fetch.exitCode !== 0) {
     return { kind: 'blocked', reason: `git fetch origin ${baseBranch} failed: ${gitErr(fetch)}` };
@@ -333,7 +333,7 @@ export async function rebaseAndForcePush(
   if (rebase.exitCode !== 0) {
     const resolved = await resolveRebaseConflicts(
       runCmd,
-      worktreePath,
+      checkoutPath,
       baseBranch,
       pr,
       log,
@@ -358,14 +358,14 @@ export async function rebaseAndForcePush(
 // gives up, leaves files unmerged past the cap, or a non-conflict rebase failure all abort + block.
 async function resolveRebaseConflicts(
   runCmd: RunCmd,
-  worktreePath: string,
+  checkoutPath: string,
   baseBranch: string,
   pr: number,
   log: LoggerLike | undefined,
   firstRebase: RunCmdResult,
   resolveConflicts: ConflictResolver | undefined,
 ): Promise<PushResult> {
-  const cwd = { cwd: worktreePath };
+  const cwd = { cwd: checkoutPath };
   const abortAndBlock = async (reason: string): Promise<PushResult> => {
     await runCmd('git', ['rebase', '--abort'], cwd);
     return { kind: 'blocked', reason };
@@ -388,7 +388,7 @@ async function resolveRebaseConflicts(
       files: conflicted,
     });
     const resolution = await resolveConflicts({
-      worktreePath,
+      checkoutPath,
       baseBranch,
       conflictedFiles: conflicted,
       attempt,
@@ -416,7 +416,7 @@ async function resolveRebaseConflicts(
   );
 }
 
-// Files git left unmerged (conflicted) in the worktree. Empty on any non-zero `git diff` so a
+// Files git left unmerged (conflicted) in the checkout. Empty on any non-zero `git diff` so a
 // diff error can't be mistaken for "conflicts remain".
 async function unmergedPaths(runCmd: RunCmd, cwd: RunCmdOptions): Promise<string[]> {
   const r = await runCmd('git', ['diff', '--name-only', '--diff-filter=U'], cwd);

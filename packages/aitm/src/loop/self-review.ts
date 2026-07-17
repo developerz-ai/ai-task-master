@@ -82,7 +82,7 @@ export type SelfReviewInput = {
   group: PrGroup;
   baseBranch: string;
   // Where the group's branch is checked out — the Worker edits here, and verify runs with this cwd.
-  worktreePath: string;
+  checkoutPath: string;
   // The effective verify command the coordinator runs ONCE before the review Worker (config
   // verifyCommand, else a detected fallback). Undefined → no shell verify (adversarial review only).
   verifyCommand?: string;
@@ -105,7 +105,7 @@ export type SelfReviewResult =
 const VERIFY_TAIL_MAX = 4000;
 
 export async function runSelfReviewSession(input: SelfReviewInput): Promise<SelfReviewResult> {
-  const { subagents, group, worktreePath } = input;
+  const { subagents, group, checkoutPath } = input;
   const runCmd = input.runCmd ?? defaultRunCmd;
   const log = input.logger;
 
@@ -114,7 +114,7 @@ export async function runSelfReviewSession(input: SelfReviewInput): Promise<Self
   //    must not spawn a bogus fix pass — so it is treated as "no verify ran".
   let verifyFailure: RunCmdResult | null = null;
   if (input.verifyCommand) {
-    const out = await runShell(runCmd, worktreePath, input.verifyCommand);
+    const out = await runShell(runCmd, checkoutPath, input.verifyCommand);
     log?.info('self-review: verify', { command: input.verifyCommand, exitCode: out.exitCode });
     if (out.exitCode !== 0 && out.exitCode !== 127) verifyFailure = out;
   }
@@ -153,11 +153,11 @@ export async function runSelfReviewSession(input: SelfReviewInput): Promise<Self
 // CI-fix session's worker build (compaction, timeout, provider options, usage, transcript hooks). No
 // verifyCommand is threaded — verification is the coordinator's job here (see module header).
 async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<WorkerResult> {
-  const { subagents, group, baseBranch, worktreePath } = input;
+  const { subagents, group, baseBranch, checkoutPath } = input;
   const baseInput: WorkerInput = {
     group,
     task,
-    worktreePath,
+    checkoutPath,
     baseBranch,
     styleContents: subagents.styleContents,
     rollingContext: subagents.rollingContext ?? '',
@@ -179,7 +179,7 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     systemPrompt: buildRolePrompt({
       style: subagents.styleContents,
       roleGuidance: WORKER_SYSTEM_PREFIX,
-      cwd: worktreePath,
+      cwd: checkoutPath,
       maxSteps: WORKER_MAX_STEPS,
       modelId: subagents.credentials.modelIdForCapability('coding'),
       ...(subagents.memoryIndex ? { memoryIndex: subagents.memoryIndex } : {}),
@@ -260,13 +260,13 @@ function verifyTail(out: RunCmdResult): string {
   return combined.length > VERIFY_TAIL_MAX ? combined.slice(-VERIFY_TAIL_MAX) : combined;
 }
 
-// Run a shell command string in the worktree via the runCmd shim (`sh -c`), so a configured
+// Run a shell command string in the checkout via the runCmd shim (`sh -c`), so a configured
 // verify command like `bun test` works verbatim. Never throws on a non-zero exit — a failing verify
 // is a handled outcome the pass reacts to.
 async function runShell(
   runCmd: RunCmd,
-  worktreePath: string,
+  checkoutPath: string,
   command: string,
 ): Promise<RunCmdResult> {
-  return runCmd('sh', ['-c', command], { cwd: worktreePath });
+  return runCmd('sh', ['-c', command], { cwd: checkoutPath });
 }

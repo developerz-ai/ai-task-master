@@ -56,10 +56,10 @@ test('assertGitAllowed: allows ordinary pushes', () => {
 });
 
 test('assertGitAllowed: the rule keys off the push subcommand, not the --force token', () => {
-  // `git worktree remove --force` and `git clean --force` must not be flagged.
-  assert.doesNotThrow(() => assertGitAllowed(['worktree', 'remove', '--force', '/tmp/wt']));
+  // `git checkout --force` and `git clean --force` must not be flagged.
+  assert.doesNotThrow(() => assertGitAllowed(['checkout', '--force', 'br']));
   assert.doesNotThrow(() => assertGitAllowed(['clean', '-f']));
-  assert.doesNotThrow(() => assertGitAllowed(['worktree', 'add', '/tmp/wt', '-b', 'br', 'main']));
+  assert.doesNotThrow(() => assertGitAllowed(['checkout', '-B', 'br', 'main']));
 });
 
 test('runGit: rejects a force-push before spawning git', async () => {

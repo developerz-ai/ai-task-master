@@ -212,7 +212,7 @@ test('makeWorkerTool returns a Tool with description, inputSchema, execute, toMo
     styleContents: '',
     rollingContext: '',
     workerTools: tools,
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     group: baseGroup(),
   };
@@ -232,7 +232,7 @@ test('makeReviewerTool returns a Tool with description, inputSchema, execute, to
     styleContents: '',
     rollingContext: '',
     reviewerTools: tools,
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     pr: 42,
     threads: [],
   };
@@ -344,7 +344,7 @@ test('worker tool: execute resolves model via credentials.modelFor("worker") and
     styleContents: '# style\n',
     rollingContext: 'prior: nothing',
     workerTools: tools,
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     group: baseGroup(),
   });
@@ -372,7 +372,7 @@ test('worker tool: toModelOutput collapses ok result to "worker [ok]: …"', asy
     styleContents: '',
     rollingContext: '',
     workerTools: tools,
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     group: baseGroup(),
   });
@@ -408,7 +408,7 @@ test('worker tool: toModelOutput collapses blocked + error results', async () =>
     styleContents: '',
     rollingContext: '',
     workerTools: tools,
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     group: baseGroup(),
   });
@@ -445,7 +445,7 @@ test('reviewer tool: execute resolves model via credentials.modelFor("reviewer")
     styleContents: '# style\n',
     rollingContext: '',
     reviewerTools: tools,
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     pr: 42,
     threads: [baseThread('T1', 'why?')],
   });
@@ -468,7 +468,7 @@ test('reviewer tool: toModelOutput collapses ok result to "reviewer [ok]: …"',
     styleContents: '',
     rollingContext: '',
     reviewerTools: tools,
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     pr: 1,
     threads: [],
   });
@@ -557,7 +557,7 @@ test('worker tool: toModelOutput bounds a verbose draft commit message and strip
     styleContents: '',
     rollingContext: '',
     workerTools: tools,
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     group: baseGroup(),
   });
@@ -592,7 +592,7 @@ test('reviewer tool: toModelOutput collapses zero-resolution ok, blocked + error
     styleContents: '',
     rollingContext: '',
     reviewerTools: tools,
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     pr: 1,
     threads: [],
   });

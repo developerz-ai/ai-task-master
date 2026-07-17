@@ -94,9 +94,6 @@ const DEFAULTS = {
   logLevel: 'info' as const,
   concurrency: 1,
   allowForcePush: true,
-  // Worktrees OFF by default: aitm works in-place in the one checkout (see in-place-checkout.ts).
-  // Opt back in with `worktrees: true` only if you need concurrent isolated groups.
-  worktrees: false,
   mcpDeferToolsOver: DEFAULT_MCP_DEFER_TOOLS_OVER,
 };
 
@@ -256,8 +253,6 @@ export class ConfigLoader {
         global?.allowForcePush,
         DEFAULTS.allowForcePush,
       ),
-      // worktrees off by default (in-place execution) — project/global only, no CLI flag.
-      worktrees: pick(undefined, project?.worktrees, global?.worktrees, DEFAULTS.worktrees),
       // Tri-state (project > global), left undefined when unset so the adapter can tell "CI-fix only"
       // (undefined) apart from "never" (false). No CLI flag, no default collapse. Issue #112.
       ...((project?.webSearch ?? global?.webSearch) !== undefined

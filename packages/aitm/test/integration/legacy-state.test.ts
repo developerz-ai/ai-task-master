@@ -17,7 +17,7 @@
 
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join, resolve as resolvePath } from 'node:path';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
@@ -32,7 +32,7 @@ import type { PrGroup, RunState } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
 import type { WorkerDelivery } from '../../src/subagents/worker.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
-import { WorktreePool } from '../../src/workspace/worktree-pool.ts';
+import { InPlaceCheckout } from '../../src/workspace/in-place-checkout.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -306,11 +306,7 @@ test('legacy-state: runStart resumes from legacy state.json and drives WorkLoop 
           });
           const defaultBranch = rawBranch.trim();
 
-          const pool = new WorktreePool(
-            input.cwd,
-            resolvePath(input.cwd, '.ai-task-master'),
-            input.resolved.concurrency,
-          );
+          const home = new InPlaceCheckout(input.cwd);
 
           const orchForFinalize = new Orchestrator({
             credentials: { modelFor: () => mockModel },
@@ -325,20 +321,20 @@ test('legacy-state: runStart resumes from legacy state.json and drives WorkLoop 
           });
 
           const stubOrchestrator: WorkLoopOrchestrator = {
-            runWorker: async ({ worktree }) => {
-              await writeFile(join(worktree.path, 'hello.ts'), 'export const hello = "hello";\n');
-              await execa('git', ['add', 'hello.ts'], { cwd: worktree.path });
-              await execa('git', ['commit', '-m', 'wip: add hello'], { cwd: worktree.path });
+            runWorker: async ({ checkout }) => {
+              await writeFile(join(checkout.path, 'hello.ts'), 'export const hello = "hello";\n');
+              await execa('git', ['add', 'hello.ts'], { cwd: checkout.path });
+              await execa('git', ['commit', '-m', 'wip: add hello'], { cwd: checkout.path });
               const delivery: WorkerDelivery = {
-                branch: worktree.branch,
+                branch: checkout.branch,
                 draftCommitMessage: 'feat: add hello',
                 changes: [{ path: 'hello.ts', kind: 'create', summary: 'creates hello export' }],
                 progressEntries: ['- created hello.ts'],
               };
               return { kind: 'ok', delivery };
             },
-            finalizeCommit: (group, delivery, worktreePath) =>
-              orchForFinalize.finalizeCommit(group, delivery, worktreePath),
+            finalizeCommit: (group, delivery, checkoutPath) =>
+              orchForFinalize.finalizeCommit(group, delivery, checkoutPath),
             openPr: async (group, _delivery, baseBranch): Promise<PullRequest> => ({
               number: 1,
               state: 'OPEN',
@@ -362,7 +358,7 @@ test('legacy-state: runStart resumes from legacy state.json and drives WorkLoop 
             orchestrator: stubOrchestrator,
             github,
             state: workLoopState,
-            pool,
+            home,
             graph,
             concurrency: input.resolved.concurrency,
             autoMerge: false,

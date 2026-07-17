@@ -14,12 +14,12 @@
 //   - Restart simulated via the production normalizeResumeStatus (preserving stage:'waiting-ci' +
 //     pr), the same normalization runStart applies on resume — not an ad-hoc status reset.
 //   - Second run resumes at waiting-ci: worker and openPr are NOT called; waitForChecks IS called.
-//   - Group advances to merged. Stub pool skips real git worktree (not needed post-pr-open).
+//   - Group advances to merged. Stub home skips real git checkout (not needed post-pr-open).
 //   The real adapter resume path is unit-tested in src/loop/run-loop-adapter.test.ts.
 
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
-import { join, resolve as resolvePath } from 'node:path';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
@@ -29,7 +29,7 @@ import type { PullRequest } from '../../src/github/schema.ts';
 import { normalizeResumeStatus } from '../../src/loop/resume-normalize.ts';
 import type {
   WorkLoopOrchestrator,
-  WorkLoopPool,
+  CheckoutHome,
   WorkLoopResult,
   WorkLoopState,
 } from '../../src/loop/work-loop.ts';
@@ -40,7 +40,7 @@ import type { PrGroup, RunState } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
 import type { WorkerDelivery } from '../../src/subagents/worker.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
-import { WorktreePool } from '../../src/workspace/worktree-pool.ts';
+import { InPlaceCheckout } from '../../src/workspace/in-place-checkout.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers shared with start-flow.test.ts (copied to keep tests self-contained)
@@ -78,7 +78,6 @@ function makeRunLoop(
   mockModel: MockLanguageModelV3,
 ): (input: RunLoopInput) => Promise<WorkLoopResult> {
   return async (input: RunLoopInput): Promise<WorkLoopResult> => {
-    const stateDir = resolvePath(input.cwd, '.ai-task-master');
 
     const planGroup: PrGroup = {
       id: 'hello',
@@ -116,7 +115,7 @@ function makeRunLoop(
     });
     const defaultBranch = rawBranch.trim();
 
-    const pool = new WorktreePool(input.cwd, stateDir, input.resolved.concurrency);
+    const home = new InPlaceCheckout(input.cwd);
 
     const orchForFinalize = new Orchestrator({
       credentials: { modelFor: () => mockModel },
@@ -131,20 +130,20 @@ function makeRunLoop(
     });
 
     const stubOrchestrator: WorkLoopOrchestrator = {
-      runWorker: async ({ worktree }) => {
-        await writeFile(join(worktree.path, 'hello.ts'), 'export const hello = "hello";\n');
-        await execa('git', ['add', 'hello.ts'], { cwd: worktree.path });
-        await execa('git', ['commit', '-m', 'wip: add hello'], { cwd: worktree.path });
+      runWorker: async ({ checkout }) => {
+        await writeFile(join(checkout.path, 'hello.ts'), 'export const hello = "hello";\n');
+        await execa('git', ['add', 'hello.ts'], { cwd: checkout.path });
+        await execa('git', ['commit', '-m', 'wip: add hello'], { cwd: checkout.path });
         const delivery: WorkerDelivery = {
-          branch: worktree.branch,
+          branch: checkout.branch,
           draftCommitMessage: 'feat: add hello',
           changes: [{ path: 'hello.ts', kind: 'create', summary: 'creates hello export' }],
           progressEntries: ['- created hello.ts'],
         };
         return { kind: 'ok', delivery };
       },
-      finalizeCommit: (group, delivery, worktreePath) =>
-        orchForFinalize.finalizeCommit(group, delivery, worktreePath),
+      finalizeCommit: (group, delivery, checkoutPath) =>
+        orchForFinalize.finalizeCommit(group, delivery, checkoutPath),
       openPr: async (group, _delivery, baseBranch): Promise<PullRequest> => ({
         number: 1,
         state: 'OPEN',
@@ -166,7 +165,7 @@ function makeRunLoop(
       orchestrator: stubOrchestrator,
       github,
       state: workLoopState,
-      pool,
+      home,
       graph,
       concurrency: input.resolved.concurrency,
       autoMerge: false,
@@ -250,14 +249,20 @@ test('resume-flow: second runStart resumes from state.json after blocked exit', 
     const { stdout: branches2 } = await execa('git', ['branch', '--list', 'aitm/*'], {
       cwd: repo.path,
     });
-    const branchList = branches2.trim().split('\n').filter(Boolean);
+    // In-place execution checks the group branch out in the repo itself, so `git branch` marks it
+    // as current (`* aitm/hello`); strip the marker before comparing.
+    const branchList = branches2
+      .trim()
+      .split('\n')
+      .map((b) => b.replace(/^\*?\s*/, ''))
+      .filter(Boolean);
     assert.equal(
       branchList.length,
       1,
       `expected exactly 1 aitm/* branch after resume, got: ${branchList.join(', ')}`,
     );
     assert.ok(
-      branchList.some((b) => b.trim() === 'aitm/hello'),
+      branchList.some((b) => b === 'aitm/hello'),
       `expected aitm/hello in branch list, got: ${branchList.join(', ')}`,
     );
 
@@ -422,8 +427,8 @@ test('resume-flow: interrupt after pr-open; resume picks up at waiting-ci withou
             isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
           };
 
-          // Stub pool: waiting-ci and beyond require no git worktree operations.
-          const pool: WorkLoopPool = {
+          // Stub home: waiting-ci and beyond require no git checkout operations.
+          const home: CheckoutHome = {
             acquire: async (groupId, branch) => ({ groupId, branch, path: input.cwd }),
             release: async () => {},
           };
@@ -466,7 +471,7 @@ test('resume-flow: interrupt after pr-open; resume picks up at waiting-ci withou
             orchestrator: stubOrchestrator,
             github,
             state: workLoopState,
-            pool,
+            home,
             graph,
             concurrency: input.resolved.concurrency,
             autoMerge: true,

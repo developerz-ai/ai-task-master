@@ -9,7 +9,7 @@
 //           → (addressing-reviews → waiting-reviews | ready-to-merge) → merged
 // 'merged'/'blocked' are terminal (no handler); 'pending' is pre-working (the dispatcher kicks it).
 //
-// Handlers stay decision-only: execution detail (worktree, subagents, git) lives behind the
+// Handlers stay decision-only: execution detail (checkout, subagents, git) lives behind the
 // `orchestrator` port, and persisting the *stage* is the dispatcher's job. A handler persists only
 // the data IT produces — handlePrOpen records the PR number right after the side effect so a later
 // state-write failure never loses an opened PR (cf. WorkLoop's StateWriteAfterSuccess guard).
@@ -37,8 +37,8 @@ export type StageGithub = {
 
 export type StageWorkResult = { kind: 'ok' } | { kind: 'blocked'; reason: string };
 
-// Worktree-bound execution facade, built per group-run by the dispatcher (which owns the worktree,
-// base branch and subagents). Its methods take the group so the handlers stay worktree-agnostic.
+// Checkout-bound execution facade, built per group-run by the dispatcher (which owns the checkout,
+// base branch and subagents). Its methods take the group so the handlers stay checkout-agnostic.
 export type StageOrchestrator = {
   // Run every not-yet-done task in the group (Worker → finalize commit → mark done → persist),
   // in order, leaving the branch holding all the group's commits. Idempotent on resume: tasks

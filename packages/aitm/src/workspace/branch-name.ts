@@ -3,7 +3,7 @@
 // became a second real caller of the sanitizer — one home for "make this string a valid ref part".
 
 // Normalize an arbitrary id into a safe single git ref component. Ids can carry characters (leading
-// '.', '.lock', spaces, ':' …) that would make a composed ref invalid and fail at checkout/worktree
+// '.', '.lock', spaces, ':' …) that would make a composed ref invalid and fail at branch
 // creation. Map unsafe chars to '-', strip the component-level footguns, never return empty.
 export function sanitizeBranchComponent(id: string): string {
   let s = id.replace(/[^A-Za-z0-9._-]/g, '-');

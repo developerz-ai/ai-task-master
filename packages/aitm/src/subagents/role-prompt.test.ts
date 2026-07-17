@@ -11,7 +11,7 @@ test('buildRolePrompt weaves the always-on contracts, role guidance, step budget
   const prompt = buildRolePrompt({
     style: '# coding style digest',
     roleGuidance: 'You are the Worker.',
-    cwd: '/tmp/does-not-exist-worktree',
+    cwd: '/tmp/does-not-exist-checkout',
     maxSteps: 30,
     modelId: 'anthropic/claude-sonnet-4',
   });
@@ -29,7 +29,7 @@ test('buildRolePrompt renders blocks in canonical order (contracts first, role b
   const prompt = buildRolePrompt({
     style: 'STYLE_MARKER',
     roleGuidance: 'ROLE_MARKER',
-    cwd: '/tmp/does-not-exist-worktree',
+    cwd: '/tmp/does-not-exist-checkout',
     maxSteps: 20,
     modelId: 'prov/model-x',
   });
@@ -46,7 +46,7 @@ test('buildRolePrompt omits the self-id block when no modelId is supplied (take-
   const prompt = buildRolePrompt({
     style: '',
     roleGuidance: 'You are the Reviewer.',
-    cwd: '/tmp/does-not-exist-worktree',
+    cwd: '/tmp/does-not-exist-checkout',
     maxSteps: 20,
   });
   assert.ok(!/running as the model/.test(prompt), 'no self-id block without a modelId');
@@ -58,7 +58,7 @@ test('buildRolePrompt injects the memory index (with staleness framing) when mem
   const withMemory = buildRolePrompt({
     style: 'S',
     roleGuidance: 'ROLE',
-    cwd: '/tmp/does-not-exist-worktree',
+    cwd: '/tmp/does-not-exist-checkout',
     maxSteps: 30,
     memoryIndex: [{ file: 'flaky.md', description: 'e2e flakes on cold cache' }],
   });
@@ -68,7 +68,7 @@ test('buildRolePrompt injects the memory index (with staleness framing) when mem
   const withoutMemory = buildRolePrompt({
     style: 'S',
     roleGuidance: 'ROLE',
-    cwd: '/tmp/does-not-exist-worktree',
+    cwd: '/tmp/does-not-exist-checkout',
     maxSteps: 30,
     memoryIndex: [],
   });
@@ -79,7 +79,7 @@ test('buildRolePrompt omits an empty style block (no blank-line artifact)', () =
   const prompt = buildRolePrompt({
     style: '',
     roleGuidance: 'ROLE',
-    cwd: '/tmp/does-not-exist-worktree',
+    cwd: '/tmp/does-not-exist-checkout',
     maxSteps: 12,
   });
   assert.ok(!prompt.includes('\n\n\n'), 'no triple newline from the omitted style block');

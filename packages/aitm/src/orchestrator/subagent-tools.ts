@@ -58,14 +58,14 @@ export type PlannerToolDeps = CommonDeps & {
 
 export type WorkerToolDeps = CommonDeps & {
   workerTools: WorkerTools;
-  worktreePath: string;
+  checkoutPath: string;
   baseBranch: string;
   group: PrGroup;
 };
 
 export type ReviewerToolDeps = CommonDeps & {
   reviewerTools: ReviewerTools;
-  worktreePath: string;
+  checkoutPath: string;
   pr: number;
   threads: ReviewThread[];
 };
@@ -121,7 +121,7 @@ export function makeWorkerTool(deps: WorkerToolDeps): Tool<EmptyInput, WorkerRes
       });
       return runWorker(agent, {
         group: deps.group,
-        worktreePath: deps.worktreePath,
+        checkoutPath: deps.checkoutPath,
         baseBranch: deps.baseBranch,
         styleContents: deps.styleContents,
         rollingContext: deps.rollingContext,
@@ -145,7 +145,7 @@ export function makeReviewerTool(deps: ReviewerToolDeps): Tool<EmptyInput, Revie
       return runReviewer(agent, {
         pr: deps.pr,
         threads: deps.threads,
-        worktreePath: deps.worktreePath,
+        checkoutPath: deps.checkoutPath,
         styleContents: deps.styleContents,
       });
     },

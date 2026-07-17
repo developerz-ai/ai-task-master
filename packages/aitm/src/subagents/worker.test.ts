@@ -73,7 +73,7 @@ function makeTools(opts: { bashExitCode?: number; bashStderr?: string } = {}): {
   const calls: ToolCallLog = { reads: [], writes: [], bashes: [] };
   const tools: WorkerTools = {
     readFile: tool<ReadFileInput, ReadFileOutput>({
-      description: 'read a file from the worktree',
+      description: 'read a file from the checkout',
       inputSchema: z.object({ path: z.string() }),
       execute: async (input) => {
         calls.reads.push(input);
@@ -81,7 +81,7 @@ function makeTools(opts: { bashExitCode?: number; bashStderr?: string } = {}): {
       },
     }),
     writeFile: tool<WriteFileInput, WriteFileOutput>({
-      description: 'write a file in the worktree',
+      description: 'write a file in the checkout',
       inputSchema: z.object({ path: z.string(), content: z.string() }),
       execute: async (input) => {
         calls.writes.push(input);
@@ -89,7 +89,7 @@ function makeTools(opts: { bashExitCode?: number; bashStderr?: string } = {}): {
       },
     }),
     bash: tool<BashInput, BashOutput>({
-      description: 'run a bash command in the worktree',
+      description: 'run a bash command in the checkout',
       inputSchema: z.object({ command: z.string() }),
       execute: async (input) => {
         calls.bashes.push(input);
@@ -124,7 +124,7 @@ function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {
 function baseInput(group: PrGroup = baseGroup()): WorkerInput {
   return {
     group,
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     styleContents: '# style\n',
     rollingContext: '',
@@ -387,7 +387,7 @@ test('runWorker: scopes the manifest prompt and progress to the current Task sli
   assert.equal(manifestPrompt.includes('task A'), false, 'sibling task omitted in task mode');
 });
 
-test('runWorker runs formatCommand in the worktree before staging when set (issue #48)', async () => {
+test('runWorker runs formatCommand in the checkout before staging when set (issue #48)', async () => {
   const manifest: FileManifest = {
     files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
     draftCommitMessage: 'feat: a',
@@ -618,7 +618,7 @@ function makeVerifyTools(verifyExitCodes: number[]): {
   let vi = 0;
   const base = makeTools().tools;
   const bash = tool<BashInput, BashOutput>({
-    description: 'run a bash command in the worktree',
+    description: 'run a bash command in the checkout',
     inputSchema: z.object({
       command: z.string(),
       timeoutMs: z.number().int().positive().optional(),

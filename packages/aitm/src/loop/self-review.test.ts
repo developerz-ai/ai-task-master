@@ -72,7 +72,7 @@ function baseInput(overrides: Partial<SelfReviewInput> = {}): SelfReviewInput {
     subagents: baseSubagents(),
     group: baseGroup(),
     baseBranch: 'main',
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     runCmd: recordingRunCmd().runCmd,
     ...overrides,
   };
@@ -138,12 +138,12 @@ test('runSelfReviewSession: nothing to fix (empty manifest, verify clean) → cl
   assert.equal(result.kind, 'clean');
 });
 
-test('runSelfReviewSession: runs the verify command once in the worktree via sh -c', async () => {
+test('runSelfReviewSession: runs the verify command once in the checkout via sh -c', async () => {
   const { runCmd, commands, cwds } = recordingRunCmd();
   await runSelfReviewSession(baseInput({ runCmd, verifyCommand: 'bun test' }));
   assert.equal(commands.length, 1, 'verify runs exactly once (single pass)');
   assert.equal(commands[0], 'sh -c bun test');
-  assert.equal(cwds[0], '/tmp/wt', 'verify runs in the worktree');
+  assert.equal(cwds[0], '/tmp/wt', 'verify runs in the checkout');
 });
 
 test('runSelfReviewSession: verify fails → fix task carries the tail, and a fixing Worker → reviewed', async () => {

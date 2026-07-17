@@ -7,11 +7,12 @@ import { renderPlanMarkdown } from '../plan/plan-markdown.ts';
 import type { PrGroup, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
-import type { Worktree } from '../workspace/worktree-pool.ts';
+import type { Checkout } from '../workspace/in-place-checkout.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
 import type { SelfReviewResult } from './self-review.ts';
 import type { StageWorkResult } from './stage-handlers.ts';
 import {
+  type CheckoutHome,
   mergeDeliveries,
   recoveredDelivery,
   type SelfReviewInvocation,
@@ -20,7 +21,6 @@ import {
   type WorkLoopGithub,
   type WorkLoopGraph,
   type WorkLoopOrchestrator,
-  type WorkLoopPool,
   type WorkLoopPrContext,
   type WorkLoopState,
 } from './work-loop.ts';
@@ -86,15 +86,15 @@ function baseState(): RunState {
 
 type OrchestratorCalls = {
   runWorker: WorkerInvocationCall[];
-  finalizeCommit: { group: PrGroup; worktreePath: string }[];
+  finalizeCommit: { group: PrGroup; checkoutPath: string }[];
   openPr: { group: PrGroup; baseBranch: string; delivery: WorkerDelivery }[];
-  runReviewer: { pr: number; threads: ReviewThread[]; worktree: Worktree }[];
+  runReviewer: { pr: number; threads: ReviewThread[]; checkout: Checkout }[];
   runCiFix: { group: PrGroup; pr: number; baseBranch: string }[];
   addressReviews: { pr: number; threads: ReviewThread[] }[];
   selfReview: SelfReviewInvocation[];
 };
 
-type WorkerInvocationCall = { group: PrGroup; task?: Task; worktree: Worktree; baseBranch: string };
+type WorkerInvocationCall = { group: PrGroup; task?: Task; checkout: Checkout; baseBranch: string };
 
 function makeOrchestrator(
   config: {
@@ -134,8 +134,8 @@ function makeOrchestrator(
       if (!next) return { kind: 'ok', delivery: delivery() } as WorkerResult;
       return next;
     },
-    finalizeCommit: async (g, _d, worktreePath) => {
-      calls.finalizeCommit.push({ group: g, worktreePath });
+    finalizeCommit: async (g, _d, checkoutPath) => {
+      calls.finalizeCommit.push({ group: g, checkoutPath });
       return `sha-${g.id}`;
     },
     openPr: async (g, d, baseBranch) => {
@@ -235,7 +235,7 @@ function makeGithub(
   return { github, calls };
 }
 
-type PoolCalls = {
+type HomeCalls = {
   acquire: string[];
   release: string[];
   activeAtAcquire: number[];
@@ -243,16 +243,16 @@ type PoolCalls = {
 };
 
 // `resetToBase: true` mounts the base-fresh-per-task seam so prPerTask + autoMerge branches each task
-// off the merged base; omitted (default) leaves the pool without it, exercising the single-branch
+// off the merged base; omitted (default) leaves the home without it, exercising the single-branch
 // fallback. `events` is a shared ordering log across stubs.
-function makePool(opts: { resetToBase?: boolean; events?: string[] } = {}): {
-  pool: WorkLoopPool;
-  calls: PoolCalls;
+function makeHome(opts: { resetToBase?: boolean; events?: string[] } = {}): {
+  home: CheckoutHome;
+  calls: HomeCalls;
   live: () => number;
 } {
   const live = new Set<string>();
-  const calls: PoolCalls = { acquire: [], release: [], activeAtAcquire: [], resetToBase: [] };
-  const pool: WorkLoopPool = {
+  const calls: HomeCalls = { acquire: [], release: [], activeAtAcquire: [], resetToBase: [] };
+  const home: CheckoutHome = {
     acquire: async (groupId, branch) => {
       calls.acquire.push(groupId);
       calls.activeAtAcquire.push(live.size);
@@ -266,11 +266,11 @@ function makePool(opts: { resetToBase?: boolean; events?: string[] } = {}): {
     ...(opts.resetToBase
       ? {
           // A real METHOD (not an arrow) that touches `this` — so if the WorkLoop extracts a bare
-          // `pool.resetToBase` reference and calls it detached, `this` is undefined and this throws,
-          // exactly like the real InPlaceCheckout/WorktreePool (which read `this.current`). Guards the
+          // `home.resetToBase` reference and calls it detached, `this` is undefined and this throws,
+          // exactly like the real InPlaceCheckout (which reads `this.current`). Guards the
           // `this`-binding regression that shipped once and blocked every group live.
           async resetToBase(
-            this: WorkLoopPool,
+            this: CheckoutHome,
             groupId: string,
             branch: string,
             baseBranch: string,
@@ -283,7 +283,7 @@ function makePool(opts: { resetToBase?: boolean; events?: string[] } = {}): {
         }
       : {}),
   };
-  return { pool, calls, live: () => live.size };
+  return { home, calls, live: () => live.size };
 }
 
 function makeState(seed: PrGroup[] = []): {
@@ -341,20 +341,20 @@ function makeDeps(
     orchestrator?: WorkLoopOrchestrator;
     github?: WorkLoopGithub;
     state?: WorkLoopState;
-    pool?: WorkLoopPool;
+    home?: CheckoutHome;
     graph?: WorkLoopGraph;
   } = {},
 ): WorkLoopDeps {
   const orch = overrides.orchestrator ?? makeOrchestrator().orchestrator;
   const gh = overrides.github ?? makeGithub().github;
   const st = overrides.state ?? makeState().state;
-  const pl = overrides.pool ?? makePool().pool;
+  const pl = overrides.home ?? makeHome().home;
   const gr = overrides.graph ?? makeGraph([], { completeAfter: 0 }).graph;
   return {
     orchestrator: orch,
     github: gh,
     state: st,
-    pool: pl,
+    home: pl,
     graph: gr,
     concurrency: overrides.concurrency ?? 1,
     autoMerge: overrides.autoMerge ?? true,
@@ -385,18 +385,18 @@ test('WorkLoop is constructible', () => {
 test('runGroup sequences: acquire → worker → finalizeCommit → openPr → state awaiting-pr', async () => {
   const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
   const { state, updates } = makeState();
-  const { pool, calls: poolCalls } = makePool();
+  const { home, calls: homeCalls } = makeHome();
   const g = group('alpha');
-  const loop = new WorkLoop(makeDeps({ orchestrator, state, pool, autoMerge: false }));
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, home, autoMerge: false }));
   await loop.runGroup(g);
 
-  assert.deepEqual(poolCalls.acquire, ['alpha']);
-  assert.deepEqual(poolCalls.release, ['alpha']);
+  assert.deepEqual(homeCalls.acquire, ['alpha']);
+  assert.deepEqual(homeCalls.release, ['alpha']);
   assert.equal(calls.runWorker.length, 1);
   assert.equal(calls.runWorker[0]?.group.id, 'alpha');
   assert.equal(calls.runWorker[0]?.group.branch, 'aitm/alpha');
   assert.equal(calls.finalizeCommit.length, 1);
-  assert.equal(calls.finalizeCommit[0]?.worktreePath, '/tmp/wt/alpha');
+  assert.equal(calls.finalizeCommit[0]?.checkoutPath, '/tmp/wt/alpha');
   assert.equal(calls.openPr.length, 1);
   assert.equal(calls.openPr[0]?.baseBranch, 'main');
 
@@ -405,7 +405,7 @@ test('runGroup sequences: acquire → worker → finalizeCommit → openPr → s
   assert.ok(updates.length >= 2, 'state.update called at least for in-progress + awaiting-pr');
 });
 
-test('self-review runs before openPr (group mode) with the delivery + worktree', async () => {
+test('self-review runs before openPr (group mode) with the delivery + checkout', async () => {
   const events: string[] = [];
   const { orchestrator, calls } = makeOrchestrator({ prNumber: 7, selfReview: true, events });
   const loop = new WorkLoop(makeDeps({ orchestrator, autoMerge: false }));
@@ -414,7 +414,7 @@ test('self-review runs before openPr (group mode) with the delivery + worktree',
   assert.equal(calls.selfReview.length, 1, 'self-review ran once');
   assert.equal(calls.selfReview[0]?.group.branch, 'aitm/alpha');
   assert.equal(calls.selfReview[0]?.baseBranch, 'main');
-  assert.equal(calls.selfReview[0]?.worktree.path, '/tmp/wt/alpha');
+  assert.equal(calls.selfReview[0]?.checkout.path, '/tmp/wt/alpha');
   assert.ok(calls.selfReview[0]?.delivery, 'the just-produced delivery is handed to the review');
   // Order: the review must precede the PR open at the same branch.
   assert.deepEqual(events, ['selfReview:aitm/alpha', 'openPr:aitm/alpha']);
@@ -883,14 +883,14 @@ test('prPerTask + autoMerge: each task branches off the merged base; its PR carr
     ],
   });
   const { github } = makeGithub({ checks: [ciSuccess, ciSuccess], threads: [], events });
-  const { pool, calls: poolCalls } = makePool({ resetToBase: true, events });
+  const { home, calls: homeCalls } = makeHome({ resetToBase: true, events });
   const loop = new WorkLoop(
-    makeDeps({ orchestrator, github, pool, autoMerge: true, prPerTask: true }),
+    makeDeps({ orchestrator, github, home, autoMerge: true, prPerTask: true }),
   );
   await loop.runGroup(twoTaskGroup());
 
   // A fresh per-task branch off the base is created for each task, under the group branch.
-  assert.deepEqual(poolCalls.resetToBase, [
+  assert.deepEqual(homeCalls.resetToBase, [
     { groupId: 'multi', branch: 'aitm/multi-a', baseBranch: 'main' },
     { groupId: 'multi', branch: 'aitm/multi-b', baseBranch: 'main' },
   ]);
@@ -920,18 +920,18 @@ test('prPerTask + autoMerge: each task branches off the merged base; its PR carr
   ]);
 });
 
-test('prPerTask + autoMerge fallback: a pool without resetToBase keeps the single group branch', async () => {
-  // A pool that can't reset to base (e.g. a home that doesn't support it) falls back to the prior
+test('prPerTask + autoMerge fallback: a home without resetToBase keeps the single group branch', async () => {
+  // A home that can't reset to base (e.g. a home that doesn't support it) falls back to the prior
   // single-branch behavior rather than failing — every task's PR opens off the one group branch.
   const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
   const { github } = makeGithub({ checks: [ciSuccess, ciSuccess], threads: [] });
-  const { pool, calls: poolCalls } = makePool(); // no resetToBase
+  const { home, calls: homeCalls } = makeHome(); // no resetToBase
   const loop = new WorkLoop(
-    makeDeps({ orchestrator, github, pool, autoMerge: true, prPerTask: true }),
+    makeDeps({ orchestrator, github, home, autoMerge: true, prPerTask: true }),
   );
   await loop.runGroup(twoTaskGroup());
 
-  assert.deepEqual(poolCalls.resetToBase, [], 'no base refresh without the seam');
+  assert.deepEqual(homeCalls.resetToBase, [], 'no base refresh without the seam');
   assert.deepEqual(
     calls.openPr.map((c) => c.group.branch),
     ['aitm/multi', 'aitm/multi'],
@@ -941,15 +941,15 @@ test('prPerTask + autoMerge fallback: a pool without resetToBase keeps the singl
 
 test('prPerTask + --no-automerge: no base refresh; tasks stay on the single group branch', async () => {
   // Without autoMerge, tasks never merge mid-group, so there is no merged base to branch from — the
-  // documented fallback keeps the single group branch even when the pool CAN resetToBase.
+  // documented fallback keeps the single group branch even when the home CAN resetToBase.
   const events: string[] = [];
   const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
-  const { pool, calls: poolCalls } = makePool({ resetToBase: true, events });
-  const loop = new WorkLoop(makeDeps({ orchestrator, pool, autoMerge: false, prPerTask: true }));
+  const { home, calls: homeCalls } = makeHome({ resetToBase: true, events });
+  const loop = new WorkLoop(makeDeps({ orchestrator, home, autoMerge: false, prPerTask: true }));
   await loop.runGroup(twoTaskGroup());
 
   assert.equal(calls.openPr.length, 2, 'a PR per task');
-  assert.deepEqual(poolCalls.resetToBase, [], 'no base refresh under --no-automerge');
+  assert.deepEqual(homeCalls.resetToBase, [], 'no base refresh under --no-automerge');
   assert.deepEqual(
     calls.openPr.map((c) => c.group.branch),
     ['aitm/multi', 'aitm/multi'],
@@ -1245,7 +1245,7 @@ test('Worker error → group marked blocked', async () => {
   assert.equal(last.prGroups.find((p) => p.id === 'theta')?.status, 'blocked');
 });
 
-test('pool.release fires even when orchestrator throws', async () => {
+test('home.release fires even when orchestrator throws', async () => {
   const orchestrator: WorkLoopOrchestrator = {
     runWorker: async () => {
       throw new Error('worker exploded');
@@ -1256,8 +1256,8 @@ test('pool.release fires even when orchestrator throws', async () => {
     runCiFix: async () => ({ kind: 'ok' }),
     addressReviews: async () => ({ kind: 'ok' }),
   };
-  const { pool, calls } = makePool();
-  const loop = new WorkLoop(makeDeps({ orchestrator, pool }));
+  const { home, calls } = makeHome();
+  const loop = new WorkLoop(makeDeps({ orchestrator, home }));
   await loop.runGroup(group('iota'));
   assert.deepEqual(calls.release, ['iota']);
 });
@@ -1307,21 +1307,21 @@ test('concurrency cap limits batch size; subsequent passes pull next ready set',
     isComplete: () => pass >= 3,
   };
   const { orchestrator, calls } = makeOrchestrator();
-  const { pool, calls: poolCalls } = makePool();
+  const { home, calls: homeCalls } = makeHome();
   const loop = new WorkLoop(
-    makeDeps({ orchestrator, graph, pool, concurrency: 2, autoMerge: true }),
+    makeDeps({ orchestrator, graph, home, concurrency: 2, autoMerge: true }),
   );
   const result = await loop.run();
   assert.equal(result.kind, 'success');
   assert.equal(calls.runWorker.length, 3, 'all three groups processed');
-  // Pool tracks live size at the moment of acquire — in the 2-concurrent pass the
+  // Home tracks live size at the moment of acquire — in the 2-concurrent pass the
   // second acquire observes the first as still live (size 1), proving they overlapped.
   assert.ok(
-    poolCalls.activeAtAcquire.slice(0, 2).some((n) => n === 1),
-    `expected at least one overlap in first batch, got ${poolCalls.activeAtAcquire.join(',')}`,
+    homeCalls.activeAtAcquire.slice(0, 2).some((n) => n === 1),
+    `expected at least one overlap in first batch, got ${homeCalls.activeAtAcquire.join(',')}`,
   );
   // Third acquire fires after both first-batch releases, so live=0 at that moment.
-  assert.equal(poolCalls.activeAtAcquire[2], 0);
+  assert.equal(homeCalls.activeAtAcquire[2], 0);
 });
 
 test('blocked propagation: WorkLoopResult.kind === "blocked" with reason from worker', async () => {

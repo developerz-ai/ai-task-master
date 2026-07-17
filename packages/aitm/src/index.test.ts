@@ -11,7 +11,7 @@ test('public surface exports the documented classes', () => {
   assert.ok(api.StateStore);
   assert.ok(api.GitHubClient);
   assert.ok(api.PlanGraph);
-  assert.ok(api.WorktreePool);
+  assert.ok(api.InPlaceCheckout);
   assert.ok(api.Orchestrator);
   assert.ok(api.WorkLoop);
   assert.ok(api.main);

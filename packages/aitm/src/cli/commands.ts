@@ -825,7 +825,9 @@ async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
     // Unreadable cache (non-ENOENT) — distill fresh rather than block the run.
   }
   // The distillation is an LLM call — announce it so the pre-planning pause isn't a silent gap.
-  harnessProgress(`coding style: distilling from ${styleFile} with ${credentials.modelIdFor('planner')}...`);
+  harnessProgress(
+    `coding style: distilling from ${styleFile} with ${credentials.modelIdFor('planner')}...`,
+  );
   let digest: string;
   try {
     // Style distillation runs on the planner's model, so its usage is recorded under `planner`.
@@ -849,14 +851,14 @@ async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
   return digest;
 }
 
-// Default loop seam — production wiring of Planner → PlanGraph → WorktreePool → WorkLoop with
+// Default loop seam — production wiring of Planner → PlanGraph → InPlaceCheckout → WorkLoop with
 // the Orchestrator/Worker/Reviewer subagents and MCP tools. Lives in run-loop-adapter.ts so this
 // module stays pure dispatch; the adapter exposes its own seams for unit + integration tests.
 async function defaultRunLoop(input: RunLoopInput): Promise<WorkLoopResult> {
   return runLoopAdapter(input);
 }
 
-// Real merge-pr adapter. Drives runTakeOverFlow against the cwd worktree: wait CI →
+// Real merge-pr adapter. Drives runTakeOverFlow against the cwd checkout: wait CI →
 // Reviewer per unresolved thread → push → loop → merge. See src/loop/take-over-flow.ts
 // for the iteration shape (mirrors claude-task-master `merge_pr`).
 async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopResult> {
@@ -866,21 +868,21 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
   const { PrContextStore } = await import('../state/pr-context-store.ts');
   const { agentStepProgress, shortModelName } = await import('../observability/step-progress.ts');
 
-  const worktreePath = input.cwd;
+  const checkoutPath = input.cwd;
   const baseBranch = await input.github.defaultBranch();
   const styleContents = input.styleDigest ?? input.agentConfig.contents;
   // Downloads full failed-CI logs + review comments under .ai-task-master/debugging/pr/<pr>/ so
   // the CI-fix Worker reads them off disk instead of guessing (issue #48).
   const prContext = new PrContextStore(resolvePath(input.cwd, '.ai-task-master'));
 
-  // Build the Claude-Code-style tool surface scoped to the cwd worktree. The Worker gets the
+  // Build the Claude-Code-style tool surface scoped to the cwd checkout. The Worker gets the
   // full read/write/edit/search/bash set; the Reviewer adds the `github` thread tool.
-  const workerTools = localEditTools(worktreePath);
+  const workerTools = localEditTools(checkoutPath);
   const github = githubThreadTool({ github: input.github });
 
   const result = await runTakeOverFlow({
     pr: input.pr,
-    worktreePath,
+    checkoutPath,
     baseBranch,
     github: input.github,
     prContext,

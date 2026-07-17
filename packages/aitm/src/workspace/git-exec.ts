@@ -36,7 +36,7 @@ function isForceWithLeaseFlag(arg: string): boolean {
 export type GitPolicy = { allowForcePush?: boolean };
 
 // Throw if the git invocation violates policy. Pure (no IO) so it is trivially unit-testable.
-// Only `git push` is constrained; `git worktree remove --force` and friends are unaffected
+// Only `git push` is constrained; `git checkout --force` and friends are unaffected
 // because the rule keys off the `push` subcommand, not the `--force` token alone.
 //
 // Any `--force` / `-f` on a push is rejected outright — even alongside `--force-with-lease`,

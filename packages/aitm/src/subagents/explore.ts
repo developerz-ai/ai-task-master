@@ -5,7 +5,7 @@
 // what stops the survey phase from re-sending file dumps on every step of a long-lived conversation.
 //
 // This is adapter-local glue (same precedent as the Reviewer's `github` slot): the child model is a
-// concrete injected handle and the read tools are worktree-confined — never sourced from MCP.
+// concrete injected handle and the read tools are checkout-confined — never sourced from MCP.
 
 import {
   AgentToolConstructionError,
@@ -40,7 +40,7 @@ const EXPLORE_SYSTEM_PROMPT = [
 ].join('\n');
 
 // The child toolset must be exactly the read-only trio (keys matching EXPLORE_ALLOWED_TOOLS); a
-// wider set trips makeAgentTool's allowlist. Callers pass the worktree-confined trio from
+// wider set trips makeAgentTool's allowlist. Callers pass the checkout-confined trio from
 // localReadTools so the child is rooted at the invoking agent's cwd.
 export type ExploreToolInit = {
   model: LanguageModel;

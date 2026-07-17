@@ -1,5 +1,5 @@
 // Production ConflictResolver: an AI subagent that resolves the git conflicts a rebase left in the
-// worktree, then stages them, so rebaseAndForcePush (ci-fix.ts) can continue the rebase and land the
+// checkout, then stages them, so rebaseAndForcePush (ci-fix.ts) can continue the rebase and land the
 // PR — the edge over claude-task-master, which just gives up on a conflict.
 //
 // SRP: this module owns *the agent that resolves conflict markers*. It does NOT drive the rebase
@@ -37,7 +37,7 @@ export const CONFLICT_RESOLVER_MAX_STEPS = 20;
 
 export const CONFLICT_RESOLVER_SYSTEM_PREFIX = [
   '',
-  'You are resolving git MERGE/REBASE CONFLICTS in a worktree that is mid-rebase. A rebase onto the',
+  'You are resolving git MERGE/REBASE CONFLICTS in a checkout that is mid-rebase. A rebase onto the',
   'base branch stopped because commits touched the same lines; your job is to resolve the conflicts',
   'so the rebase can continue.',
   '',
@@ -61,7 +61,7 @@ export const CONFLICT_RESOLVER_SYSTEM_PREFIX = [
 // so the caller blocks with the reason; otherwise it reports `resolved` and the caller verifies by
 // re-checking unmerged paths and continuing the rebase.
 export function buildConflictResolver(init: ConflictResolverInit): ConflictResolver {
-  return async ({ worktreePath, baseBranch, conflictedFiles, attempt }) => {
+  return async ({ checkoutPath, baseBranch, conflictedFiles, attempt }) => {
     init.logger?.info('conflict-resolver: resolving', {
       baseBranch,
       attempt,
@@ -76,10 +76,10 @@ export function buildConflictResolver(init: ConflictResolverInit): ConflictResol
             system: buildRolePrompt({
               style: init.styleContents,
               roleGuidance: CONFLICT_RESOLVER_SYSTEM_PREFIX,
-              cwd: worktreePath,
+              cwd: checkoutPath,
               maxSteps: CONFLICT_RESOLVER_MAX_STEPS,
             }),
-            prompt: buildConflictPrompt(worktreePath, baseBranch, conflictedFiles, attempt),
+            prompt: buildConflictPrompt(checkoutPath, baseBranch, conflictedFiles, attempt),
             stopWhen: stepCountIs(CONFLICT_RESOLVER_MAX_STEPS),
             ...(init.providerOptions !== undefined
               ? { providerOptions: init.providerOptions }
@@ -98,13 +98,13 @@ export function buildConflictResolver(init: ConflictResolverInit): ConflictResol
 }
 
 function buildConflictPrompt(
-  worktreePath: string,
+  checkoutPath: string,
   baseBranch: string,
   conflictedFiles: readonly string[],
   attempt: number,
 ): string {
   return [
-    `Worktree: ${worktreePath}`,
+    `Checkout: ${checkoutPath}`,
     `Rebasing onto: origin/${baseBranch}`,
     ...(attempt > 1
       ? [`Resolution attempt ${attempt} — the previous pass left files unmerged; finish the job.`]

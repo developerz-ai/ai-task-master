@@ -44,7 +44,7 @@ test('buildConflictResolver: model completes → resolved; usage reported', asyn
     },
   });
   const result = await resolver({
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     conflictedFiles: ['src/a.ts'],
     attempt: 1,
@@ -63,7 +63,7 @@ test('buildConflictResolver: prompt lists the conflicted files; system prompt fo
     styleContents: '',
   });
   await resolver({
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     conflictedFiles: ['src/a.ts', 'src/b.ts'],
     attempt: 1,
@@ -86,7 +86,7 @@ test('buildConflictResolver: second attempt prompt notes the prior pass left fil
     styleContents: '',
   });
   await resolver({
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     conflictedFiles: ['src/a.ts'],
     attempt: 2,
@@ -110,7 +110,7 @@ test('buildConflictResolver: a stalled/aborted generate → unresolved carrying 
     timeout: { stepMs: 40 },
   });
   const result = await resolver({
-    worktreePath: '/tmp/wt',
+    checkoutPath: '/tmp/wt',
     baseBranch: 'main',
     conflictedFiles: ['src/a.ts'],
     attempt: 1,

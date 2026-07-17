@@ -71,7 +71,7 @@ function makeTools(
   const calls: ToolCalls = { reads: [], writes: [], bashes: [], githubs: [] };
   const tools: ReviewerTools = {
     readFile: tool<ReadFileInput, ReadFileOutput>({
-      description: 'read a file from the worktree',
+      description: 'read a file from the checkout',
       inputSchema: z.object({ path: z.string() }),
       execute: async (input) => {
         calls.reads.push(input);
@@ -79,7 +79,7 @@ function makeTools(
       },
     }),
     writeFile: tool<WriteFileInput, WriteFileOutput>({
-      description: 'write a file in the worktree',
+      description: 'write a file in the checkout',
       inputSchema: z.object({ path: z.string(), content: z.string() }),
       execute: async (input) => {
         calls.writes.push(input);
@@ -87,7 +87,7 @@ function makeTools(
       },
     }),
     bash: tool<BashInput, BashOutput>({
-      description: 'run a bash command in the worktree',
+      description: 'run a bash command in the checkout',
       inputSchema: z.object({ command: z.string() }),
       execute: async (input) => {
         calls.bashes.push(input);
@@ -130,10 +130,10 @@ function thread(id: string, body: string): ReviewThread {
 function baseInput(threads: ReviewThread[]): {
   pr: number;
   threads: ReviewThread[];
-  worktreePath: string;
+  checkoutPath: string;
   styleContents: string;
 } {
-  return { pr: 42, threads, worktreePath: '/tmp/wt', styleContents: '# style\n' };
+  return { pr: 42, threads, checkoutPath: '/tmp/wt', styleContents: '# style\n' };
 }
 
 test('REVIEWER_SYSTEM_PREFIX names the three outcomes', () => {

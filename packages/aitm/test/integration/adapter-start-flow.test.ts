@@ -1,5 +1,5 @@
 // End-to-end through the real run-loop-adapter: runStart → defaultRunLoop's twin (runLoopAdapter)
-// → real WorktreePool + PlanGraph + live state proxy + WorkLoop, against a real temp git repo.
+// → real InPlaceCheckout + PlanGraph + live state proxy + WorkLoop, against a real temp git repo.
 //
 // Only two boundaries are stubbed, both via the adapter's seams:
 //   - planGroups: canned PR group (no real Planner LLM call)
@@ -88,20 +88,20 @@ function integrationSeams(mockModel: MockLanguageModelV3, defaultBranch: string)
           },
         });
         return {
-          runWorker: async ({ worktree }) => {
-            await writeFile(join(worktree.path, 'hello.ts'), 'export const hello = "hello";\n');
-            await execa('git', ['add', 'hello.ts'], { cwd: worktree.path });
-            await execa('git', ['commit', '-m', 'wip: add hello'], { cwd: worktree.path });
+          runWorker: async ({ checkout }) => {
+            await writeFile(join(checkout.path, 'hello.ts'), 'export const hello = "hello";\n');
+            await execa('git', ['add', 'hello.ts'], { cwd: checkout.path });
+            await execa('git', ['commit', '-m', 'wip: add hello'], { cwd: checkout.path });
             const delivery: WorkerDelivery = {
-              branch: worktree.branch,
+              branch: checkout.branch,
               draftCommitMessage: 'feat: add hello',
               changes: [{ path: 'hello.ts', kind: 'create', summary: 'creates hello export' }],
               progressEntries: ['- created hello.ts'],
             };
             return { kind: 'ok', delivery };
           },
-          finalizeCommit: (group, delivery, worktreePath) =>
-            orchForFinalize.finalizeCommit(group, delivery, worktreePath),
+          finalizeCommit: (group, delivery, checkoutPath) =>
+            orchForFinalize.finalizeCommit(group, delivery, checkoutPath),
           openPr: async (group, _delivery, baseBranch): Promise<PullRequest> => ({
             number: 1,
             state: 'OPEN',
@@ -115,7 +115,7 @@ function integrationSeams(mockModel: MockLanguageModelV3, defaultBranch: string)
     });
 }
 
-test('adapter start-flow: runStart → runLoopAdapter drives real pool/graph/git to awaiting-pr', async () => {
+test('adapter start-flow: runStart → runLoopAdapter drives real home/graph/git to awaiting-pr', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   try {
     await execa('git', ['add', 'CLAUDE.md'], { cwd: repo.path });
@@ -146,7 +146,7 @@ test('adapter start-flow: runStart → runLoopAdapter drives real pool/graph/git
     assert.equal(state.prGroups[0]?.pr, 1);
     assert.equal(state.currentPr, 1, 'currentPr persisted for merge-pr pickup');
 
-    // Real git artifacts from the real WorktreePool + Orchestrator.finalizeCommit.
+    // Real git artifacts from the real InPlaceCheckout + Orchestrator.finalizeCommit.
     const { stdout: branchList } = await execa('git', ['branch', '--list', 'aitm/hello'], {
       cwd: repo.path,
     });
@@ -187,7 +187,7 @@ test('adapter start-flow: planner blocked propagates to exit 1', async () => {
     assert.equal(result.code, 1);
     assert.match(result.message ?? '', /goal is not actionable/);
 
-    // No aitm/* branches when planning blocks before any worktree work.
+    // No aitm/* branches when planning blocks before any checkout work.
     const { stdout: branches } = await execa('git', ['branch', '--list', 'aitm/*'], {
       cwd: repo.path,
     });

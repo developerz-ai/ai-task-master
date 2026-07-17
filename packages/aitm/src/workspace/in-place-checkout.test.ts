@@ -57,15 +57,15 @@ test('InPlaceCheckout is constructible', () => {
   assert.ok(new InPlaceCheckout('/tmp/repo') instanceof InPlaceCheckout);
 });
 
-test('acquire checks out a fresh branch in the repo root (no worktree dir) and tracks it active', async () => {
+test('acquire checks out a fresh branch in the repo root (no separate dir) and tracks it active', async () => {
   const repo = await seedRepo();
   try {
-    const pool = new InPlaceCheckout(repo.path);
-    const wt = await pool.acquire('g1', 'aitm/g1', 'main');
+    const home = new InPlaceCheckout(repo.path);
+    const wt = await home.acquire('g1', 'aitm/g1', 'main');
     assert.deepEqual(wt, { groupId: 'g1', branch: 'aitm/g1', path: repo.path });
     assert.equal(await currentBranch(repo.path), 'aitm/g1', 'HEAD is on the group branch');
-    assert.equal(pool.active().length, 1);
-    assert.equal(pool.active()[0]?.groupId, 'g1');
+    assert.equal(home.active().length, 1);
+    assert.equal(home.active()[0]?.groupId, 'g1');
   } finally {
     await repo.cleanup();
   }
@@ -74,9 +74,9 @@ test('acquire checks out a fresh branch in the repo root (no worktree dir) and t
 test('acquire is single-slot: a second group before release throws', async () => {
   const repo = await seedRepo();
   try {
-    const pool = new InPlaceCheckout(repo.path);
-    await pool.acquire('g1', 'aitm/g1', 'main');
-    await assert.rejects(pool.acquire('g2', 'aitm/g2', 'main'), /single-slot/);
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+    await assert.rejects(home.acquire('g2', 'aitm/g2', 'main'), /single-slot/);
   } finally {
     await repo.cleanup();
   }
@@ -85,11 +85,11 @@ test('acquire is single-slot: a second group before release throws', async () =>
 test('release frees the slot so the next group can be checked out', async () => {
   const repo = await seedRepo();
   try {
-    const pool = new InPlaceCheckout(repo.path);
-    await pool.acquire('g1', 'aitm/g1', 'main');
-    await pool.release('g1');
-    assert.equal(pool.active().length, 0);
-    const wt2 = await pool.acquire('g2', 'aitm/g2', 'main');
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+    await home.release('g1');
+    assert.equal(home.active().length, 0);
+    const wt2 = await home.acquire('g2', 'aitm/g2', 'main');
     assert.equal(wt2.branch, 'aitm/g2');
     assert.equal(await currentBranch(repo.path), 'aitm/g2');
   } finally {
@@ -105,8 +105,8 @@ test('acquire reuses an existing branch (resume) instead of recreating it from b
     await execa('git', ['commit', '--allow-empty', '-m', 'prior work'], { cwd: repo.path });
     await execa('git', ['checkout', 'main'], { cwd: repo.path });
 
-    const pool = new InPlaceCheckout(repo.path);
-    await pool.acquire('g1', 'aitm/g1', 'main');
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
     const { stdout } = await execa('git', ['log', '-1', '--pretty=%s'], { cwd: repo.path });
     assert.equal(
       stdout.trim(),
@@ -119,21 +119,21 @@ test('acquire reuses an existing branch (resume) instead of recreating it from b
 });
 
 test('acquire rejects an unsafe groupId', async () => {
-  const pool = new InPlaceCheckout('/tmp/repo');
-  await assert.rejects(pool.acquire('../evil', 'aitm/x', 'main'), /invalid groupId/);
+  const home = new InPlaceCheckout('/tmp/repo');
+  await assert.rejects(home.acquire('../evil', 'aitm/x', 'main'), /invalid groupId/);
 });
 
 test('resetToBase starts a fresh branch off the up-to-date remote base, discarding the prior branch tip', async () => {
   const { repo, advanceOrigin, cleanup } = await seedRepoWithOrigin();
   try {
-    const pool = new InPlaceCheckout(repo.path);
-    await pool.acquire('g1', 'aitm/g1', 'main');
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
     // Task 1's local work on the group branch — must NOT leak into the next task's branch.
     await execa('git', ['commit', '--allow-empty', '-m', 'task1 local'], { cwd: repo.path });
     // Task 1's PR squash-merges: origin/main advances past the group branch tip.
     await advanceOrigin('merged task1');
 
-    const wt = await pool.resetToBase('g1', 'aitm/g1-t2', 'main');
+    const wt = await home.resetToBase('g1', 'aitm/g1-t2', 'main');
 
     assert.deepEqual(wt, { groupId: 'g1', branch: 'aitm/g1-t2', path: repo.path });
     assert.equal(await currentBranch(repo.path), 'aitm/g1-t2', 'HEAD is on the fresh task branch');
@@ -143,7 +143,7 @@ test('resetToBase starts a fresh branch off the up-to-date remote base, discardi
       !subjects.includes('task1 local'),
       'the prior branch tip is not carried into the fresh task branch',
     );
-    assert.equal(pool.active()[0]?.branch, 'aitm/g1-t2', 'active tracks the new branch');
+    assert.equal(home.active()[0]?.branch, 'aitm/g1-t2', 'active tracks the new branch');
   } finally {
     await cleanup();
   }
@@ -152,9 +152,9 @@ test('resetToBase starts a fresh branch off the up-to-date remote base, discardi
 test('resetToBase rejects a different group while one is still checked out (single-slot)', async () => {
   const { repo, cleanup } = await seedRepoWithOrigin();
   try {
-    const pool = new InPlaceCheckout(repo.path);
-    await pool.acquire('g1', 'aitm/g1', 'main');
-    await assert.rejects(pool.resetToBase('g2', 'aitm/g2-t1', 'main'), /single-slot/);
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+    await assert.rejects(home.resetToBase('g2', 'aitm/g2-t1', 'main'), /single-slot/);
   } finally {
     await cleanup();
   }

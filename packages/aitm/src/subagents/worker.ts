@@ -102,15 +102,15 @@ export type WorkerInput = {
   // scope to this single task; when omitted (the CI-fix / orchestrator-as-tool path) the Worker
   // plans across the whole group. The two-phase manifest/editor flow is unchanged either way.
   task?: Task;
-  worktreePath: string;
+  checkoutPath: string;
   baseBranch: string;
   styleContents: string;
   rollingContext: string;
-  // Optional shell command run in the worktree before staging, so the committed diff matches
+  // Optional shell command run in the checkout before staging, so the committed diff matches
   // the project's formatter (LLM output rarely is byte-identical to biome/prettier/gofmt). When
   // unset, no format step runs. See issue #48.
   formatCommand?: string;
-  // Optional shell command run in the worktree after the editor fanout and after formatCommand,
+  // Optional shell command run in the checkout after the editor fanout and after formatCommand,
   // before any `git add`/`commit`. A non-zero exit triggers exactly one bounded local fix pass
   // (a task-scoped manifest+editor re-run fed the verify output); if it still fails the Worker
   // returns `blocked` without committing, so a red diff never reaches the remote. Unset → no
@@ -325,7 +325,7 @@ async function planAndEdit(
 }
 
 // Gate committing on `verifyCommand`. Branch checkout + format run first (verify must see the
-// formatted files); then verify in the worktree. On a non-zero exit: exactly ONE bounded fix pass
+// formatted files); then verify in the checkout. On a non-zero exit: exactly ONE bounded fix pass
 // (a task-scoped manifest+editor re-run fed the verify output) + re-format + re-verify. Still red →
 // `blocked` carrying the verify tail; nothing is staged or committed. Green → stage + commit,
 // returning any files the fix pass touched so runWorker can fold them into the delivery.
@@ -397,7 +397,7 @@ function buildManifestPrompt(input: WorkerInput): string {
     `PR group: ${input.group.id} — ${input.group.title}`,
     `Branch: ${input.group.branch ?? `aitm/${input.group.id}`}`,
     `Base branch: ${input.baseBranch}`,
-    `Worktree: ${input.worktreePath}`,
+    `Checkout: ${input.checkoutPath}`,
     '',
   ];
   if (input.task) {
@@ -446,7 +446,7 @@ async function runEditor(
         system: buildRolePrompt({
           style: input.styleContents,
           roleGuidance: EDITOR_SYSTEM_PREFIX,
-          cwd: input.worktreePath,
+          cwd: input.checkoutPath,
           maxSteps: EDITOR_MAX_STEPS,
         }),
         prompt: buildEditorPrompt(file, input),
@@ -471,7 +471,7 @@ async function runEditor(
 
 function buildEditorPrompt(file: FileManifestEntry, input: WorkerInput): string {
   return [
-    `Worktree: ${input.worktreePath}`,
+    `Checkout: ${input.checkoutPath}`,
     `File: ${file.path}`,
     `Change kind: ${file.kind}`,
     `Purpose: ${file.purpose}`,
@@ -498,7 +498,7 @@ async function checkoutAndFormat(
   input: WorkerInput,
   branch: string,
 ): Promise<void> {
-  await runBash(exec, `git -C ${shQuote(input.worktreePath)} checkout -B ${shQuote(branch)}`);
+  await runBash(exec, `git -C ${shQuote(input.checkoutPath)} checkout -B ${shQuote(branch)}`);
   await runFormat(exec, input);
 }
 
@@ -510,7 +510,7 @@ async function stageAndCommit(
   input: WorkerInput,
   message: string,
 ): Promise<void> {
-  const wt = shQuote(input.worktreePath);
+  const wt = shQuote(input.checkoutPath);
   // Stage everything, then UNSTAGE aitm's own state dir. `git add -A -- ':!.ai-task-master'` throws
   // "paths are ignored" when .ai-task-master is gitignored (the in-place case: the state dir sits at
   // the repo root and most repos ignore it) — naming an ignored path in a pathspec trips git. Plain
@@ -540,10 +540,10 @@ async function runFormat(
   input: WorkerInput,
 ): Promise<void> {
   if (!input.formatCommand) return;
-  await runBash(exec, `cd ${shQuote(input.worktreePath)} && ${input.formatCommand}`);
+  await runBash(exec, `cd ${shQuote(input.checkoutPath)} && ${input.formatCommand}`);
 }
 
-// Run the verify command in the worktree and return its raw outcome. Unlike runBash it never
+// Run the verify command in the checkout and return its raw outcome. Unlike runBash it never
 // throws on a non-zero exit — a failing verify is a handled outcome the gate reacts to, so it
 // reads exitCode/stdout/stderr off BashOutput directly. Carries the hard-ceiling timeout so a
 // real test suite isn't cut off at the bash tool's 60s default (issue #122).
@@ -551,7 +551,7 @@ async function runVerify(
   exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
   input: WorkerInput,
 ): Promise<BashOutput> {
-  const command = `cd ${shQuote(input.worktreePath)} && ${input.verifyCommand}`;
+  const command = `cd ${shQuote(input.checkoutPath)} && ${input.verifyCommand}`;
   const out = await exec(
     { command, description: 'run the configured verify command', timeoutMs: VERIFY_TIMEOUT_MS },
     { toolCallId: `worker-verify-${Date.now()}`, messages: [] },

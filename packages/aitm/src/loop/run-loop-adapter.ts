@@ -1,5 +1,5 @@
 // Production wiring for `aitm start`. Composes the WorkLoop's structural ports out of the
-// real Planner, Orchestrator, WorktreePool, PlanGraph, MCP tools and GitHubClient.
+// real Planner, Orchestrator, InPlaceCheckout, PlanGraph, MCP tools and GitHubClient.
 //
 // Symmetric counterpart to the merge-pr flow: `runStart` injects this as its `runLoop` seam
 // (see src/cli/commands.ts `defaultRunLoop`). Every external dependency is reachable through
@@ -112,7 +112,6 @@ import { webSearchTool } from '../tools/web-search.ts';
 import { sanitizeBranchComponent } from '../workspace/branch-name.ts';
 import { runGit } from '../workspace/git-exec.ts';
 import { InPlaceCheckout } from '../workspace/in-place-checkout.ts';
-import { WorktreePool } from '../workspace/worktree-pool.ts';
 import { runFixSession } from './ci-fix.ts';
 import { buildConflictResolver } from './conflict-resolution.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
@@ -127,10 +126,10 @@ import {
   type WorkLoopState,
 } from './work-loop.ts';
 
-// Worktree-scoped Claude-Code-style tools the Worker/Reviewer fall back to when no MCP server
+// Checkout-scoped Claude-Code-style tools the Worker/Reviewer fall back to when no MCP server
 // supplies them. aitm is MCP-first, but a bare `aitm start` (no `mcpServers` configured) must
 // still be able to read, search, edit, commit and open a PR — so it uses the compat lib's
-// tools, scoped to the active worktree.
+// tools, scoped to the active checkout.
 // A reminder provider that surfaces the tracker's stale set on a file tool's result (issue #106): a
 // file changed on disk since the model read it yields one file-changed-externally note on the next
 // successful file-tool result. Shared by localEditTools and localReadTools.
@@ -155,17 +154,17 @@ type WithExplore<T> = T & { explore?: Tool<AgentToolInput, string> };
 // #112 TypedToolCall union. Present on the Worker set only when the state port hands out a memory dir.
 type WithMemory<T> = T & { memory?: Tool<MemoryToolInput, string> };
 
-// The worktree-confined read-only trio the explore child surveys with — picked from localReadTools
+// The checkout-confined read-only trio the explore child surveys with — picked from localReadTools
 // so it inherits the same resolveInside confinement, minus the web/datetime tools (the child's
-// allowlist is readFile/grep/glob only). Rooted at the invoking agent's cwd/worktree.
+// allowlist is readFile/grep/glob only). Rooted at the invoking agent's cwd/checkout.
 export function exploreReadTools(cwd: string): ToolSet {
   const read = localReadTools(cwd);
   return { readFile: read.readFile, grep: read.grep, glob: read.glob };
 }
 
-// The explore tool for an agent rooted at `cwd`: a fast-tier child surveying the worktree-confined
+// The explore tool for an agent rooted at `cwd`: a fast-tier child surveying the checkout-confined
 // read trio (issue #126). Built per call site (Planner at the repo root, Worker at its group
-// worktree) so the child never escapes the invoking agent's cwd.
+// checkout) so the child never escapes the invoking agent's cwd.
 function buildExploreFor(input: RunLoopInput, cwd: string): Tool<AgentToolInput, string> {
   return buildExploreTool({
     model: input.credentials.modelForCapability('fast'),
@@ -444,14 +443,14 @@ export type RunLoopAdapterSeams = {
   makeOrchestrator?: (
     ctx: OrchestratorBridgeCtx,
   ) => WorkLoopOrchestrator | Promise<WorkLoopOrchestrator>;
-  makePool?: (input: RunLoopInput) => WorkLoopPool;
+  makeCheckout?: (input: RunLoopInput) => CheckoutHome;
   makeGithub?: (input: RunLoopInput) => WorkLoopGithub;
   makeMcp?: (input: RunLoopInput) => McpClientManager;
   state?: AdapterStatePort;
 };
 
-// Re-exported for the seam type below without re-importing WorkLoopPool everywhere.
-export type WorkLoopPool = import('./work-loop.ts').WorkLoopPool;
+// Re-exported for the seam type below without re-importing CheckoutHome everywhere.
+export type CheckoutHome = import('./work-loop.ts').CheckoutHome;
 
 export async function runLoopAdapter(
   input: RunLoopInput,
@@ -541,19 +540,11 @@ export async function runLoopAdapter(
     };
 
     // ---- Remaining deps ----------------------------------------------------
-    // Worktrees off by default (the user's world: agents work in ONE checkout, scheduled as a team).
-    // InPlaceCheckout is single-slot, so concurrency is forced to 1 — sequential groups, no two
-    // subagents mutating the tree at once. `git worktree` isolation is opt-in via `worktrees: true`.
-    const effectiveConcurrency = input.resolved.worktrees ? input.resolved.concurrency : 1;
-    const pool =
-      seams.makePool?.(input) ??
-      (input.resolved.worktrees
-        ? new WorktreePool(
-            input.cwd,
-            resolvePath(input.cwd, '.ai-task-master'),
-            input.resolved.concurrency,
-          )
-        : new InPlaceCheckout(input.cwd));
+    // Agents work in ONE checkout, scheduled as a team. InPlaceCheckout is single-slot, so
+    // concurrency is a single slot: sequential groups, no two subagents mutating the tree at once.
+    // (A later task reframes concurrency as a cap.)
+    const effectiveConcurrency = 1;
+    const checkout = seams.makeCheckout?.(input) ?? new InPlaceCheckout(input.cwd);
     const github = seams.makeGithub?.(input) ?? input.github;
     const orchestrator = await (seams.makeOrchestrator ?? defaultMakeOrchestrator)({
       input,
@@ -568,7 +559,7 @@ export async function runLoopAdapter(
       orchestrator,
       github,
       state: workLoopState,
-      pool,
+      home: checkout,
       graph,
       // Persist addressed review threads so the addressing-reviews loop dedups across re-polls.
       prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
@@ -601,7 +592,7 @@ export { sanitizeBranchComponent };
 // Resolve a group's branch name, honoring a caller-specified `--branch`.
 //   - no branch requested        → `aitm/<group-id>` (default)
 //   - requested, single group    → the requested name verbatim (already validated by the CLI)
-//   - requested, multiple groups → `<requested>/<group-id>` so concurrent worktrees
+//   - requested, multiple groups → `<requested>/<group-id>` so the groups' branches
 //     (and the PRs they open) don't collide on one branch name.
 // The group-id segment is always sanitized so the composed ref is valid regardless of what the
 // Planner emitted.
@@ -808,11 +799,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     ...(orchUsage ? { onUsage: orchUsage } : {}),
   });
 
-  // Build + run the Reviewer over a thread set in the given worktree. Shared by the prPerTask
+  // Build + run the Reviewer over a thread set in the given checkout. Shared by the prPerTask
   // autoMergeFlow (runReviewer) and the stage machine (addressReviews). The reviewer is recorded
   // (issue #108) but never resumed — resume applies only to 'working'/'ci-failed'. The per-thread
   // conversations share one agent, so this records them into one transcript rather than one-per-thread.
-  const runReviewerThreads = async ({ pr, threads, worktree }: ReviewerInvocation) => {
+  const runReviewerThreads = async ({ pr, threads, checkout }: ReviewerInvocation) => {
     const github = githubThreadTool(input.github);
     // Surplus MCP tools beyond the fixed slots reach the Reviewer too, deferred above the threshold
     // (issue #119). The Reviewer's local `github` glue is a fixed slot, never deferred.
@@ -822,7 +813,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       {
         ...resolveReviewerTools(
           mcp.toolsForRole('reviewer'),
-          worktree.path,
+          checkout.path,
           github,
           input.resolved.bashRules,
           fetchHtmlAvailable,
@@ -830,20 +821,20 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         ...reviewerMount.extraTools,
       } as ReviewerTools,
       input,
-      worktree.path,
+      checkout.path,
     );
     const reviewerCompaction = buildCompactionStep<ReviewerTools>({
       compactor,
       modelId: input.credentials.modelIdFor('reviewer'),
     });
     const recorder = await beginTranscript(state.transcripts?.(), {
-      group: worktree.groupId,
+      group: checkout.groupId,
       stage: 'addressing-reviews',
     });
     const reviewerModelId = input.credentials.modelIdFor('reviewer');
-    const reviewerCounter = stepCounter(worktree.groupId);
+    const reviewerCounter = stepCounter(checkout.groupId);
     harnessProgress(
-      `group ${worktree.groupId}: addressing ${threads.length} review thread(s) on PR #${pr} with ${reviewerModelId}`,
+      `group ${checkout.groupId}: addressing ${threads.length} review thread(s) on PR #${pr} with ${reviewerModelId}`,
       { phase: 'reviewing', ...reviewerCounter },
     );
     const reviewerStep = composeStepFinish<StepEvent<ReviewerTools>>(
@@ -852,7 +843,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         agentLabel({
           model: shortModelName(reviewerModelId),
           role: 'reviewer',
-          ctx: worktree.groupId,
+          ctx: checkout.groupId,
         }),
         { phase: 'reviewing', ...reviewerCounter },
       ),
@@ -864,7 +855,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         reminderAgentSystemPrompt({
           style,
           roleGuidance: REVIEWER_SYSTEM_PREFIX,
-          cwd: worktree.path,
+          cwd: checkout.path,
           maxSteps: REVIEWER_MAX_STEPS,
           modelId: input.credentials.modelIdFor('reviewer'),
         }),
@@ -886,7 +877,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     const result = await runReviewerSubagent(agent, {
       pr,
       threads,
-      worktreePath: worktree.path,
+      checkoutPath: checkout.path,
       styleContents: style,
       contextBlock: harnessContextBlock(style),
     });
@@ -895,7 +886,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   };
 
   return {
-    runWorker: async ({ group, task, worktree, baseBranch }) => {
+    runWorker: async ({ group, task, checkout, baseBranch }) => {
       // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
       // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
       // memory (#118) is mounted on the manifest Worker so it can record durable repo facts.
@@ -907,16 +898,16 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         {
           ...resolveWorkerTools(
             mcp.toolsForRole('worker'),
-            worktree.path,
+            checkout.path,
             input.resolved.bashRules,
             fetchHtmlAvailable,
-            buildExploreFor(input, worktree.path),
+            buildExploreFor(input, checkout.path),
             memoryToolFor(state),
           ),
           ...workerMount.extraTools,
         } as WithExplore<WorkerTools> & WithMemory<WorkerTools>,
         input,
-        worktree.path,
+        checkout.path,
       );
       const workerCompaction = buildCompactionStep<WorkerTools>({
         compactor,
@@ -969,7 +960,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           reminderAgentSystemPrompt({
             style,
             roleGuidance: workerGuidance,
-            cwd: worktree.path,
+            cwd: checkout.path,
             maxSteps: WORKER_MAX_STEPS,
             modelId: input.credentials.modelIdFor('worker'),
             memoryIndex,
@@ -998,7 +989,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const result = await runWorkerSubagent(agent, {
         group,
         ...(task ? { task } : {}),
-        worktreePath: worktree.path,
+        checkoutPath: checkout.path,
         baseBranch,
         styleContents: style,
         // Live read (issue #123): the second group's manifest prompt carries the first group's digest.
@@ -1013,12 +1004,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       await recorder?.end(runEndOutcome(result.kind));
       return result;
     },
-    finalizeCommit: (group, delivery, worktreePath) =>
-      orch.finalizeCommit(group, delivery, worktreePath),
+    finalizeCommit: (group, delivery, checkoutPath) =>
+      orch.finalizeCommit(group, delivery, checkoutPath),
     openPr: async (group, delivery, baseBranch) => {
-      // The Worker's commits live on the group branch in a linked worktree (shared object
-      // store). Push it to origin first — `gh pr create` won't open a PR for a branch that
-      // isn't on the remote ("No commits between … / Head ref must be a branch").
+      // The Worker's commits live on the group branch in the local checkout. Push it to origin
+      // first — `gh pr create` won't open a PR for a branch that isn't on the remote
+      // ("No commits between … / Head ref must be a branch").
       const head = group.branch ?? `aitm/${group.id}`;
       const prOpenTag: RunStep = { phase: 'pr-open', ...stepCounter(group.id) };
       harnessProgress(`group ${group.id}: pushing ${head} and opening PR`, prOpenTag);
@@ -1038,7 +1029,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     // coding-tier Worker, compaction, usage, memory, rolling context), but on the LOCAL diff — no
     // rebase/force-push, since the PR isn't open yet. Verification is coordinator-owned: the session
     // runs the command; the Worker only commits.
-    selfReview: async ({ group, worktree, baseBranch }) => {
+    selfReview: async ({ group, checkout, baseBranch }) => {
       const selfReviewProviderOptions = webSearchProviderOptions(input.resolved.webSearch, false);
       // The self-review Worker runs on the coding tier, so its fallback model id is the coding id.
       const selfReviewUsage = roleUsageSink(
@@ -1050,7 +1041,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const selfReviewModelId = input.credentials.modelIdForCapability('coding');
       const selfReviewModel = shortModelName(selfReviewModelId);
       // Prefer the configured verifyCommand; else a conservative typecheck fallback for a TS repo.
-      const verifyCommand = selfReviewVerifyCommand(input.resolved.verifyCommand, worktree.path);
+      const verifyCommand = selfReviewVerifyCommand(input.resolved.verifyCommand, checkout.path);
       const selfReviewTag: RunStep = { phase: 'self-review', ...stepCounter(group.id) };
       harnessProgress(
         `group ${group.id}: self-reviewing the diff with ${selfReviewModelId} before opening the PR`,
@@ -1068,14 +1059,14 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           workerTools: applyHooks(
             resolveWorkerTools(
               mcp.toolsForRole('worker'),
-              worktree.path,
+              checkout.path,
               input.resolved.bashRules,
               fetchHtmlAvailable,
-              buildExploreFor(input, worktree.path),
+              buildExploreFor(input, checkout.path),
               memoryToolFor(state),
             ),
             input,
-            worktree.path,
+            checkout.path,
           ),
           styleContents: style,
           compactor,
@@ -1095,13 +1086,13 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         },
         group,
         baseBranch,
-        worktreePath: worktree.path,
+        checkoutPath: checkout.path,
         ...(verifyCommand ? { verifyCommand } : {}),
       });
     },
     // ci-failed stage → shared fix session: download failed logs + comments to the state dir, run
     // the coding-capability Worker pointed at them, rebase onto origin/<base>, force-with-lease push.
-    runCiFix: async ({ group, pr, worktree, baseBranch }) => {
+    runCiFix: async ({ group, pr, checkout, baseBranch }) => {
       const priorHandle = ciFixHandles.get(group.id);
       const ciFixProviderOptions = webSearchProviderOptions(input.resolved.webSearch, true);
       // The CI-fix Worker runs on the coding tier, so its fallback model id is the coding id.
@@ -1134,14 +1125,14 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const ciFixWorkerTools = applyHooks(
         resolveWorkerTools(
           mcp.toolsForRole('worker'),
-          worktree.path,
+          checkout.path,
           input.resolved.bashRules,
           fetchHtmlAvailable,
-          buildExploreFor(input, worktree.path),
+          buildExploreFor(input, checkout.path),
           memoryToolFor(state),
         ),
         input,
-        worktree.path,
+        checkout.path,
       );
       // AI conflict resolution (default-on): reuse the coding-tier model + the same Worker tool
       // surface to resolve a rebase conflict before the group blocks. Gated by config.
@@ -1193,7 +1184,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         group,
         pr,
         baseBranch,
-        worktreePath: worktree.path,
+        checkoutPath: checkout.path,
         allowForcePush: input.resolved.allowForcePush,
         ...(priorHandle ? { priorHandle } : {}),
       });
@@ -1208,8 +1199,8 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     // addressing-reviews stage → run the Reviewer, then push its commits so the PR updates. The
     // Reviewer commits code fixes locally (worker pattern); a plain push suffices (additive commits,
     // no history rewrite). Replied/wontfix-only rounds make no commit, so there's nothing to push.
-    addressReviews: async ({ pr, threads, worktree }) => {
-      const result = await runReviewerThreads({ pr, threads, worktree });
+    addressReviews: async ({ pr, threads, checkout }) => {
+      const result = await runReviewerThreads({ pr, threads, checkout });
       if (result.kind !== 'ok') {
         return {
           kind: 'blocked',
@@ -1217,7 +1208,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         };
       }
       if (result.resolutions.some((r) => r.kind === 'fixed')) {
-        await runGit(['push'], { cwd: worktree.path });
+        await runGit(['push'], { cwd: checkout.path });
       }
       return { kind: 'ok' };
     },
@@ -1226,7 +1217,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
 
 // MCP exposes a dynamically-typed ToolSet. The subagents need a statically-shaped tool record.
 // Rather than fail closed when a server only exports the legacy readFile/writeFile/bash, we
-// partial-fill: prefer the MCP tool for each name, falling back to the local worktree-scoped
+// partial-fill: prefer the MCP tool for each name, falling back to the local checkout-scoped
 // tool for any the server omits. The shape is asserted once at this boundary.
 // The bash deny/allow rules govern the LOCAL compat bash tools only (issue #113): an MCP-supplied
 // `bash` wins the partial-fill and sits outside this boundary — a documented limitation, not solved

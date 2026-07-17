@@ -1,5 +1,5 @@
 // Unit coverage for the production WorkLoop wiring. Every external dependency (Planner,
-// Orchestrator, WorktreePool, GitHubClient, MCP, StateStore) is driven through the adapter's
+// Orchestrator, InPlaceCheckout, GitHubClient, MCP, StateStore) is driven through the adapter's
 // seams so all four WorkLoopResult branches — success, awaiting-pr, blocked, session-cap —
 // are reachable without spawning subagents, git, or `gh`. The integration suite covers the
 // real stack end-to-end.
@@ -58,7 +58,7 @@ import {
   selfReviewVerifyCommand,
   webSearchProviderOptions,
 } from './run-loop-adapter.ts';
-import type { WorkLoopGithub, WorkLoopOrchestrator, WorkLoopPool } from './work-loop.ts';
+import type { CheckoutHome, WorkLoopGithub, WorkLoopOrchestrator } from './work-loop.ts';
 
 // ---- Fixtures --------------------------------------------------------------
 
@@ -156,7 +156,7 @@ function makeGithub(): WorkLoopGithub {
   };
 }
 
-function makePool(): WorkLoopPool {
+function makeCheckout(): CheckoutHome {
   return {
     acquire: async (groupId, branch) => ({ groupId, branch, path: `/tmp/wt/${groupId}` }),
     release: async () => {},
@@ -201,7 +201,7 @@ function seams(over: Partial<RunLoopAdapterSeams> = {}): RunLoopAdapterSeams {
   return {
     planGroups: async (): Promise<PlanGroupsOutcome> => ({ kind: 'ok', groups: [group('only')] }),
     makeOrchestrator: () => makeOrchestrator(),
-    makePool: () => makePool(),
+    makeCheckout: () => makeCheckout(),
     makeGithub: () => makeGithub(),
     state,
     ...over,
@@ -563,10 +563,10 @@ test('mcpTool: partial-fill matches a namespaced MCP tool by canonical name, fir
   assert.equal(mcpTool({}, 'readFile'), undefined);
 });
 
-test('localEditTools supplies worktree-scoped readFile/writeFile/bash (no-MCP fallback)', () => {
+test('localEditTools supplies checkout-scoped readFile/writeFile/bash (no-MCP fallback)', () => {
   // When no MCP server provides edit tools, the Worker/Reviewer fall back to these so a bare
   // `aitm start` can still edit, commit and open a PR (instead of blocking).
-  const tools = localEditTools('/tmp/some-worktree');
+  const tools = localEditTools('/tmp/some-checkout');
   assert.equal(typeof tools.readFile.execute, 'function');
   assert.equal(typeof tools.writeFile.execute, 'function');
   assert.equal(typeof tools.bash.execute, 'function');
@@ -751,7 +751,7 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
 
   const res = await orch.runWorker({
     group: group('core'),
-    worktree: { path: '/tmp/wt' },
+    checkout: { path: '/tmp/wt' },
     baseBranch: 'main',
   } as never);
   assert.equal(res.kind, 'blocked'); // empty manifest → blocked, but the wiring already ran
@@ -932,8 +932,8 @@ const stubExplore = () =>
     execute: async () => 'surveyed',
   });
 
-test('exploreReadTools exposes exactly the worktree-confined read trio', () => {
-  const tools = exploreReadTools('/tmp/some-worktree');
+test('exploreReadTools exposes exactly the checkout-confined read trio', () => {
+  const tools = exploreReadTools('/tmp/some-checkout');
   assert.deepEqual(Object.keys(tools).sort(), ['glob', 'grep', 'readFile']);
   assert.equal(typeof tools.readFile?.execute, 'function');
 });

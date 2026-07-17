@@ -207,7 +207,7 @@ const ONE_LEVEL_NESTING_ROOTS: ReadonlySet<string> = new Set([
 ]);
 // Reserved object keys that would let a dotted path reach Object.prototype before the schema
 // runs — rejected outright to close a prototype-pollution vector in setDotted().
-const FORBIDDEN_KEY_SEGMENTS: ReadonlySet<string> = new Set([
+export const FORBIDDEN_KEY_SEGMENTS: ReadonlySet<string> = new Set([
   '__proto__',
   'prototype',
   'constructor',

@@ -1,6 +1,13 @@
 // docs/config.md §"Resolution order", docs/auth.md §"LLM provider"
 // Only module allowed to read ~/.aitm.json and .ai-task-master/config.json.
-// Merge order: defaults < global < project < env < CLI flags. Frozen snapshot written by writeSnapshot().
+// Run settings merge low→high: defaults < global < project < CLI flags.
+// Provider credentials (openrouterApiKey, baseURL) are USER-OWNED ONLY: they resolve
+// global > profile > env — user config wins, env is the fallback — and are stripped from project
+// scope, so an untrusted repo can neither redirect inference nor swap the key (see
+// stripUntrustedProjectFields). A stdio MCP server (spawns a local process) is likewise honored
+// ONLY from user-owned config; a project-scoped stdio entry is dropped + warned (see
+// resolveMcpServers) so an untrusted repo can't run arbitrary commands. HTTP/SSE MCP servers (a URL,
+// no spawn) are allowed from any scope. Frozen snapshot written by writeSnapshot().
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -10,7 +17,7 @@ import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../loop/constants.ts';
 import { DEFAULT_MCP_DEFER_TOOLS_OVER } from '../mcp/mcp-client.ts';
-import { type McpServers, McpServersSchema } from '../mcp/schema.ts';
+import { type McpServer, type McpServers, McpServersSchema } from '../mcp/schema.ts';
 import { DEFAULT_LLM_STEP_TIMEOUT_MS } from '../subagents/factory.ts';
 import {
   type CliOverrides,
@@ -62,6 +69,22 @@ const KNOWN_KEYS = new Set<string>([
   'hooks',
 ]);
 
+// Fields a project-scoped .ai-task-master/config.json must NEVER control — an autonomous run points
+// at untrusted repos, so honoring these would let a checked-in file steer the harness. Honored ONLY
+// from the user-owned global config (~/.aitm.json); a project config that sets them is warned +
+// stripped by stripUntrustedProjectFields, the single project-scope trust strip point:
+//   - baseURL           redirects inference to an arbitrary host, which also receives the Bearer key
+//   - openrouterApiKey  swaps the provider credential
+//   - hooks             run shell commands with the operator's privileges (issue #121 CR)
+const UNTRUSTED_PROJECT_FIELDS = [
+  {
+    key: 'baseURL',
+    reason: 'a project-set base URL could redirect inference and leak the API key',
+  },
+  { key: 'openrouterApiKey', reason: 'an API key is a provider credential' },
+  { key: 'hooks', reason: 'hooks run shell commands' },
+] as const satisfies ReadonlyArray<{ key: keyof ConfigFile; reason: string }>;
+
 // Built-in destructive-command deny rules, appended AFTER any configured rules so a repo can
 // allow-override a single default (first-match-wins) without losing the rest (issue #113).
 // `git push --force*` deliberately also catches `--force-with-lease` on the model-facing side — the
@@ -105,6 +128,11 @@ export type ConfigLoaderOptions = {
 
 export class ConfigLoader {
   private readonly warn: WarnFn;
+  // stripUntrustedProjectFields warns at most once per ignored project field for this loader
+  // instance, so a repeat resolve() doesn't re-emit the same warning.
+  private readonly warnedUntrustedProjectFields = new Set<string>();
+  // resolveMcpServers warns at most once per blocked project-scoped stdio server name, same as above.
+  private readonly warnedBlockedProjectStdioMcp = new Set<string>();
 
   constructor(
     private readonly cwd: string,
@@ -117,7 +145,7 @@ export class ConfigLoader {
 
   async resolve(cliOverrides: CliOverrides): Promise<ResolvedConfig> {
     const global = await this.readGlobal();
-    const project = await this.readProject();
+    const project = this.stripUntrustedProjectFields(await this.readProject());
     const claudeUser = await this.readClaudeUserMcp();
     const claudeProject = await this.readClaudeProjectMcp();
 
@@ -126,13 +154,13 @@ export class ConfigLoader {
     const active = this.resolveActiveProfile(global);
     const profile = active?.profile;
 
-    const { apiKey, apiKeySource } = this.resolveApiKey(global, project, profile);
+    const { apiKey, apiKeySource } = this.resolveApiKey(global, profile);
 
     if (apiKey === undefined || apiKeySource === undefined) {
       throw new Error(
         'No OpenRouter API key found. Set OPENROUTER_API_KEY env, add ' +
-          '"openrouterApiKey" to ~/.aitm.json or ./.ai-task-master/config.json, or ' +
-          'create a profile with `aitm profile add <name> --api-key <key>`.',
+          '"openrouterApiKey" to the user-owned ~/.aitm.json (a project config.json is ignored ' +
+          'for credentials), or create a profile with `aitm profile add <name> --api-key <key>`.',
       );
     }
 
@@ -153,26 +181,18 @@ export class ConfigLoader {
       ...DEFAULT_BASH_RULES,
     ];
 
-    // Provider routing + fallback models — provider-shaped, so project > global > profile like
-    // baseURL. Undefined when no layer sets it (issue #124).
+    // Provider routing + fallback models — provider-shaped, resolved project > global > profile.
+    // Undefined when no layer sets it (issue #124).
     const providerRouting =
       project?.providerRouting ?? global?.providerRouting ?? profile?.providerRouting;
     const fallbackModels =
       project?.fallbackModels ?? global?.fallbackModels ?? profile?.fallbackModels;
 
-    // Hooks execute shell commands, so a repo-shippable project config must never supply them (issue
-    // #121 CR). Surface the ignored project hooks so an operator isn't silently surprised.
-    if (project?.hooks) {
-      this.warn(
-        'hooks in ./.ai-task-master/config.json are ignored — hooks run shell commands and are honored only from the user-owned ~/.aitm.json',
-      );
-    }
-
     return {
       openrouterApiKey: apiKey,
       apiKeySource,
       ...(active ? { activeProfile: active.name } : {}),
-      baseURL: this.resolveBaseURL(global, project, profile),
+      baseURL: this.resolveBaseURL(global, profile),
       models: this.resolveModels(global, project, profile, cliOverrides),
       maxPrs: pick(cliOverrides.maxPrs, project?.maxPrs, global?.maxPrs, DEFAULTS.maxPrs),
       maxSessions: pickNullable(
@@ -279,7 +299,7 @@ export class ConfigLoader {
       // Tool-registry hooks (issue #121). Hooks run shell commands with the operator's privileges, so
       // they are honored ONLY from the user-owned global config (~/.aitm.json) — NEVER from the
       // per-repo project config, which an untrusted repo could ship (CR: arbitrary code execution). A
-      // project that sets `hooks` is warned and ignored (see the warn above).
+      // project that sets `hooks` is warned + stripped (see stripUntrustedProjectFields).
       ...(global?.hooks ? { hooks: global.hooks } : {}),
       mcpServers,
       mcpServerSources,
@@ -292,6 +312,44 @@ export class ConfigLoader {
 
   async readProject(): Promise<ConfigFile | null> {
     return this.readConfigFile(join(this.cwd, PROJECT_DIR, PROJECT_FILE));
+  }
+
+  // The top-level project-scope trust boundary: drop every UNTRUSTED_PROJECT_FIELDS entry a project
+  // config.json set (provider credentials + shell hooks) so nothing downstream — resolveApiKey,
+  // resolveBaseURL, the resolved hooks, the snapshot — can honor attacker-controlled input. Returns
+  // a sanitized copy (the input is left untouched); warns at most once per field per loader instance.
+  // The sibling gate for per-server MCP transport (project-scope stdio is code execution) lives in
+  // resolveMcpServers, which also sees the two project-scoped Claude Code files.
+  private stripUntrustedProjectFields(project: ConfigFile | null): ConfigFile | null {
+    if (!project) return project;
+    const sanitized: ConfigFile = { ...project };
+    for (const { key, reason } of UNTRUSTED_PROJECT_FIELDS) {
+      if (sanitized[key] === undefined) continue;
+      this.warnUntrustedProjectField(key, reason);
+      delete sanitized[key];
+    }
+    return sanitized;
+  }
+
+  private warnUntrustedProjectField(key: string, reason: string): void {
+    if (this.warnedUntrustedProjectFields.has(key)) return;
+    this.warnedUntrustedProjectFields.add(key);
+    this.warn(
+      `${key} in ./${PROJECT_DIR}/${PROJECT_FILE} is ignored — ${reason}; honored only from the user-owned ~/${GLOBAL_FILE}`,
+    );
+  }
+
+  // A stdio MCP server declared in project scope (./.mcp.json or ./.ai-task-master/config.json) is
+  // dropped as a code-execution trust boundary — see resolveMcpServers. Warns at most once per
+  // server name per loader instance.
+  private warnBlockedProjectStdioMcp(name: string, source: McpServerSource): void {
+    if (this.warnedBlockedProjectStdioMcp.has(name)) return;
+    this.warnedBlockedProjectStdioMcp.add(name);
+    this.warn(
+      `mcp server "${name}" from ${source} is ignored — a project-scoped stdio server spawns a ` +
+        'local process from repo-controlled command/args/env; declare it in the user-owned ' +
+        `~/${GLOBAL_FILE} to run it, or use an http/sse server`,
+    );
   }
 
   // Read Claude Code's project-scoped MCP file (./.mcp.json). Schema is permissive:
@@ -308,11 +366,24 @@ export class ConfigLoader {
   }
 
   // Frozen run snapshot. API key value is replaced by its source label so the
-  // file is safe to inspect; only the resolution source is recorded.
+  // file is safe to inspect; only the resolution source is recorded. MCP server
+  // secrets (headers, env) are also redacted.
   async writeSnapshot(resolved: ResolvedConfig, stateDir: string): Promise<void> {
+    const redactedMcpServers: Record<string, unknown> = {};
+    for (const [name, server] of Object.entries(resolved.mcpServers)) {
+      const redactedServer: Record<string, unknown> = { ...server };
+      if ('headers' in server) {
+        redactedServer.headers = '<redacted>';
+      }
+      if ('env' in server) {
+        redactedServer.env = '<redacted>';
+      }
+      redactedMcpServers[name] = redactedServer;
+    }
     const redacted: ResolvedConfig = {
       ...resolved,
       openrouterApiKey: `<from ${resolved.apiKeySource}>`,
+      mcpServers: redactedMcpServers as typeof resolved.mcpServers,
     };
     const path = join(stateDir, SNAPSHOT_FILE);
     await atomicWrite(path, `${JSON.stringify(redacted, null, 2)}\n`);
@@ -366,6 +437,15 @@ export class ConfigLoader {
     for (const [label, servers] of layers) {
       if (!servers) continue;
       for (const [name, server] of Object.entries(servers)) {
+        // Trust boundary: a stdio server spawns a local process from its command/args/env. From a
+        // project-scoped source (a file an untrusted repo ships) that is arbitrary code execution, so
+        // it is dropped + warned — a stdio server is honored only from user-owned config. HTTP/SSE
+        // servers (a URL, no spawn) are allowed from any scope. Same trust point as
+        // stripUntrustedProjectFields, extended to per-server MCP transport.
+        if (isProjectScopedSource(label) && isStdioServer(server)) {
+          this.warnBlockedProjectStdioMcp(name, label);
+          continue;
+        }
         if (name in merged) {
           this.warn(`mcp server "${name}" from ${label} shadows entry from ${sourceMap[name]}`);
         }
@@ -427,16 +507,16 @@ export class ConfigLoader {
     return { name, profile };
   }
 
-  // Precedence: project > global > active profile > env OPENROUTER_BASE_URL. Undefined →
-  // provider default. Config-file values are already URL-validated by ConfigFileSchema; the
-  // env value is validated here so every source honors the same "validated as a URL"
-  // contract (docs/auth.md §"Base URL"). A whitespace-only / empty env var means "no override".
+  // Precedence: global > active profile > env OPENROUTER_BASE_URL — user config wins, env is the
+  // fallback. Project scope is NEVER consulted: a project-set baseURL is stripped upstream
+  // (stripUntrustedProjectFields) so an untrusted repo can't redirect inference or leak the key.
+  // Undefined → provider default. Config-file values are already URL-validated by ConfigFileSchema;
+  // the env value is validated here so every source honors the same "validated as a URL" contract
+  // (docs/auth.md §"Base URL"). A whitespace-only / empty env var means "no override".
   private resolveBaseURL(
     global: ConfigFile | null,
-    project: ConfigFile | null,
     profile: Profile | undefined,
   ): string | undefined {
-    if (project?.baseURL) return project.baseURL;
     if (global?.baseURL) return global.baseURL;
     if (profile?.baseURL) return profile.baseURL;
     const env = this.env.OPENROUTER_BASE_URL?.trim();
@@ -448,17 +528,15 @@ export class ConfigLoader {
     return parsed.data;
   }
 
-  // Precedence: project > global > active profile > env. The profile sits below explicit
-  // top-level config (so a legacy flat key still wins) but above env (so `aitm profile use`
-  // takes effect even when a stale OPENROUTER_API_KEY lingers in the environment).
+  // Precedence: global > active profile > env — user config wins, env is the fallback. Project
+  // scope is NEVER consulted: a project-set openrouterApiKey is stripped upstream
+  // (stripUntrustedProjectFields), so an untrusted repo can't swap the provider credential. The
+  // profile sits below explicit top-level global config (so a legacy flat key still wins) but above
+  // env (so `aitm profile use` takes effect even when a stale OPENROUTER_API_KEY lingers).
   private resolveApiKey(
     global: ConfigFile | null,
-    project: ConfigFile | null,
     profile: Profile | undefined,
   ): { apiKey: string | undefined; apiKeySource: ResolvedConfig['apiKeySource'] | undefined } {
-    if (project?.openrouterApiKey) {
-      return { apiKey: project.openrouterApiKey, apiKeySource: 'project' };
-    }
     if (global?.openrouterApiKey) {
       return { apiKey: global.openrouterApiKey, apiKeySource: 'global' };
     }
@@ -546,6 +624,18 @@ function pickNullable<T>(
   if (project !== undefined) return project;
   if (global !== undefined) return global;
   return fallback;
+}
+
+// The two project-scoped MCP sources — files an untrusted repo can ship (./.mcp.json and
+// ./.ai-task-master/config.json). aitm-global and claude-user are user-owned, hence trusted.
+function isProjectScopedSource(source: McpServerSource): boolean {
+  return source === 'aitm-project' || source === 'claude-mcp-project';
+}
+
+// A stdio server spawns a local process; http/sse carry a `url` and only open a socket. Mirrors
+// transportKind in ../mcp/mcp-client.ts — kept in sync with McpServerSchema in ../mcp/schema.ts.
+function isStdioServer(server: McpServer): boolean {
+  return !('url' in server);
 }
 
 function isNotFound(err: unknown): boolean {

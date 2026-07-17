@@ -114,6 +114,8 @@ export type Profile = z.infer<typeof ProfileSchema>;
 
 export const ConfigFileSchema = z
   .object({
+    // Provider credential. User-owned only: honored from ~/.aitm.json (or a profile), ignored +
+    // warned from a project config.json (untrusted-repo trust boundary). See config-loader.ts.
     openrouterApiKey: z.string().optional(),
     // Name of the profile in `profiles` whose provider fields seed this config. Unset →
     // no profile layer (current behavior). See docs/config.md §"Profiles" for precedence.
@@ -124,7 +126,9 @@ export const ConfigFileSchema = z
     // Override the OpenAI-compatible inference base URL. Unset → the provider default
     // (https://openrouter.ai/api/v1). Lets aitm target any OpenAI-compatible endpoint
     // (e.g. a self-hosted gateway or the z.ai GLM coding plan) without an Anthropic SDK.
-    // See docs/auth.md §"LLM provider".
+    // User-owned only: honored from ~/.aitm.json (or a profile), ignored + warned from a project
+    // config.json — a project-set baseURL could redirect inference and leak the key as a Bearer
+    // token (untrusted-repo trust boundary). See docs/auth.md §"LLM provider" and config-loader.ts.
     baseURL: z.url().optional(),
     models: CapabilityModelsSchema.optional(),
     // OpenRouter provider routing + per-capability model fallback (issue #124). Provider-shaped, so
@@ -221,12 +225,15 @@ export type CliOverrides = {
 
 export type ResolvedConfig = {
   openrouterApiKey: string;
-  apiKeySource: 'project' | 'global' | 'env' | 'profile';
+  // Where the resolved key came from. Never 'project' — a project config's openrouterApiKey is
+  // stripped as an untrusted-repo trust boundary (ConfigLoader.stripUntrustedProjectFields).
+  apiKeySource: 'global' | 'env' | 'profile';
   // Name of the active provider profile, if one supplied provider defaults for this run.
   // Undefined → no profile layer. Recorded for the snapshot and `aitm config list`.
   activeProfile?: string | undefined;
-  // Optional OpenAI-compatible base URL override. Undefined → the provider default.
-  // Resolved from config (project > global) or the OPENROUTER_BASE_URL env var.
+  // Optional OpenAI-compatible base URL override. Undefined → the provider default. User-owned only:
+  // resolved global > profile config, then the OPENROUTER_BASE_URL env var as fallback; a project
+  // config's baseURL is stripped (untrusted-repo trust boundary), so it is never attacker-set.
   baseURL?: string | undefined;
   models: Required<Pick<CapabilityModels, 'generic' | 'smart' | 'coding' | 'fast'>>;
   // OpenRouter provider routing + per-capability fallback model ids (issue #124). Omitted when unset

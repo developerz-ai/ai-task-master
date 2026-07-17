@@ -248,3 +248,35 @@ test('unset refuses profile-managed keys', async () => {
     await assert.rejects(() => writer.unset('global', 'profiles'), /managed by/);
   });
 });
+
+test('set rejects forbidden key segments (__proto__, prototype, constructor)', async () => {
+  await withWriter(async ({ writer }) => {
+    await assert.rejects(
+      () => writer.set('global', 'models.__proto__.x', '"evil"'),
+      /reserved segment/,
+    );
+    await assert.rejects(
+      () => writer.set('global', 'models.prototype.x', '"evil"'),
+      /reserved segment/,
+    );
+    await assert.rejects(
+      () => writer.set('global', 'models.constructor.x', '"evil"'),
+      /reserved segment/,
+    );
+  });
+});
+
+test('get rejects forbidden key segments', async () => {
+  await withWriter(async ({ writer }) => {
+    await assert.rejects(() => writer.get('global', 'models.__proto__'), /reserved segment/);
+    await assert.rejects(() => writer.get('global', '__proto__'), /reserved segment/);
+    await assert.rejects(() => writer.get('global', 'prototype'), /reserved segment/);
+  });
+});
+
+test('unset rejects forbidden key segments', async () => {
+  await withWriter(async ({ writer }) => {
+    await assert.rejects(() => writer.unset('global', 'models.__proto__'), /reserved segment/);
+    await assert.rejects(() => writer.unset('global', 'constructor'), /reserved segment/);
+  });
+});

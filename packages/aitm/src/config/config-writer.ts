@@ -6,6 +6,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ZodError } from 'zod';
 import { atomicWrite } from '../fs/atomic-write.ts';
+import { FORBIDDEN_KEY_SEGMENTS } from './profiles.ts';
 import { type ConfigFile, ConfigFileSchema } from './schema.ts';
 
 export type ConfigScope = 'global' | 'project';
@@ -139,6 +140,9 @@ function splitKey(key: string): [string, ...string[]] {
   const parts = key.split('.');
   if (parts.length === 0 || parts.some((p) => p === '')) {
     throw new Error(`Invalid config key: "${key}"`);
+  }
+  if (parts.some((p) => FORBIDDEN_KEY_SEGMENTS.has(p))) {
+    throw new Error(`Invalid config key: "${key}" — reserved segment`);
   }
   const [first, ...rest] = parts;
   if (first === undefined) {

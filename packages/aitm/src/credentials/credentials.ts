@@ -70,10 +70,14 @@ export const ROLE_CAPABILITY: Readonly<Record<Role, Capability>> = {
 
 export type ModelHandles = Record<Role, LanguageModel>;
 
-// Settings forwarded to the OpenAI-compatible provider. Exported so the baseURL
-// passthrough is unit-testable without reaching into provider internals. `baseURL`
-// is omitted (not set to undefined) when unset so the provider keeps its default —
-// an explicit undefined trips exactOptionalPropertyTypes.
+// Settings forwarded to the OpenAI-compatible provider: `apiKey` is sent as the Bearer credential to
+// `baseURL`. That pairing is safe ONLY because ConfigLoader resolves `baseURL` from user-owned scope
+// alone (global/profile config or the OPENROUTER_BASE_URL env) and strips any project-set baseURL —
+// so an untrusted target repo can never redirect the key to an attacker host. Do not weaken that
+// guarantee by sourcing baseURL from project/repo input. Exported so the passthrough is
+// unit-testable without reaching into provider internals. `baseURL` is omitted (not set to
+// undefined) when unset so the provider keeps its default — an explicit undefined trips
+// exactOptionalPropertyTypes.
 export function providerSettings(resolved: ResolvedConfig): { apiKey: string; baseURL?: string } {
   return {
     apiKey: resolved.openrouterApiKey,

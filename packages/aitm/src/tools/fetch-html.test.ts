@@ -86,6 +86,71 @@ test('fetchHtmlTool: clamps an oversized timeout to the hard max', async () => {
   assert.equal(captured[captured.indexOf('--max-time') + 1], '120');
 });
 
+test('fetchHtmlTool: pins the validated IP via --resolve and disables redirect following', async () => {
+  let captured: string[] = [];
+  const exec: ExecLike = async (_file, args) => {
+    captured = [...args];
+    return { stdout: 'x', stderr: metaStderr(200, 'https://example.com/', 'text/html') };
+  };
+  await run(fetchHtmlTool({ exec, lookup: publicLookup }), { url: 'https://example.com/' });
+  const ri = captured.indexOf('--resolve');
+  assert.ok(ri >= 0, 'expected a --resolve pin');
+  assert.equal(captured[ri + 1], 'example.com:443:93.184.216.34');
+  // Redirects off: no -L / -sSL / --location, and --max-redirs 0 as a belt-and-suspenders guard.
+  assert.ok(!captured.some((a) => a === '-L' || a === '-sSL' || a === '--location'));
+  assert.equal(captured[captured.indexOf('--max-redirs') + 1], '0');
+});
+
+test('fetchHtmlTool: pins on the default port matching the scheme (http → 80)', async () => {
+  let captured: string[] = [];
+  const exec: ExecLike = async (_file, args) => {
+    captured = [...args];
+    return { stdout: 'x', stderr: metaStderr(200, 'http://example.com/', 'text/html') };
+  };
+  await run(fetchHtmlTool({ exec, lookup: publicLookup }), { url: 'http://example.com/' });
+  assert.equal(captured[captured.indexOf('--resolve') + 1], 'example.com:80:93.184.216.34');
+});
+
+test('fetchHtmlTool: honors an explicit port in the --resolve pin', async () => {
+  let captured: string[] = [];
+  const exec: ExecLike = async (_file, args) => {
+    captured = [...args];
+    return { stdout: 'x', stderr: metaStderr(200, 'https://example.com:8443/', 'text/html') };
+  };
+  await run(fetchHtmlTool({ exec, lookup: publicLookup }), { url: 'https://example.com:8443/' });
+  assert.equal(captured[captured.indexOf('--resolve') + 1], 'example.com:8443:93.184.216.34');
+});
+
+test('fetchHtmlTool: pins every validated address, bracketing IPv6', async () => {
+  let captured: string[] = [];
+  const exec: ExecLike = async (_file, args) => {
+    captured = [...args];
+    return { stdout: 'x', stderr: metaStderr(200, 'https://example.com/', 'text/html') };
+  };
+  const lookup: LookupFn = async () => [{ address: '93.184.216.34' }, { address: '2606:2800::1' }];
+  await run(fetchHtmlTool({ exec, lookup }), { url: 'https://example.com/' });
+  assert.equal(
+    captured[captured.indexOf('--resolve') + 1],
+    'example.com:443:93.184.216.34,[2606:2800::1]',
+  );
+});
+
+test('fetchHtmlTool: IP-literal host skips --resolve and DNS (host is already the address)', async () => {
+  let captured: string[] = [];
+  let lookupCalled = false;
+  const exec: ExecLike = async (_file, args) => {
+    captured = [...args];
+    return { stdout: 'x', stderr: metaStderr(200, 'https://93.184.216.34/', 'text/html') };
+  };
+  const lookup: LookupFn = async () => {
+    lookupCalled = true;
+    return [];
+  };
+  await run(fetchHtmlTool({ exec, lookup }), { url: 'https://93.184.216.34/' });
+  assert.ok(!captured.includes('--resolve'));
+  assert.equal(lookupCalled, false);
+});
+
 test('fetchHtmlTool: rejects a private/loopback URL via the shared SSRF guard', async () => {
   const exec: ExecLike = async () => ({ stdout: '', stderr: '' });
   await assert.rejects(

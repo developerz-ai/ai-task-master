@@ -3,15 +3,25 @@
 // governance that lives in an @-imported file (e.g. `@core/AGENTS.md`) is actually
 // seen by the model instead of being fed through as an inert `@core/AGENTS.md` string.
 //
-// Faithful subset of Claude Code's behavior, with one deliberate hardening: imports are
-// contained to `root` (the target repo). Absolute paths, `..` escapes, `~`-home imports,
-// and symlinks that resolve outside root are refused (left as literal text) — aitm
-// processes untrusted target repos, so an @-import must never read outside the repo.
+// Faithful subset of Claude Code's behavior, with two deliberate hardenings — aitm processes
+// untrusted target repos, so an @-import must never read outside the repo and must never let a
+// hostile repo exhaust memory/CPU:
+//   1. Containment to `root` (the target repo). Absolute paths, `..` escapes, `~`-home imports,
+//      and symlinks that resolve outside root are refused (left as literal text).
+//   2. Bounded expansion. Each file is inlined at most once across the whole run — a single global
+//      memo (which doubles as the cycle guard, no per-branch Set copy) — and a cumulative byte
+//      budget caps total inlined content. Together they defeat a hostile @-import fan-out: a
+//      diamond/DAG that would otherwise re-expand shared subtrees exponentially.
 
 import { readFile, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 const DEFAULT_MAX_DEPTH = 5;
+// Cumulative ceiling on INLINED import bytes (the entry file itself is not charged — it is the
+// caller's already-loaded text, not an amplification vector). Past it, further imports are left
+// literal. Generous for real governance files (a handful of few-KB imports) yet a hard cap on a
+// hostile repo's amplification. Overridable via `maxBytes`.
+const DEFAULT_MAX_BYTES = 256 * 1024;
 
 export type ExpandImportsOptions = {
   // Containment boundary. Imports resolving outside it are left as literal text.
@@ -19,9 +29,21 @@ export type ExpandImportsOptions = {
   root?: string;
   // Maximum nesting levels of @-imports to follow. Defaults to 5.
   maxDepth?: number;
+  // Cumulative byte budget for inlined import content. Defaults to 256 KiB. Once inlining a file
+  // would overflow it, that import (and any after it) is left as literal text.
+  maxBytes?: number;
   // Path of the file `contents` was read from. Seeded into the cycle guard so the entry
   // file cannot re-inline itself (e.g. a CLAUDE.md that contains `@./CLAUDE.md`).
   sourcePath?: string;
+};
+
+// Invariants + mutable bounds shared across the whole expansion (never copied per branch): the
+// global `visited` memo (each real path inlined at most once — also the cycle guard) and the
+// `budget` counter (decremented as content is inlined). Both are what keep a hostile fan-out bounded.
+type ExpandState = {
+  root: string;
+  visited: Set<string>;
+  budget: number;
 };
 
 export async function expandImports(
@@ -39,7 +61,8 @@ export async function expandImports(
     const real = await realpathOrNull(options.sourcePath);
     if (real !== null) visited.add(real);
   }
-  return expand(contents, baseDir, root, maxDepth, visited);
+  const state: ExpandState = { root, visited, budget: options.maxBytes ?? DEFAULT_MAX_BYTES };
+  return expand(contents, baseDir, maxDepth, state);
 }
 
 async function realpathOrResolve(p: string): Promise<string> {
@@ -57,9 +80,8 @@ async function realpathOrNull(p: string): Promise<string | null> {
 async function expand(
   contents: string,
   baseDir: string,
-  root: string,
   depthLeft: number,
-  visited: ReadonlySet<string>,
+  state: ExpandState,
 ): Promise<string> {
   const lines = contents.split('\n');
   const out: string[] = [];
@@ -75,7 +97,7 @@ async function expand(
       out.push(line);
       continue;
     }
-    out.push(await expandLine(line, baseDir, root, depthLeft, visited));
+    out.push(await expandLine(line, baseDir, depthLeft, state));
   }
   return out.join('\n');
 }
@@ -96,9 +118,8 @@ function matchFence(
 async function expandLine(
   line: string,
   baseDir: string,
-  root: string,
   depthLeft: number,
-  visited: ReadonlySet<string>,
+  state: ExpandState,
 ): Promise<string> {
   // Split on inline code spans (`...`) so imports inside them are not expanded.
   // Odd-indexed segments from this split are the backtick-delimited spans.
@@ -107,7 +128,7 @@ async function expandLine(
   for (const segment of segments) {
     result += segment.startsWith('`')
       ? segment
-      : await expandSegment(segment, baseDir, root, depthLeft, visited);
+      : await expandSegment(segment, baseDir, depthLeft, state);
   }
   return result;
 }
@@ -115,9 +136,8 @@ async function expandLine(
 async function expandSegment(
   text: string,
   baseDir: string,
-  root: string,
   depthLeft: number,
-  visited: ReadonlySet<string>,
+  state: ExpandState,
 ): Promise<string> {
   // `@path` where `@` starts the segment or follows whitespace, and is not part of an
   // email (`me@host`, whose `@` follows a word char) or an escaped `@@`.
@@ -135,7 +155,7 @@ async function expandSegment(
       result += full;
       continue;
     }
-    const inlined = await inlineImport(rawPath, baseDir, root, depthLeft, visited);
+    const inlined = await inlineImport(rawPath, baseDir, depthLeft, state);
     result += inlined === null ? full : lead + inlined;
   }
   result += text.slice(last);
@@ -145,27 +165,32 @@ async function expandSegment(
 async function inlineImport(
   rawPath: string,
   baseDir: string,
-  root: string,
   depthLeft: number,
-  visited: ReadonlySet<string>,
+  state: ExpandState,
 ): Promise<string | null> {
   if (depthLeft <= 0) return null;
-  const abs = resolveWithinRoot(rawPath, baseDir, root);
+  const abs = resolveWithinRoot(rawPath, baseDir, state.root);
   if (abs === null) return null;
   // Re-check containment on the REAL path: a repo-local symlink can be lexically inside
   // root yet point outside it. realpath also serves as the existence check.
   const real = await realpathOrNull(abs);
-  if (real === null || !withinRoot(real, root)) return null;
-  if (visited.has(real)) return null;
+  if (real === null || !withinRoot(real, state.root)) return null;
+  // Global memo: a real path is inlined at most once, so a diamond/DAG of @-imports can never
+  // re-expand a shared subtree, and a cycle terminates on re-entry.
+  if (state.visited.has(real)) return null;
   let fileContents: string;
   try {
     fileContents = await readFile(real, 'utf8');
   } catch {
     return null;
   }
-  const nextVisited = new Set(visited);
-  nextVisited.add(real);
-  return expand(fileContents, dirname(real), root, depthLeft - 1, nextVisited);
+  // Mark before the budget check so a file whose bytes overflow the (monotonically shrinking)
+  // budget is not re-read on every reference — it could never fit later anyway.
+  state.visited.add(real);
+  const size = byteLength(fileContents);
+  if (size > state.budget) return null;
+  state.budget -= size;
+  return expand(fileContents, dirname(real), depthLeft - 1, state);
 }
 
 function resolveWithinRoot(rawPath: string, baseDir: string, root: string): string | null {
@@ -177,4 +202,8 @@ function resolveWithinRoot(rawPath: string, baseDir: string, root: string): stri
 function withinRoot(abs: string, root: string): boolean {
   const rel = relative(root, abs);
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
+
+function byteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
 }

@@ -1,0 +1,36 @@
+plan: 101-aitm-audit-remediation
+title: aitm Audit Remediation — hardening for autonomous parallel-team execution
+status: not_started        # not_started | in_progress | blocked | complete | superseded
+created_by: sebi
+worked_by: ""              # executor fills with their git user.name
+owner: sebi
+percent: 0
+current_focus: ""          # start with 01 (trust boundary) + 04 (durability); 02 gates on concurrency-policy decision
+slices:
+  - file: 01-untrusted-repo-trust-boundary.md
+    status: not_started
+    percent: 0
+  - file: 02-parallel-team-shared-checkout.md
+    status: not_started
+    percent: 0
+  - file: 03-pr-ci-review-loop-correctness.md
+    status: not_started
+    percent: 0
+  - file: 04-persistence-durability.md
+    status: not_started
+    percent: 0
+  - file: 05-subagent-wiring.md
+    status: not_started
+    percent: 0
+  - file: 06-cli-tools-observability.md
+    status: not_started
+    percent: 0
+  - file: 08-prompt-templating.md
+    status: not_started
+    percent: 0
+  - file: 07-tests.md
+    status: not_started
+    percent: 0
+evidence: []
+notes: "Findings from a 5-agent parallel deep-dive audit (2026-07-17). Clean: no command-injection (execa argv throughout), no Bun-only shipped APIs, no any/as-unknown-as. Product stance drives severity: non-interactive autonomous multi-agent team on ONE shared in-place checkout + one .ai-task-master state dir (worktrees removed, commit 7572a96), driving GH PRs/CI. OPEN DECISION before 02: serialize editing on the shared checkout (assumed) vs restore per-group isolation. Owner-clarified review model: self-review + verify run BEFORE the PR opens, NOT per-commit (intentional, for speed; CI is the post-PR net). Post-PR review comments (CodeRabbit etc.) are optional/repo-dependent — do not build out, but DO keep the prompt-injection fence (01) since a third-party bot's comment feeds a bash/write-tool subagent. Do NOT reintroduce per-commit verification in slice 05. Architecture principle: two kinds of logic — code/harness (deterministic) vs agent/logic-eng (prompts); keep separate + reusable; slice 08 makes the prompt-template boundary that seam and underpins 01+05."
+last_updated: 2026-07-17

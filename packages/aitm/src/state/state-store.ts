@@ -27,6 +27,12 @@ export class StateStore {
   // preventing lost updates when callers race via Promise.all.
   private updateChain: Promise<unknown> = Promise.resolve();
 
+  // Serializes concurrent appendProgress() calls: bare appendFile per call races on the file offset,
+  // risking interleaved lines and non-deterministic order. Chaining keeps entries intact and in
+  // submission order. Separate from updateChain — progress writes a different file, so they needn't
+  // block state updates (or vice versa).
+  private progressChain: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly stateDir: string) {}
 
   async init(initial: RunState): Promise<void> {
@@ -80,8 +86,14 @@ export class StateStore {
   }
 
   async appendProgress(entry: string): Promise<void> {
-    await mkdir(this.stateDir, { recursive: true });
-    await appendFile(this.path(PROGRESS_FILE), ensureTrailingNewline(entry));
+    const next = this.progressChain.then(async () => {
+      await mkdir(this.stateDir, { recursive: true });
+      await appendFile(this.path(PROGRESS_FILE), ensureTrailingNewline(entry));
+    });
+    // Swallow rejection on the chain so a failed append doesn't poison subsequent callers.
+    // The original `next` still rejects for the caller that owns this append.
+    this.progressChain = next.catch(() => undefined);
+    return next;
   }
 
   async writeContext(summary: string): Promise<void> {

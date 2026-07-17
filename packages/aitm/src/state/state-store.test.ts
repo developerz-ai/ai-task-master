@@ -344,6 +344,23 @@ test('appendProgress appends successive entries', async () => {
   }
 });
 
+test('concurrent appendProgress calls serialize — entries stay intact and ordered', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    const N = 20;
+    const entries = Array.from({ length: N }, (_, i) => `entry ${i}`);
+    // Fire all appends at once. A bare appendFile per call would race on the file offset — lines could
+    // interleave or land out of order. The per-store chain keeps each entry intact and in order.
+    await Promise.all(entries.map((e) => store.appendProgress(e)));
+    const written = await readFile(join(dir, 'progress.md'), 'utf8');
+    assert.equal(written, `${entries.join('\n')}\n`);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('writeContext + readContext round-trip', async () => {
   const repo = await makeTempRepo();
   try {

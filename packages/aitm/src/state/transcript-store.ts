@@ -8,7 +8,7 @@
 // every step (O(n²)) and lose the crash-tail property. Records pass through Logger.redact before
 // serialization (best-effort key-name redaction of key/token/secret/authorization).
 
-import { appendFile, mkdir, readdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LanguageModelUsage, ModelMessage } from 'ai';
 import { modelMessageSchema } from 'ai';
@@ -52,6 +52,15 @@ function locate(target: TranscriptTarget): { subdir: string; prefix: string } {
 function ordinalOf(file: string, prefix: string): number | null {
   const m = new RegExp(`^${prefix}-(\\d+)\\.jsonl$`).exec(file);
   return m ? Number(m[1]) : null;
+}
+
+function isEexist(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code: unknown }).code === 'EEXIST'
+  );
 }
 
 // True when `prefix` is a leading run of `arr` (deep-equal, element by element with an early exit).
@@ -167,13 +176,33 @@ export class TranscriptStore {
   }
 
   // Start a new transcript for a target, allocating the next 1-based ordinal per (subdir, prefix).
-  // The file is created lazily on the first record.
+  // The ordinal's file is created empty to reserve it (see reserveOrdinalFile); records append to it.
   async begin(target: TranscriptTarget): Promise<TranscriptRecorder> {
     const { subdir, prefix } = locate(target);
     const dir = join(this.dir(), subdir);
     await mkdir(dir, { recursive: true });
-    const ordinal = await this.nextOrdinal(dir, prefix);
-    return new FileRecorder(join(dir, `${prefix}-${ordinal}.jsonl`), this.onWarn);
+    const file = await this.reserveOrdinalFile(dir, prefix);
+    return new FileRecorder(file, this.onWarn);
+  }
+
+  // Reserve the next ordinal race-free: a bare readdir→max+1 lets two concurrent begins (in this
+  // process or a peer sharing the state dir) pick the same ordinal and interleave into one file, since
+  // the file isn't written until the first record. `open(…, 'wx')` creates the file exclusively —
+  // EEXIST means someone already took that ordinal, so we bump and retry. The scan seeds a good start;
+  // the loop only spins under an actual collision.
+  private async reserveOrdinalFile(dir: string, prefix: string): Promise<string> {
+    let ordinal = await this.nextOrdinal(dir, prefix);
+    for (;;) {
+      const file = join(dir, `${prefix}-${ordinal}.jsonl`);
+      try {
+        const handle = await open(file, 'wx');
+        await handle.close();
+        return file;
+      } catch (err) {
+        if (!isEexist(err)) throw err;
+        ordinal++;
+      }
+    }
   }
 
   private async nextOrdinal(dir: string, prefix: string): Promise<number> {
@@ -206,7 +235,10 @@ export class TranscriptStore {
     for (const { f } of ordered) {
       try {
         const parsed = reconstructTranscript(await readFile(join(dir, f), 'utf8'), this.onWarn);
-        if (!parsed.complete) return { messages: parsed.messages };
+        // An interrupted transcript with no reconstructable messages (e.g. an ordinal reserved by
+        // begin whose agent died before its first step) has nothing to resume — skip it so an empty
+        // reservation can't shadow an earlier transcript that does.
+        if (!parsed.complete && parsed.messages.length > 0) return { messages: parsed.messages };
       } catch {
         // Unreadable transcript → try the next; resume must never block the run.
       }

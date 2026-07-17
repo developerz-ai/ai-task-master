@@ -4,7 +4,10 @@
 // Provider credentials (openrouterApiKey, baseURL) are USER-OWNED ONLY: they resolve
 // global > profile > env — user config wins, env is the fallback — and are stripped from project
 // scope, so an untrusted repo can neither redirect inference nor swap the key (see
-// stripUntrustedProjectFields). Frozen snapshot written by writeSnapshot().
+// stripUntrustedProjectFields). A stdio MCP server (spawns a local process) is likewise honored
+// ONLY from user-owned config; a project-scoped stdio entry is dropped + warned (see
+// resolveMcpServers) so an untrusted repo can't run arbitrary commands. HTTP/SSE MCP servers (a URL,
+// no spawn) are allowed from any scope. Frozen snapshot written by writeSnapshot().
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -14,7 +17,7 @@ import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../loop/constants.ts';
 import { DEFAULT_MCP_DEFER_TOOLS_OVER } from '../mcp/mcp-client.ts';
-import { type McpServers, McpServersSchema } from '../mcp/schema.ts';
+import { type McpServer, type McpServers, McpServersSchema } from '../mcp/schema.ts';
 import { DEFAULT_LLM_STEP_TIMEOUT_MS } from '../subagents/factory.ts';
 import {
   type CliOverrides,
@@ -128,6 +131,8 @@ export class ConfigLoader {
   // stripUntrustedProjectFields warns at most once per ignored project field for this loader
   // instance, so a repeat resolve() doesn't re-emit the same warning.
   private readonly warnedUntrustedProjectFields = new Set<string>();
+  // resolveMcpServers warns at most once per blocked project-scoped stdio server name, same as above.
+  private readonly warnedBlockedProjectStdioMcp = new Set<string>();
 
   constructor(
     private readonly cwd: string,
@@ -309,10 +314,12 @@ export class ConfigLoader {
     return this.readConfigFile(join(this.cwd, PROJECT_DIR, PROJECT_FILE));
   }
 
-  // The one project-scope trust boundary: drop every UNTRUSTED_PROJECT_FIELDS entry a project
+  // The top-level project-scope trust boundary: drop every UNTRUSTED_PROJECT_FIELDS entry a project
   // config.json set (provider credentials + shell hooks) so nothing downstream — resolveApiKey,
   // resolveBaseURL, the resolved hooks, the snapshot — can honor attacker-controlled input. Returns
   // a sanitized copy (the input is left untouched); warns at most once per field per loader instance.
+  // The sibling gate for per-server MCP transport (project-scope stdio is code execution) lives in
+  // resolveMcpServers, which also sees the two project-scoped Claude Code files.
   private stripUntrustedProjectFields(project: ConfigFile | null): ConfigFile | null {
     if (!project) return project;
     const sanitized: ConfigFile = { ...project };
@@ -329,6 +336,19 @@ export class ConfigLoader {
     this.warnedUntrustedProjectFields.add(key);
     this.warn(
       `${key} in ./${PROJECT_DIR}/${PROJECT_FILE} is ignored — ${reason}; honored only from the user-owned ~/${GLOBAL_FILE}`,
+    );
+  }
+
+  // A stdio MCP server declared in project scope (./.mcp.json or ./.ai-task-master/config.json) is
+  // dropped as a code-execution trust boundary — see resolveMcpServers. Warns at most once per
+  // server name per loader instance.
+  private warnBlockedProjectStdioMcp(name: string, source: McpServerSource): void {
+    if (this.warnedBlockedProjectStdioMcp.has(name)) return;
+    this.warnedBlockedProjectStdioMcp.add(name);
+    this.warn(
+      `mcp server "${name}" from ${source} is ignored — a project-scoped stdio server spawns a ` +
+        'local process from repo-controlled command/args/env; declare it in the user-owned ' +
+        `~/${GLOBAL_FILE} to run it, or use an http/sse server`,
     );
   }
 
@@ -404,6 +424,15 @@ export class ConfigLoader {
     for (const [label, servers] of layers) {
       if (!servers) continue;
       for (const [name, server] of Object.entries(servers)) {
+        // Trust boundary: a stdio server spawns a local process from its command/args/env. From a
+        // project-scoped source (a file an untrusted repo ships) that is arbitrary code execution, so
+        // it is dropped + warned — a stdio server is honored only from user-owned config. HTTP/SSE
+        // servers (a URL, no spawn) are allowed from any scope. Same trust point as
+        // stripUntrustedProjectFields, extended to per-server MCP transport.
+        if (isProjectScopedSource(label) && isStdioServer(server)) {
+          this.warnBlockedProjectStdioMcp(name, label);
+          continue;
+        }
         if (name in merged) {
           this.warn(`mcp server "${name}" from ${label} shadows entry from ${sourceMap[name]}`);
         }
@@ -582,6 +611,18 @@ function pickNullable<T>(
   if (project !== undefined) return project;
   if (global !== undefined) return global;
   return fallback;
+}
+
+// The two project-scoped MCP sources — files an untrusted repo can ship (./.mcp.json and
+// ./.ai-task-master/config.json). aitm-global and claude-user are user-owned, hence trusted.
+function isProjectScopedSource(source: McpServerSource): boolean {
+  return source === 'aitm-project' || source === 'claude-mcp-project';
+}
+
+// A stdio server spawns a local process; http/sse carry a `url` and only open a socket. Mirrors
+// transportKind in ../mcp/mcp-client.ts — kept in sync with McpServerSchema in ../mcp/schema.ts.
+function isStdioServer(server: McpServer): boolean {
+  return !('url' in server);
 }
 
 function isNotFound(err: unknown): boolean {

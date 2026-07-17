@@ -20,6 +20,7 @@ import type { ReviewThread } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
 import {
   createPlannerAgent,
+  PLANNER_MAX_STEPS,
   PLANNER_SYSTEM_PREFIX,
   type PlannerResult,
   type PlannerTools,
@@ -27,14 +28,17 @@ import {
 } from '../subagents/planner.ts';
 import {
   createReviewerAgent,
+  REVIEWER_MAX_STEPS,
   REVIEWER_SYSTEM_PREFIX,
   type ReviewerResult,
   type ReviewerTools,
   runReviewer,
 } from '../subagents/reviewer.ts';
+import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
   runWorker,
+  WORKER_MAX_STEPS,
   WORKER_SYSTEM_PREFIX,
   type WorkerResult,
   type WorkerTools,
@@ -46,10 +50,13 @@ export type ModelProvider = { modelFor(role: Role): LanguageModel };
 
 type CommonDeps = {
   credentials: ModelProvider;
-  // Coding-style payload (CLAUDE.md/AGENTS.md contents) prepended to every subagent system prompt.
+  // Coding-style payload (CLAUDE.md/AGENTS.md contents) fed to every subagent's role prompt.
   styleContents: string;
   // Rolling summary of prior PRs in this run, threaded into Worker/Reviewer prompts.
   rollingContext: string;
+  // Checkout cwd for each subagent's `<env>` block (buildRolePrompt reads it). All three subagents
+  // operate in the same checkout, so it lives on the shared base.
+  checkoutPath: string;
 };
 
 export type PlannerToolDeps = CommonDeps & {
@@ -58,14 +65,12 @@ export type PlannerToolDeps = CommonDeps & {
 
 export type WorkerToolDeps = CommonDeps & {
   workerTools: WorkerTools;
-  checkoutPath: string;
   baseBranch: string;
   group: PrGroup;
 };
 
 export type ReviewerToolDeps = CommonDeps & {
   reviewerTools: ReviewerTools;
-  checkoutPath: string;
   pr: number;
   threads: ReviewThread[];
 };
@@ -95,7 +100,12 @@ export function makePlannerTool(deps: PlannerToolDeps): Tool<PlannerToolInput, P
       const agent = createPlannerAgent({
         model: deps.credentials.modelFor('planner'),
         tools: deps.plannerTools,
-        systemPrompt: deps.styleContents + PLANNER_SYSTEM_PREFIX,
+        systemPrompt: buildRolePrompt({
+          style: deps.styleContents,
+          roleGuidance: PLANNER_SYSTEM_PREFIX,
+          cwd: deps.checkoutPath,
+          maxSteps: PLANNER_MAX_STEPS,
+        }),
       });
       return runPlanner(agent, {
         goal: input.goal,
@@ -117,7 +127,12 @@ export function makeWorkerTool(deps: WorkerToolDeps): Tool<EmptyInput, WorkerRes
       const agent = createWorkerAgent({
         model: deps.credentials.modelFor('worker'),
         tools: deps.workerTools,
-        systemPrompt: deps.styleContents + WORKER_SYSTEM_PREFIX,
+        systemPrompt: buildRolePrompt({
+          style: deps.styleContents,
+          roleGuidance: WORKER_SYSTEM_PREFIX,
+          cwd: deps.checkoutPath,
+          maxSteps: WORKER_MAX_STEPS,
+        }),
       });
       return runWorker(agent, {
         group: deps.group,
@@ -140,7 +155,12 @@ export function makeReviewerTool(deps: ReviewerToolDeps): Tool<EmptyInput, Revie
       const agent = createReviewerAgent({
         model: deps.credentials.modelFor('reviewer'),
         tools: deps.reviewerTools,
-        systemPrompt: deps.styleContents + REVIEWER_SYSTEM_PREFIX,
+        systemPrompt: buildRolePrompt({
+          style: deps.styleContents,
+          roleGuidance: REVIEWER_SYSTEM_PREFIX,
+          cwd: deps.checkoutPath,
+          maxSteps: REVIEWER_MAX_STEPS,
+        }),
       });
       return runReviewer(agent, {
         pr: deps.pr,

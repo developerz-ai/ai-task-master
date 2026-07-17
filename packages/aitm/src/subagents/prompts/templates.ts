@@ -94,12 +94,36 @@ function rolePrompt(slots: RolePromptSlots): string {
   return renderPromptBlocks(blocks);
 }
 
-// The registry: template name → its slot shape. Later slices route the remaining hand-concat sites
-// (orchestrator system prompt, etc.) through render(); its signature does not change.
+// Orchestrator top-level system prompt: the coding-style digest, the orchestrator role guidance, and
+// the rolling summary of prior PRs. All three are harness-authored (aitm's own governance prose and its
+// own run summary — nothing external is concatenated here), so all three are trusted instruction slots.
+// Routed through render() so the top agent shares the one prompt-assembly seam; if a later slice needs
+// to fence an untrusted value, it flips a slot kind HERE, not at the call site.
+export type OrchestratorSystemSlots = {
+  // Coding-style digest (StyleDistiller output or raw agent-config contents). Trusted, verbatim.
+  readonly style: string;
+  // The orchestrator role prefix (ORCHESTRATOR_ROLE_PREFIX). Trusted, verbatim.
+  readonly roleGuidance: string;
+  // Rolling summary of prior PRs in this run (aitm-authored). Trusted, verbatim.
+  readonly rollingContext: string;
+};
+
+function orchestratorSystem(slots: OrchestratorSystemSlots): string {
+  return [
+    renderSlot(instruction(slots.style)),
+    renderSlot(instruction(slots.roleGuidance)),
+    renderSlot(instruction(slots.rollingContext)),
+  ].join('\n');
+}
+
+// The registry: template name → its slot shape. Every built-in subagent/orchestrator prompt renders
+// through one of these — there is no hand-concat call site left, so nothing can slip a value into a
+// prompt outside the trust boundary.
 export type PromptSlots = {
   'review-thread': ReviewThreadSlots;
   'specialist-guidance': SpecialistGuidanceSlots;
   'role-prompt': RolePromptSlots;
+  'orchestrator-system': OrchestratorSystemSlots;
 };
 
 export type PromptName = keyof PromptSlots;
@@ -108,6 +132,7 @@ const TEMPLATES: { [N in PromptName]: (slots: PromptSlots[N]) => string } = {
   'review-thread': reviewThread,
   'specialist-guidance': specialistGuidance,
   'role-prompt': rolePrompt,
+  'orchestrator-system': orchestratorSystem,
 };
 
 // The single prompt-assembly seam. Look up the named template and apply it to its typed slots. `name`

@@ -123,6 +123,27 @@ test('recordAddressedThreads merges across calls and de-dups', async () => {
   }
 });
 
+test('recordAddressedThreads: concurrent appends preserve the union with no lost ids', async () => {
+  const dir = await tempDir();
+  try {
+    const store = new PrContextStore(dir.path);
+    const batches = [
+      ['t1', 't2'],
+      ['t3', 't4'],
+      ['t5', 't6'],
+      ['t2', 't7'],
+    ];
+    await Promise.all(batches.map((ids) => store.recordAddressedThreads(4, ids)));
+    const addressed = await store.readAddressedThreads(4);
+    assert.deepEqual([...addressed].sort(), ['t1', 't2', 't3', 't4', 't5', 't6', 't7']);
+    // On-disk file is the merged union, valid JSON — no half-written clobber from the race.
+    const raw = await readFile(join(store.prDir(4), 'addressed_threads.json'), 'utf8');
+    assert.deepEqual(JSON.parse(raw), ['t1', 't2', 't3', 't4', 't5', 't6', 't7']);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
 test('recordAddressedThreads writes nothing for an empty id list', async () => {
   const dir = await tempDir();
   try {

@@ -1324,6 +1324,48 @@ test('concurrency cap limits batch size; subsequent passes pull next ready set',
   assert.equal(homeCalls.activeAtAcquire[2], 0);
 });
 
+test('runGroup serializes the worker edit/commit across a concurrent batch, yet still dispatches concurrently (checkout mutex, DECISION 1)', async () => {
+  // Two groups ready at once, concurrency 2: the driver dispatches both (acquire overlaps), but the
+  // shared single checkout holds one branch at a time, so the git-mutating worker edit/commit must
+  // run for one group at a time. The mutex guarantees no overlap regardless of timing.
+  const groups = [group('g1'), group('g2')];
+  let pass = 0;
+  const graph: WorkLoopGraph = {
+    ready: () => (pass++ === 0 ? groups.slice() : []),
+    isComplete: () => pass >= 1,
+  };
+  const { orchestrator: base, calls } = makeOrchestrator();
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const orchestrator: WorkLoopOrchestrator = {
+    ...base,
+    runWorker: async (input) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // Yield a macrotask so a second, unserialized worker would be observed overlapping here.
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 5);
+      });
+      const result = await base.runWorker(input);
+      inFlight -= 1;
+      return result;
+    },
+  };
+  const { home, calls: homeCalls } = makeHome();
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, graph, home, concurrency: 2, autoMerge: false }),
+  );
+  const result = await loop.run();
+
+  assert.equal(result.kind, 'awaiting-pr');
+  assert.equal(calls.runWorker.length, 2, 'both groups ran the worker');
+  assert.equal(maxInFlight, 1, 'the checkout mutex serialized the worker edit/commit — no overlap');
+  assert.ok(
+    homeCalls.activeAtAcquire.some((n) => n === 1),
+    `the batch still dispatched concurrently (acquire overlapped), got ${homeCalls.activeAtAcquire.join(',')}`,
+  );
+});
+
 test('blocked propagation: WorkLoopResult.kind === "blocked" with reason from worker', async () => {
   const { orchestrator } = makeOrchestrator({
     workerResults: [{ kind: 'blocked', reason: 'cannot plan' }],

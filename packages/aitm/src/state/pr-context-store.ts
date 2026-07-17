@@ -13,6 +13,7 @@
 
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { atomicWrite } from '../fs/atomic-write.ts';
 import type { ReviewThread } from '../github/schema.ts';
 
 export type CiFailure = { check: string; logs: string };
@@ -26,6 +27,11 @@ export type PrContextSummary = {
 };
 
 export class PrContextStore {
+  // Serializes recordAddressedThreads so one caller's read → merge → write finishes before the
+  // next begins. Without it, concurrent appends (Promise.all across PR groups) read the same base
+  // set and the last write clobbers the earlier ids. Mirrors StateStore.update's chain.
+  private appendChain: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly stateDir: string) {}
 
   prDir(pr: number): string {
@@ -106,13 +112,19 @@ export class PrContextStore {
   // Additive: merges ids into whatever was recorded before, so iterations accumulate.
   async recordAddressedThreads(pr: number, ids: readonly string[]): Promise<void> {
     if (ids.length === 0) return;
-    const merged = await this.readAddressedThreads(pr);
-    for (const id of ids) merged.add(id);
-    await mkdir(this.prDir(pr), { recursive: true });
-    await writeFile(
-      this.addressedThreadsFile(pr),
-      `${JSON.stringify([...merged].sort(), null, 2)}\n`,
-    );
+    const next = this.appendChain.then(async (): Promise<void> => {
+      const merged = await this.readAddressedThreads(pr);
+      for (const id of ids) merged.add(id);
+      await mkdir(this.prDir(pr), { recursive: true });
+      await atomicWrite(
+        this.addressedThreadsFile(pr),
+        `${JSON.stringify([...merged].sort(), null, 2)}\n`,
+      );
+    });
+    // Swallow rejection on the chain so a failed append doesn't poison later callers; `next` still
+    // rejects for the caller that owns this append.
+    this.appendChain = next.catch(() => undefined);
+    return next;
   }
 
   private addressedThreadsFile(pr: number): string {

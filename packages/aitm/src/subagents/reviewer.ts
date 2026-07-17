@@ -65,6 +65,11 @@ export type ReviewerInput = {
   threads: ReviewThread[];
   checkoutPath: string;
   styleContents: string;
+  // The PR head branch. When set, the runner asserts the working tree is on this branch before it
+  // commits a "fixed" thread, so a review fix can never land on the wrong branch under the shared
+  // single checkout — worktrees were removed, so all groups mutate one tree (audit 02, DECISION 1).
+  // Optional: single-flow callers that don't track the head ref omit it and skip the assertion.
+  headBranch?: string;
   // Optional harness context block prepended to each thread's first user message (issue #106).
   contextBlock?: string;
 };
@@ -180,7 +185,12 @@ async function resolveOneThread(
     case 'fixed': {
       // commitMessage is optional on the flat schema; fall back to a generic subject.
       const message = out.commitMessage?.trim() || `fix: address review thread ${thread.id}`;
-      const commitSha = await commitFix(init.tools.bash, input.checkoutPath, message);
+      const commitSha = await commitFix(
+        init.tools.bash,
+        input.checkoutPath,
+        message,
+        input.headBranch,
+      );
       return { threadId: thread.id, kind: 'fixed', commitSha };
     }
     case 'replied':
@@ -218,12 +228,26 @@ async function commitFix(
   bash: Tool<BashInput, BashOutput>,
   checkoutPath: string,
   message: string,
+  headBranch?: string,
 ): Promise<string> {
   const exec = bash.execute;
   if (typeof exec !== 'function') {
     throw new Error('bash tool is missing an execute function');
   }
   const wt = shQuote(checkoutPath);
+  // The runner commits on whatever branch is checked out. Under the shared single checkout that MUST
+  // be the PR head branch, so assert it before staging — a review fix silently committed to a
+  // concurrent group's branch would be lost or corrupt the wrong PR (audit 02, DECISION 1). This
+  // refuses rather than switching branches under uncommitted edits; the clean-tree gate at the next
+  // checkout boundary (in-place-checkout.ts) drops any edits stranded by the refusal.
+  if (headBranch !== undefined) {
+    const current = (await captureBash(exec, `git -C ${wt} rev-parse --abbrev-ref HEAD`)).trim();
+    if (current !== headBranch) {
+      throw new Error(
+        `reviewer refusing to commit: working tree is on '${current}', expected PR head '${headBranch}'`,
+      );
+    }
+  }
   // Never commit aitm's own state dir (in-place mode keeps it at the repo root). add -A skips it when
   // gitignored; the reset drops it when it isn't. See stageAndCommit in worker.ts.
   await runBash(exec, `git -C ${wt} add -A`);

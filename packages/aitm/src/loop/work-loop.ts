@@ -24,6 +24,7 @@ import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/work
 import { perTaskBranch } from '../workspace/branch-name.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
+import { Mutex } from './mutex.ts';
 import type { SelfReviewResult } from './self-review.ts';
 import {
   handleAddressingReviews,
@@ -259,6 +260,11 @@ export class WorkLoop {
   private readonly outcomes: GroupOutcome[] = [];
   private sessionCount: number;
   private readonly maxCiFixAttempts: number;
+  // Driver-owned checkout lock: the shared single in-place checkout holds one branch at a time, so
+  // the git-mutating checkout→edit→commit critical section (runOneTask) must run for one group at a
+  // time even when run() dispatches a batch of ready() groups. Non-git phases (CI waits, PR polling)
+  // stay outside it and still overlap. A no-op at concurrency 1. See docs/plans/.../02-*.md (DECISION 1).
+  private readonly checkoutMutex = new Mutex();
 
   constructor(private readonly deps: WorkLoopDeps) {
     this.sessionCount = deps.initialSessionCount ?? 0;
@@ -598,6 +604,11 @@ export class WorkLoop {
   }
 
   // One task: Worker pass → finalize commit → mark done → persist → re-render plan.md.
+  //
+  // The Worker pass + commit finalization mutate the shared checkout (branch checkout, editor
+  // writes, git commit/amend), so they run inside the driver's checkout mutex: only one group edits
+  // and commits at a time, even under a concurrently-dispatched batch (DECISION 1). completeTask is a
+  // serialized state write, not a git op, so it stays outside the lock.
   private async runOneTask(
     group: PrGroup,
     task: Task,
@@ -606,11 +617,16 @@ export class WorkLoop {
   ): Promise<
     { kind: 'ok'; group: PrGroup; delivery: WorkerDelivery } | { kind: 'blocked'; reason: string }
   > {
-    const result = await this.deps.orchestrator.runWorker({ group, task, checkout, baseBranch });
+    const result = await this.checkoutMutex.runExclusive(async () => {
+      const worked = await this.deps.orchestrator.runWorker({ group, task, checkout, baseBranch });
+      if (worked.kind === 'ok') {
+        await this.deps.orchestrator.finalizeCommit(group, worked.delivery, checkout.path);
+      }
+      return worked;
+    });
     if (result.kind !== 'ok') {
       return { kind: 'blocked', reason: result.kind === 'blocked' ? result.reason : result.error };
     }
-    await this.deps.orchestrator.finalizeCommit(group, result.delivery, checkout.path);
     const next = await this.completeTask(group, task.id);
     return { kind: 'ok', group: next, delivery: result.delivery };
   }

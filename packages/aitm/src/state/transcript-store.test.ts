@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -167,6 +167,54 @@ test('begin allocates a fresh 1-based ordinal per (group, stage); findResumable 
     ]);
     assert.ok(await readFile(join(dir, 'transcripts', 'g', 'ci-failed-1.jsonl'), 'utf8'));
     assert.ok(await readFile(join(dir, 'transcripts', 'g', 'ci-failed-2.jsonl'), 'utf8'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('concurrent begin() for the same target gets distinct ordinals — no shared file', async () => {
+  const dir = await tmp();
+  try {
+    const store = new TranscriptStore(dir);
+    const N = 10;
+    // Race N begins for one (group, stage). Without a race-free reservation they'd all readdir an
+    // empty dir, pick ordinal 1, and interleave into working-1.jsonl.
+    const recs = await Promise.all(
+      Array.from({ length: N }, () => store.begin({ group: 'g', stage: 'working' })),
+    );
+    await Promise.all(recs.map((rec, i) => rec.step([msg('assistant', `r${i}`)])));
+
+    const filesDir = join(dir, 'transcripts', 'g');
+    const files = (await readdir(filesDir)).filter((f) => /^working-\d+\.jsonl$/.test(f));
+    assert.equal(files.length, N, 'one distinct file per concurrent begin');
+
+    // Each file holds exactly one begin's marker (no interleave), and all N markers survived.
+    const seen = new Set<string>();
+    for (const f of files) {
+      const { messages } = reconstructTranscript(await readFile(join(filesDir, f), 'utf8'));
+      assert.equal(messages.length, 1, `${f} holds exactly one begin's records`);
+      const only = messages[0];
+      assert.ok(only);
+      seen.add(JSON.stringify(only));
+    }
+    assert.equal(seen.size, N, 'all N distinct markers present, none lost to a collision');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('findResumable skips an empty reserved transcript and returns the earlier resumable one', async () => {
+  const dir = await tmp();
+  try {
+    const store = new TranscriptStore(dir);
+    const first = await store.begin({ group: 'g', stage: 'working' }); // ordinal 1
+    await first.step([msg('assistant', 'real')]); // interrupted, has content
+    await store.begin({ group: 'g', stage: 'working' }); // ordinal 2 reserved, never written
+
+    // The empty higher-ordinal reservation must not shadow the resumable ordinal-1 transcript.
+    assert.deepEqual((await store.findResumable('g', 'working'))?.messages, [
+      msg('assistant', 'real'),
+    ]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

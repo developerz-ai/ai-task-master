@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -118,6 +118,83 @@ test('acquire reuses an existing branch (resume) instead of recreating it from b
     );
   } finally {
     await repo.cleanup();
+  }
+});
+
+test('acquire cleans a dirty tree (stale tracked edit) before switching, not carrying it forward', async () => {
+  const repo = await seedRepo();
+  try {
+    // A tracked file committed on main, then left with an uncommitted edit — as a crashed/blocked
+    // prior group would leave behind in the shared tree.
+    await writeFile(join(repo.path, 'a.txt'), 'base\n');
+    await execa('git', ['add', 'a.txt'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'add a.txt'], { cwd: repo.path });
+    await writeFile(join(repo.path, 'a.txt'), 'stale worker edit\n');
+
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+
+    assert.equal(await currentBranch(repo.path), 'aitm/g1');
+    assert.equal(
+      await readFile(join(repo.path, 'a.txt'), 'utf8'),
+      'base\n',
+      'the stale edit is reset, not carried onto the new branch',
+    );
+    const { stdout } = await execa('git', ['status', '--porcelain', '--untracked-files=no'], {
+      cwd: repo.path,
+    });
+    assert.equal(stdout.trim(), '', 'the new group branch starts on a clean tree');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('acquire clean gate keeps a resumed branch commit while dropping stale edits', async () => {
+  const repo = await seedRepo();
+  try {
+    await writeFile(join(repo.path, 'a.txt'), 'base\n');
+    await execa('git', ['add', 'a.txt'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'add a.txt'], { cwd: repo.path });
+    // Committed-but-unpushed work on the group branch that a resume must keep.
+    await execa('git', ['checkout', '-b', 'aitm/g1'], { cwd: repo.path });
+    await execa('git', ['commit', '--allow-empty', '-m', 'prior work'], { cwd: repo.path });
+    await execa('git', ['checkout', 'main'], { cwd: repo.path });
+    // Stale uncommitted edit sitting on the tree when the resumed acquire runs.
+    await writeFile(join(repo.path, 'a.txt'), 'stale\n');
+
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+
+    const { stdout } = await execa('git', ['log', '-1', '--pretty=%s'], { cwd: repo.path });
+    assert.equal(stdout.trim(), 'prior work', 'the resumed branch commit survives the clean gate');
+    assert.equal(await readFile(join(repo.path, 'a.txt'), 'utf8'), 'base\n', 'stale edit dropped');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('resetToBase cleans a dirty tree so the fresh-base switch is not blocked or contaminated', async () => {
+  const { repo, cleanup } = await seedRepoWithOrigin();
+  try {
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+    // A tracked file committed on the task branch, then left with an uncommitted edit that WOULD
+    // abort `checkout -B <fresh> origin/main` (local changes overwritten) without the clean gate.
+    await writeFile(join(repo.path, 'a.txt'), 'base\n');
+    await execa('git', ['add', 'a.txt'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'add a.txt'], { cwd: repo.path });
+    await writeFile(join(repo.path, 'a.txt'), 'dirty\n');
+
+    const wt = await home.resetToBase('g1', 'aitm/g1-t2', 'main');
+
+    assert.equal(wt.branch, 'aitm/g1-t2');
+    assert.equal(await currentBranch(repo.path), 'aitm/g1-t2');
+    const { stdout } = await execa('git', ['status', '--porcelain', '--untracked-files=no'], {
+      cwd: repo.path,
+    });
+    assert.equal(stdout.trim(), '', 'the fresh task branch starts clean');
+  } finally {
+    await cleanup();
   }
 });
 

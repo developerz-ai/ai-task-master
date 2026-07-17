@@ -77,7 +77,10 @@ export class Compactor {
   }
 
   // Produce a compact summary suitable for replacing the older conversation prefix.
-  async compact(olderMessages: ReadonlyArray<unknown>): Promise<string> {
+  // Returns `undefined` when the summarizer produced empty/whitespace-only text — a blank
+  // summary would otherwise replace real history with nothing, so the caller must treat this
+  // as "leave the messages uncompacted" rather than substitute an empty note.
+  async compact(olderMessages: ReadonlyArray<unknown>): Promise<string | undefined> {
     const { text } = await callWithStepTimeout(
       () =>
         generateText({
@@ -87,7 +90,7 @@ export class Compactor {
         }),
       this.init.timeout,
     );
-    return text;
+    return text.trim().length === 0 ? undefined : text;
   }
 }
 

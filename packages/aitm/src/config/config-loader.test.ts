@@ -55,6 +55,8 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     assert.equal(resolved.stylePath, null);
     assert.equal(resolved.formatCommand, null);
     assert.equal(resolved.verifyCommand, null);
+    assert.equal(resolved.selfReview, true, 'self-review is default-on');
+    assert.equal(resolved.resolveConflicts, true, 'AI conflict resolution is default-on');
     assert.equal(resolved.logLevel, 'info');
     assert.equal(resolved.concurrency, 1);
     assert.equal(resolved.allowForcePush, true);
@@ -77,6 +79,46 @@ test('resolve: mcpDeferToolsOver is project over global, and a configured 0 is h
     // 0 means "always defer" — pick() must treat it as set, not fall through to the default.
     await writeProjectConfig(cwd.path, { mcpDeferToolsOver: 0 });
     assert.equal((await loader.resolve({})).mcpDeferToolsOver, 0, 'project 0 wins over global');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: selfReview defaults true and is project over global', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    assert.equal((await loader.resolve({})).selfReview, true, 'default-on when nothing configured');
+
+    await writeGlobalConfig(home.path, { selfReview: false });
+    assert.equal((await loader.resolve({})).selfReview, false, 'global false applies');
+
+    await writeProjectConfig(cwd.path, { selfReview: true });
+    assert.equal((await loader.resolve({})).selfReview, true, 'project wins over global');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: resolveConflicts defaults true and is project over global', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    assert.equal(
+      (await loader.resolve({})).resolveConflicts,
+      true,
+      'default-on when nothing configured',
+    );
+
+    await writeGlobalConfig(home.path, { resolveConflicts: false });
+    assert.equal((await loader.resolve({})).resolveConflicts, false, 'global false applies');
+
+    await writeProjectConfig(cwd.path, { resolveConflicts: true });
+    assert.equal((await loader.resolve({})).resolveConflicts, true, 'project wins over global');
   } finally {
     await home.cleanup();
     await cwd.cleanup();

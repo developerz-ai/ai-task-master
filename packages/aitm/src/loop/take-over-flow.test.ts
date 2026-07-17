@@ -389,3 +389,90 @@ test('runTakeOverFlow: rebase conflict on push → blocked, aborts, never force-
   assert.ok(!commands.some((c) => c.includes('push')), 'never force-pushes after a failed rebase');
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0);
 });
+
+test('runTakeOverFlow: rebase conflict + AI resolver resolves → continues, force-pushes, then merges', async () => {
+  const thread: ReviewThread = {
+    id: 'TH_R',
+    isResolved: false,
+    path: 'src/a.ts',
+    comments: [{ id: 'C_R', body: 'fix', author: 'rabbit' }],
+  };
+  // Iteration 1: CI green + a thread → Reviewer fixes → push. The rebase conflicts; the AI resolver
+  // resolves it and the flow continues onto the force-push. Iteration 2: green + no threads → merge.
+  const gh = fakeGithub({ checks: ['success', 'success'], threads: [[thread], []] });
+  let diff = 0;
+  const { runCmd, commands } = recordingRunCmd((args) => {
+    if (args[0] === 'rebase' && args[1]?.startsWith('origin/')) {
+      return { exitCode: 1, stderr: 'CONFLICT (content): Merge conflict in src/a.ts' };
+    }
+    if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
+      diff++;
+      return diff <= 1 ? { stdout: 'src/a.ts' } : { stdout: '' };
+    }
+    return {};
+  });
+  let resolverCalls = 0;
+  const input = baseInput(gh.github, {
+    runCmd,
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      workerModel: dummyModel,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runReviewerOverride: async () => ({
+        kind: 'ok',
+        resolutions: [{ threadId: 'TH_R', kind: 'fixed', commitSha: 'abc' }],
+      }),
+      resolveConflicts: async () => {
+        resolverCalls++;
+        return { kind: 'resolved' };
+      },
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'merged');
+  assert.equal(resolverCalls, 1, 'AI resolver was invoked once for the conflict');
+  assert.ok(commands.includes('git -c core.editor=true rebase --continue'), 'continues the rebase');
+  assert.ok(commands.includes('git push --force-with-lease'), 'force-pushes after resolving');
+  assert.ok(!commands.includes('git rebase --abort'), 'never aborts a resolved rebase');
+  assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 1);
+});
+
+test('runTakeOverFlow: conflict + resolver gives up → aborts + blocks, never merges', async () => {
+  const thread: ReviewThread = {
+    id: 'TH_U',
+    isResolved: false,
+    path: 'src/a.ts',
+    comments: [{ id: 'C_U', body: 'fix', author: 'rabbit' }],
+  };
+  const gh = fakeGithub({ checks: ['success'], threads: [[thread]] });
+  const { runCmd, commands } = recordingRunCmd((args) => {
+    if (args[0] === 'rebase' && args[1]?.startsWith('origin/')) {
+      return { exitCode: 1, stderr: 'CONFLICT (content): Merge conflict in src/a.ts' };
+    }
+    if (args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'src/a.ts' };
+    return {};
+  });
+  const input = baseInput(gh.github, {
+    runCmd,
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      workerModel: dummyModel,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runReviewerOverride: async () => ({
+        kind: 'ok',
+        resolutions: [{ threadId: 'TH_U', kind: 'fixed', commitSha: 'abc' }],
+      }),
+      resolveConflicts: async () => ({ kind: 'unresolved', reason: 'too tangled' }),
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /could not resolve.*too tangled/i);
+  assert.ok(commands.includes('git rebase --abort'));
+  assert.ok(!commands.some((c) => c.includes('push')));
+  assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0);
+});

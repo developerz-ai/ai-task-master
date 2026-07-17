@@ -6,20 +6,33 @@
 // loop; the fine-grained `stage` and `pr` are preserved untouched, so WorkLoop.runGroup's
 // resumeStage() resumes at the exact lifecycle point instead of redoing prior stages.
 //
-// Terminal ('merged'/'blocked') and already-schedulable ('pending') groups pass through unchanged.
+// 'blocked' groups are ALSO reset: a block is frequently a transient provider failure (rate-limit, an
+// LLM-step timeout, an overloaded endpoint), and re-running `aitm start` is a deliberate request to
+// make progress on the stranded work. Without this, a single transient hiccup permanently strands a
+// group across every resume. A block whose persisted `stage` is the terminal 'blocked' (the stage
+// machine collapsed the real stage into it) is rewound to 'working' so it re-drives from the top;
+// a block that kept a real lifecycle stage (e.g. 'pr-open') resumes there. 'merged' stays terminal.
 
 import type { PrGroup, PrGroupStatus } from '../state/schema.ts';
 
-// Coarse statuses a group can hold only because a prior run was interrupted while driving it.
-const INTERRUPTED: ReadonlySet<PrGroupStatus> = new Set<PrGroupStatus>([
+// Coarse statuses a group holds only because a prior run was interrupted or blocked while driving it.
+// All are re-schedulable on an explicit resume; only 'merged' is truly terminal.
+const RESUMABLE: ReadonlySet<PrGroupStatus> = new Set<PrGroupStatus>([
   'in-progress',
   'awaiting-pr',
+  'blocked',
 ]);
 
 export function hasInterruptedGroup(groups: readonly PrGroup[]): boolean {
-  return groups.some((g) => INTERRUPTED.has(g.status));
+  return groups.some((g) => RESUMABLE.has(g.status));
 }
 
 export function normalizeResumeStatus(groups: readonly PrGroup[]): PrGroup[] {
-  return groups.map((g) => (INTERRUPTED.has(g.status) ? { ...g, status: 'pending' as const } : g));
+  return groups.map((g) => {
+    if (!RESUMABLE.has(g.status)) return g;
+    // The terminal 'blocked' stage has no handler in the stage machine — rewind it to 'working' so a
+    // retried group re-drives from the top. Any real lifecycle stage is preserved for resumeStage().
+    const stage = g.stage === 'blocked' ? ('working' as const) : g.stage;
+    return { ...g, status: 'pending' as const, stage };
+  });
 }

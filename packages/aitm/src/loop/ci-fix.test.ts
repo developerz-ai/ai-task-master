@@ -16,6 +16,7 @@ import {
   type FixSessionInput,
   type FixSessionPrContext,
   type FixSessionSubagents,
+  MAX_CONFLICT_RESOLVE_ATTEMPTS,
   rebaseAndForcePush,
   runFixSession,
 } from './ci-fix.ts';
@@ -453,6 +454,125 @@ test('runFixSession: rebase conflict → blocked, aborts the rebase, never force
   if (result.kind === 'blocked') assert.match(result.reason, /conflict/i);
   assert.ok(commands.includes('git rebase --abort'), 'must abort the half-applied rebase');
   assert.ok(!commands.some((c) => c.includes('push')), 'must not push after a failed rebase');
+});
+
+// Scripts a rebase that conflicts once, then reports the given unmerged files until they clear, then
+// lets `git rebase --continue` succeed. `resolvedAfter` controls how many conflicted-path polls
+// return files before they go empty (simulating the resolver having staged them).
+function conflictThenResolvePlan(opts: {
+  unmerged: string[];
+  // Number of `git diff --diff-filter=U` calls that still report unmerged before it clears.
+  clearAfter: number;
+}): { plan: (args: readonly string[]) => Partial<RunCmdResult>; diffCalls: () => number } {
+  let diff = 0;
+  const plan = (args: readonly string[]): Partial<RunCmdResult> => {
+    if (args[0] === 'rebase' && args[1]?.startsWith('origin/')) {
+      return { exitCode: 1, stderr: 'CONFLICT (content): Merge conflict in src/a.ts' };
+    }
+    if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
+      diff++;
+      return diff <= opts.clearAfter ? { stdout: opts.unmerged.join('\n') } : { stdout: '' };
+    }
+    // rebase --continue, rebase --abort, fetch, push all succeed by default.
+    return {};
+  };
+  return { plan, diffCalls: () => diff };
+}
+
+test('rebaseAndForcePush: conflict + resolver resolves → continue + force-push, returns fixed', async () => {
+  const { plan } = conflictThenResolvePlan({ unmerged: ['src/a.ts'], clearAfter: 1 });
+  const { runCmd, commands } = recordingRunCmd(plan);
+  const seen: Array<{ files: readonly string[]; attempt: number }> = [];
+  const resolver = async (input: {
+    conflictedFiles: readonly string[];
+    attempt: number;
+  }): Promise<{ kind: 'resolved' }> => {
+    seen.push({ files: input.conflictedFiles, attempt: input.attempt });
+    return { kind: 'resolved' };
+  };
+  const result = await rebaseAndForcePush(runCmd, '/tmp/wt', 'main', 9, undefined, true, resolver);
+  assert.equal(result.kind, 'fixed');
+  assert.deepEqual(seen, [{ files: ['src/a.ts'], attempt: 1 }], 'resolver saw the unmerged file');
+  assert.ok(
+    commands.includes('git -c core.editor=true rebase --continue'),
+    'drives the rebase forward without opening an editor',
+  );
+  assert.ok(commands.includes('git push --force-with-lease'), 'force-pushes after resolving');
+  assert.ok(!commands.includes('git rebase --abort'), 'never aborts a resolved rebase');
+});
+
+test('rebaseAndForcePush: resolver gives up → abort + block, never pushes', async () => {
+  const { plan } = conflictThenResolvePlan({ unmerged: ['src/a.ts'], clearAfter: 5 });
+  const { runCmd, commands } = recordingRunCmd(plan);
+  const result = await rebaseAndForcePush(
+    runCmd,
+    '/tmp/wt',
+    'main',
+    9,
+    undefined,
+    true,
+    async () => ({ kind: 'unresolved', reason: 'markers too tangled' }),
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked')
+    assert.match(result.reason, /could not resolve.*markers too tangled/i);
+  assert.ok(commands.includes('git rebase --abort'));
+  assert.ok(!commands.some((c) => c.includes('push')));
+});
+
+test('rebaseAndForcePush: resolver keeps leaving files unmerged → cap exhausts → abort + block', async () => {
+  // Files never clear, so each attempt re-checks unmerged, finds them, and retries until the cap.
+  const { plan } = conflictThenResolvePlan({ unmerged: ['src/a.ts'], clearAfter: 100 });
+  const { runCmd, commands } = recordingRunCmd(plan);
+  let calls = 0;
+  const result = await rebaseAndForcePush(
+    runCmd,
+    '/tmp/wt',
+    'main',
+    9,
+    undefined,
+    true,
+    async () => {
+      calls++;
+      return { kind: 'resolved' };
+    },
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /after 2 AI resolution attempt/i);
+  assert.equal(calls, MAX_CONFLICT_RESOLVE_ATTEMPTS, 'resolver invoked exactly the cap');
+  assert.ok(commands.includes('git rebase --abort'));
+  assert.ok(!commands.some((c) => c.includes('push')));
+});
+
+test('rebaseAndForcePush: no resolver wired → today’s abort + block (unchanged)', async () => {
+  const { runCmd, commands } = recordingRunCmd((args) =>
+    args[0] === 'rebase' && args[1]?.startsWith('origin/')
+      ? { exitCode: 1, stderr: 'CONFLICT (content): Merge conflict in src/a.ts' }
+      : {},
+  );
+  const result = await rebaseAndForcePush(runCmd, '/tmp/wt', 'main', 9, undefined, true, undefined);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /manual resolution/i);
+  assert.ok(commands.includes('git rebase --abort'));
+  assert.ok(!commands.some((c) => c.includes('push')));
+  // Resolver absent → the conflicted-paths probe is never even run.
+  assert.ok(!commands.some((c) => c.includes('--diff-filter=U')));
+});
+
+test('runFixSession: conflict + resolver on subagents → resolves and force-pushes (fixed)', async () => {
+  const { plan } = conflictThenResolvePlan({ unmerged: ['src/a.ts'], clearAfter: 1 });
+  const { runCmd, commands } = recordingRunCmd(plan);
+  const result = await runFixSession(
+    baseInput({
+      runCmd,
+      subagents: baseSubagents({
+        resolveConflicts: async () => ({ kind: 'resolved' }),
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'fixed');
+  assert.ok(commands.includes('git -c core.editor=true rebase --continue'));
+  assert.ok(commands.includes('git push --force-with-lease'));
 });
 
 // rebaseAndForcePush is the shared push path (also used by the merge-pr take-over loop), so it has

@@ -19,7 +19,7 @@ export { ModelLimitsRegistry } from './openrouter/model-limits.ts';
 export {
   providerOptionsWithServerTools,
   webFetchServerTool,
-  webSearchTool,
+  webSearchServerTool,
 } from './openrouter/server-tools.ts';
 export { Orchestrator } from './orchestrator/orchestrator.ts';
 export { PlanGraph } from './plan/plan-graph.ts';
@@ -34,4 +34,12 @@ export {
   isFetchHtmlAvailable,
 } from './tools/fetch-html.ts';
 export { DEFAULT_STEALTH_HEADERS, webFetchTool } from './tools/web-fetch.ts';
+export {
+  decodeDdgHref,
+  parseDuckDuckGoHtml,
+  type WebSearchInput,
+  type WebSearchOutput,
+  type WebSearchResult,
+  webSearchTool,
+} from './tools/web-search.ts';
 export { WorktreePool } from './workspace/worktree-pool.ts';

@@ -20,7 +20,12 @@ import type { MemoryIndexEntry, SubagentHandle } from '@developerz.ai/ai-claude-
 import type { LanguageModel, ModelMessage, TimeoutConfiguration } from 'ai';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../config/schema.ts';
-import { defaultRunCmd, type RunCmd, type RunCmdResult } from '../github/github-client.ts';
+import {
+  defaultRunCmd,
+  type RunCmd,
+  type RunCmdOptions,
+  type RunCmdResult,
+} from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
@@ -100,6 +105,11 @@ export type FixSessionSubagents = {
   resumeMessages?: readonly ModelMessage[];
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
+  // AI rebase-conflict resolver (issue: AI-resolved conflicts). When set, a rebase that hits a
+  // content conflict is handed to it — resolve the hunks + `git add` — and the push is retried,
+  // instead of aborting and blocking. Unset → today's abort+block. Built by conflict-resolution.ts;
+  // stubbed in tests. Gated by config `resolveConflicts` at the adapter (unset here → disabled).
+  resolveConflicts?: ConflictResolver;
 };
 
 export type FixSessionInput = {
@@ -131,6 +141,29 @@ export type FixSessionResult =
 // The push-path outcome — handle-agnostic, since rebaseAndForcePush is also shared by the take-over
 // flow (which retains no conversation). runFixSession attaches the Worker handle to the 'fixed' case.
 export type PushResult = { kind: 'fixed' } | { kind: 'blocked'; reason: string };
+
+// One AI conflict-resolution request: the files git left unmerged mid-rebase, plus the base branch
+// and the 1-based attempt number. The resolver resolves each file's <<<<<<</=======/>>>>>>> hunks
+// (preserving BOTH sides) and `git add`s them — it must NOT run `git rebase --continue`/`--abort`,
+// `git commit`, or `git checkout`; rebaseAndForcePush drives the rebase state machine and verifies.
+export type ConflictResolutionInput = {
+  worktreePath: string;
+  baseBranch: string;
+  conflictedFiles: readonly string[];
+  attempt: number;
+};
+
+// Resolver outcome. `resolved` means the files were edited + staged (rebaseAndForcePush re-checks
+// for leftover unmerged paths and drives `git rebase --continue`); `unresolved` blocks the push.
+export type ConflictResolution = { kind: 'resolved' } | { kind: 'unresolved'; reason: string };
+
+// The injectable conflict-resolution seam. Production wiring builds one from the Worker model/tools
+// (conflict-resolution.ts); tests stub it. Absent on rebaseAndForcePush → today's abort+block.
+export type ConflictResolver = (input: ConflictResolutionInput) => Promise<ConflictResolution>;
+
+// Bounded AI resolution attempts before falling back to abort+block. Small on purpose: a genuinely
+// tangled conflict should reach a human, not loop the model forever.
+export const MAX_CONFLICT_RESOLVE_ATTEMPTS = 2;
 
 export async function runFixSession(input: FixSessionInput): Promise<FixSessionResult> {
   const { github, prContext, group, pr, baseBranch, worktreePath } = input;
@@ -168,6 +201,7 @@ export async function runFixSession(input: FixSessionInput): Promise<FixSessionR
     pr,
     log,
     input.allowForcePush ?? true,
+    input.subagents.resolveConflicts,
   );
   // Carry the Worker's manifest handle out so the next fix pass for this group can continue it (#107).
   return pushed.kind === 'fixed' ? { kind: 'fixed', handle: worker.handle } : pushed;
@@ -267,8 +301,10 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
 
 // The one push path for the whole repo: rebase onto origin/<base>, then `git push --force-with-lease`
 // (never plain `git push`, which fails against a rebased remote; never plain `--force`). On a rebase
-// conflict it aborts the half-applied rebase and blocks. Shared by `runFixSession` (WorkLoop) and the
-// `merge-pr` take-over loop so every force-push goes through the same rebase-first guard.
+// conflict, when a `resolveConflicts` seam is wired it hands the conflict to an AI subagent (bounded
+// retries) and continues the rebase; otherwise — or if the AI can't resolve — it aborts the
+// half-applied rebase and blocks. Shared by `runFixSession` (WorkLoop) and the `merge-pr` take-over
+// loop so every force-push goes through the same rebase-first guard.
 export async function rebaseAndForcePush(
   runCmd: RunCmd,
   worktreePath: string,
@@ -276,6 +312,7 @@ export async function rebaseAndForcePush(
   pr: number,
   log: LoggerLike | undefined,
   allowForcePush = true,
+  resolveConflicts?: ConflictResolver,
 ): Promise<PushResult> {
   // This is the only force-push path. When policy forbids it, don't rebase — block cleanly so a
   // human lands the fix, rather than leaving a rebased branch that can't be pushed.
@@ -294,12 +331,17 @@ export async function rebaseAndForcePush(
   }
   const rebase = await runCmd('git', ['rebase', `origin/${baseBranch}`], cwd);
   if (rebase.exitCode !== 0) {
-    // Abort the half-applied rebase so the worktree is left clean for a later retry.
-    await runCmd('git', ['rebase', '--abort'], cwd);
-    return {
-      kind: 'blocked',
-      reason: `git rebase onto origin/${baseBranch} hit conflicts that need manual resolution: ${gitErr(rebase)}`,
-    };
+    const resolved = await resolveRebaseConflicts(
+      runCmd,
+      worktreePath,
+      baseBranch,
+      pr,
+      log,
+      rebase,
+      resolveConflicts,
+    );
+    // Blocked → the rebase is already aborted; stop before pushing. Fixed → fall through to push.
+    if (resolved.kind === 'blocked') return resolved;
   }
   const push = await runCmd('git', ['push', '--force-with-lease'], cwd);
   if (push.exitCode !== 0) {
@@ -307,6 +349,82 @@ export async function rebaseAndForcePush(
   }
   log?.info('ci-fix: rebased + force-pushed', { pr, baseBranch });
   return { kind: 'fixed' };
+}
+
+// Handle a rebase that stopped on a conflict. With no resolver wired this is byte-for-byte today's
+// behavior: abort the half-applied rebase and block. With one, loop up to MAX_CONFLICT_RESOLVE_
+// ATTEMPTS: gather the unmerged files, hand them to the resolver (which edits + stages), then drive
+// `git rebase --continue` ourselves. A later commit conflicting is a fresh attempt; a resolver that
+// gives up, leaves files unmerged past the cap, or a non-conflict rebase failure all abort + block.
+async function resolveRebaseConflicts(
+  runCmd: RunCmd,
+  worktreePath: string,
+  baseBranch: string,
+  pr: number,
+  log: LoggerLike | undefined,
+  firstRebase: RunCmdResult,
+  resolveConflicts: ConflictResolver | undefined,
+): Promise<PushResult> {
+  const cwd = { cwd: worktreePath };
+  const abortAndBlock = async (reason: string): Promise<PushResult> => {
+    await runCmd('git', ['rebase', '--abort'], cwd);
+    return { kind: 'blocked', reason };
+  };
+
+  const manualReason = `git rebase onto origin/${baseBranch} hit conflicts that need manual resolution: ${gitErr(firstRebase)}`;
+  if (!resolveConflicts) return abortAndBlock(manualReason);
+
+  for (let attempt = 1; attempt <= MAX_CONFLICT_RESOLVE_ATTEMPTS; attempt++) {
+    const conflicted = await unmergedPaths(runCmd, cwd);
+    if (conflicted.length === 0) {
+      // Non-zero rebase with no unmerged paths is not an AI-resolvable content conflict (e.g. a
+      // pre-commit hook rejection or an empty commit) — fall back to today's abort+block.
+      return abortAndBlock(manualReason);
+    }
+    log?.info('ci-fix: handing rebase conflict to the AI resolver', {
+      pr,
+      baseBranch,
+      attempt,
+      files: conflicted,
+    });
+    const resolution = await resolveConflicts({
+      worktreePath,
+      baseBranch,
+      conflictedFiles: conflicted,
+      attempt,
+    });
+    if (resolution.kind === 'unresolved') {
+      return abortAndBlock(
+        `git rebase onto origin/${baseBranch} hit conflicts the AI could not resolve after ${attempt} attempt(s): ${resolution.reason}`,
+      );
+    }
+    // The resolver edits + stages the files. If any stay unmerged it did not finish the job; spend
+    // another attempt rather than continuing onto a half-resolved commit.
+    if ((await unmergedPaths(runCmd, cwd)).length > 0) continue;
+    // Drive the rebase forward. `-c core.editor=true` accepts the reused commit message without
+    // opening an editor, so an unattended `git rebase --continue` can never hang.
+    const cont = await runCmd('git', ['-c', 'core.editor=true', 'rebase', '--continue'], cwd);
+    if (cont.exitCode === 0) {
+      log?.info('ci-fix: AI resolved the rebase conflict', { pr, baseBranch, attempts: attempt });
+      return { kind: 'fixed' };
+    }
+    // A non-zero continue with everything staged means a *later* commit now conflicts; loop to
+    // resolve the next set, still bounded by the attempt cap.
+  }
+  return abortAndBlock(
+    `git rebase onto origin/${baseBranch} still hit conflicts after ${MAX_CONFLICT_RESOLVE_ATTEMPTS} AI resolution attempt(s); manual resolution needed.`,
+  );
+}
+
+// Files git left unmerged (conflicted) in the worktree. Empty on any non-zero `git diff` so a
+// diff error can't be mistaken for "conflicts remain".
+async function unmergedPaths(runCmd: RunCmd, cwd: RunCmdOptions): Promise<string[]> {
+  const r = await runCmd('git', ['diff', '--name-only', '--diff-filter=U'], cwd);
+  if (r.exitCode !== 0) return [];
+  return r.stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 function gitErr(r: RunCmdResult): string {

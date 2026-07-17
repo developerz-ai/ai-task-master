@@ -34,7 +34,10 @@ export type ServerToolPayload =
   | { type: 'openrouter:web_search'; parameters?: WebSearchOptions }
   | { type: 'openrouter:web_fetch'; parameters?: WebFetchOptions };
 
-export function webSearchTool(options: WebSearchOptions = {}): ServerToolPayload {
+// Renamed from webSearchTool — the canonical webSearchTool is now the local, provider-agnostic
+// variant in src/tools/web-search.ts (DuckDuckGo, works on any provider). This one is the explicit
+// "delegate to OpenRouter's server-side web_search" opt-in, and only fires when routing via OpenRouter.
+export function webSearchServerTool(options: WebSearchOptions = {}): ServerToolPayload {
   return { type: 'openrouter:web_search', parameters: options };
 }
 

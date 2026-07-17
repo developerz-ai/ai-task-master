@@ -180,6 +180,59 @@ test('acquire rejects groupId with path traversal segments', async () => {
   assert.strictEqual(pool.active().length, 0);
 });
 
+test('resetToBase re-points the worktree to a fresh branch off the up-to-date remote base', async () => {
+  const repo = await seedRepo();
+  const stateDir = join(repo.path, '.ai-task-master');
+  // Wire origin so `git fetch origin main` resolves; land task 1's "merge" on origin/main so the
+  // fresh task branch anchors on it, not on the prior worktree tip.
+  const remote = await mkdtemp(join(tmpdir(), 'aitm-origin-'));
+  await execa('git', ['init', '--bare', remote]);
+  await execa('git', ['remote', 'add', 'origin', remote], { cwd: repo.path });
+  await execa('git', ['push', 'origin', 'main'], { cwd: repo.path });
+  const pool = new WorktreePool(repo.path, stateDir, 2);
+  try {
+    const wt = await pool.acquire('g1', 'aitm/g1', 'main');
+    await execa('git', ['commit', '--allow-empty', '-m', 'task1 local'], { cwd: wt.path });
+
+    // origin/main advances (task 1's PR merged) via a throwaway clone.
+    const clone = await mkdtemp(join(tmpdir(), 'aitm-clone-'));
+    await execa('git', ['clone', remote, clone]);
+    await execa('git', ['config', 'user.email', 'test@aitm.local'], { cwd: clone });
+    await execa('git', ['config', 'user.name', 'aitm-test'], { cwd: clone });
+    await execa('git', ['commit', '--allow-empty', '-m', 'merged task1'], { cwd: clone });
+    await execa('git', ['push', 'origin', 'main'], { cwd: clone });
+    await rm(clone, { recursive: true, force: true });
+
+    const reset = await pool.resetToBase('g1', 'aitm/g1-t2', 'main');
+    assert.equal(reset.path, wt.path, 'same worktree dir, re-pointed');
+    assert.equal(reset.branch, 'aitm/g1-t2');
+    assert.equal(pool.active()[0]?.branch, 'aitm/g1-t2', 'active tracks the new branch');
+
+    const head = await execa('git', ['log', '-1', '--pretty=%s'], { cwd: wt.path });
+    assert.equal(head.stdout.trim(), 'merged task1', 'fresh branch anchored on the merged base');
+    const log = await execa('git', ['log', '--pretty=%s'], { cwd: wt.path });
+    assert.ok(
+      !log.stdout.includes('task1 local'),
+      'the prior branch tip is not carried into the fresh task branch',
+    );
+  } finally {
+    await pool.releaseAll();
+    await repo.cleanup();
+    await rm(remote, { recursive: true, force: true });
+  }
+});
+
+test('resetToBase throws when the group was never acquired', async () => {
+  const repo = await seedRepo();
+  const stateDir = join(repo.path, '.ai-task-master');
+  const pool = new WorktreePool(repo.path, stateDir, 2);
+  try {
+    await assert.rejects(pool.resetToBase('nope', 'aitm/nope/t1', 'main'), /no worktree acquired/);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('acquire rejects in-flight duplicate before git worktree add completes', async () => {
   const repo = await seedRepo();
   const stateDir = join(repo.path, '.ai-task-master');

@@ -1,0 +1,121 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import {
+  decodeDdgHref,
+  parseDuckDuckGoHtml,
+  type WebSearchOutput,
+  webSearchTool,
+} from './web-search.ts';
+
+// A faithful slice of DuckDuckGo's HTML endpoint: one sponsored result (a `/y.js` anchor with no
+// `uddg`), two organic results (redirect hrefs, `&amp;`-escaped, `<b>` term highlighting, HTML
+// entities in the snippet), and a duplicate of the first organic URL to exercise dedupe.
+const FIXTURE = `
+<div class="result result--ad">
+  <a rel="nofollow" class="result__a" href="//duckduckgo.com/y.js?ad_domain=ads.example&amp;u3=xyz">Sponsored — Buy APIs Now</a>
+  <a class="result__snippet" href="//duckduckgo.com/y.js?u3=xyz">Ad copy that must not appear.</a>
+</div>
+<div class="result results_links">
+  <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fopenrouter.ai%2Fdocs%2Fapi&amp;rut=aaa">OpenRouter <b>API</b> Reference</a>
+  <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fopenrouter.ai%2Fdocs%2Fapi">Comprehensive guide to <b>OpenRouter</b>&#39;s API &amp; auth.</a>
+</div>
+<div class="result results_links">
+  <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fkimi.example%2Fk2&amp;rut=bbb">Kimi K2 model</a>
+  <a class="result__snippet">Pricing &amp; limits for k2.</a>
+</div>
+<div class="result results_links">
+  <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fopenrouter.ai%2Fdocs%2Fapi&amp;rut=ccc">Duplicate link</a>
+  <a class="result__snippet">Should be dropped as a dup.</a>
+</div>
+`;
+
+test('parseDuckDuckGoHtml: extracts organic results, drops ads and duplicates', () => {
+  const results = parseDuckDuckGoHtml(FIXTURE, 10);
+  assert.equal(results.length, 2);
+  assert.deepEqual(results[0], {
+    title: 'OpenRouter API Reference',
+    url: 'https://openrouter.ai/docs/api',
+    snippet: "Comprehensive guide to OpenRouter's API & auth.",
+  });
+  assert.deepEqual(results[1], {
+    title: 'Kimi K2 model',
+    url: 'https://kimi.example/k2',
+    snippet: 'Pricing & limits for k2.',
+  });
+});
+
+test('parseDuckDuckGoHtml: honors maxResults', () => {
+  const results = parseDuckDuckGoHtml(FIXTURE, 1);
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.url, 'https://openrouter.ai/docs/api');
+});
+
+test('parseDuckDuckGoHtml: empty / resultless HTML → []', () => {
+  assert.deepEqual(parseDuckDuckGoHtml('<html><body>no results</body></html>', 5), []);
+});
+
+test('decodeDdgHref: decodes the uddg redirect target', () => {
+  assert.equal(
+    decodeDdgHref('//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa%3Fx%3D1&amp;rut=z'),
+    'https://example.com/a?x=1',
+  );
+});
+
+test('decodeDdgHref: ad / redirect anchors without uddg → null', () => {
+  assert.equal(decodeDdgHref('//duckduckgo.com/y.js?ad_domain=ads.example&amp;u3=xyz'), null);
+});
+
+test('decodeDdgHref: a direct external link is accepted', () => {
+  assert.equal(decodeDdgHref('https://docs.example.com/page'), 'https://docs.example.com/page');
+});
+
+function jsonResponse(body: string, status = 200): Response {
+  return new Response(body, { status });
+}
+
+test('webSearchTool: queries the endpoint and returns parsed results', async () => {
+  const calls: string[] = [];
+  const tool = webSearchTool({
+    endpoint: 'https://search.test/html/',
+    fetchImpl: (async (url: unknown) => {
+      calls.push(String(url));
+      return jsonResponse(FIXTURE);
+    }) as typeof fetch,
+  });
+  const out = (await tool.execute?.(
+    { query: 'openrouter api', maxResults: 5 },
+    { toolCallId: 't1', messages: [] },
+  )) as WebSearchOutput;
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0], 'https://search.test/html/?q=openrouter%20api');
+  assert.equal(out.error, undefined);
+  assert.equal(out.results.length, 2);
+  assert.equal(out.results[0]?.url, 'https://openrouter.ai/docs/api');
+});
+
+test('webSearchTool: a non-200 response yields an error note and no results', async () => {
+  const tool = webSearchTool({
+    fetchImpl: (async () => jsonResponse('challenge', 202)) as typeof fetch,
+  });
+  const out = (await tool.execute?.(
+    { query: 'x' },
+    { toolCallId: 't2', messages: [] },
+  )) as WebSearchOutput;
+  assert.deepEqual(out.results, []);
+  assert.match(out.error ?? '', /HTTP 202/);
+});
+
+test('webSearchTool: a network failure is caught and reported, never thrown', async () => {
+  const tool = webSearchTool({
+    fetchImpl: (async () => {
+      throw new Error('boom');
+    }) as typeof fetch,
+  });
+  const out = (await tool.execute?.(
+    { query: 'x' },
+    { toolCallId: 't3', messages: [] },
+  )) as WebSearchOutput;
+  assert.deepEqual(out.results, []);
+  assert.match(out.error ?? '', /boom/);
+});

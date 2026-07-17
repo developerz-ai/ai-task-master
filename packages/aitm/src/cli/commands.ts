@@ -847,6 +847,7 @@ async function defaultRunLoop(input: RunLoopInput): Promise<WorkLoopResult> {
 // for the iteration shape (mirrors claude-task-master `merge_pr`).
 async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopResult> {
   const { runTakeOverFlow } = await import('../loop/take-over-flow.ts');
+  const { buildConflictResolver } = await import('../loop/conflict-resolution.ts');
   const { githubThreadTool } = await import('../tools/github-thread-tool.ts');
   const { PrContextStore } = await import('../state/pr-context-store.ts');
   const { agentStepProgress, shortModelName } = await import('../observability/step-progress.ts');
@@ -895,6 +896,21 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
       ),
       ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
       ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
+      // AI conflict resolution (default-on): resolve a base-moved rebase conflict with the Worker
+      // model + tools before blocking the take-over. Gated by config `resolveConflicts`.
+      ...(input.resolved.resolveConflicts
+        ? {
+            resolveConflicts: buildConflictResolver({
+              model: input.credentials.modelFor('worker'),
+              tools: workerTools,
+              styleContents,
+              timeout: { stepMs: input.resolved.llmStepTimeoutMs },
+              onStepFinish: agentStepProgress(
+                `${shortModelName(input.credentials.modelIdFor('worker'))} conflict-resolve pr-${input.pr}`,
+              ),
+            }),
+          }
+        : {}),
     },
   });
 

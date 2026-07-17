@@ -19,8 +19,10 @@ import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
+import { perTaskBranch } from '../workspace/branch-name.ts';
 import type { Worktree } from '../workspace/worktree-pool.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
+import type { SelfReviewResult } from './self-review.ts';
 import {
   handleAddressingReviews,
   handleCiFailed,
@@ -58,10 +60,23 @@ export type CiFixInvocation = {
   baseBranch: string;
 };
 
+export type SelfReviewInvocation = {
+  group: PrGroup;
+  // The just-produced delivery (the work about to become a PR) — context for the review.
+  delivery: WorkerDelivery;
+  worktree: Worktree;
+  baseBranch: string;
+};
+
 export type WorkLoopOrchestrator = {
   runWorker(input: WorkerInvocation): Promise<WorkerResult>;
   finalizeCommit(group: PrGroup, delivery: WorkerDelivery, worktreePath: string): Promise<string>;
   openPr(group: PrGroup, delivery: WorkerDelivery, baseBranch: string): Promise<PullRequest>;
+  // Pre-PR self-review: adversarially review + verify + fix the just-committed diff, committing any
+  // fixes onto the group branch BEFORE openPr. Optional so existing stubs compile and so a run with
+  // selfReview disabled never invokes it; when absent, the PR opens exactly as before. Never blocks —
+  // the WorkLoop logs the outcome and opens the PR regardless (external CI is the backstop).
+  selfReview?(input: SelfReviewInvocation): Promise<SelfReviewResult>;
   runReviewer(input: ReviewerInvocation): Promise<ReviewerResult>;
   // ci-failed stage: download failed logs + comments, run the Worker fix, rebase onto
   // origin/<base> and force-with-lease push. ok → CI re-runs; blocked → couldn't land the fix.
@@ -80,6 +95,12 @@ export type WorkLoopGithub = {
 export type WorkLoopPool = {
   acquire(groupId: string, branch: string, baseBranch: string): Promise<Worktree>;
   release(groupId: string): Promise<void>;
+  // Re-point the group's checkout to a fresh branch started from the up-to-date remote base
+  // (git fetch origin <baseBranch> → checkout -B <branch> origin/<baseBranch>). prPerTask + autoMerge
+  // calls it per task so each task's PR branches off the previous task's MERGED result rather than the
+  // prior task's tip (which, after a squash merge, would re-include the prior task's changes). Optional:
+  // a pool that omits it — or a --no-automerge run — keeps the single group branch (documented fallback).
+  resetToBase?(groupId: string, branch: string, baseBranch: string): Promise<Worktree>;
 };
 
 export type WorkLoopState = {
@@ -113,6 +134,10 @@ export type WorkLoopDeps = {
   prContext?: WorkLoopPrContext;
   concurrency: number;
   autoMerge: boolean;
+  // Run the pre-PR self-review pass before every openPr (default true — omitted is on). False → the
+  // pass never runs and the flow is byte-identical to the pre-selfReview behavior. Only has an effect
+  // when orchestrator.selfReview is also wired. See maybeSelfReview / src/loop/self-review.ts.
+  selfReview?: boolean;
   // When true, open (and, under autoMerge, merge) a PR after each task. Default (false/omitted)
   // is aitm's group-as-PR mode: a single PR per group, opened after the final task lands.
   prPerTask?: boolean;
@@ -305,6 +330,10 @@ export class WorkLoop {
         return;
       }
       const reason = err instanceof Error ? err.message : String(err);
+      // Surface the reason live — this catch path (e.g. an openPr throw at pr-open) otherwise blocks
+      // the group SILENTLY: unlike driveStages' in-loop block, no progress line is emitted, so the run
+      // log shows a group vanish with no cause. The reason still rides the outcome for the run summary.
+      this.deps.progress?.(`group ${group.id}: → blocked (${reason})`);
       try {
         await this.markStatus(group.id, 'blocked');
       } catch {
@@ -317,6 +346,15 @@ export class WorkLoop {
   // prPerTask mode: each not-yet-done task is one Worker pass → commit → mark done → persist,
   // then opens — and under autoMerge merges — its own PR. Resumed tasks already `done` are
   // skipped. The group-as-PR default runs through driveStages instead.
+  //
+  // Base-fresh per task: under autoMerge each task's PR merges before the next task runs, so the next
+  // task must start from the freshly-merged base. Otherwise, with the default squash merge, task N's
+  // original branch commit is not an ancestor of the base's new squash commit, and task N+1's PR —
+  // opened from the same branch — re-includes task N's changes (each successive PR grows). So under
+  // autoMerge every task gets its OWN branch reset off origin/<base> via pool.resetToBase, mirroring
+  // claudetm's fresh `git checkout -b` per task. Without autoMerge there is no merged base to branch
+  // from mid-group, and a pool without resetToBase (test stubs) can't reset either — both fall back to
+  // the single group branch, opening a PR per task off it.
   private async processGroup(
     group: PrGroup,
     worktree: Worktree,
@@ -336,10 +374,19 @@ export class WorkLoop {
       return;
     }
 
+    const resetToBase = this.deps.autoMerge ? this.deps.pool.resetToBase : undefined;
+    const groupBranch = group.branch ?? `aitm/${group.id}`;
     let worked = group;
+    let wt = worktree;
     for (const task of group.tasks) {
       if (task.done) continue;
-      const result = await this.runOneTask(worked, task, worktree, baseBranch);
+      if (resetToBase) {
+        // Fresh branch off the merged base for this task's isolated PR (see method doc).
+        const branch = perTaskBranch(groupBranch, task.id);
+        wt = await resetToBase(group.id, branch, baseBranch);
+        worked = { ...worked, branch };
+      }
+      const result = await this.runOneTask(worked, task, wt, baseBranch);
       if (result.kind === 'blocked') {
         await this.markStatus(group.id, 'blocked');
         this.outcomes.push({ groupId: group.id, status: 'blocked', reason: result.reason });
@@ -351,7 +398,7 @@ export class WorkLoop {
       // after an earlier task's PR would strand the still-undone tasks: a crash there leaves a
       // terminal group PlanGraph.ready() won't reschedule. While tasks remain, the group stays
       // in-progress (schedulable on resume).
-      await this.openAndMaybeMerge(worked, result.delivery, worktree, baseBranch, remaining === 0);
+      await this.openAndMaybeMerge(worked, result.delivery, wt, baseBranch, remaining === 0);
     }
   }
 
@@ -462,6 +509,7 @@ export class WorkLoop {
         if (ctx.delivery === null) {
           throw new Error(`group ${ctx.group.id} reached pr-open without a worker delivery`);
         }
+        await this.maybeSelfReview(ctx.group, ctx.delivery, worktree, baseBranch);
         const pr = await this.deps.orchestrator.openPr(ctx.group, ctx.delivery, baseBranch);
         ctx.group = { ...ctx.group, pr: pr.number };
         return pr.number;
@@ -569,6 +617,33 @@ export class WorkLoop {
     return { groupId: ctx.group.id, status: 'awaiting-pr', pr: prNumberOf(ctx.group) };
   }
 
+  // Run the pre-PR self-review pass at the single choke point before every openPr (stage machine +
+  // prPerTask). Default-on: skipped only when the run disables it (`selfReview: false`) or the
+  // orchestrator port doesn't wire it. Best-effort and NON-fatal — it commits any fixes onto the
+  // group branch, but a review that can't fully clean the diff (or that throws) never blocks the
+  // group: the PR still opens, with external CI as the backstop. The outcome is surfaced as one
+  // progress line so the operator sees whether the diff was clean, fixed, or shipped still-unclean.
+  private async maybeSelfReview(
+    group: PrGroup,
+    delivery: WorkerDelivery,
+    worktree: Worktree,
+    baseBranch: string,
+  ): Promise<void> {
+    if (this.deps.selfReview === false) return;
+    const run = this.deps.orchestrator.selfReview;
+    if (!run) return;
+    try {
+      const result = await run({ group, delivery, worktree, baseBranch });
+      this.deps.progress?.(selfReviewProgress(group.id, result));
+    } catch (err) {
+      // A crash in the safety net must never strand the committed work or gate the PR.
+      const reason = err instanceof Error ? err.message : String(err);
+      this.deps.progress?.(
+        `group ${group.id}: self-review errored (${reason}) — opening PR anyway`,
+      );
+    }
+  }
+
   // Open the PR for one delivery, persist the outcome, and — under autoMerge — run the CI/review/
   // merge flow. Invoked once per task in `prPerTask` mode. `final` is true only for the last
   // undone task: until then the group's persisted status stays 'in-progress' (schedulable) so a
@@ -582,6 +657,7 @@ export class WorkLoop {
     baseBranch: string,
     final: boolean,
   ): Promise<void> {
+    await this.maybeSelfReview(group, delivery, worktree, baseBranch);
     const pr = await this.deps.orchestrator.openPr(group, delivery, baseBranch);
     await this.persistAfterSideEffect(
       { groupId: group.id, status: 'awaiting-pr', pr: pr.number },
@@ -812,4 +888,17 @@ function prNumberOf(group: PrGroup): number {
     throw new Error(`group ${group.id} has no PR number`);
   }
   return group.pr;
+}
+
+// One progress line summarizing the pre-PR self-review outcome. `unclean` is the only case that
+// carries a reason (a red diff shipped to the PR anyway) — the others just note clean vs. fixed.
+function selfReviewProgress(groupId: string, result: SelfReviewResult): string {
+  switch (result.kind) {
+    case 'clean':
+      return `group ${groupId}: self-review clean — opening PR`;
+    case 'reviewed':
+      return `group ${groupId}: self-review applied fixes — opening PR`;
+    default:
+      return `group ${groupId}: self-review could not fully clean the diff (${result.reason}) — opening PR anyway (external CI is the backstop)`;
+  }
 }

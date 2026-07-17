@@ -54,6 +54,7 @@ import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
+import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
 import { type OnUsage, prependContextBlock, reportUsage, type SubagentInit } from './factory.ts';
 import { buildRolePrompt } from './role-prompt.ts';
 
@@ -73,6 +74,9 @@ export type WorkerTools = {
   // `fetchHtml` is NOT a field here: an optional tool property injects `undefined` into the SDK's
   // TypedToolCall union. It is mounted as a runtime extra by the adapter when its binary is available.
   webFetch: Tool<WebFetchInput, WebFetchOutput>;
+  // Provider-agnostic web search (DuckDuckGo, no key) so the Worker can search on ANY model, not
+  // only OpenRouter-routed ones. A local function tool, so it is a core field like webFetch.
+  webSearch: Tool<WebSearchInput, WebSearchOutput>;
   datetime: Tool<DatetimeInput, DatetimeOutput>;
 };
 

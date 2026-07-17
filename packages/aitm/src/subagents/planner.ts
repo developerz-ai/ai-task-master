@@ -19,6 +19,7 @@ import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../plan/schema.ts';
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
+import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
 import { prependContextBlock, type SubagentInit } from './factory.ts';
 
 export type PlannerAgent = ToolLoopAgent<never, PlannerTools>;
@@ -31,6 +32,9 @@ export type PlannerTools = {
   grep: Tool<GrepInput, GrepOutput>;
   glob: Tool<GlobInput, GlobOutput>;
   webFetch: Tool<WebFetchInput, WebFetchOutput>;
+  // Provider-agnostic web search (DuckDuckGo, no key) — the Planner can research on ANY model, not
+  // only OpenRouter-routed ones. A local function tool, so it is a core field like webFetch.
+  webSearch: Tool<WebSearchInput, WebSearchOutput>;
   datetime: Tool<DatetimeInput, DatetimeOutput>;
 };
 

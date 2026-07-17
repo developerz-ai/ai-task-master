@@ -13,6 +13,7 @@
 //      so status transitions written by the loop are visible (PlanGraph snapshots at construction).
 //   4. Bridge the Orchestrator/subagents into the WorkLoopOrchestrator port and run the loop.
 
+import { existsSync } from 'node:fs';
 import { relative, resolve as resolvePath } from 'node:path';
 import {
   type AgentToolInput,
@@ -55,7 +56,7 @@ import {
 import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
-import { providerOptionsWithServerTools, webSearchTool } from '../openrouter/server-tools.ts';
+import { providerOptionsWithServerTools, webSearchServerTool } from '../openrouter/server-tools.ts';
 import { Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
@@ -89,6 +90,12 @@ import {
 } from '../subagents/reviewer.ts';
 import { buildRolePrompt, type RolePromptInput } from '../subagents/role-prompt.ts';
 import {
+  buildSpecialistSignal,
+  composeSpecialistGuidance,
+  discoverSpecialists,
+  selectSpecialist,
+} from '../subagents/specialist-registry.ts';
+import {
   createWorkerAgent,
   runWorker as runWorkerSubagent,
   WORKER_MAX_STEPS,
@@ -98,10 +105,15 @@ import {
 import { datetimeTool } from '../tools/datetime.ts';
 import { type FetchHtmlInput, fetchHtmlTool, isFetchHtmlAvailable } from '../tools/fetch-html.ts';
 import { type WebFetchOutput, webFetchTool } from '../tools/web-fetch.ts';
+import { webSearchTool } from '../tools/web-search.ts';
+import { sanitizeBranchComponent } from '../workspace/branch-name.ts';
 import { runGit } from '../workspace/git-exec.ts';
+import { InPlaceCheckout } from '../workspace/in-place-checkout.ts';
 import { WorktreePool } from '../workspace/worktree-pool.ts';
 import { runFixSession } from './ci-fix.ts';
+import { buildConflictResolver } from './conflict-resolution.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
+import { runSelfReviewSession } from './self-review.ts';
 import {
   type ReviewerInvocation,
   WorkLoop,
@@ -253,9 +265,10 @@ export function applyHooks<T extends ToolSet>(tools: T, input: RunLoopInput, cwd
 // its binary is available.
 function webFunctionTools(
   fetchHtmlAvailable: boolean,
-): WithFetchHtml<Pick<WorkerTools, 'webFetch' | 'datetime'>> {
+): WithFetchHtml<Pick<WorkerTools, 'webFetch' | 'webSearch' | 'datetime'>> {
   return {
     webFetch: webFetchTool(),
+    webSearch: webSearchTool(),
     datetime: datetimeTool(),
     ...(fetchHtmlAvailable ? { fetchHtml: fetchHtmlTool() } : {}),
   };
@@ -517,13 +530,19 @@ export async function runLoopAdapter(
     };
 
     // ---- Remaining deps ----------------------------------------------------
+    // Worktrees off by default (the user's world: agents work in ONE checkout, scheduled as a team).
+    // InPlaceCheckout is single-slot, so concurrency is forced to 1 — sequential groups, no two
+    // subagents mutating the tree at once. `git worktree` isolation is opt-in via `worktrees: true`.
+    const effectiveConcurrency = input.resolved.worktrees ? input.resolved.concurrency : 1;
     const pool =
       seams.makePool?.(input) ??
-      new WorktreePool(
-        input.cwd,
-        resolvePath(input.cwd, '.ai-task-master'),
-        input.resolved.concurrency,
-      );
+      (input.resolved.worktrees
+        ? new WorktreePool(
+            input.cwd,
+            resolvePath(input.cwd, '.ai-task-master'),
+            input.resolved.concurrency,
+          )
+        : new InPlaceCheckout(input.cwd));
     const github = seams.makeGithub?.(input) ?? input.github;
     const orchestrator = await (seams.makeOrchestrator ?? defaultMakeOrchestrator)({
       input,
@@ -541,8 +560,9 @@ export async function runLoopAdapter(
       graph,
       // Persist addressed review threads so the addressing-reviews loop dedups across re-polls.
       prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
-      concurrency: input.resolved.concurrency,
+      concurrency: effectiveConcurrency,
       autoMerge: input.resolved.autoMerge,
+      selfReview: input.resolved.selfReview,
       prPerTask: current.options.prPerTask ?? false,
       maxSessions: input.resolved.maxSessions,
       maxCiFixAttempts: input.resolved.maxCiFixAttempts,
@@ -561,18 +581,9 @@ export async function runLoopAdapter(
 
 // ---- Plan ------------------------------------------------------------------
 
-// Normalize a Planner-supplied group id into a safe git ref component. The id is only
-// `z.string()` in the plan schema, so it can carry characters (leading '.', '.lock', spaces,
-// ':' …) that would make `aitm/<id>` or `<branch>/<id>` an invalid ref and fail at worktree
-// creation. Map unsafe chars to '-', strip the component-level footguns, never return empty.
-export function sanitizeBranchComponent(id: string): string {
-  let s = id.replace(/[^A-Za-z0-9._-]/g, '-');
-  s = s.replace(/\.\.+/g, '.'); // collapse '..' (forbidden in refs)
-  s = s.replace(/^[.-]+/, ''); // no leading '.' or '-'
-  s = s.replace(/(?:\.lock)+$/i, ''); // no trailing '.lock'
-  s = s.replace(/[.-]+$/, ''); // no trailing '.' or '-'
-  return s.length > 0 ? s : 'group';
-}
+// Re-exported from workspace/branch-name.ts (its home now that WorkLoop also builds ref components).
+// Kept on the adapter's surface so existing importers/tests are unaffected.
+export { sanitizeBranchComponent };
 
 // Resolve a group's branch name, honoring a caller-specified `--branch`.
 //   - no branch requested        → `aitm/<group-id>` (default)
@@ -685,7 +696,20 @@ export function webSearchProviderOptions(
   ciFix: boolean,
 ): ReturnType<typeof providerOptionsWithServerTools> | undefined {
   const enabled = webSearch === true || (ciFix && webSearch !== false);
-  return enabled ? providerOptionsWithServerTools([webSearchTool()]) : undefined;
+  return enabled ? providerOptionsWithServerTools([webSearchServerTool()]) : undefined;
+}
+
+// The effective verify command for the pre-PR self-review: the configured verifyCommand when set,
+// else a conservative zero-config fallback — a typecheck for a TS repo. Best-effort: a fallback tool
+// missing from PATH exits 127, which the self-review pass treats as "no verify ran" (never a bogus
+// failure). Configuring `verifyCommand` is the reliable path. Exported for unit testing.
+export function selfReviewVerifyCommand(
+  configured: string | null | undefined,
+  cwd: string,
+): string | undefined {
+  if (configured) return configured;
+  if (existsSync(resolvePath(cwd, 'tsconfig.json'))) return 'tsc --noEmit';
+  return undefined;
 }
 
 export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
@@ -698,6 +722,13 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   const style = input.styleDigest ?? input.agentConfig.contents;
   // Per-step LLM deadline armed on every generate site in this bridge (issue #129).
   const stepTimeout = { stepMs: input.resolved.llmStepTimeoutMs };
+
+  // Target-repo domain specialists (`.claude/agents/*.md`), discovered once per run and memoized —
+  // the roster can't change mid-run, and a repo without the dir just yields []. The Worker path picks
+  // the best match per group and layers its guidance onto WORKER_SYSTEM_PREFIX (byte-identical to
+  // today when nothing matches).
+  let specialistsPromise: ReturnType<typeof discoverSpecialists> | undefined;
+  const specialistRoster = () => (specialistsPromise ??= discoverSpecialists(input.cwd));
 
   // Per-group CI-fix conversation handles, retained in memory for the life of the run so successive
   // fix passes for a group continue the same Worker conversation instead of re-planning cold — the
@@ -867,6 +898,16 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const providerOptions = webSearchProviderOptions(input.resolved.webSearch, false);
       const workerModelId = input.credentials.modelIdFor('worker');
       const workerModel = shortModelName(workerModelId);
+      // Route this group/task to the target repo's best-matching domain specialist, if any. Its
+      // guidance layers onto the Worker's base role prefix; no match → the base prefix, unchanged.
+      const specialist = selectSpecialist(
+        await specialistRoster(),
+        buildSpecialistSignal(group, task),
+      );
+      if (specialist) {
+        harnessProgress(`group ${group.id}: routing to '${specialist.name}' specialist`);
+      }
+      const workerGuidance = composeSpecialistGuidance(WORKER_SYSTEM_PREFIX, specialist);
       harnessProgress(
         `group ${group.id}: worker starting with ${workerModelId} — ${task ? task.text : group.title}`,
       );
@@ -880,7 +921,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         systemPrompt: appendIndexBlock(
           reminderAgentSystemPrompt({
             style,
-            roleGuidance: WORKER_SYSTEM_PREFIX,
+            roleGuidance: workerGuidance,
             cwd: worktree.path,
             maxSteps: WORKER_MAX_STEPS,
             modelId: input.credentials.modelIdFor('worker'),
@@ -940,6 +981,65 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       return pr;
     },
     runReviewer: runReviewerThreads,
+    // Pre-PR self-review → shared self-review session: run the effective verify command once, then a
+    // single adversarial review-and-fix Worker pass over the just-committed diff, committing any
+    // fixes onto the group branch before the PR opens. Same subagent wiring as the CI-fix path (the
+    // coding-tier Worker, compaction, usage, memory, rolling context), but on the LOCAL diff — no
+    // rebase/force-push, since the PR isn't open yet. Verification is coordinator-owned: the session
+    // runs the command; the Worker only commits.
+    selfReview: async ({ group, worktree, baseBranch }) => {
+      const selfReviewProviderOptions = webSearchProviderOptions(input.resolved.webSearch, false);
+      // The self-review Worker runs on the coding tier, so its fallback model id is the coding id.
+      const selfReviewUsage = roleUsageSink(
+        input.usage,
+        'worker',
+        input.credentials.modelIdForCapability('coding'),
+      );
+      const selfReviewMemoryIndex = await memoryIndexFor(state);
+      const selfReviewModelId = input.credentials.modelIdForCapability('coding');
+      const selfReviewModel = shortModelName(selfReviewModelId);
+      // Prefer the configured verifyCommand; else a conservative typecheck fallback for a TS repo.
+      const verifyCommand = selfReviewVerifyCommand(input.resolved.verifyCommand, worktree.path);
+      harnessProgress(
+        `group ${group.id}: self-reviewing the diff with ${selfReviewModelId} before opening the PR`,
+      );
+      const selfReviewStep = composeStepFinish<StepEvent<WorkerTools>>(
+        agentStepProgress(`${selfReviewModel} self-review ${group.id}`),
+      );
+      return runSelfReviewSession({
+        subagents: {
+          credentials: input.credentials,
+          workerTools: applyHooks(
+            resolveWorkerTools(
+              mcp.toolsForRole('worker'),
+              worktree.path,
+              input.resolved.bashRules,
+              fetchHtmlAvailable,
+              buildExploreFor(input, worktree.path),
+              memoryToolFor(state),
+            ),
+            input,
+            worktree.path,
+          ),
+          styleContents: style,
+          compactor,
+          timeout: stepTimeout,
+          ...(selfReviewMemoryIndex.length > 0 ? { memoryIndex: selfReviewMemoryIndex } : {}),
+          ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),
+          ...(selfReviewProviderOptions !== undefined
+            ? { providerOptions: selfReviewProviderOptions }
+            : {}),
+          ...(selfReviewUsage ? { onUsage: selfReviewUsage } : {}),
+          ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
+          ...(selfReviewStep ? { onStepFinish: selfReviewStep } : {}),
+          onEditorStepFinish: agentStepProgress(`${selfReviewModel} editor ${group.id}`),
+        },
+        group,
+        baseBranch,
+        worktreePath: worktree.path,
+        ...(verifyCommand ? { verifyCommand } : {}),
+      });
+    },
     // ci-failed stage → shared fix session: download failed logs + comments to the state dir, run
     // the coding-capability Worker pointed at them, rebase onto origin/<base>, force-with-lease push.
     runCiFix: async ({ group, pr, worktree, baseBranch }) => {
@@ -967,23 +1067,39 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         ciRecorder ? recordStepDeltas(ciRecorder) : undefined,
         agentStepProgress(`${ciFixModel} ci-fix ${group.id}`),
       );
+      const ciFixWorkerTools = applyHooks(
+        resolveWorkerTools(
+          mcp.toolsForRole('worker'),
+          worktree.path,
+          input.resolved.bashRules,
+          fetchHtmlAvailable,
+          buildExploreFor(input, worktree.path),
+          memoryToolFor(state),
+        ),
+        input,
+        worktree.path,
+      );
+      // AI conflict resolution (default-on): reuse the coding-tier model + the same Worker tool
+      // surface to resolve a rebase conflict before the group blocks. Gated by config.
+      const ciFixResolveConflicts = input.resolved.resolveConflicts
+        ? buildConflictResolver({
+            model: input.credentials.modelForCapability('coding'),
+            tools: ciFixWorkerTools,
+            styleContents: style,
+            timeout: stepTimeout,
+            ...(ciFixProviderOptions !== undefined
+              ? { providerOptions: ciFixProviderOptions }
+              : {}),
+            ...(ciFixUsage ? { onUsage: ciFixUsage } : {}),
+            onStepFinish: agentStepProgress(`${ciFixModel} conflict-resolve ${group.id}`),
+          })
+        : undefined;
       const result = await runFixSession({
         github: input.github,
         prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
         subagents: {
           credentials: input.credentials,
-          workerTools: applyHooks(
-            resolveWorkerTools(
-              mcp.toolsForRole('worker'),
-              worktree.path,
-              input.resolved.bashRules,
-              fetchHtmlAvailable,
-              buildExploreFor(input, worktree.path),
-              memoryToolFor(state),
-            ),
-            input,
-            worktree.path,
-          ),
+          workerTools: ciFixWorkerTools,
           styleContents: style,
           compactor,
           timeout: stepTimeout,
@@ -1002,6 +1118,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           ...(ciFixStep ? { onStepFinish: ciFixStep } : {}),
           onEditorStepFinish: agentStepProgress(`${ciFixModel} editor ${group.id}`),
           ...(ciResume ? { resumeMessages: ciResume } : {}),
+          ...(ciFixResolveConflicts ? { resolveConflicts: ciFixResolveConflicts } : {}),
         },
         group,
         pr,

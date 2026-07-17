@@ -3,11 +3,11 @@ import { test } from 'node:test';
 import {
   providerOptionsWithServerTools,
   webFetchServerTool,
-  webSearchTool,
+  webSearchServerTool,
 } from './server-tools.ts';
 
-test('webSearchTool builds the documented payload', () => {
-  const payload = webSearchTool({ engine: 'exa', max_results: 3 });
+test('webSearchServerTool builds the documented payload', () => {
+  const payload = webSearchServerTool({ engine: 'exa', max_results: 3 });
   assert.equal(payload.type, 'openrouter:web_search');
   assert.deepEqual(payload.parameters, { engine: 'exa', max_results: 3 });
 });
@@ -19,7 +19,7 @@ test('webFetchServerTool defaults to no parameters', () => {
 });
 
 test('providerOptionsWithServerTools nests under openrouter key', () => {
-  const opts = providerOptionsWithServerTools([webSearchTool(), webFetchServerTool()]);
+  const opts = providerOptionsWithServerTools([webSearchServerTool(), webFetchServerTool()]);
   assert.equal(opts.openrouter.tools.length, 2);
   assert.equal(opts.openrouter.tools[0]?.type, 'openrouter:web_search');
 });

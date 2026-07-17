@@ -32,7 +32,7 @@ function assertSafeGroupId(groupId: string): void {
 // committed-but-unpushed work) survived the removal of the prior worktree. `git rev-parse --verify
 // --quiet` exits 1 with no output when (and only when) the ref is absent; any other failure (not a
 // repo, permissions, git missing) is a real error and must propagate, not be read as "no branch".
-async function branchExists(repoRoot: string, branch: string): Promise<boolean> {
+export async function branchExists(repoRoot: string, branch: string): Promise<boolean> {
   try {
     await runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoRoot });
     return true;
@@ -88,6 +88,22 @@ export class WorktreePool {
     } finally {
       this.pendingGroupIds.delete(groupId);
     }
+  }
+
+  // Start a FRESH branch off the up-to-date remote base inside the group's already-acquired worktree.
+  // Same contract and rationale as InPlaceCheckout.resetToBase (base-fresh per task in prPerTask +
+  // autoMerge). Fetches origin/<baseBranch>, then `checkout -B <branch> origin/<baseBranch>` in the
+  // worktree dir, re-pointing it. The group must have been acquire()d first.
+  async resetToBase(groupId: string, branch: string, baseBranch: string): Promise<Worktree> {
+    const existing = this.worktrees.get(groupId);
+    if (!existing) {
+      throw new Error(`resetToBase: no worktree acquired for group ${groupId}`);
+    }
+    await runGit(['fetch', 'origin', baseBranch], { cwd: existing.path });
+    await runGit(['checkout', '-B', branch, `origin/${baseBranch}`], { cwd: existing.path });
+    const wt: Worktree = { groupId, branch, path: existing.path };
+    this.worktrees.set(groupId, wt);
+    return wt;
   }
 
   async release(groupId: string): Promise<void> {

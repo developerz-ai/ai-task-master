@@ -51,7 +51,7 @@ import {
   type WorkerResult,
   type WorkerTools,
 } from '../subagents/worker.ts';
-import { rebaseAndForcePush } from './ci-fix.ts';
+import { type ConflictResolver, rebaseAndForcePush } from './ci-fix.ts';
 import { DEFAULT_MAX_ITERATIONS, REVIEW_COMMENTS_GRACE } from './constants.ts';
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
@@ -111,6 +111,10 @@ export type TakeOverSubagents = {
   // Receives the full WorkerInput the real path would build (incl. formatCommand/verifyCommand/
   // logger), mirroring ci-fix.ts's FixSessionSubagents.runWorkerOverride.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
+  // AI rebase-conflict resolver, threaded into the shared rebaseAndForcePush so a base that moved
+  // under the PR is resolved and retried instead of blocking. Built by conflict-resolution.ts,
+  // gated by config `resolveConflicts`; unset → today's abort+block. Stubbed in tests.
+  resolveConflicts?: ConflictResolver;
 };
 
 export type TakeOverFlowInput = {
@@ -251,8 +255,8 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
 
     if (pushedSomething) {
       // The one push path, shared with the ci-fix session: rebase onto origin/<base> then
-      // `git push --force-with-lease`. A rebase conflict here needs human resolution, so block
-      // the run cleanly (exit 1) rather than leaving a half-applied rebase.
+      // `git push --force-with-lease`. A rebase conflict is handed to the AI resolver (when wired)
+      // and retried; only an unresolvable one aborts the rebase and blocks the run cleanly (exit 1).
       const pushed = await rebaseAndForcePush(
         runCmd,
         input.worktreePath,
@@ -260,6 +264,7 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
         input.pr,
         log,
         input.allowForcePush ?? true,
+        input.subagents.resolveConflicts,
       );
       if (pushed.kind === 'blocked') {
         return { kind: 'blocked', reason: pushed.reason, iterations: iteration };

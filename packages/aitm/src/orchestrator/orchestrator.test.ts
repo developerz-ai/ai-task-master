@@ -400,6 +400,44 @@ test('openPr composes title + body via the orchestrator model and calls github.c
   assert.deepEqual(roles, ['orchestrator']);
 });
 
+test('composePr requests submit via toolChoice "auto" (thinking-model compat)', async () => {
+  // Thinking-enabled models reject a FORCED tool_choice outright — Kimi's coding models answer
+  // "tool_choice 'specified'/'required' is incompatible with thinking enabled", blocking PR
+  // composition. `submit` is the only tool and the prompt tells the model to call it, so 'auto'
+  // yields the single submit call on every model tested. Guard the shape against a regression to a
+  // forced choice.
+  const composition = { title: 'feat: core — add a', body: COMPLIANT_BODY };
+  let seenToolChoice: unknown;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      seenToolChoice = options.toolChoice;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify(composition),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: 'prior: nothing yet',
+    maxSessions: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await o.openPr(baseGroup(), baseDelivery(), 'main');
+  assert.deepEqual(seenToolChoice, { type: 'auto' });
+});
+
 test('PR_BODY_GUIDE defines the standard Summary/Changes/Testing sections', () => {
   for (const heading of PR_BODY_SECTIONS) {
     assert.ok(PR_BODY_GUIDE.includes(heading), `expected guide to mention ${heading}`);

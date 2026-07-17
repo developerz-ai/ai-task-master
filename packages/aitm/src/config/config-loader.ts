@@ -48,6 +48,8 @@ const KNOWN_KEYS = new Set<string>([
   'stylePath',
   'formatCommand',
   'verifyCommand',
+  'selfReview',
+  'resolveConflicts',
   'logLevel',
   'concurrency',
   'bashRules',
@@ -84,9 +86,17 @@ const DEFAULTS = {
   stylePath: null as string | null,
   formatCommand: null as string | null,
   verifyCommand: null as string | null,
+  // Self-review is default-ON: every PR is adversarially reviewed + verified before it opens.
+  selfReview: true,
+  // AI conflict resolution is default-ON: a rebase/merge conflict is handed to a subagent before
+  // the group blocks for a human.
+  resolveConflicts: true,
   logLevel: 'info' as const,
   concurrency: 1,
   allowForcePush: true,
+  // Worktrees OFF by default: aitm works in-place in the one checkout (see in-place-checkout.ts).
+  // Opt back in with `worktrees: true` only if you need concurrent isolated groups.
+  worktrees: false,
   mcpDeferToolsOver: DEFAULT_MCP_DEFER_TOOLS_OVER,
 };
 
@@ -222,6 +232,15 @@ export class ConfigLoader {
         global?.verifyCommand,
         DEFAULTS.verifyCommand,
       ),
+      // selfReview defaults ON (project > global). No CLI flag: it is a safety gate, toggled per repo.
+      selfReview: pick(undefined, project?.selfReview, global?.selfReview, DEFAULTS.selfReview),
+      // resolveConflicts defaults ON (project > global). No CLI flag — a per-repo capability toggle.
+      resolveConflicts: pick(
+        undefined,
+        project?.resolveConflicts,
+        global?.resolveConflicts,
+        DEFAULTS.resolveConflicts,
+      ),
       // logLevel is not exposed via CliOverrides — project/global only.
       logLevel: pick(undefined, project?.logLevel, global?.logLevel, DEFAULTS.logLevel),
       concurrency: pick(
@@ -237,6 +256,8 @@ export class ConfigLoader {
         global?.allowForcePush,
         DEFAULTS.allowForcePush,
       ),
+      // worktrees off by default (in-place execution) — project/global only, no CLI flag.
+      worktrees: pick(undefined, project?.worktrees, global?.worktrees, DEFAULTS.worktrees),
       // Tri-state (project > global), left undefined when unset so the adapter can tell "CI-fix only"
       // (undefined) apart from "never" (false). No CLI flag, no default collapse. Issue #112.
       ...((project?.webSearch ?? global?.webSearch) !== undefined

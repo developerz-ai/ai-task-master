@@ -332,9 +332,13 @@ export class Orchestrator {
   }
 
   private async composePr(group: PrGroup, delivery: WorkerDelivery): Promise<PrComposition> {
-    // Structured output via a forced submit tool (tool-calling) rather than response_format
-    // json_schema, which some OpenAI-compatible providers ignore. Single tool + forced choice =
-    // one-shot; generateText takes a single step (no stopWhen), so it can't loop on the tool.
+    // Structured output via a submit tool (tool-calling) rather than response_format json_schema,
+    // which some OpenAI-compatible providers ignore. `toolChoice: 'auto'` — NOT a forced choice —
+    // because thinking-enabled models reject a forced tool_choice outright: Kimi answers
+    // "tool_choice 'specified'/'required' is incompatible with thinking enabled" and the group blocks
+    // at pr-open. With `submit` the only tool and an explicit "call submit" instruction, every model
+    // tested still emits exactly one submit call under 'auto' — the same pattern the Worker/Planner
+    // subagents already rely on. A model that ignores it surfaces as the no-submission error below.
     const result = await callWithStepTimeout(
       () =>
         generateText({
@@ -348,7 +352,7 @@ export class Orchestrator {
               execute: async (composition) => composition,
             }),
           },
-          toolChoice: { type: 'tool', toolName: 'submit' },
+          toolChoice: 'auto',
           ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
         }),
       this.init.timeout,

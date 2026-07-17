@@ -55,6 +55,7 @@ import {
   resolveWorkerTools,
   runLoopAdapter,
   sanitizeBranchComponent,
+  selfReviewVerifyCommand,
   webSearchProviderOptions,
 } from './run-loop-adapter.ts';
 import type { WorkLoopGithub, WorkLoopOrchestrator, WorkLoopPool } from './work-loop.ts';
@@ -794,6 +795,25 @@ test('webSearchProviderOptions: unset → CI-fix only; true → all Worker calls
   // false: off for both, including CI-fix.
   assert.equal(webSearchProviderOptions(false, true), undefined, 'false → CI-fix off');
   assert.equal(webSearchProviderOptions(false, false), undefined, 'false → regular off');
+});
+
+test('selfReviewVerifyCommand: configured wins; TS repo falls back to typecheck; else undefined', async () => {
+  // Configured command is used verbatim, no detection.
+  assert.equal(selfReviewVerifyCommand('bun test', '/nope'), 'bun test');
+
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-selfreview-'));
+  try {
+    // No tsconfig, nothing configured → no shell verify (review-only pass).
+    assert.equal(selfReviewVerifyCommand(null, dir), undefined);
+    assert.equal(selfReviewVerifyCommand(undefined, dir), undefined);
+    // A TS repo (tsconfig.json present) gets the conservative typecheck fallback.
+    await writeFile(join(dir, 'tsconfig.json'), '{}');
+    assert.equal(selfReviewVerifyCommand(null, dir), 'tsc --noEmit');
+    // Configured still wins even for a TS repo.
+    assert.equal(selfReviewVerifyCommand('bun run typecheck', dir), 'bun run typecheck');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 // ---- persistRollingContext (issue #123) ------------------------------------

@@ -265,7 +265,17 @@ function makePool(opts: { resetToBase?: boolean; events?: string[] } = {}): {
     },
     ...(opts.resetToBase
       ? {
-          resetToBase: async (groupId: string, branch: string, baseBranch: string) => {
+          // A real METHOD (not an arrow) that touches `this` — so if the WorkLoop extracts a bare
+          // `pool.resetToBase` reference and calls it detached, `this` is undefined and this throws,
+          // exactly like the real InPlaceCheckout/WorktreePool (which read `this.current`). Guards the
+          // `this`-binding regression that shipped once and blocked every group live.
+          async resetToBase(
+            this: WorkLoopPool,
+            groupId: string,
+            branch: string,
+            baseBranch: string,
+          ) {
+            void this.acquire;
             calls.resetToBase.push({ groupId, branch, baseBranch });
             opts.events?.push(`reset:${branch}`);
             return { groupId, branch, path: `/tmp/wt/${groupId}` };

@@ -374,16 +374,20 @@ export class WorkLoop {
       return;
     }
 
-    const resetToBase = this.deps.autoMerge ? this.deps.pool.resetToBase : undefined;
+    // Keep the pool reference and call resetToBase AS A METHOD — extracting it to a bare local
+    // (`const fn = pool.resetToBase`) drops the `this` binding, and the real InPlaceCheckout/WorktreePool
+    // read `this.current`/`this.worktrees`, so a detached call throws "undefined is not an object".
+    const pool = this.deps.pool;
+    const canResetToBase = this.deps.autoMerge && typeof pool.resetToBase === 'function';
     const groupBranch = group.branch ?? `aitm/${group.id}`;
     let worked = group;
     let wt = worktree;
     for (const task of group.tasks) {
       if (task.done) continue;
-      if (resetToBase) {
+      if (canResetToBase && pool.resetToBase) {
         // Fresh branch off the merged base for this task's isolated PR (see method doc).
         const branch = perTaskBranch(groupBranch, task.id);
-        wt = await resetToBase(group.id, branch, baseBranch);
+        wt = await pool.resetToBase(group.id, branch, baseBranch);
         worked = { ...worked, branch };
       }
       const result = await this.runOneTask(worked, task, wt, baseBranch);

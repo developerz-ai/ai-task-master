@@ -44,6 +44,16 @@ test('normalizeResumeStatus rewinds a blocked group with terminal "blocked" stag
   assert.equal(g?.stage, 'working', 'terminal blocked stage rewinds to working');
 });
 
+test('normalizeResumeStatus never resurrects a human-needed blocked group (issue #128)', () => {
+  // CI-fix budget exhausted → parked for a human. A resume must leave it blocked so PlanGraph.ready()
+  // skips it, instead of re-driving the unfixable PR and burning the whole budget again.
+  const parked = group({ status: 'blocked', stage: 'blocked', humanNeeded: true, pr: 9 });
+  const [g] = normalizeResumeStatus([parked]);
+  assert.equal(g?.status, 'blocked', 'a human-needed block is not retried on resume');
+  assert.equal(g?.stage, 'blocked', 'stage is left as-is (no rewind to working)');
+  assert.equal(g, parked, 'returned unchanged by reference');
+});
+
 test('normalizeResumeStatus leaves merged and already-schedulable groups untouched', () => {
   const groups = [
     group({ id: 'a', status: 'merged', stage: 'merged', pr: 1 }),
@@ -69,5 +79,18 @@ test('hasInterruptedGroup detects in-progress / awaiting-pr / blocked; false for
       group({ id: 'c', status: 'pending' }),
     ]),
     false,
+  );
+});
+
+test('hasInterruptedGroup ignores a human-needed blocked group but still flags a real interrupt', () => {
+  // A parked group is not an interrupt — on its own it must not trigger normalization.
+  assert.equal(hasInterruptedGroup([group({ status: 'blocked', humanNeeded: true })]), false);
+  // A mix still reports true so the genuine interrupt gets normalized on resume.
+  assert.equal(
+    hasInterruptedGroup([
+      group({ id: 'a', status: 'blocked', humanNeeded: true }),
+      group({ id: 'b', status: 'in-progress' }),
+    ]),
+    true,
   );
 });

@@ -1209,19 +1209,57 @@ test('CI-fix cap: a fix that lands green on the last allowed attempt merges, doe
   assert.equal(result.kind, 'success');
 });
 
-test('CI-fix cap: the budget is per driveStages run — a resumed run starts fresh (issue #128)', async () => {
-  // The counter is in-memory per invocation: a later run (resume) is not permanently barred from
-  // retrying. Two separate loops over the same red group each get their own N-fix budget.
-  const g = redCiGroup('cap-resume', 15);
-  for (const _pass of [1, 2]) {
-    const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 15 });
-    const { github } = makeGithub({ checks: Array(4).fill(ciFailure), threads: [] });
-    const loop = new WorkLoop(
-      makeDeps({ orchestrator, github, autoMerge: true, maxCiFixAttempts: 1 }),
-    );
-    await loop.runGroup(g);
-    assert.equal(orchCalls.runCiFix.length, 1, 'each run gets a fresh single-attempt budget');
-  }
+test('CI-fix cap: the durable count survives resume — an at-cap group blocks with no further fix (issue #128)', async () => {
+  // The count is persisted on the group, so a resumed group re-enters carrying its spent budget. One
+  // already at the cap immediately exceeds it and parks for a human WITHOUT another fix pass — the old
+  // in-memory counter reset to zero and re-burned the whole budget every resume.
+  const g = { ...redCiGroup('cap-resume', 15), ciFixAttempts: 2 };
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 15 });
+  const { github } = makeGithub({ checks: Array(4).fill(ciFailure), threads: [] });
+  const { state, updates } = makeState([g]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, maxCiFixAttempts: 2 }),
+  );
+  await loop.runGroup(g);
+
+  assert.equal(
+    orchCalls.runCiFix.length,
+    0,
+    'the exhausted budget survives resume — no further fix runs',
+  );
+  const persisted = (updates[updates.length - 1] as RunState).prGroups.find(
+    (p) => p.id === 'cap-resume',
+  );
+  assert.equal(persisted?.status, 'blocked');
+  assert.equal(
+    persisted?.humanNeeded,
+    true,
+    'flagged human-needed so a resume never resurrects it',
+  );
+});
+
+test('CI-fix cap: a resumed group continues counting from its persisted attempts, not from zero (issue #128)', async () => {
+  // One pass was spent before the interrupt (ciFixAttempts: 1). With the cap at 3 the resume runs
+  // only the two REMAINING passes, then blocks — total fix work across runs stays bounded by the cap.
+  const g = { ...redCiGroup('cap-continue', 17), ciFixAttempts: 1 };
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 17 });
+  const { github } = makeGithub({ checks: Array(6).fill(ciFailure), threads: [] });
+  const { state, updates } = makeState([g]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, maxCiFixAttempts: 3 }),
+  );
+  await loop.runGroup(g);
+
+  assert.equal(
+    orchCalls.runCiFix.length,
+    2,
+    'resume runs only the remaining budget (cap 3 − 1 already spent)',
+  );
+  const persisted = (updates[updates.length - 1] as RunState).prGroups.find(
+    (p) => p.id === 'cap-continue',
+  );
+  assert.equal(persisted?.ciFixAttempts, 4, 'the durable counter advances to the blocking entry');
+  assert.equal(persisted?.humanNeeded, true);
 });
 
 test('autoMerge: unresolved threads → addressing-reviews runs the Reviewer, then merges', async () => {

@@ -53,6 +53,15 @@ export const PrGroupSchema = z.object({
   pr: z.number().int().positive().nullable(),
   status: PrGroupStatusSchema,
   stage: GroupStageSchema.default('pending'),
+  // Durable count of CI-fix passes dispatched for this group's PR, persisted so the recovery budget
+  // survives a resume: a crash-resumed group re-seeds its in-memory counter from this instead of
+  // restarting at zero and cycling forever on an unfixable red PR. Optional — legacy state (and
+  // in-memory groups built off-schema) load as 0. See issue #128.
+  ciFixAttempts: z.number().int().nonnegative().optional(),
+  // Set once the CI-fix budget is exhausted: the group is blocked for a human and must NOT be
+  // auto-rescheduled on resume (normalizeResumeStatus skips it) — unlike a transient provider block,
+  // which a resume retries. Optional — legacy state loads as not-human-needed. See issue #128.
+  humanNeeded: z.boolean().optional(),
 });
 export type PrGroup = z.infer<typeof PrGroupSchema>;
 

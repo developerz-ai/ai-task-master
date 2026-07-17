@@ -235,9 +235,10 @@ type StageCtx = {
   group: PrGroup;
   delivery: WorkerDelivery | null;
   blockedReason: string | undefined;
-  // CI-fix passes dispatched this driveStages run. Per group per invocation, in-memory: a
-  // crash-resumed group re-enters at its persisted stage with a fresh budget (durable cross-resume
-  // counting would need a state-schema change — out of scope, issue #128).
+  // CI-fix passes dispatched for this group, seeded from the persisted PrGroup.ciFixAttempts and
+  // mirrored back to state on each increment, so the recovery budget survives a resume: a
+  // crash-resumed group continues counting from where it left off instead of restarting at zero and
+  // cycling forever on an unfixable red PR (issue #128).
   fixAttempts: number;
 };
 
@@ -436,7 +437,13 @@ export class WorkLoop {
     checkout: Checkout,
     baseBranch: string,
   ): Promise<GroupOutcome> {
-    const ctx: StageCtx = { group, delivery: null, blockedReason: undefined, fixAttempts: 0 };
+    const ctx: StageCtx = {
+      group,
+      delivery: null,
+      blockedReason: undefined,
+      // Seed from the persisted count so a resumed group keeps its remaining budget (issue #128).
+      fixAttempts: group.ciFixAttempts ?? 0,
+    };
     const deps = this.buildStageDeps(ctx, checkout, baseBranch);
     let stage: GroupStage = group.stage;
 
@@ -452,20 +459,31 @@ export class WorkLoop {
       // autoMerge off: stop once the PR is open; runMergePr (or a follow-up run) finishes it.
       if (!this.deps.autoMerge && stage === 'waiting-ci') return this.awaitingPrOutcome(ctx);
 
-      // Cap the CI-fix recovery loop: count each ci-failed dispatch, and once the cap is exceeded
-      // block WITHOUT running the fix session (no LLM call, no push) so an unfixable red PR ends
-      // for a human instead of cycling forever (issue #128). Both entry routes into 'ci-failed'
-      // (a non-success waitForChecks and a CiFailed poll timeout) consume an attempt.
+      // Cap the CI-fix recovery loop: count each ci-failed dispatch against a budget that now
+      // survives resumes (see StageCtx.fixAttempts), and once the cap is exceeded block WITHOUT
+      // running the fix session (no LLM call, no push) so an unfixable red PR ends for a human
+      // instead of cycling forever — across resumes as well as within one run (issue #128).
       if (stage === 'ci-failed') {
+        // Charge one durable fix-attempt slot BEFORE dispatching the fix, so a crash mid-fix can't
+        // hand the resumed run a fresh budget — the count is consumed at dispatch and persisted.
         ctx.fixAttempts += 1;
+        ctx.group = { ...ctx.group, ciFixAttempts: ctx.fixAttempts };
         if (ctx.fixAttempts > this.maxCiFixAttempts) {
           ctx.blockedReason = `CI fix attempts exhausted after ${this.maxCiFixAttempts} passes for PR #${prNumberOf(ctx.group)} — needs human attention`;
-          const next: GroupStage = 'blocked';
-          ctx.group = { ...ctx.group, stage: next };
-          await this.persistStageAfter(stage, next, ctx);
-          stage = next;
+          // Flag human-needed so a resume never resurrects this block (normalizeResumeStatus skips
+          // it); a transient block, by contrast, is retried on the next `aitm start`.
+          ctx.group = { ...ctx.group, stage: 'blocked', humanNeeded: true };
+          await this.markStatus(ctx.group.id, 'blocked', {
+            stage: 'blocked',
+            ciFixAttempts: ctx.fixAttempts,
+            humanNeeded: true,
+          });
+          stage = 'blocked';
           continue;
         }
+        await this.markStatus(ctx.group.id, statusForStage(stage), {
+          ciFixAttempts: ctx.fixAttempts,
+        });
       }
 
       const handler = handlerFor(stage);
@@ -824,7 +842,7 @@ export class WorkLoop {
   private async markStatus(
     id: string,
     status: PrGroup['status'],
-    patch: Partial<Pick<PrGroup, 'branch' | 'pr' | 'stage'>> = {},
+    patch: Partial<Pick<PrGroup, 'branch' | 'pr' | 'stage' | 'ciFixAttempts' | 'humanNeeded'>> = {},
   ): Promise<void> {
     // Status transitions do not bump sessionCount — that's owned by incrementSessionCount,
     // which fires once per batch dispatch so the in-memory and persisted counters agree.

@@ -64,13 +64,21 @@ type ToolCallLog = {
   reads: ReadFileInput[];
   writes: WriteFileInput[];
   bashes: BashInput[];
+  // runEditor's per-file `git status --porcelain` verification, kept out of `bashes` so the
+  // commit-phase bash assertions stay about the checkout/add/commit sequence only.
+  statuses: BashInput[];
 };
 
-function makeTools(opts: { bashExitCode?: number; bashStderr?: string } = {}): {
+// `cleanStatusPaths` lists the paths that `git status --porcelain` reports as unchanged — i.e. the
+// editor narrated but never wrote (a phantom edit). Every other queried path reports dirty, so the
+// default (no phantom) keeps the existing happy-path tests recording changes.
+function makeTools(
+  opts: { bashExitCode?: number; bashStderr?: string; cleanStatusPaths?: string[] } = {},
+): {
   tools: WorkerTools;
   calls: ToolCallLog;
 } {
-  const calls: ToolCallLog = { reads: [], writes: [], bashes: [] };
+  const calls: ToolCallLog = { reads: [], writes: [], bashes: [], statuses: [] };
   const tools: WorkerTools = {
     readFile: tool<ReadFileInput, ReadFileOutput>({
       description: 'read a file from the checkout',
@@ -92,6 +100,13 @@ function makeTools(opts: { bashExitCode?: number; bashStderr?: string } = {}): {
       description: 'run a bash command in the checkout',
       inputSchema: z.object({ command: z.string() }),
       execute: async (input) => {
+        // The editor-change verification never mutates and is exit-0 regardless of bashExitCode.
+        if (input.command.includes('status --porcelain')) {
+          calls.statuses.push(input);
+          const path = /-- '(.*)'\s*$/.exec(input.command)?.[1] ?? '';
+          const clean = (opts.cleanStatusPaths ?? []).some((p) => p === path);
+          return { stdout: clean ? '' : ` M ${path}\n`, stderr: '', exitCode: 0 };
+        }
         calls.bashes.push(input);
         return {
           stdout: '',
@@ -329,6 +344,10 @@ test('runWorker: manifest → per-file edits → commit sequence', async () => {
   ]);
   assert.deepEqual(d.progressEntries, ['- task A', '- task B']);
 
+  // Each recorded change was confirmed on disk first: one `git status --porcelain` per planned file.
+  assert.equal(calls.statuses.length, 2);
+  assert.ok(calls.statuses.every((s) => s.command.includes('status --porcelain')));
+
   // Final bash sequence: checkout -B, add -A, reset .ai-task-master, commit -m
   assert.equal(calls.bashes.length, 4);
   const cmds = calls.bashes.map((b) => b.command);
@@ -338,6 +357,52 @@ test('runWorker: manifest → per-file edits → commit sequence', async () => {
   // which also stays clear of the "paths are ignored" error when .ai-task-master is gitignored.
   assert.match(cmds[2] ?? '', /reset -q -- \.ai-task-master/);
   assert.match(cmds[3] ?? '', /git -C '\/tmp\/wt' commit -m 'feat: add a \+ fix b'/);
+});
+
+test('runWorker: a narrate-only editor (no on-disk write) records no change and blocks — no phantom edit', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  // The editor returns a summary but never wrote src/a.ts, so `git status --porcelain` reports it clean.
+  const { tools, calls } = makeTools({ cleanStatusPaths: ['src/a.ts'] });
+  const model = makeWorkerModel(manifest, ['pretended to edit a']);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /no on-disk change/i);
+    assert.match(result.reason, /src\/a\.ts/);
+    assert.match(result.reason, /more capable/i);
+  }
+  // The path was verified on disk, and the phantom edit never reached the checkout/commit sequence.
+  assert.ok(calls.statuses.some((s) => s.command.includes("status --porcelain -- 'src/a.ts'")));
+  assert.equal(calls.bashes.length, 0, 'no checkout/add/commit on a phantom edit');
+});
+
+test('runWorker: one phantom editor blocks the whole pass and names only the unchanged file — no partial commit', async () => {
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
+      { path: 'src/b.ts', kind: 'modify', purpose: 'fix b' },
+    ],
+    draftCommitMessage: 'feat: a + b',
+  };
+  // Editor a writes (dirty); editor b only narrates (clean) — a phantom edit for b.
+  const { tools, calls } = makeTools({ cleanStatusPaths: ['src/b.ts'] });
+  const model = makeWorkerModel(manifest, ['created a', 'talked about b']);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /src\/b\.ts/);
+    assert.equal(result.reason.includes('src/a.ts'), false, 'only the unchanged path is named');
+  }
+  // A real edit to a MUST NOT be committed on its own when a sibling file was never written.
+  assert.equal(calls.bashes.length, 0, 'no partial commit when any planned file is unchanged');
+  assert.equal(calls.statuses.length, 2, 'both planned files were verified on disk');
 });
 
 test('runWorker: scopes the manifest prompt and progress to the current Task slice', async () => {
@@ -628,6 +693,12 @@ function makeVerifyTools(verifyExitCodes: number[]): {
       timeoutMs: z.number().int().positive().optional(),
     }),
     execute: async (input) => {
+      // Editors in the verify path are simulated as having written their file, so the per-file
+      // `git status --porcelain` check reports dirty (and stays out of the `bashes` sequence).
+      if (input.command.includes('status --porcelain')) {
+        const path = /-- '(.*)'\s*$/.exec(input.command)?.[1] ?? '';
+        return { stdout: ` M ${path}\n`, stderr: '', exitCode: 0 };
+      }
       bashes.push(input);
       if (input.timeoutMs === VERIFY_TIMEOUT_MS) {
         const i = vi++;

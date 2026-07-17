@@ -108,6 +108,12 @@ function makeWorkerTools(): { tools: WorkerTools; bashes: BashInput[] } {
       description: 'bash',
       inputSchema: z.object({ command: z.string() }),
       execute: async (input) => {
+        // runEditor confirms each edit landed via `git status --porcelain`; report the path dirty so
+        // the editor fanout records the change, and keep it out of the commit-phase `bashes` sequence.
+        if (input.command.includes('status --porcelain')) {
+          const path = /-- '(.*)'\s*$/.exec(input.command)?.[1] ?? '';
+          return { stdout: ` M ${path}\n`, stderr: '', exitCode: 0 };
+        }
         bashes.push(input);
         return { stdout: '', stderr: '', exitCode: 0 };
       },

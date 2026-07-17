@@ -5,7 +5,6 @@ import type { CiResult, MergeMethod } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import { renderPlanMarkdown } from '../plan/plan-markdown.ts';
 import type { PrGroup, RunState, Task } from '../state/schema.ts';
-import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
@@ -88,7 +87,6 @@ type OrchestratorCalls = {
   runWorker: WorkerInvocationCall[];
   finalizeCommit: { group: PrGroup; checkoutPath: string }[];
   openPr: { group: PrGroup; baseBranch: string; delivery: WorkerDelivery }[];
-  runReviewer: { pr: number; threads: ReviewThread[]; checkout: Checkout }[];
   runCiFix: { group: PrGroup; pr: number; baseBranch: string }[];
   addressReviews: { pr: number; threads: ReviewThread[] }[];
   selfReview: SelfReviewInvocation[];
@@ -99,7 +97,6 @@ type WorkerInvocationCall = { group: PrGroup; task?: Task; checkout: Checkout; b
 function makeOrchestrator(
   config: {
     workerResults?: WorkerResult[];
-    reviewerResult?: ReviewerResult;
     ciFixResults?: StageWorkResult[];
     addressReviewsResult?: StageWorkResult;
     prNumber?: number;
@@ -118,7 +115,6 @@ function makeOrchestrator(
     runWorker: [],
     finalizeCommit: [],
     openPr: [],
-    runReviewer: [],
     runCiFix: [],
     addressReviews: [],
     selfReview: [],
@@ -142,10 +138,6 @@ function makeOrchestrator(
       calls.openPr.push({ group: g, baseBranch, delivery: d });
       config.events?.push(`openPr:${g.branch}`);
       return pullRequest(config.prNumber ?? 42, config.headRefName ?? `aitm/${g.id}`);
-    },
-    runReviewer: async (input) => {
-      calls.runReviewer.push(input);
-      return config.reviewerResult ?? ({ kind: 'ok', resolutions: [] } satisfies ReviewerResult);
     },
     runCiFix: async ({ group, pr, baseBranch }) => {
       calls.runCiFix.push({ group, pr, baseBranch });
@@ -957,6 +949,103 @@ test('prPerTask + --no-automerge: no base refresh; tasks stay on the single grou
   );
 });
 
+test('prPerTask + autoMerge: a red PR routes the fix through runCiFix (pushes), re-polls green, merges', async () => {
+  // Regression: autoMergeFlow used to runWorker + finalizeCommit (git commit --amend) WITHOUT
+  // pushing, so the recheck polled stale remote CI and the merge landed the unfixed remote. It now
+  // routes through runCiFix — the shared fix session that rebases onto origin/<base> and
+  // force-with-lease pushes — so the recheck re-polls against the pushed fix.
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciFailure, ciSuccess], threads: [] });
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, autoMerge: true, prPerTask: true }));
+  await loop.runGroup(group('solo'));
+
+  assert.equal(calls.runCiFix.length, 1, 'the CI fix routes through the pushing fix session');
+  assert.equal(calls.runCiFix[0]?.pr, 7);
+  assert.equal(calls.runWorker.length, 1, 'the fix is not a second raw runWorker pass');
+  assert.equal(
+    calls.finalizeCommit.length,
+    1,
+    'the CI fix does not --amend (only the task commit)',
+  );
+  assert.deepEqual(ghCalls.waitForChecks, [7, 7], 'CI is re-polled after the fix is pushed');
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [7],
+    'PR merged once CI is green on the pushed fix',
+  );
+});
+
+test('prPerTask + autoMerge: a CI fix that cannot land blocks the group without merging', async () => {
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 7,
+    ciFixResults: [{ kind: 'blocked', reason: 'still red after fix' }],
+  });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciFailure], threads: [] });
+  const { state, updates } = makeState([group('solo')]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prPerTask: true }),
+  );
+  await loop.runGroup(group('solo'));
+
+  assert.equal(calls.runCiFix.length, 1);
+  assert.equal(ghCalls.waitForChecks.length, 1, 'no recheck once the fix fails to land');
+  assert.equal(ghCalls.mergePr.length, 0, 'no merge when the fix cannot land');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'solo')?.status, 'blocked');
+});
+
+test('prPerTask + autoMerge: unresolved threads route through addressReviews (pushes) before merge', async () => {
+  const thread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
+  };
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciSuccess], threads: [thread] });
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, autoMerge: true, prPerTask: true }));
+  await loop.runGroup(group('solo'));
+
+  assert.equal(
+    calls.addressReviews.length,
+    1,
+    'reviewer fixes go through the pushing addressReviews',
+  );
+  assert.deepEqual(
+    calls.addressReviews[0]?.threads.map((t) => t.id),
+    ['t1'],
+  );
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [7],
+    'PR merged after the reviewer fix is pushed',
+  );
+});
+
+test('prPerTask + autoMerge: an unaddressable review thread blocks the group without merging', async () => {
+  const thread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
+  };
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 7,
+    addressReviewsResult: { kind: 'blocked', reason: 'reviewer error' },
+  });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciSuccess], threads: [thread] });
+  const { state, updates } = makeState([group('solo')]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prPerTask: true }),
+  );
+  await loop.runGroup(group('solo'));
+
+  assert.equal(calls.addressReviews.length, 1);
+  assert.equal(ghCalls.mergePr.length, 0, 'no merge while the thread is unaddressed');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'solo')?.status, 'blocked');
+});
+
 test('autoMerge: success path runs waitForChecks → mergePr and marks merged', async () => {
   const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 11 });
   const { github, calls: ghCalls } = makeGithub({ checks: [ciSuccess], threads: [] });
@@ -975,7 +1064,7 @@ test('autoMerge: success path runs waitForChecks → mergePr and marks merged', 
 
   assert.deepEqual(ghCalls.waitForChecks, [11]);
   assert.deepEqual(ghCalls.mergePr, [{ pr: 11, method: 'squash' }]);
-  assert.equal(orchCalls.runReviewer.length, 0, 'reviewer not invoked when no threads');
+  assert.equal(orchCalls.addressReviews.length, 0, 'reviewer not invoked when no threads');
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((p) => p.id === 'gamma')?.status, 'merged');
 });
@@ -1252,7 +1341,6 @@ test('home.release fires even when orchestrator throws', async () => {
     },
     finalizeCommit: async () => 'sha',
     openPr: async () => pullRequest(1),
-    runReviewer: async () => ({ kind: 'ok', resolutions: [] }),
     runCiFix: async () => ({ kind: 'ok' }),
     addressReviews: async () => ({ kind: 'ok' }),
   };
@@ -1269,7 +1357,6 @@ test('a catch-path block emits a progress line carrying the reason (not a silent
     },
     finalizeCommit: async () => 'sha',
     openPr: async () => pullRequest(1),
-    runReviewer: async () => ({ kind: 'ok', resolutions: [] }),
     runCiFix: async () => ({ kind: 'ok' }),
     addressReviews: async () => ({ kind: 'ok' }),
   };

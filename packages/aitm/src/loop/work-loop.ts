@@ -19,7 +19,6 @@ import { phaseForStage, type StepCounterFn } from '../observability/run-step.ts'
 import type { RunStep } from '../observability/step-progress.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../state/schema.ts';
-import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import { perTaskBranch } from '../workspace/branch-name.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
@@ -43,8 +42,8 @@ import {
 
 export type WorkerInvocation = {
   group: PrGroup;
-  // The specific task being worked this pass. Omitted by the CI-fix invocation in autoMergeFlow,
-  // which re-runs the Worker over the whole group rather than a single task.
+  // The specific task being worked this pass. Optional so a caller can run the Worker over the
+  // whole group instead of a single task (the prompt falls back to the group goal).
   task?: Task;
   checkout: Checkout;
   baseBranch: string;
@@ -80,11 +79,11 @@ export type WorkLoopOrchestrator = {
   // selfReview disabled never invokes it; when absent, the PR opens exactly as before. Never blocks —
   // the WorkLoop logs the outcome and opens the PR regardless (external CI is the backstop).
   selfReview?(input: SelfReviewInvocation): Promise<SelfReviewResult>;
-  runReviewer(input: ReviewerInvocation): Promise<ReviewerResult>;
-  // ci-failed stage: download failed logs + comments, run the Worker fix, rebase onto
-  // origin/<base> and force-with-lease push. ok → CI re-runs; blocked → couldn't land the fix.
+  // ci-failed stage + autoMergeFlow: download failed logs + comments, run the Worker fix, rebase
+  // onto origin/<base> and force-with-lease push. ok → CI re-runs; blocked → couldn't land the fix.
   runCiFix(input: CiFixInvocation): Promise<StageWorkResult>;
-  // addressing-reviews stage: run the Reviewer over the given threads and push its code fixes.
+  // addressing-reviews stage + autoMergeFlow: run the Reviewer over the given threads and push its
+  // code fixes to the remote. ok → threads handled (any fix pushed); blocked → reviewer/push error.
   addressReviews(input: ReviewerInvocation): Promise<StageWorkResult>;
 };
 
@@ -767,29 +766,32 @@ export class WorkLoop {
   ): Promise<void> {
     const { orchestrator, github } = this.deps;
 
-    // CI: wait for checks. On failure, ask Worker to fix and re-check; a timeout (CiFailed)
-    // propagates. Still-red after the fix is fatal for this flow.
+    // CI: wait for checks. On failure, run the shared fix session (Worker → rebase onto
+    // origin/<base> → force-with-lease push) so the fix reaches the remote BEFORE the recheck
+    // re-polls; without the push the recheck would poll stale CI and the merge would land the
+    // unfixed remote. runCiFix pushes; the old runWorker + finalizeCommit `--amend` only rewrote
+    // history locally, diverging from the pushed branch. A poll timeout (CiFailed) propagates; a
+    // fix that can't land, or still-red CI after it, is fatal for this flow.
     const ci = await github.waitForChecks(pr.number);
     if (ci.state === 'failure') {
-      const fix = await orchestrator.runWorker({ group, checkout, baseBranch });
+      const fix = await orchestrator.runCiFix({ group, pr: pr.number, checkout, baseBranch });
       if (fix.kind !== 'ok') {
-        const reason = fix.kind === 'blocked' ? fix.reason : fix.error;
-        throw new Error(`worker CI fix failed: ${reason}`);
+        throw new Error(`worker CI fix failed: ${fix.reason}`);
       }
-      await orchestrator.finalizeCommit(group, fix.delivery, checkout.path);
       const recheck = await github.waitForChecks(pr.number);
       if (recheck.state === 'failure') {
         throw new CiFailed(`PR #${pr.number} still failing after worker CI fix`);
       }
     }
 
-    // Review: resolve any unresolved threads via Reviewer.
+    // Review: address any unresolved threads via the Reviewer. addressReviews pushes the Reviewer's
+    // code fixes to the remote, so the merge below lands them; runReviewer alone would leave them
+    // committed only locally and merge without them.
     const threads = await github.listUnresolvedThreads(pr.number);
     if (threads.length > 0) {
-      const review = await orchestrator.runReviewer({ pr: pr.number, threads, checkout });
+      const review = await orchestrator.addressReviews({ pr: pr.number, threads, checkout });
       if (review.kind !== 'ok') {
-        const reason = review.kind === 'blocked' ? review.reason : review.error;
-        throw new Error(`reviewer failed: ${reason}`);
+        throw new Error(`reviewer failed: ${review.reason}`);
       }
     }
 

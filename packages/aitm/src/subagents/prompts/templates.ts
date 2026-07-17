@@ -4,8 +4,20 @@
 // unfenced review comment or specialist file — the fencing is structural, not per-call-site discipline.
 //
 // Templates are PURE: they read only their slot record — no process env, cwd, clock, or module state —
-// so a rendered prompt is a deterministic function of its inputs (snapshot-testable).
+// so a rendered prompt is a deterministic function of its inputs (snapshot-testable). The role-prompt
+// template bakes the always-on contract blocks and the step-budget reminder in from pure module
+// constants; the impure `<env>` block is computed by the harness (buildRolePrompt) and injected as a
+// slot, so the template itself stays pure.
 
+import {
+  defaultContractBlocks,
+  type MemoryIndexEntry,
+  memoryIndexBlock,
+  type PromptBlock,
+  renderPromptBlocks,
+  selfIdBlock,
+  stepBudgetLine,
+} from '@developerz.ai/ai-claude-compat';
 import { data, instruction, renderSlot } from './slots.ts';
 
 // Reviewer thread prompt: trusted framing (PR / thread / file coordinates + the decide-act-submit ask)
@@ -43,11 +55,51 @@ function specialistGuidance(slots: SpecialistGuidanceSlots): string {
   ].join('\n');
 }
 
-// The registry: template name → its slot shape. Later slices extend this with the role templates
-// (planner / worker / reviewer / orchestrator / explore); render()'s signature does not change.
+// Role system-prompt frame: the always-on contract blocks + self-id + the role's own guidance (with its
+// step-budget reminder) + style + `<env>` + memory, rendered in the #105 canonical block order. Every
+// built-in role (planner / worker / editor / reviewer, and the take-over/ci-fix/conflict flows) renders
+// through this one template behind buildRolePrompt — the contract blocks and step-budget are the
+// template's job, so no call path can drop them. The role's prose is a slot, not a per-role template.
+export type RolePromptSlots = {
+  // The role's own session guidance — a `*_SYSTEM_PREFIX` prose const. Trusted, verbatim.
+  readonly roleGuidance: string;
+  // The role's effective step budget; interpolated into the baked-in step-budget reminder.
+  readonly maxSteps: number;
+  // Coding-style digest (StyleDistiller output). Empty → the style block is omitted.
+  readonly style: string;
+  // The pre-rendered `<env>` block. Computed by the harness (it reads cwd/platform/clock) and injected
+  // so this template stays pure.
+  readonly env: string;
+  // Resolved model id for the self-id block. Omitted → no self-id block (e.g. the editor path).
+  readonly modelId?: string;
+  // Optional knowledge cutoff for the self-id block.
+  readonly knowledgeCutoff?: string;
+  // Per-repo memory index (issue #118). Empty/absent → no memory block.
+  readonly memoryIndex?: readonly MemoryIndexEntry[];
+};
+
+function rolePrompt(slots: RolePromptSlots): string {
+  const memory = slots.memoryIndex ? memoryIndexBlock(slots.memoryIndex) : null;
+  const blocks: PromptBlock[] = [
+    ...defaultContractBlocks(),
+    ...(slots.modelId ? [selfIdBlock(slots.modelId, slots.knowledgeCutoff)] : []),
+    {
+      kind: 'sessionGuidance',
+      text: `${slots.roleGuidance}\n\n${stepBudgetLine(slots.maxSteps)}`,
+    },
+    { kind: 'style', text: slots.style },
+    { kind: 'env', text: slots.env },
+    ...(memory ? [memory] : []),
+  ];
+  return renderPromptBlocks(blocks);
+}
+
+// The registry: template name → its slot shape. Later slices route the remaining hand-concat sites
+// (orchestrator system prompt, etc.) through render(); its signature does not change.
 export type PromptSlots = {
   'review-thread': ReviewThreadSlots;
   'specialist-guidance': SpecialistGuidanceSlots;
+  'role-prompt': RolePromptSlots;
 };
 
 export type PromptName = keyof PromptSlots;
@@ -55,6 +107,7 @@ export type PromptName = keyof PromptSlots;
 const TEMPLATES: { [N in PromptName]: (slots: PromptSlots[N]) => string } = {
   'review-thread': reviewThread,
   'specialist-guidance': specialistGuidance,
+  'role-prompt': rolePrompt,
 };
 
 // The single prompt-assembly seam. Look up the named template and apply it to its typed slots. `name`

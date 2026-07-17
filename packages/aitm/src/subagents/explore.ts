@@ -13,6 +13,7 @@ import {
   makeAgentTool,
 } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, Tool, ToolSet } from 'ai';
+import { EXPLORE_SYSTEM_PROMPT } from './prompts/role-guidance.ts';
 
 // The tool name the model invokes and the ToolSet key it mounts under.
 export const EXPLORE_TOOL_NAME = 'explore';
@@ -26,18 +27,6 @@ const EXPLORE_DESCRIPTION =
   'context, so the prompt must be a complete, standalone question. Use it for broad or multi-file ' +
   'questions so the raw file text stays out of your own context; issue independent explore calls in ' +
   'the same turn to run them in parallel.';
-
-const EXPLORE_SYSTEM_PROMPT = [
-  'You are a read-only survey agent. You answer ONE self-contained question about a code repository.',
-  '',
-  'Ground every claim in the real code: use readFile (with offset/limit for large files), grep, and',
-  'glob to locate and confirm. You cannot edit, write, or run commands — only read.',
-  '',
-  'Your final message IS the return value handed back to the agent that called you. Make it a',
-  'self-contained answer: state the conclusion directly, cite concrete file:line references, and',
-  'include only what the caller needs to act — not a narration of your search. If the answer is that',
-  'something does not exist, say so plainly.',
-].join('\n');
 
 // The child toolset must be exactly the read-only trio (keys matching EXPLORE_ALLOWED_TOOLS); a
 // wider set trips makeAgentTool's allowlist. Callers pass the checkout-confined trio from

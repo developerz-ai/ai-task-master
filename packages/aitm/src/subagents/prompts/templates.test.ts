@@ -79,3 +79,40 @@ test('render is pure: identical slots render byte-for-byte identically', () => {
   const slots = { context: 'C', comment: 'D' };
   assert.equal(render('review-thread', slots), render('review-thread', slots));
 });
+
+test('render(role-prompt): bakes the contract blocks, <env>, and step-budget around the role guidance; trusted slots are never fenced', () => {
+  const out = render('role-prompt', {
+    roleGuidance: 'You are the Worker.',
+    maxSteps: 30,
+    style: '# style digest',
+    env: '<env>\nWorking directory: /repo\n</env>',
+    modelId: 'prov/model-x',
+  });
+  assert.match(out, /Harness contract:/, 'harness contract baked in');
+  assert.match(out, /Communication contract:/, 'communication contract baked in');
+  assert.match(out, /Autonomy:/, 'autonomy contract baked in');
+  assert.match(out, /You are the Worker\./, 'role guidance present');
+  assert.match(out, /hard budget of 30 tool steps/, 'step-budget reminder interpolates the cap');
+  assert.match(out, /# style digest/, 'style slot present');
+  assert.match(
+    out,
+    /<env>[\s\S]*Working directory: \/repo[\s\S]*<\/env>/,
+    'env slot rendered verbatim',
+  );
+  assert.match(out, /prov\/model-x/, 'self-id present when a modelId is supplied');
+  assert.ok(
+    !/<review-comment>|<specialist-guidance>/.test(out),
+    'role-prompt slots are trusted instruction — no data envelope wraps them',
+  );
+});
+
+test('render(role-prompt): omits the self-id block when no modelId is supplied', () => {
+  const out = render('role-prompt', {
+    roleGuidance: 'ROLE',
+    maxSteps: 12,
+    style: '',
+    env: '<env>\n</env>',
+  });
+  assert.ok(!/running as the model/.test(out), 'no self-id block without a modelId');
+  assert.match(out, /Harness contract:/, 'contracts still baked in');
+});

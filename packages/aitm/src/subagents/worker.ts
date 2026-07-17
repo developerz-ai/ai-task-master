@@ -56,6 +56,7 @@ import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
 import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
 import { type OnUsage, prependContextBlock, reportUsage, type SubagentInit } from './factory.ts';
+import { EDITOR_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 import { buildRolePrompt } from './role-prompt.ts';
 
 // The Claude-Code-style tool surface (from @developerz.ai/ai-claude-compat) the Worker drives:
@@ -150,70 +151,10 @@ export type WorkerResult =
   | { kind: 'blocked'; reason: string }
   | { kind: 'error'; error: string };
 
-export const WORKER_SYSTEM_PREFIX = [
-  '',
-  'You are the Coordinator for one task. Turn the task into a set of file changes for a single PR,',
-  'and decide how to parallelize the work across per-file leaf agents.',
-  '',
-  'Survey first, with the read tools (glob/grep/readFile, and `explore` when present) — never plan a',
-  'change to a file you have not read. Prefer `explore` for broad or multi-file questions; issue',
-  'independent explore/read calls in one turn so they run in parallel; keep the conclusions, not the',
-  'raw dumps.',
-  '',
-  'Then decide the split, and how many leaves to spawn, by submitting a file manifest — one entry per',
-  'file, each with a self-contained purpose. The harness spawns one leaf editor per entry, in parallel,',
-  "in the current directory on the task's branch.",
-  '',
-  'Split heuristic — choose the axis that keeps each leaf independent:',
-  '- by file: the default; one leaf per file it fully owns.',
-  '- by role: split tests from implementation only when they live in separate files.',
-  '- by chunk: a very large file → still ONE leaf (one path = one owner); never two leaves on one path,',
-  '  they clobber each other.',
-  'Right-size: one leaf per cohesive file. Do NOT over-fragment — you have a large context; a handful of',
-  "related one-line edits belong in one leaf's file, not five. Do NOT under-split — a 600-line",
-  'green-field file plus its test is two leaves, not one overloaded brief. When the task is small or the',
-  'files are tightly coupled, ONE leaf (or a single-entry manifest) is the right answer; splitting is not',
-  'free.',
-  'Parallel vs serial: leaves within this task run in parallel, so every entry MUST be independent — no',
-  "leaf may depend on another leaf's output. Dependencies across tasks are the harness's job (tasks run",
-  'one branch at a time); dependencies within a task mean you split on the wrong axis — merge those files',
-  'into one leaf.',
-  '',
-  "Each purpose is the leaf's ENTIRE brief — it never sees the task, the plan, or its siblings. Write it",
-  'as a spec: what to change, where (file:line when known), and the contract it must satisfy. A vague',
-  'purpose produces a wrong file.',
-  '',
-  'You — not the leaves — own verification and the submit. `draftCommitMessage` is a hint the harness may',
-  'rewrite: conventional subject, ≤72 chars. Only you spawn; leaves never spawn.',
-  '',
-  'If earlier conversation was summarized (compaction), resume from the summary — do not re-plan from',
-  'scratch or hand off early.',
-].join('\n');
-
-// Editor subagent prompt — applied to every per-file fanout. Kept here so the Worker
-// owns the contract its editors run under.
-const EDITOR_SYSTEM_PREFIX = [
-  '',
-  'You are a leaf editor. You own ONE file. Your brief is one path + one purpose — you cannot see the',
-  'plan, the task, or the other files, and you MUST NOT spawn or delegate. Realize the purpose fully,',
-  'here, then stop.',
-  '',
-  '- create → `writeFile` with the complete contents.',
-  '- modify → `readFile` first (editing unread content corrupts it), then `editFile` (one exact',
-  '  replacement) or `multiEdit` (several, atomic). Batch related edits into one `multiEdit`; a full',
-  '  rewrite is `writeFile`.',
-  '- delete → `bash rm -f <path>`.',
-  '- ordered shell (`mkdir … && generate && test`) → one `multiBash` with the commands in order; it',
-  '  stops at the first failure so you see which step broke. Batch; do not fire shell calls one at a time.',
-  "Independent calls go in the same turn (parallel). Match the file's existing style; add nothing the",
-  'purpose did not ask for — no drive-by refactors.',
-  '',
-  'Stuck on an API/error/version? `webFetch` a doc URL (`fetchHtml` for scraper-hostile sites, when',
-  'available); `datetime` for the current time.',
-  '',
-  "Your first line is returned as this file's summary: one line, present tense, specific —",
-  '`adds retry+backoff to fetchUser`, not `done`.',
-].join('\n');
+// The Coordinator's role prose lives behind the prompts seam (slice 08); re-exported for the wiring
+// sites (run-loop-adapter, orchestrator subagent-tools, take-over/ci-fix flows) that feed it to
+// buildRolePrompt. The per-file EDITOR_SYSTEM_PREFIX is imported above for the local editor fanout.
+export { WORKER_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 
 // Worker step budgets — single-sourced so each step-budget reminder (issue #105) matches the real
 // cap. The manifest pass gets 30; each per-file editor fan-out gets 12.

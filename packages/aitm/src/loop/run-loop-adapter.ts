@@ -729,6 +729,13 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // today when nothing matches).
   let specialistsPromise: ReturnType<typeof discoverSpecialists> | undefined;
   const specialistRoster = () => (specialistsPromise ??= discoverSpecialists(input.cwd));
+  // Announce the discovered roster once, up front (mirrors claudetm's "Found N subagents"). Discovery
+  // is a cheap dir read, no LLM; fire-and-forget so it never delays the run.
+  void specialistRoster().then((roster) => {
+    if (roster.length > 0) {
+      harnessProgress(`found ${roster.length} specialist(s): ${roster.map((a) => a.name).join(', ')}`);
+    }
+  });
 
   // Per-group CI-fix conversation handles, retained in memory for the life of the run so successive
   // fix passes for a group continue the same Worker conversation instead of re-planning cold — the

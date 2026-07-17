@@ -23,6 +23,7 @@ import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { GitHubClient } from '../github/github-client.ts';
 import { localEditTools, runLoopAdapter } from '../loop/run-loop-adapter.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
+import { harnessProgress } from '../observability/step-progress.ts';
 import {
   type RoleUsage,
   roleUsageSink,
@@ -808,12 +809,23 @@ const defaultAuthStatus: AuthStatusFn = (cwd) => new GitHubClient(cwd).authStatu
 // the surrounding cache IO so a flaky style step can't halt planning or merging.
 async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
   const { cwd, credentials, agentConfig, state } = input;
+  const styleFile =
+    agentConfig.flavor === 'claude'
+      ? 'CLAUDE.md'
+      : agentConfig.flavor === 'agents'
+        ? 'AGENTS.md'
+        : 'the style override';
   try {
     const cached = await state.readCodingStyle();
-    if (cached !== null && cached.trim() !== '') return cached;
+    if (cached !== null && cached.trim() !== '') {
+      harnessProgress('coding style: using cached digest');
+      return cached;
+    }
   } catch {
     // Unreadable cache (non-ENOENT) — distill fresh rather than block the run.
   }
+  // The distillation is an LLM call — announce it so the pre-planning pause isn't a silent gap.
+  harnessProgress(`coding style: distilling from ${styleFile} with ${credentials.modelIdFor('planner')}...`);
   let digest: string;
   try {
     // Style distillation runs on the planner's model, so its usage is recorded under `planner`.
@@ -825,8 +837,10 @@ async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
     });
     digest = await distiller.distill({ config: agentConfig, repoRoot: cwd });
   } catch {
+    harnessProgress('coding style: distillation unavailable — using the raw style file');
     return agentConfig.contents;
   }
+  harnessProgress('coding style: guide ready');
   try {
     await state.writeCodingStyle(digest);
   } catch {

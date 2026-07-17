@@ -124,12 +124,14 @@ test('atomicWrite: parent-dir fsync runs after rename and tolerates EINVAL', asy
     await withPatchedSync(
       d.path,
       (real) =>
-        function countedSync(this: FileHandle) {
+        async function countedSync(this: FileHandle) {
           syncCalls += 1;
-          // First sync is the file; the second is the parent dir — reject it as an unsupported op.
-          return syncCalls >= 2
-            ? Promise.reject(Object.assign(new Error('dir fsync unsupported'), { code: 'EINVAL' }))
-            : real.call(this);
+          // First sync is the file; the second is the parent dir. Assert the renamed target
+          // already exists to prove the parent-dir fsync runs after rename, then reject the
+          // dir sync as an unsupported op.
+          if (syncCalls === 1) return real.call(this);
+          await stat(path);
+          throw Object.assign(new Error('dir fsync unsupported'), { code: 'EINVAL' });
         },
       async () => {
         await atomicWrite(path, 'durable\n');

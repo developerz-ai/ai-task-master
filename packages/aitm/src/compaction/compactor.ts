@@ -90,7 +90,8 @@ export class Compactor {
         }),
       this.init.timeout,
     );
-    return text.trim().length === 0 ? undefined : text;
+    const summary = text.trim();
+    return summary.length === 0 ? undefined : summary;
   }
 }
 

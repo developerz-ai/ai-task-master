@@ -69,7 +69,6 @@ function makeRunLoop(
   mockModel: MockLanguageModelV3,
 ): (input: RunLoopInput) => Promise<WorkLoopResult> {
   return async (input: RunLoopInput): Promise<WorkLoopResult> => {
-
     // Hardcode one PR group — bypass the Planner subagent for this integration test.
     const planGroup: PrGroup = {
       id: 'hello',
@@ -258,7 +257,6 @@ test('start-flow: 2-task group writes [x] per completed task in plan.md', async 
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
         runLoop: async (input: RunLoopInput): Promise<WorkLoopResult> => {
-
           const planGroup: PrGroup = {
             id: 'hello-world',
             title: 'add hello and world',

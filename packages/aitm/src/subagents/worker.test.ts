@@ -359,6 +359,51 @@ test('runWorker: manifest → per-file edits → commit sequence', async () => {
   assert.match(cmds[3] ?? '', /git -C '\/tmp\/wt' commit -m 'feat: add a \+ fix b'/);
 });
 
+test('runWorker: creates the group branch before the editor fanout writes (branch-before-edit, audit 02)', async () => {
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
+      { path: 'src/b.ts', kind: 'modify', purpose: 'fix b' },
+    ],
+    draftCommitMessage: 'feat: a + b',
+  };
+  // One unified timeline so the checkout can be ordered against the fanout: each editor's on-disk
+  // verification (`git status --porcelain -- <path>`) marks that file's edit as complete.
+  const order: string[] = [];
+  const bash = tool<BashInput, BashOutput>({
+    description: 'run a bash command in the checkout',
+    inputSchema: z.object({ command: z.string() }),
+    execute: async (input) => {
+      if (input.command.includes('status --porcelain')) {
+        const path = /-- '(.*)'\s*$/.exec(input.command)?.[1] ?? '';
+        order.push(`edit:${path}`);
+        return { stdout: ` M ${path}\n`, stderr: '', exitCode: 0 };
+      }
+      if (input.command.includes('checkout -B')) order.push('checkout');
+      else if (input.command.includes('add -A')) order.push('add');
+      else if (input.command.includes('commit -m')) order.push('commit');
+      return { stdout: '', stderr: '', exitCode: 0 };
+    },
+  });
+  const tools: WorkerTools = { ...makeTools().tools, bash };
+  const model = makeWorkerModel(manifest, ['created a', 'fixed b']);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+
+  // Ordering: branch checkout → the editor fanout (both files) → stage → commit.
+  const checkoutIdx = order.indexOf('checkout');
+  const firstEditIdx = order.findIndex((e) => e.startsWith('edit:'));
+  const addIdx = order.indexOf('add');
+  assert.ok(checkoutIdx >= 0, 'the group branch is checked out');
+  assert.ok(
+    checkoutIdx < firstEditIdx,
+    `branch checkout must precede the editor fanout, got ${order.join(',')}`,
+  );
+  assert.ok(firstEditIdx < addIdx, 'edits precede staging');
+});
+
 test('runWorker: a narrate-only editor (no on-disk write) records no change and blocks — no phantom edit', async () => {
   const manifest: FileManifest = {
     files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
@@ -376,9 +421,15 @@ test('runWorker: a narrate-only editor (no on-disk write) records no change and 
     assert.match(result.reason, /src\/a\.ts/);
     assert.match(result.reason, /more capable/i);
   }
-  // The path was verified on disk, and the phantom edit never reached the checkout/commit sequence.
+  // The path was verified on disk. The group branch is created before the editor fanout
+  // (branch-before-edit), but the phantom is caught before staging — nothing is added or committed.
   assert.ok(calls.statuses.some((s) => s.command.includes("status --porcelain -- 'src/a.ts'")));
-  assert.equal(calls.bashes.length, 0, 'no checkout/add/commit on a phantom edit');
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.equal(
+    cmds.some((c) => /add -A|commit -m/.test(c)),
+    false,
+    'no add/commit on a phantom edit',
+  );
 });
 
 test('runWorker: one phantom editor blocks the whole pass and names only the unchanged file — no partial commit', async () => {
@@ -400,8 +451,14 @@ test('runWorker: one phantom editor blocks the whole pass and names only the unc
     assert.match(result.reason, /src\/b\.ts/);
     assert.equal(result.reason.includes('src/a.ts'), false, 'only the unchanged path is named');
   }
-  // A real edit to a MUST NOT be committed on its own when a sibling file was never written.
-  assert.equal(calls.bashes.length, 0, 'no partial commit when any planned file is unchanged');
+  // A real edit to a MUST NOT be committed on its own when a sibling file was never written. The
+  // group branch is created before the fanout (branch-before-edit), but the phantom blocks staging.
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.equal(
+    cmds.some((c) => /add -A|commit -m/.test(c)),
+    false,
+    'no partial commit when any planned file is unchanged',
+  );
   assert.equal(calls.statuses.length, 2, 'both planned files were verified on disk');
 });
 

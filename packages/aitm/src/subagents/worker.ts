@@ -210,7 +210,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
   }
   const branch = input.group.branch ?? `aitm/${input.group.id}`;
   try {
-    const planned = await planAndEdit(agent, init, input);
+    const planned = await planAndEdit(agent, init, input, branch);
     if (planned.kind === 'blocked') return { kind: 'blocked', reason: planned.reason };
     if (planned.kind === 'error') return { kind: 'error', error: planned.error };
 
@@ -224,7 +224,8 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
       if (gated.kind === 'blocked') return { kind: 'blocked', reason: gated.reason };
       if (gated.extraChanges.length > 0) changes = [...changes, ...gated.extraChanges];
     } else {
-      await commitOnBranch(init.tools.bash, input, branch, planned.draftCommitMessage);
+      // Branch already created by planAndEdit (branch-before-edit), so this only formats + commits.
+      await commitOnBranch(init.tools.bash, input, planned.draftCommitMessage);
     }
 
     return {
@@ -261,6 +262,7 @@ async function planAndEdit(
   agent: WorkerAgent,
   init: SubagentInit<WorkerTools>,
   input: WorkerInput,
+  branch: string,
 ): Promise<PlanEditResult> {
   const { submitted, handle } = await planManifest(agent, input, init.onUsage);
   if (!submitted.ok) {
@@ -278,6 +280,11 @@ async function planAndEdit(
   if (manifest.files.length === 0) {
     return { kind: 'blocked', reason: EMPTY_MANIFEST_REASON };
   }
+  // Create/switch the group branch BEFORE the editor fanout writes any file, so every edit lands on
+  // the group branch from the start rather than on whatever branch is currently checked out. Under
+  // the shared single checkout (worktrees removed), a `checkout -B` after the writes would otherwise
+  // carry this group's — or a concurrent group's — uncommitted edits onto the wrong branch (audit 02).
+  await checkoutBranch(requireExec(init.tools.bash), input, branch);
   const outcomes = await Promise.all(manifest.files.map((file) => runEditor(init, file, input)));
   const changes: FileChange[] = [];
   const unchanged: string[] = [];
@@ -320,7 +327,9 @@ async function commitWithVerify(
   message: string,
 ): Promise<{ kind: 'ok'; extraChanges: FileChange[] } | { kind: 'blocked'; reason: string }> {
   const exec = requireExec(init.tools.bash);
-  await checkoutAndFormat(exec, input, branch);
+  // The group branch was already created by the first planAndEdit pass (branch-before-edit); verify
+  // must see the formatted files, so format the checked-out branch before running verify.
+  await runFormat(exec, input);
 
   let started = Date.now();
   let out = await runVerify(exec, input);
@@ -331,10 +340,15 @@ async function commitWithVerify(
     // One bounded fix pass. planAndEdit never verifies, so this cannot recurse. Its edits are
     // captured for the delivery; an empty/blocked fix manifest simply makes zero edits, and the
     // re-verify below is still authoritative (per the spec, a still-red gate blocks on the tail).
-    const fixed = await planAndEdit(agent, init, {
-      ...input,
-      task: buildVerifyFixTask(input.group.id, out),
-    });
+    const fixed = await planAndEdit(
+      agent,
+      init,
+      {
+        ...input,
+        task: buildVerifyFixTask(input.group.id, out),
+      },
+      branch,
+    );
     if (fixed.kind === 'ok') extraChanges = fixed.changes;
     await runFormat(exec, input);
     started = Date.now();
@@ -502,23 +516,25 @@ function buildEditorPrompt(file: FileManifestEntry, input: WorkerInput): string 
 async function commitOnBranch(
   bash: Tool<BashInput, BashOutput>,
   input: WorkerInput,
-  branch: string,
   message: string,
 ): Promise<void> {
   const exec = requireExec(bash);
-  await checkoutAndFormat(exec, input, branch);
+  // Branch already created by planAndEdit (branch-before-edit); only format + stage + commit remain.
+  await runFormat(exec, input);
   await stageAndCommit(exec, input, message);
 }
 
-// Branch setup + format — the pre-staging steps shared by the plain commit path and the verify
-// gate (which slots verify + a fix pass between this and stageAndCommit).
-async function checkoutAndFormat(
+// Create/switch the group branch. Invoked from planAndEdit BEFORE the editor fanout so edits land on
+// the group branch from the start (audit 02). `-B` with no start-point sets the branch to the current
+// HEAD — a no-op when the branch is already checked out (e.g. the reused verify fix pass), and it
+// never discards committed work. The driver acquires its checkout mutex around the whole
+// checkout→edit→commit span so a concurrent group can't switch the shared tree mid-pass.
+async function checkoutBranch(
   exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
   input: WorkerInput,
   branch: string,
 ): Promise<void> {
   await runBash(exec, `git -C ${shQuote(input.checkoutPath)} checkout -B ${shQuote(branch)}`);
-  await runFormat(exec, input);
 }
 
 // Stage (excluding aitm's own state dir) + commit — the post-verify steps shared by both paths.

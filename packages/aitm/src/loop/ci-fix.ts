@@ -92,6 +92,9 @@ export type FixSessionSubagents = {
   // Per-step transcript recorder callback (issue #108), forwarded to the fix Worker agent. Unset →
   // nothing recorded.
   onStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
+  // Progress-only per-step callback for the fix Worker's parallel editor fanout (silent-run fix).
+  // See SubagentInit.onEditorStepFinish. Unset → editors stay silent.
+  onEditorStepFinish?: SubagentInit<WorkerTools>['onEditorStepFinish'];
   // Reconstructed messages from an interrupted ci-fix transcript (issue #108). When present and no
   // in-memory priorHandle exists, the fix Worker resumes from them instead of cold-starting.
   resumeMessages?: readonly ModelMessage[];
@@ -249,6 +252,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
       : {}),
     ...(subagents.onUsage !== undefined ? { onUsage: subagents.onUsage } : {}),
     ...(subagents.onStepFinish ? { onStepFinish: subagents.onStepFinish } : {}),
+    ...(subagents.onEditorStepFinish ? { onEditorStepFinish: subagents.onEditorStepFinish } : {}),
   });
   // priorHandle precedence (issue #108): an in-memory handle from an earlier pass this run wins;
   // otherwise, resume from an interrupted transcript's messages (built against this fresh agent).

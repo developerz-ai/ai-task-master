@@ -849,6 +849,7 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
   const { runTakeOverFlow } = await import('../loop/take-over-flow.ts');
   const { githubThreadTool } = await import('../tools/github-thread-tool.ts');
   const { PrContextStore } = await import('../state/pr-context-store.ts');
+  const { agentStepProgress, shortModelName } = await import('../observability/step-progress.ts');
 
   const worktreePath = input.cwd;
   const baseBranch = await input.github.defaultBranch();
@@ -882,6 +883,16 @@ async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopRe
       workerTools,
       styleContents,
       timeout: { stepMs: input.resolved.llmStepTimeoutMs },
+      // Live agent-activity stream (silent-run fix), labeled by the model doing the work.
+      onReviewerStepFinish: agentStepProgress(
+        `${shortModelName(input.credentials.modelIdFor('reviewer'))} reviewer pr-${input.pr}`,
+      ),
+      onWorkerStepFinish: agentStepProgress(
+        `${shortModelName(input.credentials.modelIdFor('worker'))} ci-fix pr-${input.pr}`,
+      ),
+      onEditorStepFinish: agentStepProgress(
+        `${shortModelName(input.credentials.modelIdFor('worker'))} editor pr-${input.pr}`,
+      ),
       ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
       ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
     },

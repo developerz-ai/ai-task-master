@@ -32,6 +32,7 @@ import {
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup } from '../state/schema.ts';
+import type { SubagentInit } from '../subagents/factory.ts';
 import {
   createReviewerAgent,
   REVIEWER_MAX_STEPS,
@@ -94,6 +95,12 @@ export type TakeOverSubagents = {
   // Per-step LLM request deadline, armed on both take-over agents (Worker + Reviewer). Unset → none.
   // Orthogonal to the flow's between-iterations `signal` cancel (issue #129).
   timeout?: TimeoutConfiguration;
+  // Live progress stream for the take-over agents (silent-run fix): forwarded verbatim to both
+  // agents' `onStepFinish`; the editor variant reaches the fix Worker's parallel fanout. Unset →
+  // silent, matching prior behavior.
+  onReviewerStepFinish?: SubagentInit<ReviewerTools>['onStepFinish'];
+  onWorkerStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
+  onEditorStepFinish?: SubagentInit<WorkerTools>['onEditorStepFinish'];
   // Injection seam — bypass the real subagent agents in tests.
   runReviewerOverride?: (input: {
     pr: number;
@@ -327,6 +334,9 @@ async function runReviewerThreads(
       maxSteps: REVIEWER_MAX_STEPS,
     }),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
+    ...(input.subagents.onReviewerStepFinish
+      ? { onStepFinish: input.subagents.onReviewerStepFinish }
+      : {}),
   });
   return runReviewer(agent, {
     pr: input.pr,
@@ -389,6 +399,12 @@ async function runWorkerCiFix(
       maxSteps: WORKER_MAX_STEPS,
     }),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
+    ...(input.subagents.onWorkerStepFinish
+      ? { onStepFinish: input.subagents.onWorkerStepFinish }
+      : {}),
+    ...(input.subagents.onEditorStepFinish
+      ? { onEditorStepFinish: input.subagents.onEditorStepFinish }
+      : {}),
   });
   return runWorker(agent, workerInput);
 }

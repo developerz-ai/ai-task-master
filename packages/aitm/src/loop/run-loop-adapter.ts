@@ -46,6 +46,12 @@ import { Compactor } from '../compaction/compactor.ts';
 import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager, type ToolSurface } from '../mcp/mcp-client.ts';
 import { guardDeferred, TOOL_SEARCH_TOOL_NAME, toolSearch } from '../mcp/tool-search.ts';
+import {
+  agentStepProgress,
+  composeStepFinish,
+  harnessProgress,
+  shortModelName,
+} from '../observability/step-progress.ts';
 import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
@@ -225,6 +231,12 @@ export function recordStepDeltas(
     if (delta.length > 0) void recorder.step(delta, event.usage);
   };
 }
+
+// The SDK step event a role's `onStepFinish` receives — spelled once so the composeStepFinish call
+// sites (recorder + progress stream share one slot) don't restate the settings-indexed type.
+type StepEvent<TOOLS extends ToolSet> = Parameters<
+  NonNullable<ToolLoopAgentSettings<never, TOOLS>['onStepFinish']>
+>[0];
 
 // Apply operator-configured PreToolUse/PostToolUse hooks over a resolved tool record (issue #121),
 // after the MCP/local partial-fill so both MCP-supplied and local tools are covered. No hooks
@@ -537,6 +549,7 @@ export async function runLoopAdapter(
       mergeMethod: input.resolved.mergeMethod,
       adminMerge: input.resolved.adminMerge ?? false,
       initialSessionCount: current.sessionCount,
+      progress: harnessProgress,
     });
     return await loop.run();
   } finally {
@@ -613,6 +626,12 @@ async function defaultPlanGroups(
   const memoryIndex = await memoryIndexFor(input.state);
   // Transcript (issue #108): the planner run is recorded (never resumed — it always cold-starts).
   const plannerRecorder = await beginTranscript(input.state.transcripts?.(), { planner: true });
+  const plannerModelId = input.credentials.modelIdFor('planner');
+  harnessProgress(`planning with ${plannerModelId}: ${input.goal}`);
+  const plannerStep = composeStepFinish<StepEvent<PlannerTools>>(
+    plannerRecorder ? recordStepDeltas(plannerRecorder) : undefined,
+    agentStepProgress(`${shortModelName(plannerModelId)} planner`),
+  );
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
     tools: applyHooks(
@@ -635,7 +654,7 @@ async function defaultPlanGroups(
     }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
-    ...(plannerRecorder ? { onStepFinish: recordStepDeltas(plannerRecorder) } : {}),
+    ...(plannerStep ? { onStepFinish: plannerStep } : {}),
   });
   const result = await runPlanner(agent, {
     goal: input.goal,
@@ -645,8 +664,13 @@ async function defaultPlanGroups(
     ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
   });
   await plannerRecorder?.end(runEndOutcome(result.kind));
-  if (result.kind === 'ok')
-    return { kind: 'ok', groups: planToPrGroups(result.plan, input.branch) };
+  if (result.kind === 'ok') {
+    const groups = planToPrGroups(result.plan, input.branch);
+    harnessProgress(
+      `plan ready: ${groups.length} PR group(s) — ${groups.map((g) => g.id).join(', ')}`,
+    );
+    return { kind: 'ok', groups };
+  }
   if (result.kind === 'blocked') return { kind: 'blocked', reason: result.reason };
   return { kind: 'error', error: result.error };
 }
@@ -760,6 +784,14 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       group: worktree.groupId,
       stage: 'addressing-reviews',
     });
+    const reviewerModelId = input.credentials.modelIdFor('reviewer');
+    harnessProgress(
+      `group ${worktree.groupId}: addressing ${threads.length} review thread(s) on PR #${pr} with ${reviewerModelId}`,
+    );
+    const reviewerStep = composeStepFinish<StepEvent<ReviewerTools>>(
+      recorder ? recordStepDeltas(recorder) : undefined,
+      agentStepProgress(`${shortModelName(reviewerModelId)} reviewer ${worktree.groupId}`),
+    );
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
       tools,
@@ -784,7 +816,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             ),
       timeout: stepTimeout,
       ...(reviewerUsage ? { onUsage: reviewerUsage } : {}),
-      ...(recorder ? { onStepFinish: recordStepDeltas(recorder) } : {}),
+      ...(reviewerStep ? { onStepFinish: reviewerStep } : {}),
     });
     const result = await runReviewerSubagent(agent, {
       pr,
@@ -833,6 +865,15 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const recorder = await beginTranscript(store, { group: group.id, stage: 'working' });
       // Regular Worker: web_search only when explicitly enabled (webSearch: true).
       const providerOptions = webSearchProviderOptions(input.resolved.webSearch, false);
+      const workerModelId = input.credentials.modelIdFor('worker');
+      const workerModel = shortModelName(workerModelId);
+      harnessProgress(
+        `group ${group.id}: worker starting with ${workerModelId} — ${task ? task.text : group.title}`,
+      );
+      const workerStep = composeStepFinish<StepEvent<WorkerTools>>(
+        recorder ? recordStepDeltas(recorder) : undefined,
+        agentStepProgress(`${workerModel} worker ${group.id}`),
+      );
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
         tools,
@@ -859,7 +900,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         timeout: stepTimeout,
         ...(providerOptions !== undefined ? { providerOptions } : {}),
         ...(workerUsage ? { onUsage: workerUsage } : {}),
-        ...(recorder ? { onStepFinish: recordStepDeltas(recorder) } : {}),
+        ...(workerStep ? { onStepFinish: workerStep } : {}),
+        // Editor fanout runs on the worker model; per-step-field-only progress is parallel-safe.
+        onEditorStepFinish: agentStepProgress(`${workerModel} editor ${group.id}`),
       });
       const result = await runWorkerSubagent(agent, {
         group,
@@ -886,8 +929,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // store). Push it to origin first — `gh pr create` won't open a PR for a branch that
       // isn't on the remote ("No commits between … / Head ref must be a branch").
       const head = group.branch ?? `aitm/${group.id}`;
+      harnessProgress(`group ${group.id}: pushing ${head} and opening PR`);
       await runGit(['push', '-u', 'origin', head], { cwd: input.cwd });
       const pr = await orch.openPr(group, delivery, baseBranch);
+      harnessProgress(`group ${group.id}: PR #${pr.number} opened — ${pr.url}`);
       // Accumulate this group's deterministic digest into the live rolling context and persist it
       // (issue #123), so the next group's Worker plans against it and a resumed run recovers it. The
       // accumulator serializes concurrent appends from a parallel group batch (no lost digest).
@@ -913,6 +958,15 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const ciStore = state.transcripts?.();
       const ciResume = priorHandle ? null : await resumeMessagesFor(ciStore, group.id, 'ci-failed');
       const ciRecorder = await beginTranscript(ciStore, { group: group.id, stage: 'ci-failed' });
+      const ciFixModelId = input.credentials.modelIdForCapability('coding');
+      const ciFixModel = shortModelName(ciFixModelId);
+      harnessProgress(
+        `group ${group.id}: CI failed on PR #${pr} — running fix session with ${ciFixModelId}`,
+      );
+      const ciFixStep = composeStepFinish<StepEvent<WorkerTools>>(
+        ciRecorder ? recordStepDeltas(ciRecorder) : undefined,
+        agentStepProgress(`${ciFixModel} ci-fix ${group.id}`),
+      );
       const result = await runFixSession({
         github: input.github,
         prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
@@ -945,7 +999,8 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           ...(ciFixUsage ? { onUsage: ciFixUsage } : {}),
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
-          ...(ciRecorder ? { onStepFinish: recordStepDeltas(ciRecorder) } : {}),
+          ...(ciFixStep ? { onStepFinish: ciFixStep } : {}),
+          onEditorStepFinish: agentStepProgress(`${ciFixModel} editor ${group.id}`),
           ...(ciResume ? { resumeMessages: ciResume } : {}),
         },
         group,

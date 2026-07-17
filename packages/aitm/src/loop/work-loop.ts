@@ -129,6 +129,10 @@ export type WorkLoopDeps = {
   // Delay primitive for the post-CI review grace (handleWaitingCi). Optional — defaults to a real
   // timer in production; tests inject a no-op so they don't block on the 2-minute wait.
   sleep?: Sleep;
+  // Harness narration (silent-run fix): one line per group stage transition, wired by the adapter
+  // to the cyan [aitm] console stream so the operator sees the loop driving each group
+  // (working → pr-open → waiting-ci → …). Optional — tests and older callers omit it.
+  progress?: (message: string) => void;
 };
 
 export type GroupOutcome =
@@ -408,6 +412,10 @@ export class WorkLoop {
       }
       if (next === 'blocked') {
         ctx.blockedReason ??= blockReasonFor(stage, ctx.group);
+      }
+      if (next !== stage) {
+        const reason = next === 'blocked' && ctx.blockedReason ? ` (${ctx.blockedReason})` : '';
+        this.deps.progress?.(`group ${ctx.group.id}: ${stage} → ${next}${reason}`);
       }
       ctx.group = { ...ctx.group, stage: next };
       await this.persistStageAfter(stage, next, ctx);

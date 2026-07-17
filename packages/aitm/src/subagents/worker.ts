@@ -453,6 +453,9 @@ async function runEditor(
         // chat-setting default (true), so dropping it changes no request bytes.
         ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
         ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
+        // Editor-fanout progress (silent-run fix): per-step-field-only handlers, safe under the
+        // parallel fanout — see SubagentInit.onEditorStepFinish.
+        ...(init.onEditorStepFinish ? { onStepFinish: init.onEditorStepFinish } : {}),
       }),
     init.timeout,
   );

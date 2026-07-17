@@ -141,6 +141,40 @@ test('the source file is seeded into the cycle guard (self-import blocked)', asy
   });
 });
 
+test('a file reached from two branches is inlined only once (global memo)', async () => {
+  await withDir(async (dir) => {
+    // Diamond: entry → a.md → shared.md and entry → b.md → shared.md. Without a global memo a
+    // hostile fan-out re-expands shared subtrees exponentially; the memo inlines shared.md once.
+    await writeFile(join(dir, 'a.md'), 'A @shared.md\n');
+    await writeFile(join(dir, 'b.md'), 'B @shared.md\n');
+    await writeFile(join(dir, 'shared.md'), 'SHARED\n');
+    const out = await expandImports('@a.md\n@b.md\n', dir);
+    assert.equal((out.match(/SHARED/g) ?? []).length, 1);
+    // the second reference is left literal
+    assert.match(out, /@shared\.md/);
+  });
+});
+
+test('an import whose bytes exceed the budget is left literal', async () => {
+  await withDir(async (dir) => {
+    await writeFile(join(dir, 'big.md'), 'x'.repeat(1000));
+    const out = await expandImports('@big.md\n', dir, { maxBytes: 100 });
+    assert.equal(out, '@big.md\n');
+    assert.doesNotMatch(out, /x{100}/);
+  });
+});
+
+test('the byte budget is cumulative across imports', async () => {
+  await withDir(async (dir) => {
+    await writeFile(join(dir, 'a.md'), 'A'.repeat(60));
+    await writeFile(join(dir, 'b.md'), 'B'.repeat(60));
+    const out = await expandImports('@a.md\n@b.md\n', dir, { maxBytes: 100 });
+    assert.match(out, /A{60}/); // first import fits
+    assert.doesNotMatch(out, /B{60}/); // budget exhausted before the second
+    assert.match(out, /@b\.md/); // left literal
+  });
+});
+
 test('nesting beyond maxDepth leaves the deep import literal', async () => {
   await withDir(async (dir) => {
     await writeFile(join(dir, 'a.md'), 'A @b.md\n');

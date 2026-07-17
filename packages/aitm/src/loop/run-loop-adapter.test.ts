@@ -740,7 +740,13 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
 
   // Constructing the bridge builds OpenRouterClient + ModelLimitsRegistry + Compactor (lazily, no
   // network) — proving they are live in the production path, not dead exports.
-  const orch = defaultMakeOrchestrator({ input, mcp, rollingContext: '', state: {} } as never);
+  const orch = defaultMakeOrchestrator({
+    input,
+    mcp,
+    rollingContext: '',
+    state: {},
+    stepCounter: () => undefined,
+  } as never);
   assert.equal(typeof orch.runWorker, 'function');
 
   const res = await orch.runWorker({

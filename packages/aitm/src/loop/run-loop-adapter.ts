@@ -47,10 +47,13 @@ import { Compactor } from '../compaction/compactor.ts';
 import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager, type ToolSurface } from '../mcp/mcp-client.ts';
 import { guardDeferred, TOOL_SEARCH_TOOL_NAME, toolSearch } from '../mcp/tool-search.ts';
+import { makeStepCounter, type StepCounterFn } from '../observability/run-step.ts';
 import {
+  agentLabel,
   agentStepProgress,
   composeStepFinish,
   harnessProgress,
+  type RunStep,
   shortModelName,
 } from '../observability/step-progress.ts';
 import { roleUsageSink } from '../observability/usage-tracker.ts';
@@ -427,6 +430,9 @@ export type OrchestratorBridgeCtx = {
   fetchHtmlAvailable: boolean;
   // State port so the bridge can persist the accumulated rolling context after each PR opens (#123).
   state: AdapterStatePort;
+  // Resolve the N/M step counter for a group/task so every harness + agent line carries the run's
+  // position (`group 2/5`, `task 3/38`). Built once per run in runLoopAdapter over the plan.
+  stepCounter: StepCounterFn;
 };
 
 export type RunLoopAdapterSeams = {
@@ -510,6 +516,11 @@ export async function runLoopAdapter(
       await state.update((s) => ({ ...s, status: 'working', prGroups: groups }));
     }
 
+    // Step counter over the plan (claudetm parity): group N/M in group-mode, task N/M in prPerTask.
+    // Group order + membership are fixed at plan time, so build it once and share it with the
+    // orchestrator bridges (their harness + agent lines) and the WorkLoop (its transition lines).
+    const stepCounter = makeStepCounter(groups, current.options.prPerTask ?? false);
+
     // ---- Live graph + state proxy ------------------------------------------
     // PlanGraph captures its groups at construction, so rebuild it per call against the
     // mirror that workLoopState keeps in sync after every persisted update.
@@ -550,6 +561,7 @@ export async function runLoopAdapter(
       rollingContext,
       fetchHtmlAvailable,
       state,
+      stepCounter,
     });
 
     const loop = new WorkLoop({
@@ -570,6 +582,7 @@ export async function runLoopAdapter(
       adminMerge: input.resolved.adminMerge ?? false,
       initialSessionCount: current.sessionCount,
       progress: harnessProgress,
+      stepCounter,
     });
     return await loop.run();
   } finally {
@@ -638,10 +651,12 @@ async function defaultPlanGroups(
   // Transcript (issue #108): the planner run is recorded (never resumed — it always cold-starts).
   const plannerRecorder = await beginTranscript(input.state.transcripts?.(), { planner: true });
   const plannerModelId = input.credentials.modelIdFor('planner');
-  harnessProgress(`planning with ${plannerModelId}: ${input.goal}`);
+  harnessProgress(`planning with ${plannerModelId}: ${input.goal}`, { phase: 'planning' });
   const plannerStep = composeStepFinish<StepEvent<PlannerTools>>(
     plannerRecorder ? recordStepDeltas(plannerRecorder) : undefined,
-    agentStepProgress(`${shortModelName(plannerModelId)} planner`),
+    agentStepProgress(agentLabel({ model: shortModelName(plannerModelId), role: 'planner' }), {
+      phase: 'planning',
+    }),
   );
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
@@ -679,6 +694,7 @@ async function defaultPlanGroups(
     const groups = planToPrGroups(result.plan, input.branch);
     harnessProgress(
       `plan ready: ${groups.length} PR group(s) — ${groups.map((g) => g.id).join(', ')}`,
+      { phase: 'planning' },
     );
     return { kind: 'ok', groups };
   }
@@ -713,7 +729,7 @@ export function selfReviewVerifyCommand(
 }
 
 export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
-  const { input, mcp, rollingContext, fetchHtmlAvailable, state } = ctx;
+  const { input, mcp, rollingContext, fetchHtmlAvailable, state, stepCounter } = ctx;
   // Rolling context accumulates across groups within a run (issue #123): seeded from what a resumed
   // run already persisted (ctx.rollingContext), grown by openPr after each PR, and read LIVE by the
   // worker + ci-fix bridges — so group N+1 plans against group N's digest. Appends are serialized so
@@ -733,7 +749,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // is a cheap dir read, no LLM; fire-and-forget so it never delays the run.
   void specialistRoster().then((roster) => {
     if (roster.length > 0) {
-      harnessProgress(`found ${roster.length} specialist(s): ${roster.map((a) => a.name).join(', ')}`);
+      harnessProgress(
+        `found ${roster.length} specialist(s): ${roster.map((a) => a.name).join(', ')}`,
+      );
     }
   });
 
@@ -823,12 +841,21 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       stage: 'addressing-reviews',
     });
     const reviewerModelId = input.credentials.modelIdFor('reviewer');
+    const reviewerCounter = stepCounter(worktree.groupId);
     harnessProgress(
       `group ${worktree.groupId}: addressing ${threads.length} review thread(s) on PR #${pr} with ${reviewerModelId}`,
+      { phase: 'reviewing', ...reviewerCounter },
     );
     const reviewerStep = composeStepFinish<StepEvent<ReviewerTools>>(
       recorder ? recordStepDeltas(recorder) : undefined,
-      agentStepProgress(`${shortModelName(reviewerModelId)} reviewer ${worktree.groupId}`),
+      agentStepProgress(
+        agentLabel({
+          model: shortModelName(reviewerModelId),
+          role: 'reviewer',
+          ctx: worktree.groupId,
+        }),
+        { phase: 'reviewing', ...reviewerCounter },
+      ),
     );
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
@@ -905,6 +932,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const providerOptions = webSearchProviderOptions(input.resolved.webSearch, false);
       const workerModelId = input.credentials.modelIdFor('worker');
       const workerModel = shortModelName(workerModelId);
+      const workerStepTag: RunStep = { phase: 'working', ...stepCounter(group.id, task) };
       // Route this group/task to the target repo's best-matching domain specialist, if any. Its
       // guidance layers onto the Worker's base role prefix; no match → the base prefix, unchanged.
       const specialist = selectSpecialist(
@@ -912,15 +940,27 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         buildSpecialistSignal(group, task),
       );
       if (specialist) {
-        harnessProgress(`group ${group.id}: routing to '${specialist.name}' specialist`);
+        harnessProgress(
+          `group ${group.id}: routing to '${specialist.name}' specialist`,
+          workerStepTag,
+        );
       }
       const workerGuidance = composeSpecialistGuidance(WORKER_SYSTEM_PREFIX, specialist);
       harnessProgress(
         `group ${group.id}: worker starting with ${workerModelId} — ${task ? task.text : group.title}`,
+        workerStepTag,
       );
+      // The stream label names the SUBAGENT: the routed specialist (backend/jobs/frontend…) when one
+      // matched, else the bare 'worker' role. So `[k3 backend g1 3/38 working] …` on a routed task.
+      const workerAgentLabel = agentLabel({
+        model: workerModel,
+        role: 'worker',
+        ...(specialist ? { specialist: specialist.name } : {}),
+        ctx: group.id,
+      });
       const workerStep = composeStepFinish<StepEvent<WorkerTools>>(
         recorder ? recordStepDeltas(recorder) : undefined,
-        agentStepProgress(`${workerModel} worker ${group.id}`),
+        agentStepProgress(workerAgentLabel, workerStepTag),
       );
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
@@ -950,7 +990,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         ...(workerUsage ? { onUsage: workerUsage } : {}),
         ...(workerStep ? { onStepFinish: workerStep } : {}),
         // Editor fanout runs on the worker model; per-step-field-only progress is parallel-safe.
-        onEditorStepFinish: agentStepProgress(`${workerModel} editor ${group.id}`),
+        onEditorStepFinish: agentStepProgress(
+          agentLabel({ model: workerModel, role: 'editor', ctx: group.id }),
+          workerStepTag,
+        ),
       });
       const result = await runWorkerSubagent(agent, {
         group,
@@ -977,10 +1020,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // store). Push it to origin first — `gh pr create` won't open a PR for a branch that
       // isn't on the remote ("No commits between … / Head ref must be a branch").
       const head = group.branch ?? `aitm/${group.id}`;
-      harnessProgress(`group ${group.id}: pushing ${head} and opening PR`);
+      const prOpenTag: RunStep = { phase: 'pr-open', ...stepCounter(group.id) };
+      harnessProgress(`group ${group.id}: pushing ${head} and opening PR`, prOpenTag);
       await runGit(['push', '-u', 'origin', head], { cwd: input.cwd });
       const pr = await orch.openPr(group, delivery, baseBranch);
-      harnessProgress(`group ${group.id}: PR #${pr.number} opened — ${pr.url}`);
+      harnessProgress(`group ${group.id}: PR #${pr.number} opened — ${pr.url}`, prOpenTag);
       // Accumulate this group's deterministic digest into the live rolling context and persist it
       // (issue #123), so the next group's Worker plans against it and a resumed run recovers it. The
       // accumulator serializes concurrent appends from a parallel group batch (no lost digest).
@@ -1007,11 +1051,16 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const selfReviewModel = shortModelName(selfReviewModelId);
       // Prefer the configured verifyCommand; else a conservative typecheck fallback for a TS repo.
       const verifyCommand = selfReviewVerifyCommand(input.resolved.verifyCommand, worktree.path);
+      const selfReviewTag: RunStep = { phase: 'self-review', ...stepCounter(group.id) };
       harnessProgress(
         `group ${group.id}: self-reviewing the diff with ${selfReviewModelId} before opening the PR`,
+        selfReviewTag,
       );
       const selfReviewStep = composeStepFinish<StepEvent<WorkerTools>>(
-        agentStepProgress(`${selfReviewModel} self-review ${group.id}`),
+        agentStepProgress(
+          agentLabel({ model: selfReviewModel, role: 'self-review', ctx: group.id }),
+          selfReviewTag,
+        ),
       );
       return runSelfReviewSession({
         subagents: {
@@ -1039,7 +1088,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           ...(selfReviewUsage ? { onUsage: selfReviewUsage } : {}),
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(selfReviewStep ? { onStepFinish: selfReviewStep } : {}),
-          onEditorStepFinish: agentStepProgress(`${selfReviewModel} editor ${group.id}`),
+          onEditorStepFinish: agentStepProgress(
+            agentLabel({ model: selfReviewModel, role: 'editor', ctx: group.id }),
+            selfReviewTag,
+          ),
         },
         group,
         baseBranch,
@@ -1067,12 +1119,17 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const ciRecorder = await beginTranscript(ciStore, { group: group.id, stage: 'ci-failed' });
       const ciFixModelId = input.credentials.modelIdForCapability('coding');
       const ciFixModel = shortModelName(ciFixModelId);
+      const ciFixTag: RunStep = { phase: 'ci-fix', ...stepCounter(group.id) };
       harnessProgress(
         `group ${group.id}: CI failed on PR #${pr} — running fix session with ${ciFixModelId}`,
+        ciFixTag,
       );
       const ciFixStep = composeStepFinish<StepEvent<WorkerTools>>(
         ciRecorder ? recordStepDeltas(ciRecorder) : undefined,
-        agentStepProgress(`${ciFixModel} ci-fix ${group.id}`),
+        agentStepProgress(
+          agentLabel({ model: ciFixModel, role: 'ci-fix', ctx: group.id }),
+          ciFixTag,
+        ),
       );
       const ciFixWorkerTools = applyHooks(
         resolveWorkerTools(
@@ -1098,7 +1155,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
               ? { providerOptions: ciFixProviderOptions }
               : {}),
             ...(ciFixUsage ? { onUsage: ciFixUsage } : {}),
-            onStepFinish: agentStepProgress(`${ciFixModel} conflict-resolve ${group.id}`),
+            onStepFinish: agentStepProgress(
+              agentLabel({ model: ciFixModel, role: 'conflict-resolve', ctx: group.id }),
+              ciFixTag,
+            ),
           })
         : undefined;
       const result = await runFixSession({
@@ -1123,7 +1183,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
           ...(ciFixStep ? { onStepFinish: ciFixStep } : {}),
-          onEditorStepFinish: agentStepProgress(`${ciFixModel} editor ${group.id}`),
+          onEditorStepFinish: agentStepProgress(
+            agentLabel({ model: ciFixModel, role: 'editor', ctx: group.id }),
+            ciFixTag,
+          ),
           ...(ciResume ? { resumeMessages: ciResume } : {}),
           ...(ciFixResolveConflicts ? { resolveConflicts: ciFixResolveConflicts } : {}),
         },

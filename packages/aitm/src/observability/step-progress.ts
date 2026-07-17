@@ -23,6 +23,44 @@ export type StepProgressEvent = {
   toolCalls?: ReadonlyArray<{ toolName: string; input: unknown }>;
 };
 
+// The STATE + STEP a line is reported under (claudetm parity): a phase word (`working`, `pr-open`,
+// `ci-fix`, …) and an `index/total` step counter, both optional. Composed into a compact tag that
+// rides inside the timestamp bracket. All fields undefined → empty tag → today's format, byte-for-byte.
+export type RunStep = {
+  phase?: string;
+  // Counter label — `group`/`task`. Prefixes the counter (`group 2/5`); omitted → bare `2/5`.
+  unit?: string;
+  index?: number;
+  total?: number;
+};
+
+// Render a RunStep as the in-bracket tag: `<unit N/M> <phase>`, e.g. `group 2/5 working`,
+// `task 3/38 ci-fix`, or just `planning` when there is no counter yet. Empty string when nothing is
+// known, so the prefix falls back to the plain `[label HH:MM:SS]` form.
+export function formatStepTag(step: RunStep): string {
+  const parts: string[] = [];
+  if (step.index !== undefined && step.total !== undefined && step.total > 0) {
+    const counter = `${step.index}/${step.total}`;
+    parts.push(step.unit ? `${step.unit} ${counter}` : counter);
+  }
+  if (step.phase) parts.push(step.phase);
+  return parts.join(' ');
+}
+
+// Compose a per-agent stream-line label: model, then the subagent's name — a routed domain
+// specialist's name when one was picked, else the bare role — then optional context (the group id).
+// Single source of truth for the specialist-else-role choice so the worker/reviewer/ci-fix call
+// sites don't each hand-roll it. No specialist → `k3 worker g1` (today's label, unchanged).
+export function agentLabel(input: {
+  model: string;
+  role: string;
+  specialist?: string;
+  ctx?: string;
+}): string {
+  const name = input.specialist ?? input.role;
+  return input.ctx ? `${input.model} ${name} ${input.ctx}` : `${input.model} ${name}`;
+}
+
 // Output seam: where lines go, whether ANSI color is applied, and the clock. Injectable for tests;
 // production call sites omit it and get stderr + TTY-gated color + wall clock.
 export type ProgressSink = {
@@ -39,12 +77,12 @@ function defaultSink(): ProgressSink {
   };
 }
 
-function prefix(label: string, sink: ProgressSink, colorCode: string): string {
+function prefix(label: string, sink: ProgressSink, colorCode: string, tag = ''): string {
   const t = sink.now();
   const hh = String(t.getHours()).padStart(2, '0');
   const mm = String(t.getMinutes()).padStart(2, '0');
   const ss = String(t.getSeconds()).padStart(2, '0');
-  const body = `[${label} ${hh}:${mm}:${ss}]`;
+  const body = tag ? `[${label} ${hh}:${mm}:${ss} ${tag}]` : `[${label} ${hh}:${mm}:${ss}]`;
   return sink.color ? `${colorCode}${body}${RESET}` : body;
 }
 
@@ -103,14 +141,16 @@ export function renderStepLines(
   label: string,
   event: StepProgressEvent,
   sink: ProgressSink,
+  step?: RunStep,
 ): string[] {
+  const tag = step ? formatStepTag(step) : '';
   const lines: string[] = [];
   const text = event.text?.trim();
-  if (text) lines.push(`${prefix(label, sink, ORANGE_BOLD)} ${clip(text)}\n`);
+  if (text) lines.push(`${prefix(label, sink, ORANGE_BOLD, tag)} ${clip(text)}\n`);
   for (const call of event.toolCalls ?? []) {
     const detail = summarizeToolInput(call.toolName, call.input);
     lines.push(
-      `${prefix(label, sink, ORANGE_BOLD)} Using tool: ${call.toolName}${detail ? ` → ${detail}` : ''}\n`,
+      `${prefix(label, sink, ORANGE_BOLD, tag)} Using tool: ${call.toolName}${detail ? ` → ${detail}` : ''}\n`,
     );
   }
   return lines;
@@ -120,11 +160,12 @@ export function renderStepLines(
 // Never throws — progress must never break a run.
 export function agentStepProgress(
   label: string,
+  step?: RunStep,
   sink: ProgressSink = defaultSink(),
 ): (event: StepProgressEvent) => void {
   return (event) => {
     try {
-      for (const line of renderStepLines(label, event, sink)) sink.write(line);
+      for (const line of renderStepLines(label, event, sink, step)) sink.write(line);
     } catch {
       // observability must never break the run
     }
@@ -132,10 +173,16 @@ export function agentStepProgress(
 }
 
 // One cyan orchestrator line: what the harness is doing to drive/keep the agents in check
-// (stage starts, PR numbers, fix passes, retries).
-export function harnessProgress(message: string, sink: ProgressSink = defaultSink()): void {
+// (stage starts, PR numbers, fix passes, retries). The optional RunStep stamps the phase + N/M
+// step into the bracket so every harness line names the state and position the run is on.
+export function harnessProgress(
+  message: string,
+  step?: RunStep,
+  sink: ProgressSink = defaultSink(),
+): void {
   try {
-    sink.write(`${prefix('aitm', sink, CYAN_BOLD)} ${clip(message)}\n`);
+    const tag = step ? formatStepTag(step) : '';
+    sink.write(`${prefix('aitm', sink, CYAN_BOLD, tag)} ${clip(message)}\n`);
   } catch {
     // observability must never break the run
   }

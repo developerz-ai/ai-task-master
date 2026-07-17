@@ -15,6 +15,8 @@
 import { CiFailed } from '../github/errors.ts';
 import type { CiResult, MergeMethod, Sleep } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
+import { phaseForStage, type StepCounterFn } from '../observability/run-step.ts';
+import type { RunStep } from '../observability/step-progress.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../state/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
@@ -156,8 +158,12 @@ export type WorkLoopDeps = {
   sleep?: Sleep;
   // Harness narration (silent-run fix): one line per group stage transition, wired by the adapter
   // to the cyan [aitm] console stream so the operator sees the loop driving each group
-  // (working → pr-open → waiting-ci → …). Optional — tests and older callers omit it.
-  progress?: (message: string) => void;
+  // (working → pr-open → waiting-ci → …). Optional — tests and older callers omit it. The RunStep
+  // stamps the phase + N/M step counter into the line (claudetm parity); harnessProgress renders it.
+  progress?: (message: string, step?: RunStep) => void;
+  // Resolve the N/M step counter for a group/task, injected by the adapter (it owns the plan totals
+  // + prPerTask). Optional — omitted → the phase word still shows, without a counter.
+  stepCounter?: StepCounterFn;
 };
 
 export type GroupOutcome =
@@ -333,7 +339,10 @@ export class WorkLoop {
       // Surface the reason live — this catch path (e.g. an openPr throw at pr-open) otherwise blocks
       // the group SILENTLY: unlike driveStages' in-loop block, no progress line is emitted, so the run
       // log shows a group vanish with no cause. The reason still rides the outcome for the run summary.
-      this.deps.progress?.(`group ${group.id}: → blocked (${reason})`);
+      this.deps.progress?.(
+        `group ${group.id}: → blocked (${reason})`,
+        this.stepFor(group.id, 'blocked'),
+      );
       try {
         await this.markStatus(group.id, 'blocked');
       } catch {
@@ -394,7 +403,10 @@ export class WorkLoop {
       if (result.kind === 'blocked') {
         // Surface the reason live — this prPerTask task-blocked path otherwise marks the group
         // blocked SILENTLY (no progress line), so a failed task looks like the group just vanished.
-        this.deps.progress?.(`group ${group.id} task ${task.id}: → blocked (${result.reason})`);
+        this.deps.progress?.(
+          `group ${group.id} task ${task.id}: → blocked (${result.reason})`,
+          this.stepFor(group.id, 'blocked', task),
+        );
         await this.markStatus(group.id, 'blocked');
         this.outcomes.push({ groupId: group.id, status: 'blocked', reason: result.reason });
         return;
@@ -469,7 +481,10 @@ export class WorkLoop {
       }
       if (next !== stage) {
         const reason = next === 'blocked' && ctx.blockedReason ? ` (${ctx.blockedReason})` : '';
-        this.deps.progress?.(`group ${ctx.group.id}: ${stage} → ${next}${reason}`);
+        this.deps.progress?.(
+          `group ${ctx.group.id}: ${stage} → ${next}${reason}`,
+          this.stepFor(ctx.group.id, phaseForStage(next)),
+        );
       }
       ctx.group = { ...ctx.group, stage: next };
       await this.persistStageAfter(stage, next, ctx);
@@ -639,14 +654,16 @@ export class WorkLoop {
     if (this.deps.selfReview === false) return;
     const run = this.deps.orchestrator.selfReview;
     if (!run) return;
+    const step = this.stepFor(group.id, 'self-review');
     try {
       const result = await run({ group, delivery, worktree, baseBranch });
-      this.deps.progress?.(selfReviewProgress(group.id, result));
+      this.deps.progress?.(selfReviewProgress(group.id, result), step);
     } catch (err) {
       // A crash in the safety net must never strand the committed work or gate the PR.
       const reason = err instanceof Error ? err.message : String(err);
       this.deps.progress?.(
         `group ${group.id}: self-review errored (${reason}) — opening PR anyway`,
+        step,
       );
     }
   }
@@ -777,6 +794,13 @@ export class WorkLoop {
     const remaining =
       maxSessions !== null ? Math.max(0, maxSessions - this.sessionCount) : readyCount;
     return Math.min(concurrency, readyCount, remaining);
+  }
+
+  // Build the RunStep (phase + N/M counter) for a progress line. The phase always shows; the
+  // counter is filled from the injected resolver when present (production), omitted otherwise (stubs).
+  private stepFor(groupId: string, phase: string, task?: Task): RunStep {
+    const counter = this.deps.stepCounter?.(groupId, task);
+    return counter ? { phase, ...counter } : { phase };
   }
 
   private async markStatus(

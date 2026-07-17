@@ -29,7 +29,10 @@ async function seedRepoWithOrigin(): Promise<{
 }> {
   const repo = await seedRepo();
   const remote = await mkdtemp(join(tmpdir(), 'aitm-origin-'));
-  await execa('git', ['init', '--bare', remote]);
+  // Pin the bare origin's default branch to main so a machine whose init.defaultBranch is master
+  // (e.g. CI) still clones onto main in advanceOrigin — otherwise `git push origin main` there
+  // fails with "src refspec main does not match any".
+  await execa('git', ['init', '--bare', '--initial-branch=main', remote]);
   await execa('git', ['remote', 'add', 'origin', remote], { cwd: repo.path });
   await execa('git', ['push', 'origin', 'main'], { cwd: repo.path });
   const advanceOrigin = async (subject: string): Promise<void> => {

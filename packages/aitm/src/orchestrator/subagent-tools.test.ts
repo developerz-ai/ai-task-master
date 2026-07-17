@@ -368,6 +368,133 @@ test('worker tool: execute resolves model via credentials.modelFor("worker") and
   assert.match(bashes[0]?.command ?? '', /checkout -B 'aitm\/core'/);
 });
 
+test('worker tool: threads formatCommand, providerOptions, and onUsage into the Worker (parity with the direct spawn path)', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
+    draftCommitMessage: 'feat: x',
+  };
+  // Capture providerOptions on every model call (manifest agent + editor generateText) and count
+  // onUsage fires; both must be configured exactly as the direct run-loop spawn path configures them.
+  const seenProviderOptions: unknown[] = [];
+  let i = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      seenProviderOptions.push(opts.providerOptions);
+      if (i++ === 0) return submitContent(manifest);
+      return {
+        content: [{ type: 'text', text: 'created x' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const { tools, bashes } = makeWorkerTools();
+  const providerOptions = {
+    openrouter: { tools: [{ type: 'openrouter:web_search', parameters: {} }] },
+  };
+  let usageCalls = 0;
+  const t = makeWorkerTool({
+    credentials: provider,
+    styleContents: '# style\n',
+    rollingContext: '',
+    workerTools: tools,
+    checkoutPath: '/tmp/wt',
+    baseBranch: 'main',
+    group: baseGroup(),
+    formatCommand: 'bun run lint:fix',
+    providerOptions,
+    onUsage: () => {
+      usageCalls++;
+    },
+  });
+  const exec = t.execute;
+  if (typeof exec !== 'function') throw new Error('no execute');
+  const out = await exec({}, { toolCallId: 'tc', messages: [] });
+  assert.equal(out.kind, 'ok');
+
+  // formatCommand: format runs in the checkout before staging — checkout, <format>, add, reset, commit.
+  const cmds = bashes.map((b) => b.command);
+  assert.equal(cmds.length, 5);
+  assert.match(cmds[1] ?? '', /cd '\/tmp\/wt' && bun run lint:fix/);
+
+  // providerOptions: forwarded to BOTH the manifest agent and the editor generateText call.
+  assert.ok(seenProviderOptions.length >= 2, 'manifest + editor both generate');
+  for (const po of seenProviderOptions) assert.deepEqual(po, providerOptions);
+
+  // onUsage: fired at least once (per-generate usage sink threaded through).
+  assert.ok(usageCalls >= 1, 'onUsage sink received at least one usage report');
+});
+
+test('worker tool: forwards timeout so a stalled Worker step surfaces a deadline error (parity with direct path)', async () => {
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const { provider } = recordingProvider(stalling);
+  const { tools } = makeWorkerTools();
+  const t = makeWorkerTool({
+    credentials: provider,
+    styleContents: '',
+    rollingContext: '',
+    workerTools: tools,
+    checkoutPath: '/tmp/wt',
+    baseBranch: 'main',
+    group: baseGroup(),
+    timeout: { stepMs: 40 },
+  });
+  const exec = t.execute;
+  if (typeof exec !== 'function') throw new Error('no execute');
+  const out = await exec({}, { toolCallId: 'tc', messages: [] });
+  assert.equal(out.kind, 'error');
+  if (out.kind === 'error') assert.match(out.error, /exceeded the configured deadline/);
+});
+
+test('worker tool: omits the format step when formatCommand is unset (no config leaks in)', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
+    draftCommitMessage: 'feat: x',
+  };
+  let i = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      if (i++ === 0) return submitContent(manifest);
+      return {
+        content: [{ type: 'text', text: 'created x' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const { tools, bashes } = makeWorkerTools();
+  const t = makeWorkerTool({
+    credentials: provider,
+    styleContents: '',
+    rollingContext: '',
+    workerTools: tools,
+    checkoutPath: '/tmp/wt',
+    baseBranch: 'main',
+    group: baseGroup(),
+  });
+  const exec = t.execute;
+  if (typeof exec !== 'function') throw new Error('no execute');
+  const out = await exec({}, { toolCallId: 'tc', messages: [] });
+  assert.equal(out.kind, 'ok');
+  // No format step: exactly checkout, add, reset .ai-task-master, commit.
+  assert.equal(bashes.length, 4);
+  assert.equal(
+    bashes.some((b) => b.command.includes('lint:fix')),
+    false,
+  );
+});
+
 test('worker tool: toModelOutput collapses ok result to "worker [ok]: …"', async () => {
   const { provider } = recordingProvider(new MockLanguageModelV3());
   const { tools } = makeWorkerTools();

@@ -18,6 +18,7 @@ import { z } from 'zod';
 import type { Role } from '../credentials/credentials.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
+import type { OnUsage, SubagentInit } from '../subagents/factory.ts';
 import {
   createPlannerAgent,
   PLANNER_MAX_STEPS,
@@ -67,6 +68,16 @@ export type WorkerToolDeps = CommonDeps & {
   workerTools: WorkerTools;
   baseBranch: string;
   group: PrGroup;
+  // Optional Worker config mirrored from the direct run-loop spawn path (run-loop-adapter's
+  // `createWorkerAgent`/`runWorker`) so the orchestrator-as-tool Worker is configured identically —
+  // no config drift. Each is forwarded conditionally in makeWorkerTool, the same idiom the direct
+  // path uses. Types are indexed off SubagentInit so they can't drift from what createWorkerAgent
+  // accepts. Per-commit `verifyCommand` is deliberately NOT threaded here: the orchestrator-tool
+  // Worker plans across the whole group, and the verify gate belongs to the per-task direct path.
+  formatCommand?: string;
+  providerOptions?: SubagentInit<WorkerTools>['providerOptions'];
+  timeout?: SubagentInit<WorkerTools>['timeout'];
+  onUsage?: OnUsage;
 };
 
 export type ReviewerToolDeps = CommonDeps & {
@@ -133,6 +144,11 @@ export function makeWorkerTool(deps: WorkerToolDeps): Tool<EmptyInput, WorkerRes
           cwd: deps.checkoutPath,
           maxSteps: WORKER_MAX_STEPS,
         }),
+        // Same optional Worker config the direct run-loop path forwards — conditionally spread so an
+        // unset dep never overrides a factory default under exactOptionalPropertyTypes.
+        ...(deps.timeout !== undefined ? { timeout: deps.timeout } : {}),
+        ...(deps.providerOptions !== undefined ? { providerOptions: deps.providerOptions } : {}),
+        ...(deps.onUsage ? { onUsage: deps.onUsage } : {}),
       });
       return runWorker(agent, {
         group: deps.group,
@@ -140,6 +156,8 @@ export function makeWorkerTool(deps: WorkerToolDeps): Tool<EmptyInput, WorkerRes
         baseBranch: deps.baseBranch,
         styleContents: deps.styleContents,
         rollingContext: deps.rollingContext,
+        // formatCommand mirrors the direct path; verifyCommand stays off by design (see WorkerToolDeps).
+        ...(deps.formatCommand ? { formatCommand: deps.formatCommand } : {}),
       });
     },
     toModelOutput: ({ output }) => ({ type: 'text', value: summarizeWorkerResult(output) }),

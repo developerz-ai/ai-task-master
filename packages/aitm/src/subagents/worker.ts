@@ -278,8 +278,33 @@ async function planAndEdit(
   if (manifest.files.length === 0) {
     return { kind: 'blocked', reason: EMPTY_MANIFEST_REASON };
   }
-  const changes = await Promise.all(manifest.files.map((file) => runEditor(init, file, input)));
+  const outcomes = await Promise.all(manifest.files.map((file) => runEditor(init, file, input)));
+  const changes: FileChange[] = [];
+  const unchanged: string[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.changed) changes.push(outcome.change);
+    else unchanged.push(outcome.path);
+  }
+  // A planned file the editor never wrote is a phantom edit: recording its FileChange would name a
+  // file in the PR body and commit message that the diff does not contain. Fail the whole pass rather
+  // than commit a partial (or misleading) result — same remediation as an empty manifest (audit 05).
+  if (unchanged.length > 0) {
+    return { kind: 'blocked', reason: editorNoChangeReason(unchanged) };
+  }
   return { kind: 'ok', changes, draftCommitMessage: manifest.draftCommitMessage, handle };
+}
+
+// Guidance surfaced (as a `blocked`) when the manifest was non-empty but one or more editors returned
+// a summary without writing anything on disk. Mirrors EMPTY_MANIFEST_REASON: the root cause is almost
+// always a coding model too weak to edit, so the remediation is a more capable model.
+function editorNoChangeReason(paths: string[]): string {
+  return [
+    `The coding model produced no on-disk change for ${paths.length === 1 ? 'a planned file' : 'planned files'}:`,
+    `${paths.join(', ')}. The editor narrated the edit instead of writing it (a phantom edit), so nothing`,
+    'was committed and no PR was opened. This usually means the coding model is not capable enough; try a',
+    'more capable coding model (set `models.coding` in .ai-task-master/config.json or pass a stronger',
+    '`--model`).',
+  ].join(' ');
 }
 
 // Gate committing on `verifyCommand`. Branch checkout + format run first (verify must see the
@@ -391,11 +416,16 @@ export function editorToolSet(tools: WorkerTools): WorkerTools {
   return rest as WorkerTools;
 }
 
+// Per-file editor result. `changed: false` marks a phantom edit — the model returned a summary but
+// never wrote the file — so planAndEdit drops it and fails the pass instead of recording a FileChange
+// the committed diff can't back.
+type EditorOutcome = { changed: true; change: FileChange } | { changed: false; path: string };
+
 async function runEditor(
   init: SubagentInit<WorkerTools>,
   file: FileManifestEntry,
   input: WorkerInput,
-): Promise<FileChange> {
+): Promise<EditorOutcome> {
   const result = await callWithStepTimeout(
     () =>
       generateText({
@@ -424,7 +454,38 @@ async function runEditor(
   reportUsage(init.onUsage, result); // per-file editor pass, recorded under the worker role (#114)
   const firstLine = result.text.trim().split('\n')[0];
   const summary = firstLine && firstLine.length > 0 ? firstLine : `${file.kind} ${file.path}`;
-  return { path: file.path, kind: file.kind, summary };
+  // Confirm the working tree actually diverged at this path before recording the change: a weak model
+  // can narrate an edit ("edited x") without ever calling writeFile/editFile, and an unverified
+  // FileChange becomes a phantom entry in the PR body and commit message (audit 05).
+  if (!(await editorTouchedPath(init.tools.bash, input.checkoutPath, file.path))) {
+    return { changed: false, path: file.path };
+  }
+  return { changed: true, change: { path: file.path, kind: file.kind, summary } };
+}
+
+// Did the editor actually change this path on disk? `git status --porcelain` reports create (`??`),
+// modify (` M`) and delete (` D`) as a non-empty line and stays empty when the tree is unchanged —
+// exactly the no-diff-is-failure signal. `--no-optional-locks` keeps the parallel per-file checks off
+// the shared index.lock so concurrent editors don't race on it. A non-zero exit is a real git fault,
+// not a no-op edit, so it surfaces as an error rather than a silent phantom.
+async function editorTouchedPath(
+  bash: Tool<BashInput, BashOutput>,
+  checkoutPath: string,
+  filePath: string,
+): Promise<boolean> {
+  const exec = requireExec(bash);
+  const command = `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain -- ${shQuote(filePath)}`;
+  const out = await exec(
+    { command, description: 'verify the editor changed the file on disk' },
+    { toolCallId: `worker-status-${Date.now()}`, messages: [] },
+  );
+  if (isAsyncIterable(out)) {
+    throw new Error('bash tool returned an async iterable; expected a single result');
+  }
+  if (out.exitCode !== 0) {
+    throw new Error(`git status failed (${out.exitCode}) verifying ${filePath}\n${out.stderr}`);
+  }
+  return out.stdout.trim().length > 0;
 }
 
 function buildEditorPrompt(file: FileManifestEntry, input: WorkerInput): string {

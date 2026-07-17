@@ -366,11 +366,24 @@ export class ConfigLoader {
   }
 
   // Frozen run snapshot. API key value is replaced by its source label so the
-  // file is safe to inspect; only the resolution source is recorded.
+  // file is safe to inspect; only the resolution source is recorded. MCP server
+  // secrets (headers, env) are also redacted.
   async writeSnapshot(resolved: ResolvedConfig, stateDir: string): Promise<void> {
+    const redactedMcpServers: Record<string, unknown> = {};
+    for (const [name, server] of Object.entries(resolved.mcpServers)) {
+      const redactedServer: Record<string, unknown> = { ...server };
+      if ('headers' in server) {
+        redactedServer.headers = '<redacted>';
+      }
+      if ('env' in server) {
+        redactedServer.env = '<redacted>';
+      }
+      redactedMcpServers[name] = redactedServer;
+    }
     const redacted: ResolvedConfig = {
       ...resolved,
       openrouterApiKey: `<from ${resolved.apiKeySource}>`,
+      mcpServers: redactedMcpServers as typeof resolved.mcpServers,
     };
     const path = join(stateDir, SNAPSHOT_FILE);
     await atomicWrite(path, `${JSON.stringify(redacted, null, 2)}\n`);

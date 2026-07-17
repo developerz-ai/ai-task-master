@@ -1115,6 +1115,105 @@ test('writeSnapshot records the user-owned key source and never a project-suppli
   }
 });
 
+test('writeSnapshot redacts MCP server headers', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-secret',
+      mcpServers: {
+        docs: {
+          type: 'http',
+          url: 'https://mcp.example.com/docs',
+          headers: { Authorization: 'Bearer secret-token' },
+        },
+      },
+    });
+    const loader = new ConfigLoader(cwd.path, home.path, {});
+    const resolved = await loader.resolve({});
+    const stateDir = join(cwd.path, '.ai-task-master');
+    await mkdir(stateDir, { recursive: true });
+    await loader.writeSnapshot(resolved, stateDir);
+    const raw = await readFile(join(stateDir, 'config.snapshot.json'), 'utf8');
+    assert.doesNotMatch(raw, /secret-token/);
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const mcpServers = parsed.mcpServers as Record<string, unknown>;
+    assert.equal((mcpServers.docs as Record<string, unknown>).headers, '<redacted>');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('writeSnapshot redacts MCP server env variables', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-secret',
+      mcpServers: {
+        myserver: {
+          type: 'stdio',
+          command: 'some-command',
+          env: { SECRET_KEY: 'env-secret-value' },
+        },
+      },
+    });
+    const loader = new ConfigLoader(cwd.path, home.path, {});
+    const resolved = await loader.resolve({});
+    const stateDir = join(cwd.path, '.ai-task-master');
+    await mkdir(stateDir, { recursive: true });
+    await loader.writeSnapshot(resolved, stateDir);
+    const raw = await readFile(join(stateDir, 'config.snapshot.json'), 'utf8');
+    assert.doesNotMatch(raw, /env-secret-value/);
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const mcpServers = parsed.mcpServers as Record<string, unknown>;
+    assert.equal((mcpServers.myserver as Record<string, unknown>).env, '<redacted>');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('writeSnapshot redacts MCP servers with both headers and env', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-secret',
+      mcpServers: {
+        withHeaders: {
+          type: 'http',
+          url: 'https://mcp.example.com/api',
+          headers: { 'X-API-Key': 'header-secret' },
+        },
+        withEnv: {
+          type: 'stdio',
+          command: 'some-command',
+          env: { SECRET_KEY: 'env-secret-value' },
+        },
+      },
+    });
+    const loader = new ConfigLoader(cwd.path, home.path, {});
+    const resolved = await loader.resolve({});
+    const stateDir = join(cwd.path, '.ai-task-master');
+    await mkdir(stateDir, { recursive: true });
+    await loader.writeSnapshot(resolved, stateDir);
+    const raw = await readFile(join(stateDir, 'config.snapshot.json'), 'utf8');
+    assert.doesNotMatch(raw, /header-secret/);
+    assert.doesNotMatch(raw, /env-secret-value/);
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const mcpServers = parsed.mcpServers as Record<string, unknown>;
+    const withHeadersServer = mcpServers.withHeaders as Record<string, unknown>;
+    const withEnvServer = mcpServers.withEnv as Record<string, unknown>;
+    assert.equal(withHeadersServer.headers, '<redacted>');
+    assert.equal(withEnvServer.env, '<redacted>');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 // ---- provider profiles -----------------------------------------------------
 
 async function resolveWith(

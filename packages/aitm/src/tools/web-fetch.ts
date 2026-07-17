@@ -51,13 +51,19 @@ export const defaultLookup: LookupFn = async (hostname) => {
   return await dns.lookup(hostname, { all: true });
 };
 
+// Validated URL plus every IP its hostname resolved to (empty for IP-literal hosts — the host
+// *is* the address). Callers whose transport can pin the connect IP (curl `--resolve`) use
+// `addresses` to connect to exactly the IP we checked, closing the DNS-rebind TOCTOU below.
+export type SafeUrlResolution = { url: URL; addresses: string[] };
+
 // SSRF guard. Rejects non-http(s), private/loopback/link-local literals, and hostnames
-// that resolve to private/loopback IPs. NOT a full DNS-rebinding fix: we don't pin the
-// resolved address at connect time, so a hostile resolver could return a public IP here
-// and a private one when `fetch` re-resolves. Portable connect-time pinning across
-// Bun/Node/Deno isn't possible via standard fetch — that needs a runtime-specific
-// dispatcher (e.g. undici `lookup` on Node) and is out of scope here.
-export async function assertSafeUrl(rawUrl: string, lookup: LookupFn): Promise<URL> {
+// that resolve to private/loopback IPs, returning the resolved addresses so a pinning-capable
+// caller can defeat DNS rebinding. NOT a full fix on its own for `fetch` callers: standard
+// fetch re-resolves the hostname at connect time (a hostile resolver could return a public IP
+// here and a private one to fetch), and portable connect-time pinning across Bun/Node/Deno
+// isn't possible via standard fetch — that needs a runtime-specific dispatcher. curl callers
+// close this by pinning `addresses` via `--resolve`.
+export async function resolveSafeUrl(rawUrl: string, lookup: LookupFn): Promise<SafeUrlResolution> {
   let u: URL;
   try {
     u = new URL(rawUrl);
@@ -71,28 +77,35 @@ export async function assertSafeUrl(rawUrl: string, lookup: LookupFn): Promise<U
   if (isPrivateOrLoopbackHost(h)) {
     throw new Error(`Refusing to fetch private/loopback address: ${h}`);
   }
+  // IP literals are their own address — nothing to resolve or pin.
+  if (isIpLiteral(h)) {
+    return { url: u, addresses: [] };
+  }
   // For non-literal hostnames, resolve and re-check every returned IP. Closes the
   // "public-looking domain resolves to private IP" bypass on the literal-hostname check.
-  if (!isIpLiteral(h)) {
-    let addrs: Array<{ address: string }>;
-    try {
-      addrs = await lookup(h);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw new Error(`DNS lookup failed for ${h}: ${message}`);
-    }
-    if (addrs.length === 0) {
-      throw new Error(`Hostname did not resolve to any address: ${h}`);
-    }
-    for (const { address } of addrs) {
-      if (isPrivateOrLoopbackHost(address.toLowerCase())) {
-        throw new Error(
-          `Refusing to fetch hostname resolving to private/loopback: ${h} → ${address}`,
-        );
-      }
+  let addrs: Array<{ address: string }>;
+  try {
+    addrs = await lookup(h);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`DNS lookup failed for ${h}: ${message}`);
+  }
+  if (addrs.length === 0) {
+    throw new Error(`Hostname did not resolve to any address: ${h}`);
+  }
+  for (const { address } of addrs) {
+    if (isPrivateOrLoopbackHost(address.toLowerCase())) {
+      throw new Error(
+        `Refusing to fetch hostname resolving to private/loopback: ${h} → ${address}`,
+      );
     }
   }
-  return u;
+  return { url: u, addresses: addrs.map((a) => a.address) };
+}
+
+// URL-only view of resolveSafeUrl for callers that don't pin the connect IP (standard fetch).
+export async function assertSafeUrl(rawUrl: string, lookup: LookupFn): Promise<URL> {
+  return (await resolveSafeUrl(rawUrl, lookup)).url;
 }
 
 function isIpLiteral(h: string): boolean {
@@ -141,6 +154,51 @@ function isPrivateOrLoopbackHost(h: string): boolean {
     }
   }
   return false;
+}
+
+// Follow redirects manually, re-running the SSRF guard on every hop. Native redirect:'follow'
+// would chase a 3xx Location straight past assertSafeUrl (which only saw the initial URL) into a
+// private address. Hops are capped like the platform default; `signal` is shared across hops so
+// the caller's timeout bounds the whole chain, not each request.
+const MAX_REDIRECTS = 20;
+
+async function fetchFollowingSafeRedirects(
+  startUrl: URL,
+  requestHeaders: Record<string, string>,
+  signal: AbortSignal,
+  lookup: LookupFn,
+): Promise<{ response: Response; finalUrl: string }> {
+  let currentUrl = startUrl;
+  let redirects = 0;
+  while (true) {
+    const response = await fetch(currentUrl, {
+      headers: requestHeaders,
+      redirect: 'manual',
+      signal,
+    });
+    const location = isRedirectStatus(response.status) ? response.headers.get('location') : null;
+    if (location === null) {
+      return { response, finalUrl: currentUrl.href };
+    }
+    // Drain the redirect body before the next hop so the socket can be reused/closed.
+    await response.body?.cancel();
+    if (redirects >= MAX_REDIRECTS) {
+      throw new Error(`Too many redirects (>${MAX_REDIRECTS}) from ${startUrl.href}`);
+    }
+    redirects += 1;
+    let nextUrl: URL;
+    try {
+      nextUrl = new URL(location, currentUrl);
+    } catch {
+      throw new Error(`Invalid redirect Location from ${currentUrl.href}: ${location}`);
+    }
+    // Re-validate every hop — this is the SSRF guard that native redirect following skips.
+    currentUrl = await assertSafeUrl(nextUrl.href, lookup);
+  }
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
 // Stream the body until `maxChars` UTF-8 characters have been collected, then cancel
@@ -239,15 +297,16 @@ export function webFetchTool(init: WebFetchInit = {}): Tool<WebFetchInput, WebFe
       if (input.referrer !== undefined) {
         requestHeaders.Referer = input.referrer;
       }
-      const response = await fetch(safeUrl, {
-        headers: requestHeaders,
-        redirect: 'follow',
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      const { response, finalUrl } = await fetchFollowingSafeRedirects(
+        safeUrl,
+        requestHeaders,
+        AbortSignal.timeout(timeoutMs),
+        lookup,
+      );
       const { body, truncated } = await readBodyCapped(response, maxChars);
       return {
         url: input.url,
-        finalUrl: response.url || input.url,
+        finalUrl,
         status: response.status,
         contentType: response.headers.get('content-type'),
         body,

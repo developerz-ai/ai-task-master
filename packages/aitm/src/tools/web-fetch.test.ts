@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { DEFAULT_STEALTH_HEADERS, type LookupFn, webFetchTool } from './web-fetch.ts';
+import {
+  DEFAULT_STEALTH_HEADERS,
+  type LookupFn,
+  resolveSafeUrl,
+  webFetchTool,
+} from './web-fetch.ts';
 
 type FetchCall = { url: string; init: RequestInit };
 
@@ -11,7 +16,12 @@ function stubFetch(responder: (call: FetchCall) => Response | Promise<Response>)
 } {
   const calls: FetchCall[] = [];
   globalThis.fetch = (async (input: unknown, init: RequestInit = {}) => {
-    const url = typeof input === 'string' ? input : (input as { url: string }).url;
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : (input as { url: string }).url;
     calls.push({ url, init });
     return responder({ url, init });
   }) as typeof fetch;
@@ -308,4 +318,114 @@ test('webFetchTool stops reading once maxChars reached', async () => {
   assert.equal(result.body.length, 500);
   // We must have stopped early — not pulled all 100+ chunks.
   assert.ok(chunksPulled < 5, `streamed too long: ${chunksPulled} chunks`);
+});
+
+test('webFetchTool follows a safe redirect and returns the final hop, tracking finalUrl', async () => {
+  const { calls } = stubFetch(({ url }) =>
+    url === 'https://example.com/start'
+      ? new Response(null, { status: 302, headers: { location: 'https://example.com/final' } })
+      : new Response('final-body', { status: 200, headers: { 'content-type': 'text/plain' } }),
+  );
+  const t = webFetchTool({ lookup: publicLookup });
+  assert.ok(t.execute);
+  const result = await t.execute({ url: 'https://example.com/start' });
+  assert.equal(result.body, 'final-body');
+  assert.equal(result.status, 200);
+  assert.equal(result.finalUrl, 'https://example.com/final');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0]?.init.redirect, 'manual');
+  assert.equal(calls[1]?.init.redirect, 'manual');
+});
+
+test('webFetchTool re-validates each redirect hop: blocks a redirect to a private IP literal', async () => {
+  const { calls } = stubFetch(({ url }) =>
+    url === 'https://example.com/start'
+      ? new Response(null, {
+          status: 302,
+          headers: { location: 'http://169.254.169.254/latest/meta-data/' },
+        })
+      : new Response('SHOULD NOT REACH', { status: 200 }),
+  );
+  const t = webFetchTool({ lookup: publicLookup });
+  assert.ok(t.execute);
+  await assert.rejects(() => t.execute({ url: 'https://example.com/start' }), /private\/loopback/);
+  // The redirect target was rejected before it was ever fetched.
+  assert.equal(calls.length, 1);
+});
+
+test('webFetchTool re-validates redirect hostname via DNS (blocks rebind to a private IP)', async () => {
+  const lookup: LookupFn = async (host) =>
+    host === 'evil.example' ? [{ address: '10.0.0.5' }] : [{ address: '93.184.216.34' }];
+  const { calls } = stubFetch(({ url }) =>
+    url === 'https://good.example/'
+      ? new Response(null, { status: 301, headers: { location: 'https://evil.example/' } })
+      : new Response('SHOULD NOT REACH', { status: 200 }),
+  );
+  const t = webFetchTool({ lookup });
+  assert.ok(t.execute);
+  await assert.rejects(
+    () => t.execute({ url: 'https://good.example/' }),
+    /resolving to private\/loopback/,
+  );
+  assert.equal(calls.length, 1);
+});
+
+test('webFetchTool resolves a relative redirect Location against the current URL', async () => {
+  const { calls } = stubFetch(({ url }) =>
+    url === 'https://example.com/a/b'
+      ? new Response(null, { status: 302, headers: { location: '/c/d' } })
+      : new Response('ok', { status: 200 }),
+  );
+  const t = webFetchTool({ lookup: publicLookup });
+  assert.ok(t.execute);
+  const result = await t.execute({ url: 'https://example.com/a/b' });
+  assert.equal(result.finalUrl, 'https://example.com/c/d');
+  assert.equal(calls[1]?.url, 'https://example.com/c/d');
+});
+
+test('webFetchTool rejects a redirect chain that exceeds the hop cap', async () => {
+  stubFetch(({ url }) => {
+    const n = Number(new URL(url).searchParams.get('n') ?? '0');
+    return new Response(null, {
+      status: 302,
+      headers: { location: `https://example.com/?n=${n + 1}` },
+    });
+  });
+  const t = webFetchTool({ lookup: publicLookup });
+  assert.ok(t.execute);
+  await assert.rejects(
+    () => t.execute({ url: 'https://example.com/?n=0' }),
+    /[Tt]oo many redirects/,
+  );
+});
+
+test('webFetchTool treats a non-redirect 3xx (304) as the final response', async () => {
+  stubFetch(() => new Response(null, { status: 304 }));
+  const t = webFetchTool({ lookup: publicLookup });
+  assert.ok(t.execute);
+  const result = await t.execute({ url: 'https://example.com/' });
+  assert.equal(result.status, 304);
+});
+
+test('resolveSafeUrl returns the validated addresses for a hostname', async () => {
+  const { url, addresses } = await resolveSafeUrl('https://example.com/', async () => [
+    { address: '93.184.216.34' },
+    { address: '93.184.216.35' },
+  ]);
+  assert.equal(url.href, 'https://example.com/');
+  assert.deepEqual(addresses, ['93.184.216.34', '93.184.216.35']);
+});
+
+test('resolveSafeUrl returns no addresses for an IP-literal host (nothing to resolve)', async () => {
+  const { addresses } = await resolveSafeUrl('https://93.184.216.34/', async () => {
+    throw new Error('lookup should not be called for an IP literal');
+  });
+  assert.deepEqual(addresses, []);
+});
+
+test('resolveSafeUrl rejects a hostname resolving to a private IP', async () => {
+  await assert.rejects(
+    () => resolveSafeUrl('https://attacker.example/', async () => [{ address: '10.0.0.1' }]),
+    /resolving to private\/loopback/,
+  );
 });

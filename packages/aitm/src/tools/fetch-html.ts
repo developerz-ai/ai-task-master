@@ -13,7 +13,7 @@ import type { Tool } from 'ai';
 import { tool } from 'ai';
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
-import { assertSafeUrl, defaultLookup, type LookupFn, type WebFetchOutput } from './web-fetch.ts';
+import { defaultLookup, type LookupFn, resolveSafeUrl, type WebFetchOutput } from './web-fetch.ts';
 
 const fetchHtmlInputSchema = z.object({
   url: z.string().url(),
@@ -67,6 +67,16 @@ function resolveExec(init: FetchHtmlInit): ExecLike {
   return init.exec ?? ((file, args, options) => execa(file, args, options));
 }
 
+// Pin curl to the exact IP(s) resolveSafeUrl already validated (`--resolve host:port:ip`), so a
+// hostile resolver can't hand our SSRF check a public IP and curl a private one on re-resolution.
+// Empty for IP-literal hosts (the host is the address). IPv6 is bracketed for the addr slot.
+function resolvePinArgs(url: URL, addresses: readonly string[]): string[] {
+  if (addresses.length === 0) return [];
+  const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+  const pinned = addresses.map((a) => (a.includes(':') ? `[${a}]` : a)).join(',');
+  return ['--resolve', `${url.hostname}:${port}:${pinned}`];
+}
+
 // True when the curl-impersonate binary is callable. Use at the wiring site to decide whether to
 // register fetch_html at all (per CLAUDE.md: gate on "binary present", don't hard-fail).
 export async function isFetchHtmlAvailable(init: FetchHtmlInit = {}): Promise<boolean> {
@@ -93,14 +103,20 @@ export function fetchHtmlTool(init: FetchHtmlInit = {}): Tool<FetchHtmlInput, We
     execute: async (input: FetchHtmlInput): Promise<WebFetchOutput> => {
       const maxChars = Math.min(input.maxChars ?? DEFAULT_MAX_CHARS, MAX_OUTPUT_CHARS);
       const timeoutMs = Math.min(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
-      const safeUrl = await assertSafeUrl(input.url, lookup);
+      const { url: safeUrl, addresses } = await resolveSafeUrl(input.url, lookup);
       const target = targets[input.impersonate ?? 'chrome'];
-      // -sS: quiet but show errors; -L: follow redirects; --max-time bounds the request.
-      // -w '%{stderr}…': write the metadata line to STDERR (so STDOUT is purely the body).
+      // -sS: quiet but show errors. NO -L + --max-redirs 0: never follow redirects — a 3xx
+      // Location could aim at a private address and curl would re-resolve+chase it past our SSRF
+      // check. --resolve pins the exact IP(s) we validated so curl can't re-resolve to a private
+      // one (DNS-rebind TOCTOU). --max-time bounds the request; -w '%{stderr}…' writes the
+      // metadata line to STDERR so STDOUT is purely the body.
       const args = [
         '--impersonate',
         target,
-        '-sSL',
+        '-sS',
+        '--max-redirs',
+        '0',
+        ...resolvePinArgs(safeUrl, addresses),
         '--max-time',
         String(Math.max(1, Math.ceil(timeoutMs / 1000))),
         '-w',

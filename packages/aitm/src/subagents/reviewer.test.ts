@@ -232,6 +232,68 @@ test('runReviewer yields one resolution per thread, mixed fixed/replied/wontfix'
   assert.match(cmds[3] ?? '', /git -C '\/tmp\/wt' rev-parse HEAD/);
 });
 
+test('runReviewer: commitFix asserts the PR head branch, then commits when the tree is on it (audit 02)', async () => {
+  const outputs: ThreadResolutionOutput[] = [{ kind: 'fixed', commitMessage: 'fix: on head' }];
+  const { tools, calls } = makeTools({
+    bashStdout: (cmd) =>
+      cmd.includes('rev-parse --abbrev-ref HEAD')
+        ? 'aitm/g1\n'
+        : cmd.includes('rev-parse HEAD')
+          ? 'deadbeefcafef00d\n'
+          : '',
+  });
+  const agent = createReviewerAgent({
+    model: makeReviewerModel(outputs),
+    tools,
+    systemPrompt: REVIEWER_SYSTEM_PREFIX,
+  });
+  const result = await runReviewer(agent, {
+    ...baseInput([thread('T1', 'fix this')]),
+    headBranch: 'aitm/g1',
+  });
+
+  assert.equal(result.kind, 'ok');
+  if (result.kind === 'ok') {
+    assert.deepEqual(result.resolutions[0], {
+      threadId: 'T1',
+      kind: 'fixed',
+      commitSha: 'deadbeefcafef00d',
+    });
+  }
+  // The head-branch assertion is the FIRST git call, before any staging.
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.match(cmds[0] ?? '', /rev-parse --abbrev-ref HEAD/);
+  assert.match(cmds[1] ?? '', /git -C '\/tmp\/wt' add -A/);
+  assert.match(cmds[3] ?? '', /commit -m 'fix: on head'/);
+});
+
+test('runReviewer: commitFix refuses to commit when the tree is on the wrong branch (audit 02)', async () => {
+  const outputs: ThreadResolutionOutput[] = [{ kind: 'fixed', commitMessage: 'fix: wrong branch' }];
+  const { tools, calls } = makeTools({
+    bashStdout: (cmd) => (cmd.includes('rev-parse --abbrev-ref HEAD') ? 'some-other-branch\n' : ''),
+  });
+  const agent = createReviewerAgent({
+    model: makeReviewerModel(outputs),
+    tools,
+    systemPrompt: REVIEWER_SYSTEM_PREFIX,
+  });
+  const result = await runReviewer(agent, {
+    ...baseInput([thread('T1', 'fix this')]),
+    headBranch: 'aitm/g1',
+  });
+
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') {
+    assert.match(result.error, /refusing to commit/);
+    assert.match(result.error, /some-other-branch/);
+    assert.match(result.error, /aitm\/g1/);
+  }
+  // It bailed at the assertion: no add/commit was attempted on the wrong branch.
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.equal(cmds.length, 1);
+  assert.ok(!cmds.some((c) => /add -A|commit -m/.test(c)));
+});
+
 test('runReviewer returns ok with no resolutions when threads is empty', async () => {
   const { tools, calls } = makeTools();
   const agent = createReviewerAgent({

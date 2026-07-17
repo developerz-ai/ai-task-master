@@ -897,6 +897,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       pr,
       threads,
       checkoutPath: checkout.path,
+      // The single checkout is on the PR head branch (the PR was opened from it); pin it so a
+      // review fix commit can never land on the wrong branch (audit 02, DECISION 1).
+      headBranch: checkout.branch,
       styleContents: style,
       contextBlock: harnessContextBlock(style, { phase: 'reviewing', ...reviewerCounter }),
     });

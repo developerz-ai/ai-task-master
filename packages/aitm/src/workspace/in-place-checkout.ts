@@ -57,6 +57,7 @@ export class InPlaceCheckout {
         `in-place checkout is single-slot: group ${this.current.groupId} is still checked out (set concurrency to 1)`,
       );
     }
+    await this.ensureCleanTree();
     // Reuse an existing group branch (a resumed run whose committed-but-unpushed work survives on the
     // branch) rather than recreating it from base. A brand-new group starts a fresh branch off base
     // with `-B` so a retry after a half-done checkout is idempotent.
@@ -81,11 +82,28 @@ export class InPlaceCheckout {
         `in-place checkout is single-slot: group ${this.current.groupId} is still checked out (set concurrency to 1)`,
       );
     }
+    await this.ensureCleanTree();
     await runGit(['fetch', 'origin', baseBranch], { cwd: this.repoRoot });
     await runGit(['checkout', '-B', branch, `origin/${baseBranch}`], { cwd: this.repoRoot });
     const co: Checkout = { groupId, branch, path: this.repoRoot };
     this.current = co;
     return co;
+  }
+
+  // Drop stale uncommitted edits before switching branches. A crashed or blocked prior group can
+  // leave modified tracked files in the shared tree; `git checkout` would carry them onto the next
+  // group's branch (contamination) or abort the switch. `git reset --hard` restores tracked files to
+  // the current HEAD — committed work is untouched (HEAD does not move), so a resumed branch's saved
+  // commits survive. Untracked files, including aitm's own `.ai-task-master/` state dir at the repo
+  // root, are deliberately left alone (`reset --hard` never removes them). `--untracked-files=no`
+  // keeps that state dir from reading as "dirty" so a genuinely clean tree skips the reset entirely.
+  private async ensureCleanTree(): Promise<void> {
+    const { stdout } = await runGit(['status', '--porcelain', '--untracked-files=no'], {
+      cwd: this.repoRoot,
+    });
+    if (stdout.trim() !== '') {
+      await runGit(['reset', '--hard'], { cwd: this.repoRoot });
+    }
   }
 
   async release(groupId: string): Promise<void> {

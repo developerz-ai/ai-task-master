@@ -28,8 +28,8 @@ import { runMergePr, runStart } from '../../src/cli/commands.ts';
 import type { PullRequest } from '../../src/github/schema.ts';
 import { normalizeResumeStatus } from '../../src/loop/resume-normalize.ts';
 import type {
-  WorkLoopOrchestrator,
   CheckoutHome,
+  WorkLoopOrchestrator,
   WorkLoopResult,
   WorkLoopState,
 } from '../../src/loop/work-loop.ts';
@@ -78,7 +78,6 @@ function makeRunLoop(
   mockModel: MockLanguageModelV3,
 ): (input: RunLoopInput) => Promise<WorkLoopResult> {
   return async (input: RunLoopInput): Promise<WorkLoopResult> => {
-
     const planGroup: PrGroup = {
       id: 'hello',
       title: 'add hello',

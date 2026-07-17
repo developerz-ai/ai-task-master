@@ -61,12 +61,51 @@ test('reconstructTranscript skips unknown kinds (forward compatible)', () => {
   assert.deepEqual(reconstructTranscript(raw).messages, [msg('assistant', 'a')]);
 });
 
+test('reconstructTranscript: a step message failing the ModelMessage shape is skipped; valid siblings and later records survive', () => {
+  const warns: string[] = [];
+  const raw = [
+    // A JSON-valid line whose second message is mistyped (numeric content, not a string/parts).
+    JSON.stringify({
+      kind: 'step',
+      ts: 't1',
+      messages: [msg('assistant', 'a'), { role: 'user', content: 5 }],
+    }),
+    JSON.stringify({ kind: 'step', ts: 't2', messages: [msg('user', 'b')] }),
+  ].join('\n');
+  const out = reconstructTranscript(raw, (m) => warns.push(m));
+  assert.deepEqual(
+    out.messages,
+    [msg('assistant', 'a'), msg('user', 'b')],
+    'the mistyped message is dropped; its valid sibling and the later record are kept',
+  );
+  assert.equal(warns.length, 1, 'exactly the mistyped message warned');
+});
+
+test('reconstructTranscript: a mistyped message inside a compaction record is skipped, valid ones kept', () => {
+  const warns: string[] = [];
+  const raw = [
+    JSON.stringify({ kind: 'step', ts: 't1', messages: [msg('assistant', 'old')] }),
+    JSON.stringify({
+      kind: 'compaction',
+      ts: 't2',
+      messages: [{ role: 'nope', content: 'x' }, msg('user', 'SUMMARY')],
+    }),
+  ].join('\n');
+  const out = reconstructTranscript(raw, (m) => warns.push(m));
+  assert.deepEqual(
+    out.messages,
+    [msg('user', 'SUMMARY')],
+    'compaction keeps only the valid message',
+  );
+  assert.equal(warns.length, 1, 'the invalid-role message warned');
+});
+
 test('reconstructTranscript: de-overlaps a pre-#175 cumulative transcript (no duplicated context)', () => {
   // Files written before #175 stored step.messages as the CUMULATIVE response list: each record
   // re-includes everything so far ([a,b], then [a,b,c,d]). Naive concatenation duplicated the prefix.
   const a = msg('user', 'goal');
   const b = msg('assistant', 'a1');
-  const c = msg('tool', 'r1');
+  const c = msg('user', 'r1');
   const d = msg('assistant', 'a2');
   const raw = [
     JSON.stringify({ kind: 'step', ts: 't1', messages: [a, b] }),

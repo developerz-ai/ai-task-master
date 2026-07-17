@@ -90,13 +90,23 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
     // Nothing older than the kept tail → summarizing would drop nothing; pass through.
     if (older.length === 0) return undefined;
 
-    let summary: string;
+    let summary: string | undefined;
     try {
       summary = await init.compactor.compact(older);
     } catch (err) {
       init.logger?.warn('compaction: summarizer failed; passing through', {
         modelId: init.modelId,
         error: errText(err),
+      });
+      return undefined;
+    }
+
+    // Empty/whitespace summary → the summarizer produced nothing usable. Passing through
+    // uncompacted is safer than replacing real history with a blank note (issue: empty-summary
+    // context loss).
+    if (summary === undefined) {
+      init.logger?.warn('compaction: summarizer returned empty text; passing through', {
+        modelId: init.modelId,
       });
       return undefined;
     }

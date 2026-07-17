@@ -39,6 +39,7 @@ function prepInput(steps: unknown[], messages: unknown[]) {
 function stubCompactor(opts: {
   decision: CompactionDecision;
   summary?: string;
+  compactReturnsUndefined?: boolean;
   onCompact?: (older: readonly unknown[]) => void;
   shouldThrows?: boolean;
   compactThrows?: boolean;
@@ -51,6 +52,7 @@ function stubCompactor(opts: {
     compact: async (older) => {
       opts.onCompact?.(older);
       if (opts.compactThrows) throw new Error('summarizer boom');
+      if (opts.compactReturnsUndefined) return undefined;
       return opts.summary ?? 'SUMMARY';
     },
   };
@@ -219,6 +221,23 @@ test('buildCompactionStep: summarizer failure → pass-through + warning (non-fa
   })(prepInput([step(2), step(4)], msgs(5)));
   assert.equal(result, undefined);
   assert.ok(events.some((e) => e.level === 'warn' && /summarizer failed/i.test(String(e.msg))));
+});
+
+test('buildCompactionStep: empty/whitespace summary → pass-through + warning, no context dropped', async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    compactReturnsUndefined: true,
+  });
+  const result = await buildCompactionStep({
+    compactor,
+    modelId: 'm',
+    logger: captureLogger(events),
+  })(prepInput([step(2), step(4)], msgs(5)));
+  assert.equal(result, undefined);
+  assert.ok(
+    events.some((e) => e.level === 'warn' && /empty text; passing through/i.test(String(e.msg))),
+  );
 });
 
 test('buildCompactionStep: logs one structured event per compaction (model id, tokens, context length, kept steps)', async () => {

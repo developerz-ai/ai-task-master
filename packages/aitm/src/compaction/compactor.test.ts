@@ -155,6 +155,20 @@ test('compact arms the per-step deadline and surfaces a StepTimeoutError on a st
   );
 });
 
+test('compact returns undefined when the summarizer text is empty', async () => {
+  const { model } = summarizerReturning('');
+  const c = new Compactor({ summarizer: model, limits: stubLimits(100_000) });
+  const summary = await c.compact([{ role: 'user', content: 'Goal: refactor parser' }]);
+  assert.equal(summary, undefined);
+});
+
+test('compact returns undefined when the summarizer text is whitespace-only', async () => {
+  const { model } = summarizerReturning('   \n\t  ');
+  const c = new Compactor({ summarizer: model, limits: stubLimits(100_000) });
+  const summary = await c.compact([{ role: 'user', content: 'Goal: refactor parser' }]);
+  assert.equal(summary, undefined);
+});
+
 test('compact survives circular references in messages', async () => {
   const { model } = summarizerReturning('- summary');
   const c = new Compactor({ summarizer: model, limits: stubLimits(100_000) });

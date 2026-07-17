@@ -11,6 +11,7 @@
 import { appendFile, mkdir, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LanguageModelUsage, ModelMessage } from 'ai';
+import { modelMessageSchema } from 'ai';
 import { Logger } from '../logger/logger.ts';
 import type { GroupStage } from './schema.ts';
 
@@ -64,10 +65,24 @@ function isLeadingRun(arr: readonly ModelMessage[], prefix: readonly ModelMessag
   return true;
 }
 
+// Keep only a record's messages that match the ModelMessage shape, warning on each skip. A crash
+// mid-write or a hand-edit can leave a JSON-valid line whose message shape is wrong; dropping the
+// bad element (not the whole line) keeps the rest of the transcript replayable on resume.
+function validMessages(raw: readonly unknown[], onWarn: (message: string) => void): ModelMessage[] {
+  const out: ModelMessage[] = [];
+  for (const item of raw) {
+    const parsed = modelMessageSchema.safeParse(item);
+    if (parsed.success) out.push(parsed.data);
+    else onWarn('skipping a transcript message that is not a valid ModelMessage');
+  }
+  return out;
+}
+
 // Reconstruct the message array the agent would see next from a transcript's raw JSONL, plus whether
 // the run completed (a `run-end` record present). `step` messages concatenate; a `compaction` record
 // replaces the accumulated array (its summary subsumes earlier steps), and steps after it append. A
-// corrupt/truncated line is skipped with a warning; unknown `kind`s are ignored (forward-compatible).
+// corrupt/truncated line, or a message failing the ModelMessage shape, is skipped with a warning;
+// unknown `kind`s are ignored (forward-compatible).
 //
 // Transcripts written before issue #175 stored `step.messages` as the CUMULATIVE response list per
 // step (each record re-includes the whole conversation), so a record whose leading run equals the
@@ -90,12 +105,12 @@ export function reconstructTranscript(
     }
     if (!isRecord(record)) continue;
     if (record.kind === 'step' && Array.isArray(record.messages)) {
-      const recorded = record.messages as ModelMessage[];
+      const recorded = validMessages(record.messages, onWarn);
       messages.push(
         ...(isLeadingRun(recorded, messages) ? recorded.slice(messages.length) : recorded),
       );
     } else if (record.kind === 'compaction' && Array.isArray(record.messages)) {
-      messages = [...(record.messages as ModelMessage[])];
+      messages = validMessages(record.messages, onWarn);
     } else if (record.kind === 'run-end') {
       complete = true;
     }

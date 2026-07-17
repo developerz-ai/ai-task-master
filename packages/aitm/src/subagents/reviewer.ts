@@ -219,7 +219,10 @@ async function commitFix(
     throw new Error('bash tool is missing an execute function');
   }
   const wt = shQuote(worktreePath);
+  // Never commit aitm's own state dir (in-place mode keeps it at the repo root). add -A skips it when
+  // gitignored; the reset drops it when it isn't. See stageAndCommit in worker.ts.
   await runBash(exec, `git -C ${wt} add -A`);
+  await runBash(exec, `git -C ${wt} reset -q -- .ai-task-master`);
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
   const sha = await captureBash(exec, `git -C ${wt} rev-parse HEAD`);
   return sha.trim();

@@ -511,7 +511,13 @@ async function stageAndCommit(
   message: string,
 ): Promise<void> {
   const wt = shQuote(input.worktreePath);
-  await runBash(exec, `git -C ${wt} add -A -- ${shQuote(':!.ai-task-master')}`);
+  // Stage everything, then UNSTAGE aitm's own state dir. `git add -A -- ':!.ai-task-master'` throws
+  // "paths are ignored" when .ai-task-master is gitignored (the in-place case: the state dir sits at
+  // the repo root and most repos ignore it) — naming an ignored path in a pathspec trips git. Plain
+  // `add -A` skips ignored files silently; the `reset` then also drops the dir if it ISN'T ignored,
+  // so aitm never commits its own state either way. No-op (exit 0) when nothing was staged for it.
+  await runBash(exec, `git -C ${wt} add -A`);
+  await runBash(exec, `git -C ${wt} reset -q -- .ai-task-master`);
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
 }
 

@@ -220,11 +220,12 @@ test('runReviewer yields one resolution per thread, mixed fixed/replied/wontfix'
   });
 
   // Exactly one commit sequence — only the 'fixed' thread drives bash calls.
-  assert.equal(calls.bashes.length, 3);
+  assert.equal(calls.bashes.length, 4);
   const cmds = calls.bashes.map((b) => b.command);
   assert.match(cmds[0] ?? '', /git -C '\/tmp\/wt' add -A/);
-  assert.match(cmds[1] ?? '', /git -C '\/tmp\/wt' commit -m 'fix: rename variable'/);
-  assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' rev-parse HEAD/);
+  assert.match(cmds[1] ?? '', /reset -q -- \.ai-task-master/);
+  assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' commit -m 'fix: rename variable'/);
+  assert.match(cmds[3] ?? '', /git -C '\/tmp\/wt' rev-parse HEAD/);
 });
 
 test('runReviewer returns ok with no resolutions when threads is empty', async () => {

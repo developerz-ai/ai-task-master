@@ -325,14 +325,15 @@ test('runWorker: manifest → per-file edits → commit sequence', async () => {
   ]);
   assert.deepEqual(d.progressEntries, ['- task A', '- task B']);
 
-  // Final bash sequence: checkout -B, add -A, commit -m
-  assert.equal(calls.bashes.length, 3);
+  // Final bash sequence: checkout -B, add -A, reset .ai-task-master, commit -m
+  assert.equal(calls.bashes.length, 4);
   const cmds = calls.bashes.map((b) => b.command);
   assert.match(cmds[0] ?? '', /git -C '\/tmp\/wt' checkout -B 'aitm\/core'/);
   assert.match(cmds[1] ?? '', /git -C '\/tmp\/wt' add -A/);
-  // Never stage aitm's own state dir into the target-repo commit (issue #89).
-  assert.match(cmds[1] ?? '', /add -A -- ':!\.ai-task-master'/);
-  assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' commit -m 'feat: add a \+ fix b'/);
+  // Never stage aitm's own state dir into the target-repo commit (issue #89): unstage it after add,
+  // which also stays clear of the "paths are ignored" error when .ai-task-master is gitignored.
+  assert.match(cmds[2] ?? '', /reset -q -- \.ai-task-master/);
+  assert.match(cmds[3] ?? '', /git -C '\/tmp\/wt' commit -m 'feat: add a \+ fix b'/);
 });
 
 test('runWorker: scopes the manifest prompt and progress to the current Task slice', async () => {
@@ -398,13 +399,14 @@ test('runWorker runs formatCommand in the worktree before staging when set (issu
   const result = await runWorker(agent, { ...baseInput(), formatCommand: 'bun run lint:fix' });
   assert.equal(result.kind, 'ok');
 
-  // Sequence: checkout -B, <format>, add -A, commit. Format runs in the worktree, before add.
+  // Sequence: checkout -B, <format>, add -A, reset .ai-task-master, commit. Format runs before add.
   const cmds = calls.bashes.map((b) => b.command);
-  assert.equal(cmds.length, 4);
+  assert.equal(cmds.length, 5);
   assert.match(cmds[0] ?? '', /checkout -B/);
   assert.match(cmds[1] ?? '', /cd '\/tmp\/wt' && bun run lint:fix/);
   assert.match(cmds[2] ?? '', /add -A/);
-  assert.match(cmds[3] ?? '', /commit -m/);
+  assert.match(cmds[3] ?? '', /reset -q -- \.ai-task-master/);
+  assert.match(cmds[4] ?? '', /commit -m/);
 });
 
 test('runWorker omits the format step when formatCommand is unset', async () => {
@@ -418,8 +420,8 @@ test('runWorker omits the format step when formatCommand is unset', async () => 
 
   const result = await runWorker(agent, baseInput());
   assert.equal(result.kind, 'ok');
-  // No format step: exactly checkout, add, commit.
-  assert.equal(calls.bashes.length, 3);
+  // No format step: exactly checkout, add, reset .ai-task-master, commit.
+  assert.equal(calls.bashes.length, 4);
   assert.equal(
     calls.bashes.some((b) => b.command.includes('lint:fix')),
     false,
@@ -719,11 +721,12 @@ test('runWorker verifyCommand green: one verify (timeoutMs 600000) before git ad
   // Bash order: checkout -B, verify, add -A, commit — the git commands are identical to today's,
   // with exactly one verify invocation inserted before `git add`.
   const cmds = bashes.map((b) => b.command);
-  assert.equal(cmds.length, 4);
+  assert.equal(cmds.length, 5);
   assert.match(cmds[0] ?? '', /git -C '\/tmp\/wt' checkout -B 'aitm\/core'/);
   assert.match(cmds[1] ?? '', /cd '\/tmp\/wt' && run-verify/);
-  assert.match(cmds[2] ?? '', /add -A -- ':!\.ai-task-master'/);
-  assert.match(cmds[3] ?? '', /commit -m 'feat: a'/);
+  assert.match(cmds[2] ?? '', /add -A/);
+  assert.match(cmds[3] ?? '', /reset -q -- \.ai-task-master/);
+  assert.match(cmds[4] ?? '', /commit -m 'feat: a'/);
   const verifyIdx = cmds.findIndex((c) => c.includes('run-verify'));
   const addIdx = cmds.findIndex((c) => c.includes('add -A'));
   assert.ok(verifyIdx >= 0 && verifyIdx < addIdx, 'verify must run before git add');
@@ -798,11 +801,12 @@ test('runWorker without verifyCommand: zero verify invocations, byte-identical g
     bashes.some((b) => b.timeoutMs === VERIFY_TIMEOUT_MS),
     false,
   );
-  // Exactly checkout, add, commit — no extra bash calls.
-  assert.equal(bashes.length, 3);
+  // Exactly checkout, add, reset .ai-task-master, commit — no extra bash calls.
+  assert.equal(bashes.length, 4);
   assert.match(bashes[0]?.command ?? '', /checkout -B/);
   assert.match(bashes[1]?.command ?? '', /add -A/);
-  assert.match(bashes[2]?.command ?? '', /commit -m/);
+  assert.match(bashes[2]?.command ?? '', /reset -q -- \.ai-task-master/);
+  assert.match(bashes[3]?.command ?? '', /commit -m/);
 });
 
 test('runWorker verifyCommand emits one structured log event per verify invocation', async () => {

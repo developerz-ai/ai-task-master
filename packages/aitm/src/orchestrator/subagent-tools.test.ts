@@ -359,7 +359,8 @@ test('worker tool: execute resolves model via credentials.modelFor("worker") and
     assert.equal(out.delivery.changes.length, 1);
   }
   // Worker commits on branch via bash — verifies tools were threaded through.
-  assert.equal(bashes.length, 3);
+  // checkout -B, add -A, reset .ai-task-master, commit.
+  assert.equal(bashes.length, 4);
   assert.match(bashes[0]?.command ?? '', /checkout -B 'aitm\/core'/);
 });
 

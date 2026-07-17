@@ -162,18 +162,98 @@ function isAbortError(err: unknown): boolean {
 // names the bound. `timeout === undefined` → pass-through (no deadline, raw errors propagate). The
 // direct `generateText` call sites use this: they inject the `timeout` key themselves (key-absence
 // preserved when unset) and wrap the call here so a stalled provider surfaces a named timeout.
+// Every aitm LLM call funnels through here, so it is also the one place to absorb TRANSIENT provider
+// failures (rate-limit, overload, 5xx, Kimi's "not found the model … permission denied" — a
+// rate-limit dressed as a 404). Without a retry a single hiccup permanently blocks a whole PR group.
+// The deadline translation stays inside the retried call so a StepTimeoutError is raised per attempt;
+// it is deliberately NOT retryable (see isRetryableProviderError) — a timeout re-run risks doubling
+// wall-clock, so it propagates and blocks.
 export async function callWithStepTimeout<T>(
   call: () => Promise<T>,
   timeout: TimeoutConfiguration | undefined,
 ): Promise<T> {
-  try {
-    return await call();
-  } catch (err) {
-    if (timeout !== undefined && isAbortError(err)) {
-      throw new StepTimeoutError(stepTimeoutMessage(timeout), { cause: err });
+  return callWithRetry(async () => {
+    try {
+      return await call();
+    } catch (err) {
+      if (timeout !== undefined && isAbortError(err)) {
+        throw new StepTimeoutError(stepTimeoutMessage(timeout), { cause: err });
+      }
+      throw err;
     }
-    throw err;
+  });
+}
+
+// Retry an LLM call on transient provider failures with an escalating backoff. Up to 10 retries at
+// 1s, 5s, 10s, 15s … (+5s), so a rate-limit window or a brief overload rides through instead of
+// blocking the run. Non-transient errors (schema failures, timeouts, aborts, 4xx that aren't
+// rate-limits) throw immediately — retrying them just burns tokens. `sleep` is injectable for tests.
+export const DEFAULT_LLM_MAX_RETRIES = 10;
+
+export function defaultRetryDelayMs(attemptIndex: number): number {
+  // 0 → 1s, then 5s, 10s, 15s … (+5s). Matches the operator-requested schedule.
+  return attemptIndex === 0 ? 1_000 : 5_000 * attemptIndex;
+}
+
+export type RetryOptions = {
+  maxRetries?: number;
+  delayMs?: (attemptIndex: number) => number;
+  sleep?: (ms: number) => Promise<void>;
+  isRetryable?: (err: unknown) => boolean;
+};
+
+export async function callWithRetry<T>(
+  call: () => Promise<T>,
+  opts: RetryOptions = {},
+): Promise<T> {
+  const maxRetries = opts.maxRetries ?? DEFAULT_LLM_MAX_RETRIES;
+  const delayMs = opts.delayMs ?? defaultRetryDelayMs;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const isRetryable = opts.isRetryable ?? isRetryableProviderError;
+  let attempt = 0;
+  while (true) {
+    try {
+      return await call();
+    } catch (err) {
+      if (attempt >= maxRetries || !isRetryable(err)) throw err;
+      await sleep(delayMs(attempt));
+      attempt += 1;
+    }
   }
+}
+
+// HTTP statuses worth a retry: rate-limit (429, and Anthropic-style 529 overloaded), request/gateway
+// timeouts (408, 504), and transient server/gateway faults (500, 502, 503).
+const RETRYABLE_STATUS: ReadonlySet<number> = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
+
+// Message signatures of a transient failure across providers, including Kimi's misleading
+// "Not found the model <x> or Permission denied" (its coding endpoint returns this for a rate-limit)
+// and common network resets. Kept deliberately narrow so a genuine 4xx (bad request, real auth
+// failure, unknown model on a non-Kimi provider) is NOT retried.
+const RETRYABLE_MESSAGE =
+  /rate.?limit|overloaded|too many requests|temporarily unavailable|service unavailable|not found the model.*permission denied|econnreset|etimedout|eai_again|socket hang up|network error|fetch failed/i;
+
+// Read an HTTP status off the assorted shapes provider SDKs throw (AI SDK APICallError.statusCode,
+// a bare `status`, or a nested `response.status`).
+function readStatusCode(err: unknown): number | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const e = err as { statusCode?: unknown; status?: unknown; response?: { status?: unknown } };
+  for (const v of [e.statusCode, e.status, e.response?.status]) {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return undefined;
+}
+
+// Classify a thrown LLM error as a transient provider failure worth retrying. A deadline
+// (StepTimeoutError) and an explicit abort/cancel are never retried; a matching transient HTTP status
+// or message is. Exported for direct unit testing.
+export function isRetryableProviderError(err: unknown): boolean {
+  if (err instanceof StepTimeoutError) return false;
+  if (isAbortError(err)) return false;
+  const status = readStatusCode(err);
+  if (status !== undefined && RETRYABLE_STATUS.has(status)) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return RETRYABLE_MESSAGE.test(message);
 }
 
 // Structural shape of the agent.generate() result fields submittedOutput reads — kept minimal so

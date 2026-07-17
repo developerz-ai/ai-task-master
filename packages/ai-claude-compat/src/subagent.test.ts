@@ -9,11 +9,14 @@ import { z } from 'zod';
 import { envBlock } from './env-block.ts';
 import { communicationContractBlock, identityBlock } from './prompt-blocks.ts';
 import {
+  callWithRetry,
   callWithStepTimeout,
   composeSystemPrompt,
   continueSubagent,
   createSubagent,
+  defaultRetryDelayMs,
   formatSubmitIssues,
+  isRetryableProviderError,
   runSubagent,
   runWithSchemaRetry,
   StepTimeoutError,
@@ -323,6 +326,88 @@ test('callWithStepTimeout: a non-abort error propagates unchanged', async () => 
   await assert.rejects(
     callWithStepTimeout(() => Promise.reject(boom), { stepMs: 1000 }),
     (err: unknown) => err === boom,
+  );
+});
+
+// --- transient-provider retry (callWithRetry / isRetryableProviderError) ---
+
+test('isRetryableProviderError: transient statuses and messages are retryable', () => {
+  assert.equal(isRetryableProviderError({ statusCode: 429 }), true, '429 rate limit');
+  assert.equal(isRetryableProviderError({ status: 503 }), true, '503 unavailable');
+  assert.equal(isRetryableProviderError({ response: { status: 529 } }), true, '529 overloaded');
+  assert.equal(isRetryableProviderError(new Error('Rate limit exceeded')), true);
+  assert.equal(isRetryableProviderError(new Error('The engine is overloaded')), true);
+  // Kimi's coding endpoint returns this exact phrasing for a rate-limit.
+  assert.equal(
+    isRetryableProviderError(new Error('Not found the model k3 or Permission denied')),
+    true,
+  );
+  assert.equal(isRetryableProviderError(new Error('socket hang up')), true);
+});
+
+test('isRetryableProviderError: deadlines, aborts and real 4xx are NOT retryable', () => {
+  assert.equal(isRetryableProviderError(new StepTimeoutError('deadline')), false);
+  assert.equal(
+    isRetryableProviderError(new DOMException('aborted', 'AbortError')),
+    false,
+    'explicit abort',
+  );
+  assert.equal(isRetryableProviderError({ statusCode: 400 }), false, 'bad request');
+  assert.equal(isRetryableProviderError({ statusCode: 401 }), false, 'auth failure');
+  assert.equal(isRetryableProviderError(new Error('schema validation failed')), false);
+});
+
+test('callWithRetry: retries a transient error then succeeds, with the escalating backoff', async () => {
+  const delays: number[] = [];
+  let calls = 0;
+  const out = await callWithRetry(
+    async () => {
+      calls += 1;
+      if (calls < 4) throw new Error('rate limit hit');
+      return 'ok';
+    },
+    { sleep: async (ms) => void delays.push(ms) },
+  );
+  assert.equal(out, 'ok');
+  assert.equal(calls, 4, 'failed 3 times, succeeded on the 4th attempt');
+  assert.deepEqual(delays, [1_000, 5_000, 10_000], 'backoff 1s, 5s, 10s before attempts 2..4');
+});
+
+test('callWithRetry: gives up after maxRetries and throws the last transient error', async () => {
+  let calls = 0;
+  const err = await callWithRetry(
+    async () => {
+      calls += 1;
+      throw new Error(`overloaded ${calls}`);
+    },
+    { maxRetries: 3, sleep: async () => {} },
+  ).then(
+    () => null,
+    (e: Error) => e,
+  );
+  assert.equal(calls, 4, '1 initial + 3 retries');
+  assert.match(err?.message ?? '', /overloaded 4/, 'the final attempt error is surfaced');
+});
+
+test('callWithRetry: a non-transient error is thrown immediately, no retry', async () => {
+  let calls = 0;
+  await assert.rejects(
+    callWithRetry(
+      async () => {
+        calls += 1;
+        throw new Error('bad request: invalid schema');
+      },
+      { sleep: async () => {} },
+    ),
+    /bad request/,
+  );
+  assert.equal(calls, 1, 'non-transient errors are not retried');
+});
+
+test('defaultRetryDelayMs: 1s then +5s per attempt', () => {
+  assert.deepEqual(
+    [0, 1, 2, 3, 4].map(defaultRetryDelayMs),
+    [1_000, 5_000, 10_000, 15_000, 20_000],
   );
 });
 

@@ -126,12 +126,17 @@ export {
 } from './skill-tool.ts';
 export { loadSkills, type SkillDefinition } from './skills-loader.ts';
 export {
+  callWithRetry,
   callWithStepTimeout,
   composeSystemPrompt,
   continueSubagent,
   correctiveMessage,
   createSubagent,
+  DEFAULT_LLM_MAX_RETRIES,
+  defaultRetryDelayMs,
   formatSubmitIssues,
+  isRetryableProviderError,
+  type RetryOptions,
   runSubagent,
   runWithSchemaRetry,
   type SchemaRetryOptions,

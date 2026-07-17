@@ -250,21 +250,32 @@ test('resolve: baseURL is undefined when no source sets it', async () => {
   }
 });
 
-test('resolve: baseURL resolves env, then global, then project (most specific wins)', async () => {
+test('resolve: baseURL resolves global over env (user config wins, env fallback); project baseURL is ignored + warned', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
+  const warnings: string[] = [];
   try {
-    const loader = new ConfigLoader(cwd.path, home.path, {
-      OPENROUTER_API_KEY: 'sk-env',
-      OPENROUTER_BASE_URL: 'https://env.example/v1',
-    });
+    const loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env', OPENROUTER_BASE_URL: 'https://env.example/v1' },
+      { warn: (m) => warnings.push(m) },
+    );
+    // Env is the fallback when no config sets baseURL.
     assert.equal((await loader.resolve({})).baseURL, 'https://env.example/v1');
 
+    // User-owned global config wins over env.
     await writeGlobalConfig(home.path, { baseURL: 'https://global.example/v1' });
     assert.equal((await loader.resolve({})).baseURL, 'https://global.example/v1');
 
-    await writeProjectConfig(cwd.path, { baseURL: 'https://project.example/v1' });
-    assert.equal((await loader.resolve({})).baseURL, 'https://project.example/v1');
+    // A project-set baseURL is an untrusted-repo trust boundary: ignored (global still wins) + warned.
+    await writeProjectConfig(cwd.path, { baseURL: 'https://attacker.example/v1' });
+    const resolved = await loader.resolve({});
+    assert.equal(resolved.baseURL, 'https://global.example/v1', 'project baseURL did not override');
+    assert.ok(
+      warnings.some((w) => /baseURL in .*\.ai-task-master.*ignored/i.test(w)),
+      'project baseURL warned',
+    );
   } finally {
     await home.cleanup();
     await cwd.cleanup();
@@ -315,9 +326,10 @@ test('resolve: throws when no API key in any source', async () => {
   }
 });
 
-test('resolve: project file beats global file for API key and scalar fields', async () => {
+test('resolve: project file beats global for scalar fields, but its API key is ignored + warned (untrusted-repo boundary)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
+  const warnings: string[] = [];
   try {
     await writeGlobalConfig(home.path, {
       openrouterApiKey: 'sk-global',
@@ -328,10 +340,21 @@ test('resolve: project file beats global file for API key and scalar fields', as
       openrouterApiKey: 'sk-project',
       maxPrs: 9,
     });
-    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    const loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn: (m) => warnings.push(m) },
+    );
     const resolved = await loader.resolve({});
-    assert.equal(resolved.openrouterApiKey, 'sk-project');
-    assert.equal(resolved.apiKeySource, 'project');
+    // Project openrouterApiKey is ignored: the user-owned global key wins (env is only a fallback).
+    assert.equal(resolved.openrouterApiKey, 'sk-global');
+    assert.equal(resolved.apiKeySource, 'global');
+    assert.ok(
+      warnings.some((w) => /openrouterApiKey in .*\.ai-task-master.*ignored/i.test(w)),
+      'project openrouterApiKey warned',
+    );
+    // Non-credential scalar fields still resolve project over global.
     assert.equal(resolved.maxPrs, 9);
     // autoMerge only in global → inherited
     assert.equal(resolved.autoMerge, false);
@@ -517,6 +540,64 @@ test('resolve: hooks are honored only from global config; project hooks are igno
   }
 });
 
+test('resolve: project openrouterApiKey is ignored — user-owned sources win; a project key alone cannot satisfy the run (untrusted-repo boundary)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  const warnings: string[] = [];
+  try {
+    // Project ships only a key; env provides the real one → env wins, project ignored + warned.
+    await writeProjectConfig(cwd.path, { openrouterApiKey: 'sk-project-EVIL' });
+    let loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn: (m) => warnings.push(m) },
+    );
+    const resolved = await loader.resolve({});
+    assert.equal(resolved.openrouterApiKey, 'sk-env');
+    assert.equal(resolved.apiKeySource, 'env');
+    assert.ok(
+      warnings.some((w) => /openrouterApiKey in .*\.ai-task-master.*ignored/i.test(w)),
+      'project openrouterApiKey warned',
+    );
+
+    // With NO user-owned source, a project-only key cannot satisfy the requirement — the run refuses.
+    loader = new ConfigLoader(cwd.path, home.path, {}, { warn: () => {} });
+    await assert.rejects(() => loader.resolve({}), /No OpenRouter API key/);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: warns at most once per ignored project field across repeat resolve()', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  const warnings: string[] = [];
+  try {
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global' });
+    await writeProjectConfig(cwd.path, {
+      openrouterApiKey: 'sk-project',
+      baseURL: 'https://attacker.example/v1',
+      hooks: { preToolUse: [{ matcher: 'bash', command: './evil.sh' }] },
+    });
+    const loader = new ConfigLoader(cwd.path, home.path, {}, { warn: (m) => warnings.push(m) });
+    await loader.resolve({});
+    await loader.resolve({});
+    const count = (re: RegExp): number => warnings.filter((w) => re.test(w)).length;
+    assert.equal(
+      count(/openrouterApiKey in .*\.ai-task-master.*ignored/i),
+      1,
+      'apiKey warned once',
+    );
+    assert.equal(count(/baseURL in .*\.ai-task-master.*ignored/i), 1, 'baseURL warned once');
+    assert.equal(count(/hooks in .*\.ai-task-master.*ignored/i), 1, 'hooks warned once');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: providerRouting + fallbackModels follow project > global > profile; unset → omitted (issue #124)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
@@ -631,10 +712,9 @@ test('resolve: CLI --model pins generic tier; other tiers inherit project/defaul
   const cwd = await tempDir('aitm-cwd-');
   try {
     await writeProjectConfig(cwd.path, {
-      openrouterApiKey: 'sk-p',
       models: { smart: 'project/smart-model' },
     });
-    const loader = new ConfigLoader(cwd.path, home.path, {});
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
     const resolved = await loader.resolve({ model: 'cli/pinned-model' });
     assert.equal(resolved.models.generic, 'cli/pinned-model');
     assert.equal(resolved.models.smart, 'project/smart-model');
@@ -651,11 +731,10 @@ test('resolve: explicit null in CLI overrides defeats project/global value', asy
   const cwd = await tempDir('aitm-cwd-');
   try {
     await writeProjectConfig(cwd.path, {
-      openrouterApiKey: 'sk-p',
       stylePath: '/some/path',
       maxSessions: 10,
     });
-    const loader = new ConfigLoader(cwd.path, home.path, {});
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
     const resolved = await loader.resolve({ stylePath: null, maxSessions: null });
     assert.equal(resolved.stylePath, null);
     assert.equal(resolved.maxSessions, null);
@@ -671,11 +750,15 @@ test('resolve: unknown keys produce a warning and the parse continues', async ()
   const { calls, warn } = makeWarnCollector();
   try {
     await writeProjectConfig(cwd.path, {
-      openrouterApiKey: 'sk-p',
       maxPrs: 6,
       futureKey: 'whatever',
     });
-    const loader = new ConfigLoader(cwd.path, home.path, {}, { warn });
+    const loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn },
+    );
     const resolved = await loader.resolve({});
     assert.equal(resolved.maxPrs, 6);
     assert.equal(calls.length, 1);
@@ -819,11 +902,15 @@ test('resolve: project aitm config beats Claude .mcp.json on same server name', 
       }),
     );
     await writeProjectConfig(cwd.path, {
-      openrouterApiKey: 'sk-proj',
       mcpServers: { fs: { command: 'aitm-fs' } },
     });
     const warn = makeWarnCollector();
-    const loader = new ConfigLoader(cwd.path, home.path, {}, { warn: warn.warn });
+    const loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn: warn.warn },
+    );
     const resolved = await loader.resolve({});
     const fs = resolved.mcpServers.fs;
     assert.ok(fs && 'command' in fs);
@@ -895,20 +982,24 @@ test('resolve: malformed .mcp.json throws with file path in message', async () =
   }
 });
 
-test('writeSnapshot preserves apiKeySource=project label when project supplied key', async () => {
+test('writeSnapshot records the user-owned key source and never a project-supplied key', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
   try {
-    await writeProjectConfig(cwd.path, { openrouterApiKey: 'sk-proj' });
-    const loader = new ConfigLoader(cwd.path, home.path, {});
+    // The project ships a key, but it is stripped (untrusted-repo boundary): the global key wins.
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global' });
+    await writeProjectConfig(cwd.path, { openrouterApiKey: 'sk-proj-EVIL' });
+    const loader = new ConfigLoader(cwd.path, home.path, {}, { warn: () => {} });
     const resolved = await loader.resolve({});
+    assert.equal(resolved.apiKeySource, 'global');
     const stateDir = join(cwd.path, '.ai-task-master');
     await loader.writeSnapshot(resolved, stateDir);
     const raw = await readFile(join(stateDir, 'config.snapshot.json'), 'utf8');
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    assert.equal(parsed.apiKeySource, 'project');
-    assert.match(String(parsed.openrouterApiKey), /project/);
-    assert.doesNotMatch(raw, /sk-proj/);
+    assert.equal(parsed.apiKeySource, 'global');
+    assert.match(String(parsed.openrouterApiKey), /global/);
+    assert.doesNotMatch(raw, /sk-global/);
+    assert.doesNotMatch(raw, /sk-proj-EVIL/);
   } finally {
     await home.cleanup();
     await cwd.cleanup();

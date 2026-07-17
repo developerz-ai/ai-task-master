@@ -1,6 +1,10 @@
 // docs/config.md §"Resolution order", docs/auth.md §"LLM provider"
 // Only module allowed to read ~/.aitm.json and .ai-task-master/config.json.
-// Merge order: defaults < global < project < env < CLI flags. Frozen snapshot written by writeSnapshot().
+// Run settings merge low→high: defaults < global < project < CLI flags.
+// Provider credentials (openrouterApiKey, baseURL) are USER-OWNED ONLY: they resolve
+// global > profile > env — user config wins, env is the fallback — and are stripped from project
+// scope, so an untrusted repo can neither redirect inference nor swap the key (see
+// stripUntrustedProjectFields). Frozen snapshot written by writeSnapshot().
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -62,6 +66,22 @@ const KNOWN_KEYS = new Set<string>([
   'hooks',
 ]);
 
+// Fields a project-scoped .ai-task-master/config.json must NEVER control — an autonomous run points
+// at untrusted repos, so honoring these would let a checked-in file steer the harness. Honored ONLY
+// from the user-owned global config (~/.aitm.json); a project config that sets them is warned +
+// stripped by stripUntrustedProjectFields, the single project-scope trust strip point:
+//   - baseURL           redirects inference to an arbitrary host, which also receives the Bearer key
+//   - openrouterApiKey  swaps the provider credential
+//   - hooks             run shell commands with the operator's privileges (issue #121 CR)
+const UNTRUSTED_PROJECT_FIELDS = [
+  {
+    key: 'baseURL',
+    reason: 'a project-set base URL could redirect inference and leak the API key',
+  },
+  { key: 'openrouterApiKey', reason: 'an API key is a provider credential' },
+  { key: 'hooks', reason: 'hooks run shell commands' },
+] as const satisfies ReadonlyArray<{ key: keyof ConfigFile; reason: string }>;
+
 // Built-in destructive-command deny rules, appended AFTER any configured rules so a repo can
 // allow-override a single default (first-match-wins) without losing the rest (issue #113).
 // `git push --force*` deliberately also catches `--force-with-lease` on the model-facing side — the
@@ -105,6 +125,9 @@ export type ConfigLoaderOptions = {
 
 export class ConfigLoader {
   private readonly warn: WarnFn;
+  // stripUntrustedProjectFields warns at most once per ignored project field for this loader
+  // instance, so a repeat resolve() doesn't re-emit the same warning.
+  private readonly warnedUntrustedProjectFields = new Set<string>();
 
   constructor(
     private readonly cwd: string,
@@ -117,7 +140,7 @@ export class ConfigLoader {
 
   async resolve(cliOverrides: CliOverrides): Promise<ResolvedConfig> {
     const global = await this.readGlobal();
-    const project = await this.readProject();
+    const project = this.stripUntrustedProjectFields(await this.readProject());
     const claudeUser = await this.readClaudeUserMcp();
     const claudeProject = await this.readClaudeProjectMcp();
 
@@ -126,13 +149,13 @@ export class ConfigLoader {
     const active = this.resolveActiveProfile(global);
     const profile = active?.profile;
 
-    const { apiKey, apiKeySource } = this.resolveApiKey(global, project, profile);
+    const { apiKey, apiKeySource } = this.resolveApiKey(global, profile);
 
     if (apiKey === undefined || apiKeySource === undefined) {
       throw new Error(
         'No OpenRouter API key found. Set OPENROUTER_API_KEY env, add ' +
-          '"openrouterApiKey" to ~/.aitm.json or ./.ai-task-master/config.json, or ' +
-          'create a profile with `aitm profile add <name> --api-key <key>`.',
+          '"openrouterApiKey" to the user-owned ~/.aitm.json (a project config.json is ignored ' +
+          'for credentials), or create a profile with `aitm profile add <name> --api-key <key>`.',
       );
     }
 
@@ -153,26 +176,18 @@ export class ConfigLoader {
       ...DEFAULT_BASH_RULES,
     ];
 
-    // Provider routing + fallback models — provider-shaped, so project > global > profile like
-    // baseURL. Undefined when no layer sets it (issue #124).
+    // Provider routing + fallback models — provider-shaped, resolved project > global > profile.
+    // Undefined when no layer sets it (issue #124).
     const providerRouting =
       project?.providerRouting ?? global?.providerRouting ?? profile?.providerRouting;
     const fallbackModels =
       project?.fallbackModels ?? global?.fallbackModels ?? profile?.fallbackModels;
 
-    // Hooks execute shell commands, so a repo-shippable project config must never supply them (issue
-    // #121 CR). Surface the ignored project hooks so an operator isn't silently surprised.
-    if (project?.hooks) {
-      this.warn(
-        'hooks in ./.ai-task-master/config.json are ignored — hooks run shell commands and are honored only from the user-owned ~/.aitm.json',
-      );
-    }
-
     return {
       openrouterApiKey: apiKey,
       apiKeySource,
       ...(active ? { activeProfile: active.name } : {}),
-      baseURL: this.resolveBaseURL(global, project, profile),
+      baseURL: this.resolveBaseURL(global, profile),
       models: this.resolveModels(global, project, profile, cliOverrides),
       maxPrs: pick(cliOverrides.maxPrs, project?.maxPrs, global?.maxPrs, DEFAULTS.maxPrs),
       maxSessions: pickNullable(
@@ -279,7 +294,7 @@ export class ConfigLoader {
       // Tool-registry hooks (issue #121). Hooks run shell commands with the operator's privileges, so
       // they are honored ONLY from the user-owned global config (~/.aitm.json) — NEVER from the
       // per-repo project config, which an untrusted repo could ship (CR: arbitrary code execution). A
-      // project that sets `hooks` is warned and ignored (see the warn above).
+      // project that sets `hooks` is warned + stripped (see stripUntrustedProjectFields).
       ...(global?.hooks ? { hooks: global.hooks } : {}),
       mcpServers,
       mcpServerSources,
@@ -292,6 +307,29 @@ export class ConfigLoader {
 
   async readProject(): Promise<ConfigFile | null> {
     return this.readConfigFile(join(this.cwd, PROJECT_DIR, PROJECT_FILE));
+  }
+
+  // The one project-scope trust boundary: drop every UNTRUSTED_PROJECT_FIELDS entry a project
+  // config.json set (provider credentials + shell hooks) so nothing downstream — resolveApiKey,
+  // resolveBaseURL, the resolved hooks, the snapshot — can honor attacker-controlled input. Returns
+  // a sanitized copy (the input is left untouched); warns at most once per field per loader instance.
+  private stripUntrustedProjectFields(project: ConfigFile | null): ConfigFile | null {
+    if (!project) return project;
+    const sanitized: ConfigFile = { ...project };
+    for (const { key, reason } of UNTRUSTED_PROJECT_FIELDS) {
+      if (sanitized[key] === undefined) continue;
+      this.warnUntrustedProjectField(key, reason);
+      delete sanitized[key];
+    }
+    return sanitized;
+  }
+
+  private warnUntrustedProjectField(key: string, reason: string): void {
+    if (this.warnedUntrustedProjectFields.has(key)) return;
+    this.warnedUntrustedProjectFields.add(key);
+    this.warn(
+      `${key} in ./${PROJECT_DIR}/${PROJECT_FILE} is ignored — ${reason}; honored only from the user-owned ~/${GLOBAL_FILE}`,
+    );
   }
 
   // Read Claude Code's project-scoped MCP file (./.mcp.json). Schema is permissive:
@@ -427,16 +465,16 @@ export class ConfigLoader {
     return { name, profile };
   }
 
-  // Precedence: project > global > active profile > env OPENROUTER_BASE_URL. Undefined →
-  // provider default. Config-file values are already URL-validated by ConfigFileSchema; the
-  // env value is validated here so every source honors the same "validated as a URL"
-  // contract (docs/auth.md §"Base URL"). A whitespace-only / empty env var means "no override".
+  // Precedence: global > active profile > env OPENROUTER_BASE_URL — user config wins, env is the
+  // fallback. Project scope is NEVER consulted: a project-set baseURL is stripped upstream
+  // (stripUntrustedProjectFields) so an untrusted repo can't redirect inference or leak the key.
+  // Undefined → provider default. Config-file values are already URL-validated by ConfigFileSchema;
+  // the env value is validated here so every source honors the same "validated as a URL" contract
+  // (docs/auth.md §"Base URL"). A whitespace-only / empty env var means "no override".
   private resolveBaseURL(
     global: ConfigFile | null,
-    project: ConfigFile | null,
     profile: Profile | undefined,
   ): string | undefined {
-    if (project?.baseURL) return project.baseURL;
     if (global?.baseURL) return global.baseURL;
     if (profile?.baseURL) return profile.baseURL;
     const env = this.env.OPENROUTER_BASE_URL?.trim();
@@ -448,17 +486,15 @@ export class ConfigLoader {
     return parsed.data;
   }
 
-  // Precedence: project > global > active profile > env. The profile sits below explicit
-  // top-level config (so a legacy flat key still wins) but above env (so `aitm profile use`
-  // takes effect even when a stale OPENROUTER_API_KEY lingers in the environment).
+  // Precedence: global > active profile > env — user config wins, env is the fallback. Project
+  // scope is NEVER consulted: a project-set openrouterApiKey is stripped upstream
+  // (stripUntrustedProjectFields), so an untrusted repo can't swap the provider credential. The
+  // profile sits below explicit top-level global config (so a legacy flat key still wins) but above
+  // env (so `aitm profile use` takes effect even when a stale OPENROUTER_API_KEY lingers).
   private resolveApiKey(
     global: ConfigFile | null,
-    project: ConfigFile | null,
     profile: Profile | undefined,
   ): { apiKey: string | undefined; apiKeySource: ResolvedConfig['apiKeySource'] | undefined } {
-    if (project?.openrouterApiKey) {
-      return { apiKey: project.openrouterApiKey, apiKeySource: 'project' };
-    }
     if (global?.openrouterApiKey) {
       return { apiKey: global.openrouterApiKey, apiKeySource: 'global' };
     }

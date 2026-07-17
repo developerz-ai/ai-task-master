@@ -392,6 +392,9 @@ export class WorkLoop {
       }
       const result = await this.runOneTask(worked, task, wt, baseBranch);
       if (result.kind === 'blocked') {
+        // Surface the reason live — this prPerTask task-blocked path otherwise marks the group
+        // blocked SILENTLY (no progress line), so a failed task looks like the group just vanished.
+        this.deps.progress?.(`group ${group.id} task ${task.id}: → blocked (${result.reason})`);
         await this.markStatus(group.id, 'blocked');
         this.outcomes.push({ groupId: group.id, status: 'blocked', reason: result.reason });
         return;

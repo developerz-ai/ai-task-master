@@ -194,6 +194,7 @@ test('makePlannerTool returns a Tool with description, inputSchema, execute, toM
     credentials: provider,
     styleContents: '',
     rollingContext: '',
+    checkoutPath: '/tmp/wt',
     plannerTools: {},
   };
   const t = makePlannerTool(deps);
@@ -252,6 +253,7 @@ test('planner tool: execute resolves model via credentials.modelFor("planner") a
     credentials: provider,
     styleContents: '# style\n',
     rollingContext: '',
+    checkoutPath: '/tmp/wt',
     plannerTools: {},
   });
   const exec = t.execute;
@@ -273,6 +275,7 @@ test('planner tool: toModelOutput collapses ok result to "planner [ok]: …"', a
     credentials: provider,
     styleContents: '',
     rollingContext: '',
+    checkoutPath: '/tmp/wt',
     plannerTools: {},
   });
   const exec = t.execute;
@@ -297,6 +300,7 @@ test('planner tool: toModelOutput collapses blocked + error results', async () =
     credentials: provider,
     styleContents: '',
     rollingContext: '',
+    checkoutPath: '/tmp/wt',
     plannerTools: {},
   });
   const toModelOutput = t.toModelOutput;
@@ -501,6 +505,7 @@ test('planner tool: toModelOutput truncates long IDs to a preview + "+N more"', 
     credentials: provider,
     styleContents: '',
     rollingContext: '',
+    checkoutPath: '/tmp/wt',
     plannerTools: {},
   });
   const toModelOutput = t.toModelOutput;
@@ -531,6 +536,7 @@ test('planner tool: toModelOutput collapses multiline / long error payloads to o
     credentials: provider,
     styleContents: '',
     rollingContext: '',
+    checkoutPath: '/tmp/wt',
     plannerTools: {},
   });
   const toModelOutput = t.toModelOutput;

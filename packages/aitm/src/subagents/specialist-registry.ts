@@ -11,6 +11,7 @@
 import { join } from 'node:path';
 import { type AgentDefinition, loadAgents } from '@developerz.ai/ai-claude-compat';
 import type { PrGroup, Task } from '../state/schema.ts';
+import { render } from './prompts/templates.ts';
 
 // Discover the TARGET repo's domain specialists: `<repoRoot>/.claude/agents/*.md`. Only the project
 // `.claude` is scanned (never the user-global `~/.claude`) — these are the repo's own experts, a
@@ -131,21 +132,23 @@ export function selectSpecialist(
 
 // Layer a chosen specialist's guidance on top of the Worker's base role guidance. The specialist
 // refines HOW the Worker operates in this domain; it never replaces the manifest/editor flow, the
-// coding-style digest, or the submit contract (those come from the surrounding role prompt). Null
-// specialist → the base guidance is returned unchanged (byte-identical to a repo with no agents).
+// coding-style digest, or the submit contract (those come from the surrounding role prompt). The repo
+// ships that specialist file, so its `systemPrompt` is untrusted: render() fences it as the advisory
+// <specialist-guidance> data slot, structurally BELOW the trusted base (and thus below the immutable
+// contract the base sits under). Null specialist → the base guidance is returned unchanged
+// (byte-identical to a repo with no agents).
 export function composeSpecialistGuidance(
   baseGuidance: string,
   specialist: AgentDefinition | null,
 ): string {
   if (specialist === null) return baseGuidance;
-  return [
+  const base = [
     baseGuidance,
     '',
     `Domain specialist: ${specialist.name}`,
     'This repo ships a specialist for this kind of work. Apply its guidance below as the domain',
     'expert for this PR — it refines how you work within the Worker contract above; it does not',
     'replace the manifest/editor flow, the coding-style rules, or the submit contract.',
-    '',
-    specialist.systemPrompt,
   ].join('\n');
+  return render('specialist-guidance', { base, guidance: specialist.systemPrompt });
 }

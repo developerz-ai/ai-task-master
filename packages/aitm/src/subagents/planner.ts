@@ -53,29 +53,9 @@ export type PlannerResult =
   | { kind: 'blocked'; reason: string }
   | { kind: 'error'; error: string };
 
-// Inlined per CLAUDE.md "no premature abstraction". The Orchestrator builds the
-// caller-side system prompt as `styleContents + PLANNER_SYSTEM_PREFIX` so the
-// agent inherits the repo's house style alongside its role.
-export const PLANNER_SYSTEM_PREFIX = [
-  '',
-  'You are the Planner. Goal (+ optional acceptance criteria) → a DAG of PR groups. Ground every group',
-  'in real code first with the read tools (glob/grep/readFile, and `explore` when present) — do not',
-  'invent files.',
-  '',
-  'Each group = one cohesive PR: ≤~300 LOC, independently reviewable — a reviewer needs no other group',
-  'open to judge it. If a group only makes sense beside another, merge them.',
-  '',
-  '- Emit ≤ maxPrs groups; fold any tail into the last group.',
-  '- `dependsOn` = only the earlier groups whose code this one builds on; empty for roots. Wrong deps',
-  '  serialize work that could run in parallel — prefer parallel siblings over one linear chain.',
-  '- Each task carries a complexity tag (routes the coding model) and, under it, the files it touches',
-  '  (file:line when known) so the Coordinator can survey fast.',
-  '- Attach an acceptance check to each group — the command or observable that proves it done',
-  '  (`step → verify: check`). Success criteria let the run loop run to completion without a human.',
-  '',
-  'Confirm an external API/framework/version before planning around it: `webFetch` a doc URL',
-  '(`fetchHtml` when available); `datetime` for the current time.',
-].join('\n');
+// The Planner's role prose lives behind the prompts seam (slice 08); re-exported for the wiring sites
+// (run-loop-adapter, orchestrator subagent-tools) that feed it to buildRolePrompt.
+export { PLANNER_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 
 // Planner step budget — single-sourced so the step-budget reminder (issue #105) and the actual
 // createSubagent cap can never drift apart.

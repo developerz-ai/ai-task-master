@@ -34,6 +34,7 @@ import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
 import { type OnUsage, reportUsage } from '../subagents/factory.ts';
 import type { PlannerTools } from '../subagents/planner.ts';
+import { render } from '../subagents/prompts/templates.ts';
 import type { ReviewerTools } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerTools } from '../subagents/worker.ts';
 import {
@@ -79,8 +80,8 @@ export const defaultRunCmd: RunCmd = async (file, args, options) => {
   }
 };
 
-// Inlined per CLAUDE.md "no premature abstraction". Full system prompt is
-// `agentConfig.contents + ORCHESTRATOR_ROLE_PREFIX + rollingContext`.
+// The orchestrator's role guidance. buildSystemPrompt weaves it with the style digest and rolling
+// context through render('orchestrator-system', …) — the one prompt-assembly seam, no call-site concat.
 export const ORCHESTRATOR_ROLE_PREFIX = [
   '',
   '## Role: Orchestrator',
@@ -244,20 +245,19 @@ export class Orchestrator {
       credentials: this.init.credentials,
       styleContents: this.styleContents(),
       rollingContext: this.init.rollingContext,
+      checkoutPath: context.checkoutPath,
     };
     const tools: OrchestratorTools = {
       planner: makePlannerTool({ ...commonDeps, plannerTools: context.plannerTools }),
       worker: makeWorkerTool({
         ...commonDeps,
         workerTools: context.workerTools,
-        checkoutPath: context.checkoutPath,
         baseBranch: context.baseBranch,
         group: context.group,
       }),
       reviewer: makeReviewerTool({
         ...commonDeps,
         reviewerTools: context.reviewerTools,
-        checkoutPath: context.checkoutPath,
         pr: context.pr,
         threads: context.threads,
       }),
@@ -271,7 +271,11 @@ export class Orchestrator {
   }
 
   buildSystemPrompt(): string {
-    return [this.styleContents(), ORCHESTRATOR_ROLE_PREFIX, this.init.rollingContext].join('\n');
+    return render('orchestrator-system', {
+      style: this.styleContents(),
+      roleGuidance: ORCHESTRATOR_ROLE_PREFIX,
+      rollingContext: this.init.rollingContext,
+    });
   }
 
   // Re-write the Worker's draft commit message via the orchestrator model, then

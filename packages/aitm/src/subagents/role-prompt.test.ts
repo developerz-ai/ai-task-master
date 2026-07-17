@@ -5,6 +5,11 @@ import {
   COMMUNICATION_CONTRACT_TEXT,
   HARNESS_CONTRACT_TEXT,
 } from '@developerz.ai/ai-claude-compat';
+import {
+  EDITOR_SYSTEM_PREFIX,
+  PLANNER_SYSTEM_PREFIX,
+  WORKER_SYSTEM_PREFIX,
+} from './prompts/role-guidance.ts';
 import { buildRolePrompt } from './role-prompt.ts';
 
 test('buildRolePrompt weaves the always-on contracts, role guidance, step budget, style and env', () => {
@@ -73,6 +78,35 @@ test('buildRolePrompt injects the memory index (with staleness framing) when mem
     memoryIndex: [],
   });
   assert.ok(!/point-in-time/i.test(withoutMemory), 'no memory block when the index is empty');
+});
+
+test('buildRolePrompt: every built-in role prompt carries the contract/<env>/step-budget frame (baked into the template, not the prose)', () => {
+  const roles = [
+    { name: 'planner', roleGuidance: PLANNER_SYSTEM_PREFIX, marker: /You are the Planner\./ },
+    { name: 'worker', roleGuidance: WORKER_SYSTEM_PREFIX, marker: /You are the Coordinator/ },
+    { name: 'editor', roleGuidance: EDITOR_SYSTEM_PREFIX, marker: /You are a leaf editor\./ },
+  ] as const;
+  for (const { name, roleGuidance, marker } of roles) {
+    const prompt = buildRolePrompt({
+      style: '',
+      roleGuidance,
+      cwd: '/tmp/does-not-exist-checkout',
+      maxSteps: 25,
+    });
+    assert.ok(prompt.includes(HARNESS_CONTRACT_TEXT), `${name}: harness contract present`);
+    assert.ok(
+      prompt.includes(COMMUNICATION_CONTRACT_TEXT),
+      `${name}: communication contract present`,
+    );
+    assert.ok(prompt.includes(AUTONOMY_CONTRACT_TEXT), `${name}: autonomy contract present`);
+    assert.match(prompt, /<env>/, `${name}: <env> block present`);
+    assert.match(
+      prompt,
+      /budget of 25 tool steps/,
+      `${name}: step-budget reminder interpolates the cap`,
+    );
+    assert.match(prompt, marker, `${name}: role prose flows through the sessionGuidance slot`);
+  }
 });
 
 test('buildRolePrompt omits an empty style block (no blank-line artifact)', () => {

@@ -25,6 +25,7 @@ import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
 import { prependContextBlock, type SubagentInit } from './factory.ts';
+import { render } from './prompts/templates.ts';
 import type { WorkerTools } from './worker.ts';
 
 // Subset of GitHubClient methods exposed to the agent. Kept as a single discriminated tool so
@@ -193,18 +194,24 @@ async function resolveOneThread(
   }
 }
 
+// Trusted framing (coordinates + the decide-act-submit ask) as the `context` slot; the external
+// review conversation as the `comment` slot, auto-fenced by render() as <review-comment> so a hostile
+// comment body ("ignore previous instructions") is quoted as data, never obeyed. Both author and body
+// come from GitHub, so the whole conversation is untrusted and goes inside the fence.
 function buildThreadPrompt(input: ReviewerInput, thread: ReviewThread): string {
-  const lines = [`PR: #${input.pr}`, `Checkout: ${input.checkoutPath}`, `Thread id: ${thread.id}`];
-  if (thread.path) lines.push(`File: ${thread.path}`);
-  lines.push('', 'Conversation:');
-  for (const c of thread.comments) {
-    lines.push(`  @${c.author}: ${c.body}`);
-  }
-  lines.push(
+  const context = [
+    `PR: #${input.pr}`,
+    `Checkout: ${input.checkoutPath}`,
+    `Thread id: ${thread.id}`,
+  ];
+  if (thread.path) context.push(`File: ${thread.path}`);
+  context.push(
     '',
     'Decide the outcome, take the action, then call submit with the ThreadResolutionOutput.',
   );
-  return prependContextBlock(input.contextBlock, lines.join('\n'));
+  const comment = thread.comments.map((c) => `@${c.author}: ${c.body}`).join('\n');
+  const prompt = render('review-thread', { context: context.join('\n'), comment });
+  return prependContextBlock(input.contextBlock, prompt);
 }
 
 async function commitFix(

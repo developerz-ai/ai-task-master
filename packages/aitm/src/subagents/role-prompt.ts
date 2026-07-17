@@ -1,23 +1,18 @@
-// The one aitm-side system-prompt assembly (issue #105). Every built-in subagent (planner, worker
-// manifest, per-file editor, reviewer, ci-fix worker, take-over flows) builds its prompt here, so the
-// cross-cutting contracts land in exactly one place: a weak routed model can no longer skip the
+// The one aitm-side system-prompt assembly (issue #105 + slice 08). Every built-in subagent (planner,
+// worker manifest, per-file editor, reviewer, ci-fix worker, take-over flows) builds its prompt here, so
+// the cross-cutting contracts land in exactly one place: a weak routed model can no longer skip the
 // faithful-reporting or scope-discipline directives, and a new subagent that bypasses this helper is
 // caught by test.
 //
-// A leaf module (imports only the compat block pipeline) so both the main loop (run-loop-adapter) and
-// the flows it pulls in (ci-fix, take-over) can share it without an import cycle.
+// This is the harness↔agent seam's front door. buildRolePrompt gathers the real-world context a pure
+// template cannot (the `<env>` block reads cwd/platform/clock) and injects it, then routes through
+// render('role-prompt', …). The template bakes in the contract blocks, step-budget, and block order; the
+// caller supplies only slot values — no prompt text is hand-concatenated here. Imports stay one-way
+// (role-prompt → prompts/templates → prompts/slots + compat) so the main loop and the flows it pulls in
+// (ci-fix, take-over) share it without an import cycle.
 
-import {
-  composeSystemPrompt,
-  defaultContractBlocks,
-  detectGitRepo,
-  envBlock,
-  type MemoryIndexEntry,
-  memoryIndexBlock,
-  type PromptBlock,
-  selfIdBlock,
-  stepBudgetLine,
-} from '@developerz.ai/ai-claude-compat';
+import { detectGitRepo, envBlock, type MemoryIndexEntry } from '@developerz.ai/ai-claude-compat';
+import { render } from './prompts/templates.ts';
 
 export type RolePromptInput = {
   // Coding-style digest (StyleDistiller output, or raw agent-config contents). Empty → omitted.
@@ -37,21 +32,18 @@ export type RolePromptInput = {
   memoryIndex?: readonly MemoryIndexEntry[];
 };
 
-// Assemble a subagent system prompt from the ordered block pipeline: the always-on contract blocks
-// (harness / communication / autonomy) + optional self-id + the role guidance (with its step budget)
-// + style + env. Canonical order and separation are the pipeline's job.
+// Compute the impure `<env>` block from the checkout cwd, then hand every slot to the role-prompt
+// template. The template owns canonical order, the always-on contract blocks, and the step-budget
+// reminder — this function only supplies values.
 export function buildRolePrompt(input: RolePromptInput): string {
-  const memoryBlock = input.memoryIndex ? memoryIndexBlock(input.memoryIndex) : null;
-  const blocks: PromptBlock[] = [
-    ...defaultContractBlocks(),
-    ...(input.modelId ? [selfIdBlock(input.modelId, input.knowledgeCutoff)] : []),
-    {
-      kind: 'sessionGuidance',
-      text: `${input.roleGuidance}\n\n${stepBudgetLine(input.maxSteps)}`,
-    },
-    { kind: 'style', text: input.style },
-    { kind: 'env', text: envBlock({ cwd: input.cwd, isGitRepo: detectGitRepo(input.cwd) }) },
-    ...(memoryBlock ? [memoryBlock] : []),
-  ];
-  return composeSystemPrompt(blocks);
+  const env = envBlock({ cwd: input.cwd, isGitRepo: detectGitRepo(input.cwd) });
+  return render('role-prompt', {
+    roleGuidance: input.roleGuidance,
+    maxSteps: input.maxSteps,
+    style: input.style,
+    env,
+    ...(input.modelId !== undefined ? { modelId: input.modelId } : {}),
+    ...(input.knowledgeCutoff !== undefined ? { knowledgeCutoff: input.knowledgeCutoff } : {}),
+    ...(input.memoryIndex !== undefined ? { memoryIndex: input.memoryIndex } : {}),
+  });
 }

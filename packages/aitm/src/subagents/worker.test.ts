@@ -131,14 +131,18 @@ function baseInput(group: PrGroup = baseGroup()): WorkerInput {
   };
 }
 
-test('WORKER_SYSTEM_PREFIX mentions FileManifest + the two phases', () => {
-  assert.match(WORKER_SYSTEM_PREFIX, /FileManifest/);
-  assert.match(WORKER_SYSTEM_PREFIX, /Phase 1/);
-  assert.match(WORKER_SYSTEM_PREFIX, /Phase 2/);
+test('WORKER_SYSTEM_PREFIX is the Coordinator: file manifest + the split/right-size judgment', () => {
+  assert.match(WORKER_SYSTEM_PREFIX, /Coordinator/);
+  assert.match(WORKER_SYSTEM_PREFIX, /file manifest/);
+  assert.match(WORKER_SYSTEM_PREFIX, /Split heuristic/);
+  assert.match(WORKER_SYSTEM_PREFIX, /Right-size/);
+  // The "only the coordinator spawns" boundary and leaf independence, the product principles §2a adds.
+  assert.match(WORKER_SYSTEM_PREFIX, /Only you spawn; leaves never spawn\./);
+  assert.match(WORKER_SYSTEM_PREFIX, /every entry MUST be independent/);
 });
 
 test('WORKER_SYSTEM_PREFIX carries the explore delegation guidance, gated on availability (issue #126)', () => {
-  assert.match(WORKER_SYSTEM_PREFIX, /`explore` tool is available/);
+  assert.match(WORKER_SYSTEM_PREFIX, /`explore` when present/);
   assert.match(WORKER_SYSTEM_PREFIX, /in parallel/);
 });
 
@@ -262,8 +266,8 @@ test('runWorker: a prior handle is continued — the retained conversation is re
 
 test('WORKER_SYSTEM_PREFIX carries the compaction continuation contract (issue #102)', () => {
   assert.match(WORKER_SYSTEM_PREFIX, /summarized/i);
-  assert.match(WORKER_SYSTEM_PREFIX, /continue the task from that summary/i);
-  assert.match(WORKER_SYSTEM_PREFIX, /do not wrap up early/i);
+  assert.match(WORKER_SYSTEM_PREFIX, /resume from the summary/i);
+  assert.match(WORKER_SYSTEM_PREFIX, /do not re-plan from\s+scratch or hand off early/i);
 });
 
 test('createWorkerAgent builds an agent that exposes the injected tools', () => {

@@ -54,6 +54,7 @@ import {
   resolvePlannerTools,
   resolveWorkerTools,
   runLoopAdapter,
+  runStepContextLine,
   sanitizeBranchComponent,
   selfReviewVerifyCommand,
   webSearchProviderOptions,
@@ -640,6 +641,29 @@ test('harnessContextBlock: one envelope carrying the claudeMd and currentDate se
   assert.match(block, /# claudeMd\n# House style\n- single quotes only/);
   assert.match(block, /# currentDate\n\d{4}-\d{2}-\d{2}/);
   assert.match(block, /may or may not be relevant/);
+  // No step supplied → no runProgress section (prompt-design.md §3).
+  assert.equal(block.includes('# runProgress'), false, 'no progress section without a step');
+});
+
+test('harnessContextBlock: a step adds a runProgress section with the phase + N/M line (§3)', () => {
+  const block = harnessContextBlock('# style', {
+    phase: 'working',
+    unit: 'group',
+    index: 2,
+    total: 5,
+  });
+  assert.equal((block.match(/<system-reminder>/g) ?? []).length, 1, 'still one envelope');
+  assert.match(block, /# runProgress\nStep 2 of 5 — working/);
+});
+
+test('runStepContextLine: counter → "Step N of M — phase"; phase-only → "Phase: x"; empty → ""', () => {
+  assert.equal(
+    runStepContextLine({ phase: 'working', index: 3, total: 38 }),
+    'Step 3 of 38 — working',
+  );
+  assert.equal(runStepContextLine({ phase: 'planning' }), 'Phase: planning');
+  assert.equal(runStepContextLine({ index: 1, total: 4 }), 'Step 1 of 4');
+  assert.equal(runStepContextLine({}), '');
 });
 
 test('reminderAgentSystemPrompt: block pipeline + provenance contract (issues #105/#106)', () => {

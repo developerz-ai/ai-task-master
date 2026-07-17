@@ -144,8 +144,12 @@ test('REVIEWER_SYSTEM_PREFIX names the three outcomes', () => {
 
 test('REVIEWER_SYSTEM_PREFIX carries the compaction continuation contract (issue #102)', () => {
   assert.match(REVIEWER_SYSTEM_PREFIX, /summarized/i);
-  assert.match(REVIEWER_SYSTEM_PREFIX, /continue from that summary/i);
-  assert.match(REVIEWER_SYSTEM_PREFIX, /do not\s+wrap up early/i);
+  assert.match(REVIEWER_SYSTEM_PREFIX, /resume from the summary/i);
+  assert.match(REVIEWER_SYSTEM_PREFIX, /do not re-decide a resolved thread/i);
+});
+
+test('REVIEWER_SYSTEM_PREFIX tells the model to disagree when the comment is wrong (§2d)', () => {
+  assert.match(REVIEWER_SYSTEM_PREFIX, /Disagree when the comment is wrong/);
 });
 
 test('createReviewerAgent builds an agent that exposes the injected tools', () => {

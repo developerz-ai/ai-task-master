@@ -6,6 +6,7 @@ import type { PrGroup } from '../state/schema.ts';
 import type { FileManifest, WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
 import {
   runSelfReviewSession,
+  SELF_REVIEW_SYSTEM_PREFIX,
   type SelfReviewInput,
   type SelfReviewSubagents,
 } from './self-review.ts';
@@ -101,6 +102,19 @@ function submitManifestModel(manifest: FileManifest): MockLanguageModelV3 {
     }),
   });
 }
+
+test('SELF_REVIEW_SYSTEM_PREFIX is the adversarial pre-PR self-reviewer prompt (§2e)', () => {
+  assert.match(SELF_REVIEW_SYSTEM_PREFIX, /pre-PR self-reviewer/);
+  assert.match(SELF_REVIEW_SYSTEM_PREFIX, /hostile reviewer/);
+  assert.match(SELF_REVIEW_SYSTEM_PREFIX, /you own this gate/);
+  // The four-pass adversarial checklist (correctness / scope / contract / style).
+  assert.match(SELF_REVIEW_SYSTEM_PREFIX, /1\. Correctness/);
+  assert.match(SELF_REVIEW_SYSTEM_PREFIX, /2\. Scope/);
+  assert.match(SELF_REVIEW_SYSTEM_PREFIX, /3\. Contract/);
+  assert.match(SELF_REVIEW_SYSTEM_PREFIX, /4\. Style/);
+  // Faithful-reporting reinforcement: never claim green without a tool result.
+  assert.match(SELF_REVIEW_SYSTEM_PREFIX, /Do NOT claim green/);
+});
 
 test('runSelfReviewSession: no verify command → adversarial-review task, Worker fixes → reviewed', async () => {
   let captured: WorkerInput | null = null;

@@ -48,14 +48,17 @@ function basicPlan(groupCount: number): Plan {
   return { goal: 'do the thing', groups };
 }
 
-test('PLANNER_SYSTEM_PREFIX carries the explore delegation guidance, gated on availability (issue #126)', () => {
-  assert.match(PLANNER_SYSTEM_PREFIX, /`explore` tool is available/);
-  assert.match(PLANNER_SYSTEM_PREFIX, /in parallel/);
+test('PLANNER_SYSTEM_PREFIX names the read tools including explore, gated on availability (issue #126)', () => {
+  assert.match(PLANNER_SYSTEM_PREFIX, /`explore` when present/);
+  assert.match(PLANNER_SYSTEM_PREFIX, /glob\/grep\/readFile/);
 });
 
-test('PLANNER_SYSTEM_PREFIX is non-empty and mentions maxPrs + Plan', () => {
+test('PLANNER_SYSTEM_PREFIX is non-empty and mentions maxPrs + the PR-group DAG', () => {
   assert.match(PLANNER_SYSTEM_PREFIX, /maxPrs/);
-  assert.match(PLANNER_SYSTEM_PREFIX, /Plan/);
+  assert.match(PLANNER_SYSTEM_PREFIX, /DAG of PR groups/);
+  // §2c additions: file:line hints under each task and the `step → verify` acceptance check.
+  assert.match(PLANNER_SYSTEM_PREFIX, /file:line when known/);
+  assert.match(PLANNER_SYSTEM_PREFIX, /step → verify/);
 });
 
 test('createPlannerAgent builds an agent with the injected tools plus a submit tool', () => {

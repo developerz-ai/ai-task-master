@@ -33,11 +33,30 @@ import {
   createWorkerAgent,
   runWorker,
   WORKER_MAX_STEPS,
-  WORKER_SYSTEM_PREFIX,
   type WorkerInput,
   type WorkerResult,
   type WorkerTools,
 } from '../subagents/worker.ts';
+
+// The self-review session's own role prefix (docs/prompt-design.md §2e). The review Worker is a
+// Coordinator run adversarially over its own diff, so it gets this hostile-reviewer prompt instead of
+// the plain WORKER_SYSTEM_PREFIX — it owns the pre-PR gate: read the diff as a hostile reviewer, fix
+// what it finds, and submit only when the diff is clean and the verify command is green.
+export const SELF_REVIEW_SYSTEM_PREFIX = [
+  '',
+  'You are the pre-PR self-reviewer. Read the diff about to become a PR as a hostile reviewer would,',
+  'then fix what you find — you own this gate.',
+  '',
+  'Adversarial pass, in order:',
+  '1. Correctness: bugs, wrong edge cases, off-by-one, unhandled errors the change introduced.',
+  '2. Scope: every changed line must trace to the task — revert drive-by edits and reformatting.',
+  "3. Contract: does it meet the task's acceptance check? Run tests and lint (the verify command).",
+  "4. Style: matches the repo's conventions and the coding-style digest.",
+  '',
+  "Fix real problems with the edit tools; leave a pre-existing issue you did not cause as a note, don't",
+  'bundle it. Do NOT claim green unless a tool result in this run shows it. When the diff is clean and',
+  'verify passes, submit — a partial-but-honest report beats an unearned "looks good".',
+].join('\n');
 
 // Model selector — Credentials satisfies it structurally. The pass owns the tier decision: always
 // 'coding', so the self-review lands on the strongest code model regardless of role mapping. The id
@@ -67,6 +86,9 @@ export type SelfReviewSubagents = {
   onUsage?: SubagentInit<WorkerTools>['onUsage'];
   // Live rolling context threaded into the review Worker's manifest prompt. Unset → ''.
   rollingContext?: string;
+  // Optional harness context block (a `<system-reminder>` envelope: repo instructions + date + the
+  // run's phase/step) prepended to the review Worker's first user message. Unset → no block.
+  contextBlock?: string;
   // Per-repo memory index injected into the review Worker's prompt. Unset → no memory block.
   memoryIndex?: readonly MemoryIndexEntry[];
   // Per-step transcript recorder callback forwarded to the review Worker agent. Unset → nothing.
@@ -161,6 +183,7 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     baseBranch,
     styleContents: subagents.styleContents,
     rollingContext: subagents.rollingContext ?? '',
+    ...(subagents.contextBlock ? { contextBlock: subagents.contextBlock } : {}),
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),
   };
@@ -178,7 +201,7 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     tools: subagents.workerTools,
     systemPrompt: buildRolePrompt({
       style: subagents.styleContents,
-      roleGuidance: WORKER_SYSTEM_PREFIX,
+      roleGuidance: SELF_REVIEW_SYSTEM_PREFIX,
       cwd: checkoutPath,
       maxSteps: WORKER_MAX_STEPS,
       modelId: subagents.credentials.modelIdForCapability('coding'),

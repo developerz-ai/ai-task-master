@@ -328,12 +328,29 @@ function staleFileReminders(fileState: FileStateTracker, cwd: string): string[] 
 }
 
 // First-message context block for the subagents: the target-repo instructions + today's date, framed
-// as advisory <system-reminder> context (issue #106). Prepended to each subagent's first user message.
-export function harnessContextBlock(styleContents: string): string {
-  return contextReminder([
+// as advisory <system-reminder> context (issue #106). When a `step` is supplied, the run's phase +
+// N/M position rides along as a `runProgress` section so the model knows where it is in the run
+// (prompt-design.md §3 — previously logging-only). Prepended to each subagent's first user message.
+export function harnessContextBlock(styleContents: string, step?: RunStep): string {
+  const sections = [
     { label: 'claudeMd', body: styleContents },
     { label: 'currentDate', body: new Date().toISOString().slice(0, 10) },
-  ]);
+  ];
+  const progress = step ? runStepContextLine(step) : '';
+  if (progress) sections.push({ label: 'runProgress', body: progress });
+  return contextReminder(sections);
+}
+
+// Render a RunStep as a first-message progress line: `Step N of M — <phase>` when the counter is
+// known, `Phase: <phase>` when only the phase is (planning, before groups exist), '' when nothing is.
+// Mirrors the observability tag (step-progress.formatStepTag) but in prose for the model, not the log.
+export function runStepContextLine(step: RunStep): string {
+  const hasCounter = step.index !== undefined && step.total !== undefined && step.total > 0;
+  if (hasCounter) {
+    const base = `Step ${step.index} of ${step.total}`;
+    return step.phase ? `${base} — ${step.phase}` : base;
+  }
+  return step.phase ? `Phase: ${step.phase}` : '';
 }
 
 // System prompt for a main-loop agent whose tool set is decorated with reminders (issue #106): the
@@ -677,7 +694,9 @@ async function defaultPlanGroups(
     goal: input.goal,
     styleContents: style,
     maxPrs: input.resolved.maxPrs,
-    contextBlock: harnessContextBlock(style),
+    // No group counter yet — the Planner is what produces the groups — so the block carries the
+    // phase only (`Phase: planning`).
+    contextBlock: harnessContextBlock(style, { phase: 'planning' }),
     ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
   });
   await plannerRecorder?.end(runEndOutcome(result.kind));
@@ -879,7 +898,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       threads,
       checkoutPath: checkout.path,
       styleContents: style,
-      contextBlock: harnessContextBlock(style),
+      contextBlock: harnessContextBlock(style, { phase: 'reviewing', ...reviewerCounter }),
     });
     await recorder?.end(runEndOutcome(result.kind));
     return result;
@@ -994,7 +1013,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         styleContents: style,
         // Live read (issue #123): the second group's manifest prompt carries the first group's digest.
         rollingContext: rollingCtx.current(),
-        contextBlock: harnessContextBlock(style),
+        contextBlock: harnessContextBlock(style, workerStepTag),
         ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
         ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
         // Resume (issue #108): continue the interrupted conversation from its retained messages
@@ -1071,6 +1090,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           styleContents: style,
           compactor,
           timeout: stepTimeout,
+          contextBlock: harnessContextBlock(style, selfReviewTag),
           ...(selfReviewMemoryIndex.length > 0 ? { memoryIndex: selfReviewMemoryIndex } : {}),
           ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),
           ...(selfReviewProviderOptions !== undefined

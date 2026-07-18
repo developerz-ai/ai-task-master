@@ -19,6 +19,10 @@ export type MainCtx = {
   runPlanner?: StartCtx['runPlanner'];
   runLoop?: StartCtx['runLoop'];
   runMergeFlow?: MergePrCtx['runMergeFlow'];
+  // Abort handle threaded into both flows: the merge-pr take-over loop → `{ kind: 'cancelled' }`
+  // (exit 2), and the start loop → eager MCP close so a force-exit can't orphan stdio children.
+  // The entrypoint wires this to SIGINT/SIGTERM; tests drive it directly.
+  signal?: AbortSignal;
 };
 
 export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Promise<number> {
@@ -57,6 +61,7 @@ function buildStartCtx(ctx: MainCtx): StartCtx {
   if (ctx.authStatus !== undefined) out.authStatus = ctx.authStatus;
   if (ctx.runPlanner !== undefined) out.runPlanner = ctx.runPlanner;
   if (ctx.runLoop !== undefined) out.runLoop = ctx.runLoop;
+  if (ctx.signal !== undefined) out.signal = ctx.signal;
   return out;
 }
 
@@ -67,6 +72,7 @@ function buildMergePrCtx(ctx: MainCtx): MergePrCtx {
   if (ctx.env !== undefined) out.env = ctx.env;
   if (ctx.authStatus !== undefined) out.authStatus = ctx.authStatus;
   if (ctx.runMergeFlow !== undefined) out.runMergeFlow = ctx.runMergeFlow;
+  if (ctx.signal !== undefined) out.signal = ctx.signal;
   return out;
 }
 
@@ -132,8 +138,10 @@ Docs: docs/commands/start.md, docs/commands/merge-pr.md, docs/commands/config.md
 if (isEntrypoint(import.meta.url, process.argv[1])) {
   void (async () => {
     const reporter = await initErrorReporter();
+    const controller = new AbortController();
+    installSignalHandlers(controller);
     try {
-      const code = await main(process.argv.slice(2));
+      const code = await main(process.argv.slice(2), { signal: controller.signal });
       await reporter.flush();
       process.exit(code);
     } catch (err: unknown) {
@@ -143,6 +151,35 @@ if (isEntrypoint(import.meta.url, process.argv[1])) {
       process.exit(1);
     }
   })();
+}
+
+// Minimal process surface the signal wiring touches. Injectable so the abort/force-exit
+// branches are unit-testable without attaching handlers to the real test-runner process.
+export type SignalProcess = {
+  on(signal: NodeJS.Signals, listener: () => void): unknown;
+  exit(code: number): never;
+  stderr: { write(chunk: string): boolean };
+};
+
+const CANCEL_SIGNALS: ReadonlyArray<{ name: NodeJS.Signals; signo: number }> = [
+  { name: 'SIGINT', signo: 2 },
+  { name: 'SIGTERM', signo: 15 },
+];
+
+// First SIGINT/SIGTERM aborts the run so an in-flight flow unwinds to `{ kind: 'cancelled' }`
+// (exit 2, wired through the merge-pr take-over loop); a second one force-exits with the
+// conventional 128+signo code so a wedged flow can't trap the user.
+export function installSignalHandlers(
+  controller: AbortController,
+  proc: SignalProcess = process,
+): void {
+  for (const { name, signo } of CANCEL_SIGNALS) {
+    proc.on(name, () => {
+      if (controller.signal.aborted) proc.exit(128 + signo);
+      proc.stderr.write('\nCancelling — interrupt again to force-quit.\n');
+      controller.abort();
+    });
+  }
 }
 
 // Exported for unit-test coverage of the symlink case (global installs put a symlink at

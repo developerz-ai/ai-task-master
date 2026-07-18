@@ -486,6 +486,17 @@ export async function runLoopAdapter(
           : {}),
       });
 
+  // Reap the MCP stdio children (Experimental_StdioMCPTransport spawns them, mcp-client.ts) the
+  // instant the run is aborted. A second Ctrl-C force-exits the process (cli.ts installSignalHandlers)
+  // and Node's default signal termination skips the `finally` below, so relying on it alone orphans
+  // the servers — close eagerly on abort while we still can. close() is idempotent (it swaps out its
+  // server list before awaiting), so the finally's close is a harmless no-op once this has fired; the
+  // listener is detached in the finally so a normally-completing run never leaks it.
+  const reapMcpOnAbort = () => {
+    void mcp.close();
+  };
+  input.signal?.addEventListener('abort', reapMcpOnAbort, { once: true });
+
   let mcpConnected = false;
   try {
     if (usesMcp && !seams.makeMcp) {
@@ -591,9 +602,11 @@ export async function runLoopAdapter(
       initialSessionCount: current.sessionCount,
       progress: harnessProgress,
       stepCounter,
+      ...(input.signal ? { signal: input.signal } : {}),
     });
     return await loop.run();
   } finally {
+    input.signal?.removeEventListener('abort', reapMcpOnAbort);
     if (mcpConnected) {
       await mcp.close();
     }

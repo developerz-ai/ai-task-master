@@ -125,6 +125,10 @@ export type WorkerInput = {
   // Optional handle from an earlier manifest-planning run (a prior CI-fix pass for this group). When
   // set, the manifest agent continues that conversation instead of planning fresh (issue #107).
   priorHandle?: SubagentHandle<WorkerTools>;
+  // Optional outer abort signal (e.g. SIGINT, see cli.ts). When it aborts, the editor fanout's own
+  // controller aborts too, so sibling editor LLM calls stop rather than burning tokens after the
+  // run is already cancelled (cleanup #2, plan 02-signal-cancellation-cleanup).
+  signal?: AbortSignal;
 };
 
 // Per-file outcome from the parallel editor fanout. Useful to the Orchestrator
@@ -285,7 +289,7 @@ async function planAndEdit(
   // the shared single checkout (worktrees removed), a `checkout -B` after the writes would otherwise
   // carry this group's — or a concurrent group's — uncommitted edits onto the wrong branch (audit 02).
   await checkoutBranch(requireExec(init.tools.bash), input, branch);
-  const outcomes = await Promise.all(manifest.files.map((file) => runEditor(init, file, input)));
+  const outcomes = await runEditorFanout(init, manifest.files, input);
   const changes: FileChange[] = [];
   const unchanged: string[] = [];
   for (const outcome of outcomes) {
@@ -435,10 +439,41 @@ export function editorToolSet(tools: WorkerTools): WorkerTools {
 // the committed diff can't back.
 type EditorOutcome = { changed: true; change: FileChange } | { changed: false; path: string };
 
+// Fan out one editor per manifest file, sharing a single AbortController: any editor rejecting
+// (or the outer WorkerInput.signal aborting, e.g. SIGINT) aborts every sibling's in-flight
+// `generateText` call so a doomed fanout stops burning tokens instead of running to completion
+// (cleanup #2, plan 02-signal-cancellation-cleanup).
+async function runEditorFanout(
+  init: SubagentInit<WorkerTools>,
+  files: FileManifestEntry[],
+  input: WorkerInput,
+): Promise<EditorOutcome[]> {
+  const controller = new AbortController();
+  const outer = input.signal;
+  const onOuterAbort = (): void => controller.abort(outer?.reason);
+  if (outer) {
+    if (outer.aborted) controller.abort(outer.reason);
+    else outer.addEventListener('abort', onOuterAbort, { once: true });
+  }
+  try {
+    return await Promise.all(
+      files.map((file) =>
+        runEditor(init, file, input, controller.signal).catch((err: unknown) => {
+          controller.abort();
+          throw err;
+        }),
+      ),
+    );
+  } finally {
+    outer?.removeEventListener('abort', onOuterAbort);
+  }
+}
+
 async function runEditor(
   init: SubagentInit<WorkerTools>,
   file: FileManifestEntry,
   input: WorkerInput,
+  signal: AbortSignal,
 ): Promise<EditorOutcome> {
   const result = await callWithStepTimeout(
     () =>
@@ -453,6 +488,7 @@ async function runEditor(
         }),
         prompt: buildEditorPrompt(file, input),
         stopWhen: stepCountIs(EDITOR_MAX_STEPS),
+        abortSignal: signal,
         // web_search (issue #112) rides providerOptions.openrouter when the adapter enabled it for
         // this Worker. The old `{ openai: { parallelToolCalls: true } }` was dead — the OpenRouter
         // provider ignores the `openai` namespace, and parallelToolCalls is already an OpenRouter

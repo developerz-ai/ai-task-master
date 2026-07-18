@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { makeTempRepo } from '../testing/temp-repo.ts';
-import type { MainCtx } from './cli.ts';
-import { isEntrypoint, main } from './cli.ts';
+import type { MainCtx, SignalProcess } from './cli.ts';
+import { installSignalHandlers, isEntrypoint, main } from './cli.ts';
 
 const FAKE_KEY = 'sk-or-fake-test-key';
 
@@ -110,6 +110,33 @@ test('main: start with stubbed env routes to runStart and forwards exit code', a
   }
 });
 
+test('main: start threads ctx.signal into the run loop', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const cap = capture();
+  const controller = new AbortController();
+  try {
+    let received: AbortSignal | undefined;
+    const code = await main(['start', 'goal'], {
+      ...cap.ctx,
+      cwd: repo.path,
+      homeDir: home.path,
+      env: { OPENROUTER_API_KEY: FAKE_KEY },
+      authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      signal: controller.signal,
+      runLoop: async (input) => {
+        received = input.signal;
+        return { kind: 'success', outcomes: [] };
+      },
+    });
+    assert.equal(code, 0, cap.err.join(''));
+    assert.equal(received, controller.signal);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('main: start without OPENROUTER_API_KEY → exit 1, message on stderr', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();
@@ -158,6 +185,63 @@ test('main: merge-pr --pr N with no prior state → exit 0 (take-over path)', as
     });
     assert.equal(code, 0, cap.err.join(''));
     assert.equal(flowRan, true);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('main: merge-pr threads ctx.signal into the merge flow', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const cap = capture();
+  const controller = new AbortController();
+  try {
+    let received: AbortSignal | undefined;
+    const code = await main(['merge-pr', '--pr', '7'], {
+      ...cap.ctx,
+      cwd: repo.path,
+      homeDir: home.path,
+      env: { OPENROUTER_API_KEY: FAKE_KEY },
+      authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      resolveStyle: async () => 'style',
+      signal: controller.signal,
+      runMergeFlow: async (input) => {
+        received = input.signal;
+        return { kind: 'success', outcomes: [] };
+      },
+    });
+    assert.equal(code, 0, cap.err.join(''));
+    assert.equal(received, controller.signal);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('main: merge-pr with an aborted signal → flow cancels → exit 2', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const cap = capture();
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    const code = await main(['merge-pr', '--pr', '7'], {
+      ...cap.ctx,
+      cwd: repo.path,
+      homeDir: home.path,
+      env: { OPENROUTER_API_KEY: FAKE_KEY },
+      authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      resolveStyle: async () => 'style',
+      signal: controller.signal,
+      // Mirrors the real take-over loop: an already-aborted signal short-circuits to cancelled.
+      runMergeFlow: async (input) =>
+        input.signal?.aborted
+          ? { kind: 'cancelled', outcomes: [] }
+          : { kind: 'success', outcomes: [] },
+    });
+    assert.equal(code, 2);
+    assert.match(cap.err.join(''), /Cancelled/);
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -405,4 +489,80 @@ test('main: start cancelled (code 2, message) routes to stderr, not stdout', asy
     await repo.cleanup();
     await home.cleanup();
   }
+});
+
+// ---- signal handling: abort-then-force-exit --------------------------------
+
+type FakeProc = {
+  proc: SignalProcess;
+  handlers: Map<string, () => void>;
+  fire: (name: string) => void;
+  errs: string[];
+  exits: number[];
+};
+
+// A structural SignalProcess whose exit() throws (like a real process.exit that never returns)
+// so the abort/force-exit branches are observable without touching the test-runner process.
+function fakeSignalProc(): FakeProc {
+  const handlers = new Map<string, () => void>();
+  const errs: string[] = [];
+  const exits: number[] = [];
+  const proc: SignalProcess = {
+    on(signal, listener) {
+      handlers.set(signal, listener);
+    },
+    exit(code): never {
+      exits.push(code);
+      throw new Error(`forced-exit:${code}`);
+    },
+    stderr: {
+      write(chunk) {
+        errs.push(chunk);
+        return true;
+      },
+    },
+  };
+  return {
+    proc,
+    handlers,
+    fire: (name) => {
+      const handler = handlers.get(name);
+      if (!handler) throw new Error(`no handler registered for ${name}`);
+      handler();
+    },
+    errs,
+    exits,
+  };
+}
+
+test('installSignalHandlers: registers SIGINT and SIGTERM', () => {
+  const fake = fakeSignalProc();
+  installSignalHandlers(new AbortController(), fake.proc);
+  assert.deepEqual([...fake.handlers.keys()].sort(), ['SIGINT', 'SIGTERM']);
+});
+
+test('installSignalHandlers: first SIGINT aborts + warns, second force-exits 130', () => {
+  const controller = new AbortController();
+  const fake = fakeSignalProc();
+  installSignalHandlers(controller, fake.proc);
+
+  assert.equal(controller.signal.aborted, false);
+  fake.fire('SIGINT');
+  assert.equal(controller.signal.aborted, true);
+  assert.match(fake.errs.join(''), /force-quit/);
+  assert.deepEqual(fake.exits, []);
+
+  assert.throws(() => fake.fire('SIGINT'), /forced-exit:130/);
+  assert.deepEqual(fake.exits, [130]);
+});
+
+test('installSignalHandlers: second SIGTERM force-exits 143', () => {
+  const controller = new AbortController();
+  const fake = fakeSignalProc();
+  installSignalHandlers(controller, fake.proc);
+
+  fake.fire('SIGTERM');
+  assert.equal(controller.signal.aborted, true);
+  assert.throws(() => fake.fire('SIGTERM'), /forced-exit:143/);
+  assert.deepEqual(fake.exits, [143]);
 });

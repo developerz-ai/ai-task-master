@@ -364,6 +364,7 @@ function makeDeps(
     ...(overrides.initialSessionCount !== undefined
       ? { initialSessionCount: overrides.initialSessionCount }
       : {}),
+    ...(overrides.signal !== undefined ? { signal: overrides.signal } : {}),
   };
 }
 
@@ -1623,6 +1624,51 @@ test('session cap exits with "session-cap" before all groups are processed', asy
   const result = await loop.run();
   assert.equal(result.kind, 'session-cap');
   assert.equal(calls.runWorker.length, 2, 'only 2 worker invocations under cap');
+});
+
+test('run(): an already-aborted signal → cancelled before any group runs', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const ready = makeGraph([group('a')], { completeAfter: 5 });
+  const { orchestrator, calls } = makeOrchestrator();
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, graph: ready.graph, signal: controller.signal }),
+  );
+  const result = await loop.run();
+  assert.equal(result.kind, 'cancelled');
+  assert.equal(calls.runWorker.length, 0, 'no worker invoked once the signal is already aborted');
+});
+
+test('run(): signal aborts mid-batch → cancelled, not blocked, even though the abort failed the group', async () => {
+  // Mirrors a real SIGINT: an in-flight worker call rejects with an AbortError (worker.ts signal
+  // wiring) at the same instant the run's own AbortController flips. Without the post-batch
+  // signal check, runGroup's catch would report this group `blocked` and the run would exit 1
+  // instead of the cancelled exit 2 a user-initiated Ctrl-C promises.
+  const controller = new AbortController();
+  const orchestrator: WorkLoopOrchestrator = {
+    runWorker: async () => {
+      controller.abort();
+      throw new Error('The operation was aborted');
+    },
+    finalizeCommit: async () => {
+      throw new Error('finalizeCommit must not run');
+    },
+    openPr: async () => {
+      throw new Error('openPr must not run');
+    },
+    runCiFix: async () => {
+      throw new Error('runCiFix must not run');
+    },
+    addressReviews: async () => {
+      throw new Error('addressReviews must not run');
+    },
+  };
+  const ready = makeGraph([group('a')], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, graph: ready.graph, signal: controller.signal }),
+  );
+  const result = await loop.run();
+  assert.equal(result.kind, 'cancelled');
 });
 
 test('autoMerge=false → result is awaiting-pr with PR numbers', async () => {

@@ -164,6 +164,12 @@ export type WorkLoopDeps = {
   // Resolve the N/M step counter for a group/task, injected by the adapter (it owns the plan totals
   // + prPerTask). Optional — omitted → the phase word still shows, without a counter.
   stepCounter?: StepCounterFn;
+  // Abort handle threaded from the CLI's SIGINT/SIGTERM handler (cli.ts → RunLoopInput.signal →
+  // run-loop-adapter.ts). Checked at each loop iteration boundary so a cancelled run reports
+  // `{ kind: 'cancelled' }` (exit 2) instead of surfacing whatever abort-induced group failure
+  // `runGroup`'s catch produced as `blocked` (exit 1). Optional — omitted → no cancellation check,
+  // byte-identical to pre-signal behavior. See docs/plans/.../02-signal-cancellation-cleanup.md.
+  signal?: AbortSignal;
 };
 
 export type GroupOutcome =
@@ -285,9 +291,12 @@ export class WorkLoop {
   }
 
   async run(): Promise<WorkLoopResult> {
-    const { graph, maxSessions, concurrency } = this.deps;
+    const { graph, maxSessions, concurrency, signal } = this.deps;
 
     while (!graph.isComplete()) {
+      if (signal?.aborted) {
+        return { kind: 'cancelled', outcomes: this.outcomes.slice() };
+      }
       if (this.sessionCapReached(maxSessions)) {
         return { kind: 'session-cap', outcomes: this.outcomes.slice() };
       }
@@ -300,6 +309,13 @@ export class WorkLoop {
       const batch = ready.slice(0, batchSize);
       await this.incrementSessionCount(batch.length);
       await Promise.all(batch.map((g) => this.runGroup(g)));
+      // Re-check post-batch: an abort mid-batch aborts each group's in-flight LLM calls
+      // (worker.ts signal wiring), which runGroup's catch would otherwise report as `blocked`
+      // (exit 1). A cancelled run must report cancelled (exit 2) regardless of the abort-induced
+      // per-group outcome.
+      if (signal?.aborted) {
+        return { kind: 'cancelled', outcomes: this.outcomes.slice() };
+      }
     }
 
     return this.finalResult();

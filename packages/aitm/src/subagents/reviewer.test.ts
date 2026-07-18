@@ -61,11 +61,21 @@ type ToolCalls = {
   githubs: GithubToolInput[];
 };
 
+// `git diff --cached --quiet` is the reviewer's empty-index probe: exit 0 = nothing staged, 1 =
+// staged changes. Default it to 1 (a real fix stages something) so the commit path runs; `stagedEmpty`
+// flips it to 0 to exercise the no-op downgrade. An explicit `bashExitCode` still wins (failure paths).
+function bashExit(command: string, opts: { bashExitCode?: number; stagedEmpty?: boolean }): number {
+  if (opts.bashExitCode !== undefined) return opts.bashExitCode;
+  if (command.includes('diff --cached --quiet')) return opts.stagedEmpty ? 0 : 1;
+  return 0;
+}
+
 function makeTools(
   opts: {
     bashStdout?: (command: string) => string;
     bashExitCode?: number;
     bashStderr?: string;
+    stagedEmpty?: boolean;
   } = {},
 ): { tools: ReviewerTools; calls: ToolCalls } {
   const calls: ToolCalls = { reads: [], writes: [], bashes: [], githubs: [] };
@@ -95,7 +105,7 @@ function makeTools(
         return {
           stdout,
           stderr: opts.bashStderr ?? '',
-          exitCode: opts.bashExitCode ?? 0,
+          exitCode: bashExit(input.command, opts),
         };
       },
     }),
@@ -223,13 +233,15 @@ test('runReviewer yields one resolution per thread, mixed fixed/replied/wontfix'
     reason: 'out of scope for this PR',
   });
 
-  // Exactly one commit sequence — only the 'fixed' thread drives bash calls.
-  assert.equal(calls.bashes.length, 4);
+  // Exactly one commit sequence — only the 'fixed' thread drives bash calls. The empty-index probe
+  // (`diff --cached --quiet`) sits between staging and the commit.
+  assert.equal(calls.bashes.length, 5);
   const cmds = calls.bashes.map((b) => b.command);
   assert.match(cmds[0] ?? '', /git -C '\/tmp\/wt' add -A/);
   assert.match(cmds[1] ?? '', /reset -q -- \.ai-task-master/);
-  assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' commit -m 'fix: rename variable'/);
-  assert.match(cmds[3] ?? '', /git -C '\/tmp\/wt' rev-parse HEAD/);
+  assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' diff --cached --quiet/);
+  assert.match(cmds[3] ?? '', /git -C '\/tmp\/wt' commit -m 'fix: rename variable'/);
+  assert.match(cmds[4] ?? '', /git -C '\/tmp\/wt' rev-parse HEAD/);
 });
 
 test('runReviewer: commitFix asserts the PR head branch, then commits when the tree is on it (audit 02)', async () => {
@@ -260,11 +272,13 @@ test('runReviewer: commitFix asserts the PR head branch, then commits when the t
       commitSha: 'deadbeefcafef00d',
     });
   }
-  // The head-branch assertion is the FIRST git call, before any staging.
+  // The head-branch assertion is the FIRST git call, before any staging; the empty-index probe
+  // precedes the commit.
   const cmds = calls.bashes.map((b) => b.command);
   assert.match(cmds[0] ?? '', /rev-parse --abbrev-ref HEAD/);
   assert.match(cmds[1] ?? '', /git -C '\/tmp\/wt' add -A/);
-  assert.match(cmds[3] ?? '', /commit -m 'fix: on head'/);
+  assert.match(cmds[3] ?? '', /diff --cached --quiet/);
+  assert.match(cmds[4] ?? '', /commit -m 'fix: on head'/);
 });
 
 test('runReviewer: commitFix refuses to commit when the tree is on the wrong branch (audit 02)', async () => {
@@ -345,6 +359,46 @@ test('runReviewer: a thread whose submission never validates resolves wontfix wi
     if (t1?.kind === 'wontfix') assert.match(t1.reason, /schema validation after retries/i);
     assert.equal(result.resolutions.find((r) => r.threadId === 'T2')?.kind, 'replied');
   }
+});
+
+test('runReviewer: an empty-diff "fixed" thread downgrades to wontfix and keeps the other resolutions (audit 03)', async () => {
+  // T1 says "fixed" but stages nothing (stagedEmpty ⇒ `git diff --cached --quiet` exits 0). Pre-guard
+  // that threw "nothing to commit" and — under the pass-wide try/catch — discarded T2's resolution too.
+  const outputs: ThreadResolutionOutput[] = [
+    { kind: 'fixed', commitMessage: 'fix: no-op' },
+    { kind: 'replied' },
+  ];
+  const { tools, calls } = makeTools({ stagedEmpty: true });
+  const agent = createReviewerAgent({
+    model: makeReviewerModel(outputs),
+    tools,
+    systemPrompt: REVIEWER_SYSTEM_PREFIX,
+  });
+  const result = await runReviewer(
+    agent,
+    baseInput([thread('T1', 'please fix this'), thread('T2', 'why is this here?')]),
+  );
+
+  assert.equal(result.kind, 'ok');
+  if (result.kind === 'ok') {
+    assert.equal(result.resolutions.length, 2);
+    const t1 = result.resolutions.find((r) => r.threadId === 'T1');
+    assert.equal(t1?.kind, 'wontfix');
+    if (t1?.kind === 'wontfix') assert.match(t1.reason, /no staged changes|nothing to commit/i);
+    // The other thread's resolution survives — the empty diff did not abort the pass.
+    assert.deepEqual(
+      result.resolutions.find((r) => r.threadId === 'T2'),
+      { threadId: 'T2', kind: 'replied' },
+    );
+  }
+
+  // The no-op thread stages and probes but never commits: add + reset + diff, no commit / rev-parse.
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.equal(calls.bashes.length, 3);
+  assert.match(cmds[0] ?? '', /git -C '\/tmp\/wt' add -A/);
+  assert.match(cmds[1] ?? '', /reset -q -- \.ai-task-master/);
+  assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' diff --cached --quiet/);
+  assert.ok(!cmds.some((c) => /commit -m/.test(c)));
 });
 
 test('runReviewer returns error when bash fails during the fixed-thread commit', async () => {

@@ -191,6 +191,17 @@ async function resolveOneThread(
         message,
         input.headBranch,
       );
+      if (commitSha === null) {
+        // Empty staged index: the model claimed a fix but wrote no code (net-zero or no-op edit).
+        // Downgrade to wontfix so we neither push a phantom commit nor report a fix that never
+        // landed — the agent already replied/resolved this thread, so wontfix (also "resolved")
+        // matches its GitHub state; the reason keeps the no-op observable in the resolution counts.
+        return {
+          threadId: thread.id,
+          kind: 'wontfix',
+          reason: 'reviewer reported a fix but staged no changes; nothing to commit',
+        };
+      }
       return { threadId: thread.id, kind: 'fixed', commitSha };
     }
     case 'replied':
@@ -224,12 +235,15 @@ function buildThreadPrompt(input: ReviewerInput, thread: ReviewThread): string {
   return prependContextBlock(input.contextBlock, prompt);
 }
 
+// Returns the commit sha, or `null` when the staged index is empty (a no-op "fixed"). Genuine git
+// failures and the wrong-branch safety refusal still throw — they abort the pass rather than
+// silently downgrading, so a fix is never dropped while its thread stays resolved on GitHub.
 async function commitFix(
   bash: Tool<BashInput, BashOutput>,
   checkoutPath: string,
   message: string,
   headBranch?: string,
-): Promise<string> {
+): Promise<string | null> {
   const exec = bash.execute;
   if (typeof exec !== 'function') {
     throw new Error('bash tool is missing an execute function');
@@ -252,9 +266,30 @@ async function commitFix(
   // gitignored; the reset drops it when it isn't. See stageAndCommit in worker.ts.
   await runBash(exec, `git -C ${wt} add -A`);
   await runBash(exec, `git -C ${wt} reset -q -- .ai-task-master`);
+  // Guard the commit: `git commit` on an empty index exits non-zero ("nothing to commit"), which
+  // pre-guard threw and — under the pass-wide try/catch — discarded every resolution gathered this
+  // pass (audit 03). Probe the index first; an empty one means no code landed, so return null and
+  // let the caller downgrade instead of committing.
+  if (await stagedIndexIsEmpty(exec, wt)) {
+    return null;
+  }
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
   const sha = await captureBash(exec, `git -C ${wt} rev-parse HEAD`);
   return sha.trim();
+}
+
+// `git diff --cached --quiet` is the emptiness probe: exit 0 = nothing staged, exit 1 = staged
+// changes present. Exit 1 is the expected "has changes" signal, not a failure, so this can't go
+// through runBash (which throws on any non-zero); anything above 1 is a real git error and rethrows.
+async function stagedIndexIsEmpty(
+  exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
+  wt: string,
+): Promise<boolean> {
+  const command = `git -C ${wt} diff --cached --quiet`;
+  const out = await execBash(exec, command);
+  if (out.exitCode === 0) return true;
+  if (out.exitCode === 1) return false;
+  throw new Error(`bash failed (${out.exitCode}): ${command}\n${out.stderr}`);
 }
 
 async function runBash(

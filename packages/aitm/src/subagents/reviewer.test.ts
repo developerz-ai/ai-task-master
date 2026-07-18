@@ -308,6 +308,44 @@ test('runReviewer: commitFix refuses to commit when the tree is on the wrong bra
   assert.ok(!cmds.some((c) => /add -A|commit -m/.test(c)));
 });
 
+test('runReviewer: a commitFix throw at thread N keeps resolutions 1..N-1 (durability #4)', async () => {
+  // T1 replied and T2 wontfix are already resolved on GitHub before T3's "fixed" reaches commitFix,
+  // which refuses (tree on the wrong branch) and throws. The pass errors, but the two earlier
+  // resolutions must survive on the error result so the caller records them as addressed — otherwise
+  // a resume re-feeds T1/T2 and the Reviewer duplicates the replies.
+  const outputs: ThreadResolutionOutput[] = [
+    { kind: 'replied' },
+    { kind: 'wontfix', reason: 'stale' },
+    { kind: 'fixed', commitMessage: 'fix: too late' },
+  ];
+  const { tools, calls } = makeTools({
+    bashStdout: (cmd) => (cmd.includes('rev-parse --abbrev-ref HEAD') ? 'wrong-branch\n' : ''),
+  });
+  const agent = createReviewerAgent({
+    model: makeReviewerModel(outputs),
+    tools,
+    systemPrompt: REVIEWER_SYSTEM_PREFIX,
+  });
+  const result = await runReviewer(agent, {
+    ...baseInput([thread('T1', 'a'), thread('T2', 'b'), thread('T3', 'fix this')]),
+    headBranch: 'aitm/g1',
+  });
+
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') {
+    assert.match(result.error, /refusing to commit/);
+    assert.deepEqual(result.resolutions, [
+      { threadId: 'T1', kind: 'replied' },
+      { threadId: 'T2', kind: 'wontfix', reason: 'stale' },
+    ]);
+  }
+  // Only T3 touched git — the branch check — and it never staged or committed on the wrong branch.
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.equal(cmds.length, 1);
+  assert.match(cmds[0] ?? '', /rev-parse --abbrev-ref HEAD/);
+  assert.ok(!cmds.some((c) => /add -A|commit -m/.test(c)));
+});
+
 test('runReviewer returns ok with no resolutions when threads is empty', async () => {
   const { tools, calls } = makeTools();
   const agent = createReviewerAgent({

@@ -342,7 +342,11 @@ test('runTakeOverFlow: Reviewer error → blocked, no merge', async () => {
       workerModel: dummyModel,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
-      runReviewerOverride: async () => ({ kind: 'error', error: 'model exploded' }),
+      runReviewerOverride: async () => ({
+        kind: 'error',
+        error: 'model exploded',
+        resolutions: [],
+      }),
     },
   });
   const result = await runTakeOverFlow(input);

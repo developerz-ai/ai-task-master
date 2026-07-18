@@ -21,7 +21,8 @@ import type { CliOverrides, ConfigFile, Profile, ResolvedConfig } from '../confi
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { GitHubClient } from '../github/github-client.ts';
-import { localEditTools, runLoopAdapter } from '../loop/run-loop-adapter.ts';
+import { mergeFlowAdapter } from '../loop/merge-flow-adapter.ts';
+import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
 import { harnessProgress } from '../observability/step-progress.ts';
 import {
@@ -858,92 +859,13 @@ async function defaultRunLoop(input: RunLoopInput): Promise<WorkLoopResult> {
   return runLoopAdapter(input);
 }
 
-// Real merge-pr adapter. Drives runTakeOverFlow against the cwd checkout: wait CI →
-// Reviewer per unresolved thread → push → loop → merge. See src/loop/take-over-flow.ts
-// for the iteration shape (mirrors claude-task-master `merge_pr`).
+// Default merge-flow seam — production wiring of the take-over flow (wait CI → Reviewer per
+// unresolved thread → push → loop → merge) with the checkout-scoped tool surface and conflict
+// resolver. Lives in merge-flow-adapter.ts so this module stays pure dispatch; the adapter
+// exposes its own seams for unit + integration tests. See src/loop/take-over-flow.ts for the
+// iteration shape (mirrors claude-task-master `merge_pr`).
 async function defaultRunMergeFlow(input: RunMergeFlowInput): Promise<WorkLoopResult> {
-  const { runTakeOverFlow } = await import('../loop/take-over-flow.ts');
-  const { buildConflictResolver } = await import('../loop/conflict-resolution.ts');
-  const { githubThreadTool } = await import('../tools/github-thread-tool.ts');
-  const { PrContextStore } = await import('../state/pr-context-store.ts');
-  const { agentStepProgress, shortModelName } = await import('../observability/step-progress.ts');
-
-  const checkoutPath = input.cwd;
-  const baseBranch = await input.github.defaultBranch();
-  const styleContents = input.styleDigest ?? input.agentConfig.contents;
-  // Downloads full failed-CI logs + review comments under .ai-task-master/debugging/pr/<pr>/ so
-  // the CI-fix Worker reads them off disk instead of guessing (issue #48).
-  const prContext = new PrContextStore(resolvePath(input.cwd, '.ai-task-master'));
-
-  // Build the Claude-Code-style tool surface scoped to the cwd checkout. The Worker gets the
-  // full read/write/edit/search/bash set; the Reviewer adds the `github` thread tool.
-  const workerTools = localEditTools(checkoutPath);
-  const github = githubThreadTool({ github: input.github });
-
-  const result = await runTakeOverFlow({
-    pr: input.pr,
-    checkoutPath,
-    baseBranch,
-    github: input.github,
-    prContext,
-    mergeMethod: input.runState.options.mergeMethod,
-    adminMerge: input.resolved.adminMerge ?? false,
-    allowForcePush: input.resolved.allowForcePush,
-    ...(input.maxIterations !== undefined ? { maxIterations: input.maxIterations } : {}),
-    ...(input.signal ? { signal: input.signal } : {}),
-    // Pushes go through take-over-flow's shared rebaseAndForcePush helper (rebase onto
-    // origin/<base> → `git push --force-with-lease`); `runCmd` defaults to real git via execa.
-    subagents: {
-      reviewerModel: input.credentials.modelFor('reviewer'),
-      reviewerTools: { ...workerTools, github },
-      workerModel: input.credentials.modelFor('worker'),
-      workerTools,
-      styleContents,
-      timeout: { stepMs: input.resolved.llmStepTimeoutMs },
-      // Live agent-activity stream (silent-run fix), labeled by the model doing the work.
-      onReviewerStepFinish: agentStepProgress(
-        `${shortModelName(input.credentials.modelIdFor('reviewer'))} reviewer pr-${input.pr}`,
-      ),
-      onWorkerStepFinish: agentStepProgress(
-        `${shortModelName(input.credentials.modelIdFor('worker'))} ci-fix pr-${input.pr}`,
-      ),
-      onEditorStepFinish: agentStepProgress(
-        `${shortModelName(input.credentials.modelIdFor('worker'))} editor pr-${input.pr}`,
-      ),
-      ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
-      ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
-      // AI conflict resolution (default-on): resolve a base-moved rebase conflict with the Worker
-      // model + tools before blocking the take-over. Gated by config `resolveConflicts`.
-      ...(input.resolved.resolveConflicts
-        ? {
-            resolveConflicts: buildConflictResolver({
-              model: input.credentials.modelFor('worker'),
-              tools: workerTools,
-              styleContents,
-              timeout: { stepMs: input.resolved.llmStepTimeoutMs },
-              onStepFinish: agentStepProgress(
-                `${shortModelName(input.credentials.modelIdFor('worker'))} conflict-resolve pr-${input.pr}`,
-              ),
-            }),
-          }
-        : {}),
-    },
-  });
-
-  if (result.kind === 'merged') {
-    return {
-      kind: 'success',
-      outcomes: [{ groupId: `takeover-${result.pr}`, status: 'merged', pr: result.pr }],
-    };
-  }
-  if (result.kind === 'cancelled') {
-    return { kind: 'cancelled', outcomes: [] };
-  }
-  return {
-    kind: 'blocked',
-    reason: result.reason,
-    outcomes: [{ groupId: `takeover-${input.pr}`, status: 'blocked', reason: result.reason }],
-  };
+  return mergeFlowAdapter(input);
 }
 
 type SynthesizeTakeoverResult =

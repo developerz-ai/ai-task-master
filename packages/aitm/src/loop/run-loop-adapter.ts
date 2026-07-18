@@ -818,10 +818,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     ...(orchUsage ? { onUsage: orchUsage } : {}),
   });
 
-  // Build + run the Reviewer over a thread set in the given checkout. Shared by the prPerTask
-  // autoMergeFlow (runReviewer) and the stage machine (addressReviews). The reviewer is recorded
-  // (issue #108) but never resumed — resume applies only to 'working'/'ci-failed'. The per-thread
-  // conversations share one agent, so this records them into one transcript rather than one-per-thread.
+  // Build + run the Reviewer over a thread set in the given checkout. Wrapped by addressReviews
+  // (which pushes the fixes), used by both the stage machine and the prPerTask autoMergeFlow. The
+  // reviewer is recorded (issue #108) but never resumed — resume applies only to 'working'/'ci-failed'.
+  // The per-thread conversations share one agent, so this records them into one transcript rather than one-per-thread.
   const runReviewerThreads = async ({ pr, threads, checkout }: ReviewerInvocation) => {
     const github = githubThreadTool(input.github);
     // Surplus MCP tools beyond the fixed slots reach the Reviewer too, deferred above the threshold
@@ -1044,7 +1044,6 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       await rollingCtx.append({ group, pr, delivery });
       return pr;
     },
-    runReviewer: runReviewerThreads,
     // Pre-PR self-review → shared self-review session: run the effective verify command once, then a
     // single adversarial review-and-fix Worker pass over the just-committed diff, committing any
     // fixes onto the group branch before the PR opens. Same subagent wiring as the CI-fix path (the

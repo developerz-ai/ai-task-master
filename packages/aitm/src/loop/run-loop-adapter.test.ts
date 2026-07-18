@@ -29,7 +29,6 @@ import type { Plan } from '../plan/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import type { TranscriptRecorder } from '../state/transcript-store.ts';
-import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import {
   type AdapterStatePort,
@@ -133,16 +132,15 @@ function pr(number: number): PullRequest {
   };
 }
 
-// Orchestrator stub whose Worker outcome is configurable; finalizeCommit / openPr / runReviewer
+// Orchestrator stub whose Worker outcome is configurable; finalizeCommit / openPr / addressReviews
 // are inert so the loop advances to the merge/awaiting state.
 function makeOrchestrator(
-  config: { worker?: WorkerResult; reviewer?: ReviewerResult; prNumber?: number } = {},
+  config: { worker?: WorkerResult; prNumber?: number } = {},
 ): WorkLoopOrchestrator {
   return {
     runWorker: async () => config.worker ?? { kind: 'ok', delivery: delivery() },
     finalizeCommit: async () => 'sha',
     openPr: async () => pr(config.prNumber ?? 1),
-    runReviewer: async () => config.reviewer ?? { kind: 'ok', resolutions: [] },
     runCiFix: async () => ({ kind: 'ok' }),
     addressReviews: async () => ({ kind: 'ok' }),
   };
@@ -512,7 +510,6 @@ test('resume: an interrupted waiting-ci group is rescheduled through the real ad
       openPrCalls++;
       return pr(42);
     },
-    runReviewer: async () => ({ kind: 'ok', resolutions: [] }),
     runCiFix: async () => ({ kind: 'ok' }),
     addressReviews: async () => ({ kind: 'ok' }),
   };

@@ -60,7 +60,7 @@ export const defaultRunCmd: RunCmd = async (file, args, options) => {
 // Sleep DI — tests inject a recording stub so backoff is asserted without real timers.
 export type Sleep = (ms: number) => Promise<void>;
 
-// Real grace/poll waits (REVIEW_COMMENTS_GRACE 2min, CI_START_WAIT 60s, backoff…) are correct in
+// Real grace/poll waits (REVIEW_COMMENTS_GRACE 2min, CHECKS_START_WAIT_MS 60s, backoff…) are correct in
 // the released CLI but would make the test suite crawl. So defaultSleep collapses to a microtask
 // under a test runner: `node --test` sets NODE_TEST_CONTEXT in every test child, which is the
 // zero-config signal (an explicit env var / NODE_ENV override also works). Tests that assert
@@ -86,6 +86,15 @@ export const CHECKS_MAX_DELAY_MS = 60_000;
 // timeout case). On timeout the caller blocks rather than merging a PR whose CI never finished,
 // unless --admin is set — see handleWaitingCi.
 export const CHECKS_TIMEOUT_MS = 120 * 60_000;
+
+// A push doesn't register its CI checks instantly. Polling immediately would see an empty check
+// set, and an empty set has nothing failing or pending — so it would read "CI hasn't started" as
+// "CI passed" and merge before a single job runs. waitForChecks sleeps CHECKS_START_WAIT_MS before
+// the first poll to let Actions register, and keeps treating an empty set as pending until
+// CHECKS_EMPTY_GRACE_MS of polling has also elapsed; only then is the PR deemed to genuinely have
+// no checks and reported mergeable.
+export const CHECKS_START_WAIT_MS = 60_000;
+export const CHECKS_EMPTY_GRACE_MS = 60_000;
 
 // waitForChecks collapses the per-check buckets into one of three states; callers branch on it
 // instead of catching a throw. failedChecks is populated only when state is 'failure' (one entry
@@ -187,8 +196,12 @@ export class GitHubClient {
   }
 
   async waitForChecks(pr: number): Promise<CiResult> {
+    // Let CI register its checks before the first poll, so a just-pushed PR doesn't read as
+    // "passed" off an empty check set — see CHECKS_START_WAIT_MS.
+    await this.sleep(CHECKS_START_WAIT_MS);
     let delay = CHECKS_INITIAL_DELAY_MS;
     let waited = 0;
+    let emptyWaited = 0;
     while (true) {
       const r = await this.runCmd(
         'gh',
@@ -206,11 +219,17 @@ export class GitHubClient {
         return { state: 'failure', failedChecks: collectFailedChecks(rows) };
       }
       if (status !== 'pending') return { state: 'success', failedChecks: [] };
+      // An empty check set aggregates to pending: CI still hasn't registered. Once it has stayed
+      // empty past the grace, the PR genuinely has no checks configured and is mergeable.
+      if (rows.length === 0 && emptyWaited >= CHECKS_EMPTY_GRACE_MS) {
+        return { state: 'success', failedChecks: [] };
+      }
       if (waited >= CHECKS_TIMEOUT_MS) {
         throw new CiFailed(`PR #${pr} checks still pending after ${Math.round(waited / 1000)}s`);
       }
       await this.sleep(delay);
       waited += delay;
+      emptyWaited = rows.length === 0 ? emptyWaited + delay : 0;
       delay = Math.min(delay * 2, CHECKS_MAX_DELAY_MS);
     }
   }
@@ -559,7 +578,10 @@ const BUCKET_TO_STATUS: Record<CheckBucket, CheckStatus> = {
 };
 
 function aggregateChecks(rows: CheckRow[]): CheckStatus {
-  if (rows.length === 0) return 'success';
+  // No rows is not success: right after a push, CI may not have registered its checks yet, so
+  // nothing has run. Report pending; waitForChecks bounds how long an empty set stays pending
+  // before deciding the PR truly has no checks.
+  if (rows.length === 0) return 'pending';
   let pending = false;
   for (const row of rows) {
     const status = BUCKET_TO_STATUS[row.bucket];

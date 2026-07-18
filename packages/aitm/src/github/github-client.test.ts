@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CiFailed, GhAuthRequired, MergeConflict, PrNotFound } from './errors.ts';
 import {
+  CHECKS_EMPTY_GRACE_MS,
   CHECKS_INITIAL_DELAY_MS,
   CHECKS_MAX_DELAY_MS,
+  CHECKS_START_WAIT_MS,
   CHECKS_TIMEOUT_MS,
   DEFAULT_PR_LABEL,
   defaultSleep,
@@ -328,14 +330,41 @@ test('waitForChecks returns success when all checks pass', async () => {
   const result = await g.waitForChecks(42);
   assert.deepEqual(result, { state: 'success', failedChecks: [] });
   assert.deepEqual(calls[0]?.args, ['pr', 'checks', '42', '--json', 'bucket,name,state']);
-  assert.equal(delays.length, 0);
+  // Only the start-wait before the first poll; a green first poll adds no backoff sleeps.
+  assert.deepEqual(delays, [CHECKS_START_WAIT_MS]);
 });
 
-test('waitForChecks returns success when there are no checks at all', async () => {
-  const { run } = makeRun([{ stdout: '[]' }]);
-  const { sleep } = makeSleep();
+test('waitForChecks: empty checks read as pending, not instant success', async () => {
+  // A just-pushed PR whose Actions haven't registered returns []. It must keep polling (pending)
+  // and let the real checks decide — never insta-succeed and merge before CI runs.
+  const empty = '[]';
+  const passing = JSON.stringify([{ bucket: 'pass', name: 'test', state: 'SUCCESS' }]);
+  const { run, calls } = makeRun([{ stdout: empty }, { stdout: empty }, { stdout: passing }]);
+  const { sleep, delays } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
-  assert.deepEqual(await g.waitForChecks(1), { state: 'success', failedChecks: [] });
+  const result = await g.waitForChecks(5);
+  assert.deepEqual(result, { state: 'success', failedChecks: [] });
+  assert.equal(calls.length, 3);
+  assert.equal(delays[0], CHECKS_START_WAIT_MS);
+});
+
+test('waitForChecks: a PR with no checks resolves to success only after the empty grace', async () => {
+  const { run, calls } = makeRun(() => ({ stdout: '[]' }));
+  const { sleep, delays } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  const result = await g.waitForChecks(1);
+  assert.deepEqual(result, { state: 'success', failedChecks: [] });
+  assert.ok(calls.length > 1, 'did not insta-succeed on the first empty poll');
+  const emptyPollWait = delays.slice(1).reduce((sum, d) => sum + d, 0);
+  assert.ok(
+    emptyPollWait >= CHECKS_EMPTY_GRACE_MS,
+    'waited the full empty grace before concluding the PR has no checks',
+  );
+});
+
+test('CHECKS_START_WAIT_MS / CHECKS_EMPTY_GRACE_MS: 60s each', () => {
+  assert.equal(CHECKS_START_WAIT_MS, 60_000);
+  assert.equal(CHECKS_EMPTY_GRACE_MS, 60_000);
 });
 
 test('waitForChecks polls while pending with 1s→2s→4s backoff (60s cap)', async () => {
@@ -352,7 +381,7 @@ test('waitForChecks polls while pending with 1s→2s→4s backoff (60s cap)', as
   const result = await g.waitForChecks(7);
   assert.equal(result.state, 'success');
   assert.equal(calls.length, 4);
-  assert.deepEqual(delays, [1000, 2000, 4000]);
+  assert.deepEqual(delays, [CHECKS_START_WAIT_MS, 1000, 2000, 4000]);
 });
 
 test('waitForChecks caps backoff at CHECKS_MAX_DELAY_MS', async () => {
@@ -365,7 +394,16 @@ test('waitForChecks caps backoff at CHECKS_MAX_DELAY_MS', async () => {
   const { sleep, delays } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
   await g.waitForChecks(1);
-  assert.deepEqual(delays, [1000, 2000, 4000, 8000, 16_000, 32_000, CHECKS_MAX_DELAY_MS]);
+  assert.deepEqual(delays, [
+    CHECKS_START_WAIT_MS,
+    1000,
+    2000,
+    4000,
+    8000,
+    16_000,
+    32_000,
+    CHECKS_MAX_DELAY_MS,
+  ]);
   assert.equal(CHECKS_INITIAL_DELAY_MS, 1000);
 });
 
@@ -386,7 +424,8 @@ test('waitForChecks returns a failure CiResult (not a throw) for a failed bucket
     state: 'failure',
     failedChecks: [{ name: 'test', status: 'failure' }],
   });
-  assert.equal(delays.length, 0);
+  // Start-wait only; a decisive first poll adds no backoff sleeps.
+  assert.deepEqual(delays, [CHECKS_START_WAIT_MS]);
 });
 
 test('waitForChecks reports a cancelled bucket as a failure CiResult', async () => {

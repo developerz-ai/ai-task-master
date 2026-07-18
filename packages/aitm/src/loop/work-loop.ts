@@ -19,7 +19,6 @@ import { phaseForStage, type StepCounterFn } from '../observability/run-step.ts'
 import type { RunStep } from '../observability/step-progress.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../state/schema.ts';
-import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import { perTaskBranch } from '../workspace/branch-name.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
@@ -43,8 +42,8 @@ import {
 
 export type WorkerInvocation = {
   group: PrGroup;
-  // The specific task being worked this pass. Omitted by the CI-fix invocation in autoMergeFlow,
-  // which re-runs the Worker over the whole group rather than a single task.
+  // The specific task being worked this pass. Optional so a caller can run the Worker over the
+  // whole group instead of a single task (the prompt falls back to the group goal).
   task?: Task;
   checkout: Checkout;
   baseBranch: string;
@@ -80,11 +79,11 @@ export type WorkLoopOrchestrator = {
   // selfReview disabled never invokes it; when absent, the PR opens exactly as before. Never blocks —
   // the WorkLoop logs the outcome and opens the PR regardless (external CI is the backstop).
   selfReview?(input: SelfReviewInvocation): Promise<SelfReviewResult>;
-  runReviewer(input: ReviewerInvocation): Promise<ReviewerResult>;
-  // ci-failed stage: download failed logs + comments, run the Worker fix, rebase onto
-  // origin/<base> and force-with-lease push. ok → CI re-runs; blocked → couldn't land the fix.
+  // ci-failed stage + autoMergeFlow: download failed logs + comments, run the Worker fix, rebase
+  // onto origin/<base> and force-with-lease push. ok → CI re-runs; blocked → couldn't land the fix.
   runCiFix(input: CiFixInvocation): Promise<StageWorkResult>;
-  // addressing-reviews stage: run the Reviewer over the given threads and push its code fixes.
+  // addressing-reviews stage + autoMergeFlow: run the Reviewer over the given threads and push its
+  // code fixes to the remote. ok → threads handled (any fix pushed); blocked → reviewer/push error.
   addressReviews(input: ReviewerInvocation): Promise<StageWorkResult>;
 };
 
@@ -236,9 +235,10 @@ type StageCtx = {
   group: PrGroup;
   delivery: WorkerDelivery | null;
   blockedReason: string | undefined;
-  // CI-fix passes dispatched this driveStages run. Per group per invocation, in-memory: a
-  // crash-resumed group re-enters at its persisted stage with a fresh budget (durable cross-resume
-  // counting would need a state-schema change — out of scope, issue #128).
+  // CI-fix passes dispatched for this group, seeded from the persisted PrGroup.ciFixAttempts and
+  // mirrored back to state on each increment, so the recovery budget survives a resume: a
+  // crash-resumed group continues counting from where it left off instead of restarting at zero and
+  // cycling forever on an unfixable red PR (issue #128).
   fixAttempts: number;
 };
 
@@ -437,7 +437,13 @@ export class WorkLoop {
     checkout: Checkout,
     baseBranch: string,
   ): Promise<GroupOutcome> {
-    const ctx: StageCtx = { group, delivery: null, blockedReason: undefined, fixAttempts: 0 };
+    const ctx: StageCtx = {
+      group,
+      delivery: null,
+      blockedReason: undefined,
+      // Seed from the persisted count so a resumed group keeps its remaining budget (issue #128).
+      fixAttempts: group.ciFixAttempts ?? 0,
+    };
     const deps = this.buildStageDeps(ctx, checkout, baseBranch);
     let stage: GroupStage = group.stage;
 
@@ -453,20 +459,31 @@ export class WorkLoop {
       // autoMerge off: stop once the PR is open; runMergePr (or a follow-up run) finishes it.
       if (!this.deps.autoMerge && stage === 'waiting-ci') return this.awaitingPrOutcome(ctx);
 
-      // Cap the CI-fix recovery loop: count each ci-failed dispatch, and once the cap is exceeded
-      // block WITHOUT running the fix session (no LLM call, no push) so an unfixable red PR ends
-      // for a human instead of cycling forever (issue #128). Both entry routes into 'ci-failed'
-      // (a non-success waitForChecks and a CiFailed poll timeout) consume an attempt.
+      // Cap the CI-fix recovery loop: count each ci-failed dispatch against a budget that now
+      // survives resumes (see StageCtx.fixAttempts), and once the cap is exceeded block WITHOUT
+      // running the fix session (no LLM call, no push) so an unfixable red PR ends for a human
+      // instead of cycling forever — across resumes as well as within one run (issue #128).
       if (stage === 'ci-failed') {
+        // Charge one durable fix-attempt slot BEFORE dispatching the fix, so a crash mid-fix can't
+        // hand the resumed run a fresh budget — the count is consumed at dispatch and persisted.
         ctx.fixAttempts += 1;
+        ctx.group = { ...ctx.group, ciFixAttempts: ctx.fixAttempts };
         if (ctx.fixAttempts > this.maxCiFixAttempts) {
           ctx.blockedReason = `CI fix attempts exhausted after ${this.maxCiFixAttempts} passes for PR #${prNumberOf(ctx.group)} — needs human attention`;
-          const next: GroupStage = 'blocked';
-          ctx.group = { ...ctx.group, stage: next };
-          await this.persistStageAfter(stage, next, ctx);
-          stage = next;
+          // Flag human-needed so a resume never resurrects this block (normalizeResumeStatus skips
+          // it); a transient block, by contrast, is retried on the next `aitm start`.
+          ctx.group = { ...ctx.group, stage: 'blocked', humanNeeded: true };
+          await this.markStatus(ctx.group.id, 'blocked', {
+            stage: 'blocked',
+            ciFixAttempts: ctx.fixAttempts,
+            humanNeeded: true,
+          });
+          stage = 'blocked';
           continue;
         }
+        await this.markStatus(ctx.group.id, statusForStage(stage), {
+          ciFixAttempts: ctx.fixAttempts,
+        });
       }
 
       const handler = handlerFor(stage);
@@ -767,29 +784,32 @@ export class WorkLoop {
   ): Promise<void> {
     const { orchestrator, github } = this.deps;
 
-    // CI: wait for checks. On failure, ask Worker to fix and re-check; a timeout (CiFailed)
-    // propagates. Still-red after the fix is fatal for this flow.
+    // CI: wait for checks. On failure, run the shared fix session (Worker → rebase onto
+    // origin/<base> → force-with-lease push) so the fix reaches the remote BEFORE the recheck
+    // re-polls; without the push the recheck would poll stale CI and the merge would land the
+    // unfixed remote. runCiFix pushes; the old runWorker + finalizeCommit `--amend` only rewrote
+    // history locally, diverging from the pushed branch. A poll timeout (CiFailed) propagates; a
+    // fix that can't land, or still-red CI after it, is fatal for this flow.
     const ci = await github.waitForChecks(pr.number);
     if (ci.state === 'failure') {
-      const fix = await orchestrator.runWorker({ group, checkout, baseBranch });
+      const fix = await orchestrator.runCiFix({ group, pr: pr.number, checkout, baseBranch });
       if (fix.kind !== 'ok') {
-        const reason = fix.kind === 'blocked' ? fix.reason : fix.error;
-        throw new Error(`worker CI fix failed: ${reason}`);
+        throw new Error(`worker CI fix failed: ${fix.reason}`);
       }
-      await orchestrator.finalizeCommit(group, fix.delivery, checkout.path);
       const recheck = await github.waitForChecks(pr.number);
       if (recheck.state === 'failure') {
         throw new CiFailed(`PR #${pr.number} still failing after worker CI fix`);
       }
     }
 
-    // Review: resolve any unresolved threads via Reviewer.
+    // Review: address any unresolved threads via the Reviewer. addressReviews pushes the Reviewer's
+    // code fixes to the remote, so the merge below lands them; runReviewer alone would leave them
+    // committed only locally and merge without them.
     const threads = await github.listUnresolvedThreads(pr.number);
     if (threads.length > 0) {
-      const review = await orchestrator.runReviewer({ pr: pr.number, threads, checkout });
+      const review = await orchestrator.addressReviews({ pr: pr.number, threads, checkout });
       if (review.kind !== 'ok') {
-        const reason = review.kind === 'blocked' ? review.reason : review.error;
-        throw new Error(`reviewer failed: ${reason}`);
+        throw new Error(`reviewer failed: ${review.reason}`);
       }
     }
 
@@ -822,7 +842,7 @@ export class WorkLoop {
   private async markStatus(
     id: string,
     status: PrGroup['status'],
-    patch: Partial<Pick<PrGroup, 'branch' | 'pr' | 'stage'>> = {},
+    patch: Partial<Pick<PrGroup, 'branch' | 'pr' | 'stage' | 'ciFixAttempts' | 'humanNeeded'>> = {},
   ): Promise<void> {
     // Status transitions do not bump sessionCount — that's owned by incrementSessionCount,
     // which fires once per batch dispatch so the in-memory and persisted counters agree.

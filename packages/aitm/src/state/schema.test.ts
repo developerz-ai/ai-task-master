@@ -56,6 +56,29 @@ test('GroupStageSchema rejects an unknown stage', () => {
   assert.throws(() => GroupStageSchema.parse('deploying'));
 });
 
+test('PrGroupSchema: ciFixAttempts/humanNeeded are optional (legacy state parses) and round-trip (issue #128)', () => {
+  const base = {
+    id: 'auth-models',
+    title: 'auth models',
+    tasks: [],
+    branch: null,
+    pr: 7,
+    status: 'awaiting-pr' as const,
+    stage: 'ci-failed' as const,
+  };
+  // A pre-#128 group (no durable fix-attempt fields) still parses.
+  const legacy = PrGroupSchema.parse(base);
+  assert.equal(legacy.ciFixAttempts, undefined);
+  assert.equal(legacy.humanNeeded, undefined);
+  // Persisted values round-trip.
+  const parked = PrGroupSchema.parse({ ...base, ciFixAttempts: 3, humanNeeded: true });
+  assert.equal(parked.ciFixAttempts, 3);
+  assert.equal(parked.humanNeeded, true);
+  // A negative or non-integer attempt count is rejected.
+  assert.throws(() => PrGroupSchema.parse({ ...base, ciFixAttempts: -1 }));
+  assert.throws(() => PrGroupSchema.parse({ ...base, ciFixAttempts: 1.5 }));
+});
+
 test('TaskSchema accepts a full task with subtasks', () => {
   const parsed = TaskSchema.parse({
     id: 't1',

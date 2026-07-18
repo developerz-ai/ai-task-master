@@ -123,6 +123,11 @@ export class GitHubClient {
   // poll never re-spawns the lookup per iteration.
   private cachedLogin: string | null = null;
 
+  // {owner,name} resolved once via `gh repo view` and reused — `listUnresolvedThreads` and
+  // `getFailedCiLogs` each call `repoMeta()` per poll iteration (≤30 iters), so without this the
+  // review loop spawns a `gh repo view` subprocess every tick for a value that never changes.
+  private cachedRepoMeta: { owner: string; name: string } | null = null;
+
   async currentBranch(): Promise<string> {
     const r = await this.runCmd('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: this.cwd });
     if (r.exitCode !== 0) {
@@ -513,6 +518,7 @@ export class GitHubClient {
   }
 
   private async repoMeta(): Promise<{ owner: string; name: string }> {
+    if (this.cachedRepoMeta !== null) return this.cachedRepoMeta;
     const r = await this.runCmd('gh', ['repo', 'view', '--json', 'owner,name'], {
       cwd: this.cwd,
     });
@@ -520,7 +526,8 @@ export class GitHubClient {
       throw new Error(`gh repo view failed: ${r.stderr.trim() || r.stdout.trim()}`);
     }
     const parsed = RepoOwnerNameSchema.parse(parseGhJson('gh repo view', r.stdout));
-    return { owner: parsed.owner.login, name: parsed.name };
+    this.cachedRepoMeta = { owner: parsed.owner.login, name: parsed.name };
+    return this.cachedRepoMeta;
   }
 
   async mergePr(pr: number, method: MergeMethod, opts?: { admin?: boolean }): Promise<void> {

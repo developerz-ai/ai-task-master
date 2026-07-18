@@ -641,6 +641,22 @@ test('listUnresolvedThreads fetches repo meta then GraphQL with owner/repo/pr va
   assert.ok(query?.includes('repository(owner: $owner, name: $repo)'));
 });
 
+test('repoMeta is cached across calls (one gh repo view subprocess for two lookups)', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  const gql1 = threadsResponse([]);
+  const gql2 = threadsResponse([]);
+  const { run, calls } = makeRun([{ stdout: meta }, { stdout: gql1 }, { stdout: gql2 }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await g.listUnresolvedThreads(1);
+  await g.listUnresolvedThreads(2);
+
+  const repoViewCalls = calls.filter(
+    (c) => c.file === 'gh' && c.args[0] === 'repo' && c.args[1] === 'view',
+  );
+  assert.equal(repoViewCalls.length, 1, 'second listUnresolvedThreads reuses the cached repoMeta');
+  assert.equal(calls.length, 3, 'only repo view + 2 GraphQL calls, no second repo view');
+});
+
 test('listUnresolvedThreads pages through reviewThreads with endCursor', async () => {
   const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
   const page1 = threadsResponse(

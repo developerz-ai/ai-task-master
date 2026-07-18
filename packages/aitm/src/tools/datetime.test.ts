@@ -23,7 +23,8 @@ test('datetimeTool inputSchema parses valid input', async () => {
 test('datetimeTool execute returns datetime in ISO-8601 format and resolved timezone', async () => {
   const tool = datetimeTool();
   assert.ok(tool.execute);
-  // Test without timezone (should resolve to UTC)
+  // Without a timezone, Intl resolves to the runtime's configured zone (not guaranteed UTC across
+  // Bun/Node/Deno) — assert only that it's a non-empty resolved IANA string.
   const result1 = await tool.execute({});
   assert.ok(result1.datetime);
   assert.equal(typeof result1.datetime, 'string');

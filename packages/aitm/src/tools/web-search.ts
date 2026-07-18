@@ -135,6 +135,17 @@ export function parseDuckDuckGoHtml(html: string, maxResults: number): WebSearch
   return out;
 }
 
+// Accept a `text/html` or `text/plain` response. Parse the media type (the part before `;`), trim,
+// and lowercase it so `TEXT/HTML; charset=utf-8` is accepted while a value that merely contains
+// `text/html` as a substring is not. A missing header is accepted: some runtimes/proxies omit it on
+// an otherwise-valid body (`new Response(str)` sets no content-type under Bun), and the parser
+// tolerates non-HTML input by simply returning no results.
+function isAcceptableContentType(raw: string | null): boolean {
+  if (raw === null) return true;
+  const mediaType = raw.split(';')[0]?.trim().toLowerCase() ?? '';
+  return mediaType === 'text/html' || mediaType === 'text/plain';
+}
+
 const WEB_SEARCH_DESCRIPTION = [
   'Search the web and return the top results as {title, url, snippet}. Provider-agnostic — works',
   'with any model/provider (backed by DuckDuckGo, no API key). Use it to find current docs, error',
@@ -173,6 +184,8 @@ export function webSearchTool(init: WebSearchInit = {}): Tool<WebSearchInput, We
       // counts as success) and an empty body — surface that as an error note, not silent "no
       // results", so the model can retry rather than conclude nothing was found.
       if (response.status !== 200) {
+        // Release the unread stream/socket promptly before bailing.
+        await response.body?.cancel();
         return {
           query: input.query,
           results: [],
@@ -180,15 +193,12 @@ export function webSearchTool(init: WebSearchInit = {}): Tool<WebSearchInput, We
         };
       }
       const contentType = response.headers.get('content-type');
-      if (
-        contentType &&
-        !contentType.includes('text/html') &&
-        !contentType.includes('text/plain')
-      ) {
+      if (!isAcceptableContentType(contentType)) {
+        await response.body?.cancel();
         return {
           query: input.query,
           results: [],
-          error: `unexpected content-type: ${contentType}`,
+          error: `unexpected content-type: ${contentType ?? '(none)'}`,
         };
       }
       const { body: html } = await readBodyCapped(response, MAX_RESPONSE_CHARS);

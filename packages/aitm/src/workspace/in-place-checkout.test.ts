@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { execa } from 'execa';
 import { makeTempRepo, type TempRepo } from '../testing/temp-repo.ts';
-import { InPlaceCheckout } from './in-place-checkout.ts';
+import { hasTaskCommit, InPlaceCheckout } from './in-place-checkout.ts';
+import { taskCommitTrailer } from './task-commit-marker.ts';
 
 async function seedRepo(): Promise<TempRepo> {
   const repo = await makeTempRepo();
@@ -268,5 +269,82 @@ test('resetToBase rejects a different group while one is still checked out (sing
     await assert.rejects(home.resetToBase('g2', 'aitm/g2-t1', 'main'), /single-slot/);
   } finally {
     await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// hasTaskCommit — the duplicate task-commit-on-resume detector
+// ---------------------------------------------------------------------------
+
+test('hasTaskCommit: false when the branch has no commit carrying the task trailer', async () => {
+  const repo = await seedRepo();
+  try {
+    await execa('git', ['checkout', '-b', 'aitm/g1'], { cwd: repo.path });
+    await execa('git', ['commit', '--allow-empty', '-m', 'unrelated work'], { cwd: repo.path });
+    assert.equal(await hasTaskCommit(repo.path, 'aitm/g1', 't1'), false);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('hasTaskCommit: false when the branch does not exist at all', async () => {
+  const repo = await seedRepo();
+  try {
+    assert.equal(await hasTaskCommit(repo.path, 'aitm/never-acquired', 't1'), false);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('hasTaskCommit: true once a commit stamped with the task trailer lands on the branch', async () => {
+  const repo = await seedRepo();
+  try {
+    await execa('git', ['checkout', '-b', 'aitm/g1'], { cwd: repo.path });
+    const message = `feat: add hello\n\n${taskCommitTrailer('t1')}`;
+    await execa('git', ['commit', '--allow-empty', '-m', message], { cwd: repo.path });
+    assert.equal(await hasTaskCommit(repo.path, 'aitm/g1', 't1'), true);
+    assert.equal(
+      await hasTaskCommit(repo.path, 'aitm/g1', 't2'),
+      false,
+      'a different task id on the same branch must not match',
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('hasTaskCommit: a t1 trailer does not match a t10 task id (full-line, not substring)', async () => {
+  const repo = await seedRepo();
+  try {
+    await execa('git', ['checkout', '-b', 'aitm/g1'], { cwd: repo.path });
+    // Only t10's trailer is on the branch. A substring grep for `Aitm-Task-Id: t1` would match it.
+    const message = `feat: add tenth\n\n${taskCommitTrailer('t10')}`;
+    await execa('git', ['commit', '--allow-empty', '-m', message], { cwd: repo.path });
+    assert.equal(
+      await hasTaskCommit(repo.path, 'aitm/g1', 't1'),
+      false,
+      't1 must not match the t10 trailer line',
+    );
+    assert.equal(
+      await hasTaskCommit(repo.path, 'aitm/g1', 't10'),
+      true,
+      't10 matches its own complete trailer line',
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('InPlaceCheckout.hasTaskCommit: reachable as a CheckoutHome method, same result as the free function', async () => {
+  const repo = await seedRepo();
+  try {
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+    const message = `feat: add hello\n\n${taskCommitTrailer('t1')}`;
+    await execa('git', ['commit', '--allow-empty', '-m', message], { cwd: repo.path });
+    assert.equal(await home.hasTaskCommit('aitm/g1', 't1'), true);
+    assert.equal(await home.hasTaskCommit('aitm/g1', 't2'), false);
+  } finally {
+    await repo.cleanup();
   }
 });

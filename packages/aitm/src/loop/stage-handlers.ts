@@ -33,6 +33,10 @@ export type StageGithub = {
   waitForChecks(pr: number): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
   mergePr(pr: number): Promise<void>;
+  // The login `gh` is authenticated as, so freshThreads can recognize the Reviewer's own replies and
+  // skip a thread it already replied to. Optional — when absent (or it throws), the dedup falls back
+  // to the addressed-thread record alone.
+  authenticatedLogin?(): Promise<string>;
 };
 
 export type StageWorkResult = { kind: 'ok' } | { kind: 'blocked'; reason: string };
@@ -175,11 +179,36 @@ function requirePr(group: PrGroup, stage: GroupStage): number {
 }
 
 // Unresolved threads the addressing loop hasn't run the Reviewer over yet: listUnresolvedThreads
-// minus readAddressedThreads. The dedup terminates the waiting-reviews ⇄ addressing-reviews loop —
-// a thread the Reviewer only replied to stays unresolved, so without subtracting the addressed set
-// it would be re-processed on every poll.
+// minus the addressed set minus threads that already carry a reply from us. The dedup terminates the
+// waiting-reviews ⇄ addressing-reviews loop — a thread the Reviewer only replied to stays unresolved,
+// so without subtracting it the thread would be re-processed on every poll.
+//
+// Two subtractions, because the addressed-thread record has a gap: the Reviewer's side effects (reply
+// + push) land BEFORE recordAddressedThreads, so a crash in between loses the record and a resume
+// would re-feed the thread → a duplicate reply. Reading our own reply straight off the thread closes
+// that gap (durability #5) — a self-healing skip keyed on GitHub's actual state rather than our
+// bookkeeping, which also heals a partial pass that replied but couldn't record (task 11's residue).
 async function freshThreads(deps: StageDeps, pr: number): Promise<ReviewThread[]> {
   const unresolved = await deps.github.listUnresolvedThreads(pr);
   const addressed = (await deps.prContext?.readAddressedThreads(pr)) ?? new Set<string>();
-  return unresolved.filter((t) => !addressed.has(t.id));
+  const botLogin = await botReplyLogin(deps);
+  return unresolved.filter((t) => !addressed.has(t.id) && !hasReplyFrom(t, botLogin));
+}
+
+// The login `gh` is authenticated as, or undefined when it can't be resolved. Best-effort: the
+// bot-reply skip is an enhancement over the addressed-set dedup, so a gh hiccup degrades to that
+// record rather than breaking the review loop.
+async function botReplyLogin(deps: StageDeps): Promise<string | undefined> {
+  try {
+    return await deps.github.authenticatedLogin?.();
+  } catch {
+    return undefined;
+  }
+}
+
+// Whether the thread already carries a comment authored by us. A review thread is opened by a
+// reviewer (CodeRabbit / a human), never by our own account, so a comment from `botLogin` can only be
+// a reply we posted — meaning this thread was already addressed. Undefined login → never a match.
+function hasReplyFrom(thread: ReviewThread, botLogin: string | undefined): boolean {
+  return botLogin !== undefined && thread.comments.some((c) => c.author === botLogin);
 }

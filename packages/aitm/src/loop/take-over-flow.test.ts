@@ -342,13 +342,62 @@ test('runTakeOverFlow: Reviewer error → blocked, no merge', async () => {
       workerModel: dummyModel,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
-      runReviewerOverride: async () => ({ kind: 'error', error: 'model exploded' }),
+      runReviewerOverride: async () => ({
+        kind: 'error',
+        error: 'model exploded',
+        resolutions: [],
+      }),
     },
   });
   const result = await runTakeOverFlow(input);
   assert.equal(result.kind, 'blocked');
   if (result.kind === 'blocked') assert.match(result.reason, /reviewer error.*model exploded/i);
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0);
+});
+
+test('runTakeOverFlow: Reviewer errors mid-pass with completed fixes → pushes them before blocking', async () => {
+  const threads: ReviewThread[] = [
+    {
+      id: 'TH_E',
+      isResolved: false,
+      path: 'src/a.ts',
+      comments: [{ id: 'C_E', body: 'fix', author: 'rabbit' }],
+    },
+  ];
+  const gh = fakeGithub({ checks: ['success'], threads: [threads] });
+  const { runCmd, commands } = recordingRunCmd();
+  const input = baseInput(gh.github, {
+    runCmd,
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      workerModel: dummyModel,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      // The pass threw on a later thread, but TH_E was already fixed + committed locally first.
+      // Those completed fixes must reach the remote before the run blocks (durability #4).
+      runReviewerOverride: async () => ({
+        kind: 'error',
+        error: 'model exploded on the next thread',
+        resolutions: [{ threadId: 'TH_E', kind: 'fixed', commitSha: 'abc123' }],
+      }),
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /reviewer error.*model exploded/i);
+    assert.equal(result.iterations, 0);
+  }
+  assert.ok(
+    commands.includes('git push --force-with-lease'),
+    `the completed fix must be pushed before blocking, got: ${commands.join(' | ')}`,
+  );
+  assert.equal(
+    gh.calls.filter((c) => c.method === 'mergePr').length,
+    0,
+    'never merges on a reviewer error',
+  );
 });
 
 test('runTakeOverFlow: rebase conflict on push → blocked, aborts, never force-pushes', async () => {

@@ -82,7 +82,9 @@ export type ThreadResolution =
 export type ReviewerResult =
   | { kind: 'ok'; resolutions: ThreadResolution[] }
   | { kind: 'blocked'; reason: string }
-  | { kind: 'error'; error: string };
+  // `resolutions` carries whatever the pass completed before it errored — empty for a pre-loop
+  // failure, threads 1..N-1 when commitFix throws at thread N — so the caller can still record them.
+  | { kind: 'error'; error: string; resolutions: ThreadResolution[] };
 
 export const REVIEWER_SYSTEM_PREFIX = [
   '',
@@ -142,19 +144,24 @@ export async function runReviewer(
     return {
       kind: 'error',
       error: 'runReviewer called with an agent not built by createReviewerAgent',
+      resolutions: [],
     };
   }
   if (input.threads.length === 0) {
     return { kind: 'ok', resolutions: [] };
   }
+  // Declared outside the try so a mid-pass throw still surfaces the resolutions gathered before it.
+  const resolutions: ThreadResolution[] = [];
   try {
-    const resolutions: ThreadResolution[] = [];
     for (const thread of input.threads) {
       resolutions.push(await resolveOneThread(agent, init, input, thread));
     }
     return { kind: 'ok', resolutions };
   } catch (err) {
-    return { kind: 'error', error: err instanceof Error ? err.message : String(err) };
+    // commitFix's wrong-branch refusal (or a genuine git failure) aborts the pass, but the earlier
+    // threads were already replied/resolved on GitHub. Return them so the caller records them as
+    // addressed — otherwise a resume re-feeds those threads and duplicates the work (durability #4).
+    return { kind: 'error', error: err instanceof Error ? err.message : String(err), resolutions };
   }
 }
 

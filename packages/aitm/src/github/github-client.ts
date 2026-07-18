@@ -119,6 +119,10 @@ export class GitHubClient {
     private readonly sleep: Sleep = defaultSleep,
   ) {}
 
+  // The login `gh` is authenticated as, resolved once via `gh api user` and reused, so the review
+  // poll never re-spawns the lookup per iteration.
+  private cachedLogin: string | null = null;
+
   async currentBranch(): Promise<string> {
     const r = await this.runCmd('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: this.cwd });
     if (r.exitCode !== 0) {
@@ -483,6 +487,25 @@ export class GitHubClient {
         `gh api graphql (resolveThread) failed: ${r.stderr.trim() || r.stdout.trim()}`,
       );
     }
+  }
+
+  // The login `gh` is authenticated as. The addressing-reviews loop uses it to recognize the
+  // Reviewer's own replies on a thread and skip a thread it already replied to — self-healing dedup
+  // that survives a crash between the reply and the addressed-thread record (durability #5). Throws
+  // on a gh failure; the review loop's use of it is best-effort and degrades to the addressed-set
+  // record when it can't resolve.
+  async authenticatedLogin(): Promise<string> {
+    if (this.cachedLogin !== null) return this.cachedLogin;
+    const r = await this.runCmd('gh', ['api', 'user', '--jq', '.login'], { cwd: this.cwd });
+    if (r.exitCode !== 0) {
+      throw new Error(`gh api user failed: ${r.stderr.trim() || r.stdout.trim()}`);
+    }
+    const login = r.stdout.trim();
+    if (login === '') {
+      throw new Error('gh api user returned an empty login');
+    }
+    this.cachedLogin = login;
+    return login;
   }
 
   private async repoMeta(): Promise<{ owner: string; name: string }> {

@@ -44,6 +44,16 @@ function thread(id: string): ReviewThread {
   };
 }
 
+// A thread that already carries a reply authored by `botLogin` — the shape freshThreads must skip:
+// our reply landed on GitHub but a crash may have lost the addressed-thread record.
+function repliedThread(id: string, botLogin: string): ReviewThread {
+  const base = thread(id);
+  return {
+    ...base,
+    comments: [...base.comments, { id: `${id}-reply`, body: 'fixed it', author: botLogin }],
+  };
+}
+
 function baseState(groups: PrGroup[]): RunState {
   return {
     status: 'working',
@@ -322,6 +332,52 @@ test('handleWaitingReviews: a not-yet-addressed thread among addressed ones → 
   );
 });
 
+test('handleWaitingReviews: a thread already carrying our reply → ready-to-merge (self-healing skip)', async () => {
+  // The reply landed on GitHub but the addressed record was lost (crash in the gap): no prContext
+  // here. The bot-reply skip reads our own reply off the thread and converges to merge instead of
+  // re-feeding the thread to the Reviewer for a duplicate reply.
+  const deps = makeDeps({
+    github: makeGithub({
+      authenticatedLogin: async () => 'aitm-bot',
+      listUnresolvedThreads: async () => [repliedThread('T1', 'aitm-bot')],
+    }),
+  });
+  assert.equal(
+    await handleWaitingReviews(deps, group({ stage: 'waiting-reviews', pr: 5 })),
+    'ready-to-merge',
+  );
+});
+
+test('handleWaitingReviews: a reply from another author is not treated as ours → addressing-reviews', async () => {
+  const deps = makeDeps({
+    github: makeGithub({
+      authenticatedLogin: async () => 'aitm-bot',
+      listUnresolvedThreads: async () => [repliedThread('T1', 'someone-else')],
+    }),
+  });
+  assert.equal(
+    await handleWaitingReviews(deps, group({ stage: 'waiting-reviews', pr: 5 })),
+    'addressing-reviews',
+  );
+});
+
+test('handleWaitingReviews: authenticatedLogin failure falls back to the addressed-set dedup', async () => {
+  // A gh hiccup resolving our login must not break the review loop: without the addressed record the
+  // thread is still treated as fresh (today's behavior), not merged past.
+  const deps = makeDeps({
+    github: makeGithub({
+      authenticatedLogin: async () => {
+        throw new Error('gh down');
+      },
+      listUnresolvedThreads: async () => [repliedThread('T1', 'aitm-bot')],
+    }),
+  });
+  assert.equal(
+    await handleWaitingReviews(deps, group({ stage: 'waiting-reviews', pr: 5 })),
+    'addressing-reviews',
+  );
+});
+
 // ---- ready-to-merge ------------------------------------------------------
 
 test('handleReadyToMerge: merges the PR → merged', async () => {
@@ -410,6 +466,32 @@ test('handleAddressingReviews: skips already-addressed threads', async () => {
     'waiting-reviews',
   );
   assert.deepEqual(seen, [['T2']], 'only the not-yet-addressed thread reaches the Reviewer');
+});
+
+test('handleAddressingReviews: skips threads already carrying our reply, addresses the rest', async () => {
+  // T1 was replied to on a prior pass but its record was lost (crash before recordAddressedThreads);
+  // T2 is genuinely new. The bot-reply skip drops T1 so only T2 reaches the Reviewer and is recorded.
+  const seen: string[][] = [];
+  const addressed = makeAddressed();
+  const deps = makeDeps({
+    github: makeGithub({
+      authenticatedLogin: async () => 'aitm-bot',
+      listUnresolvedThreads: async () => [repliedThread('T1', 'aitm-bot'), thread('T2')],
+    }),
+    orchestrator: makeOrchestrator({
+      addressReviews: async (_g, threads) => {
+        seen.push(threads.map((t) => t.id));
+        return { kind: 'ok' };
+      },
+    }),
+    prContext: addressed.store,
+  });
+  assert.equal(
+    await handleAddressingReviews(deps, group({ stage: 'addressing-reviews', pr: 5 })),
+    'waiting-reviews',
+  );
+  assert.deepEqual(seen, [['T2']], 'the already-replied thread never reaches the Reviewer');
+  assert.deepEqual(addressed.ids(), ['T2'], 'only the freshly addressed thread is recorded');
 });
 
 test('handleAddressingReviews: nothing fresh → waiting-reviews without running the Reviewer', async () => {

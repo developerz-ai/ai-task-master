@@ -11,6 +11,7 @@ import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
 import type { SelfReviewResult } from './self-review.ts';
 import type { StageWorkResult } from './stage-handlers.ts';
 import {
+  alreadyCommittedDelivery,
   type CheckoutHome,
   mergeDeliveries,
   recoveredDelivery,
@@ -85,7 +86,7 @@ function baseState(): RunState {
 
 type OrchestratorCalls = {
   runWorker: WorkerInvocationCall[];
-  finalizeCommit: { group: PrGroup; checkoutPath: string }[];
+  finalizeCommit: { group: PrGroup; checkoutPath: string; taskId?: string }[];
   openPr: { group: PrGroup; baseBranch: string; delivery: WorkerDelivery }[];
   runCiFix: { group: PrGroup; pr: number; baseBranch: string }[];
   addressReviews: { pr: number; threads: ReviewThread[] }[];
@@ -130,8 +131,8 @@ function makeOrchestrator(
       if (!next) return { kind: 'ok', delivery: delivery() } as WorkerResult;
       return next;
     },
-    finalizeCommit: async (g, _d, checkoutPath) => {
-      calls.finalizeCommit.push({ group: g, checkoutPath });
+    finalizeCommit: async (g, _d, checkoutPath, taskId) => {
+      calls.finalizeCommit.push({ group: g, checkoutPath, ...(taskId ? { taskId } : {}) });
       return `sha-${g.id}`;
     },
     openPr: async (g, d, baseBranch) => {
@@ -193,6 +194,9 @@ function makeGithub(
     defaultBranch?: string;
     checks?: Array<CiResult | CiFailed>;
     threads?: ReviewThread[];
+    // Login the addressing-reviews dedup treats as ours: a thread already carrying a comment from it
+    // is skipped as already-replied. Unset → authenticatedLogin omitted (dedup falls back to record).
+    botLogin?: string;
     // Shared ordering log (see makeOrchestrator).
     events?: string[];
   } = {},
@@ -223,6 +227,9 @@ function makeGithub(
       calls.mergePr.push({ pr, method });
       config.events?.push(`merge:${pr}`);
     },
+    ...(config.botLogin !== undefined
+      ? { authenticatedLogin: async () => config.botLogin ?? '' }
+      : {}),
   };
   return { github, calls };
 }
@@ -232,18 +239,29 @@ type HomeCalls = {
   release: string[];
   activeAtAcquire: number[];
   resetToBase: { groupId: string; branch: string; baseBranch: string }[];
+  hasTaskCommit: { branch: string; taskId: string }[];
 };
 
 // `resetToBase: true` mounts the base-fresh-per-task seam so prPerTask + autoMerge branches each task
 // off the merged base; omitted (default) leaves the home without it, exercising the single-branch
-// fallback. `events` is a shared ordering log across stubs.
-function makeHome(opts: { resetToBase?: boolean; events?: string[] } = {}): {
+// fallback. `alreadyCommittedTaskIds` mounts hasTaskCommit, reporting true for exactly those task
+// ids (the resume-idempotency skip); omitted leaves the home without it, exercising the pre-fix
+// always-re-run-the-Worker fallback. `events` is a shared ordering log across stubs.
+function makeHome(
+  opts: { resetToBase?: boolean; alreadyCommittedTaskIds?: string[]; events?: string[] } = {},
+): {
   home: CheckoutHome;
   calls: HomeCalls;
   live: () => number;
 } {
   const live = new Set<string>();
-  const calls: HomeCalls = { acquire: [], release: [], activeAtAcquire: [], resetToBase: [] };
+  const calls: HomeCalls = {
+    acquire: [],
+    release: [],
+    activeAtAcquire: [],
+    resetToBase: [],
+    hasTaskCommit: [],
+  };
   const home: CheckoutHome = {
     acquire: async (groupId, branch) => {
       calls.acquire.push(groupId);
@@ -255,6 +273,14 @@ function makeHome(opts: { resetToBase?: boolean; events?: string[] } = {}): {
       calls.release.push(groupId);
       live.delete(groupId);
     },
+    ...(opts.alreadyCommittedTaskIds
+      ? {
+          hasTaskCommit: async (branch: string, taskId: string) => {
+            calls.hasTaskCommit.push({ branch, taskId });
+            return (opts.alreadyCommittedTaskIds ?? []).includes(taskId);
+          },
+        }
+      : {}),
     ...(opts.resetToBase
       ? {
           // A real METHOD (not an arrow) that touches `this` — so if the WorkLoop extracts a bare
@@ -565,6 +591,53 @@ test('resume: tasks already marked done are skipped', async () => {
   );
 });
 
+test('resume idempotency: a task whose commit already landed (hasTaskCommit) skips the Worker and is marked done', async () => {
+  // Models the crash window between finalizeCommit landing the commit and completeTask persisting
+  // `done` — state still shows the task undone, but the branch (checked via home.hasTaskCommit)
+  // already carries its commit. runOneTask must skip straight to completeTask, not re-run the Worker
+  // (which would double the commit).
+  const resumed = group('resume-commit', {
+    tasks: [
+      { id: 'a', text: 'already committed pre-crash', complexity: 'normal', done: false },
+      { id: 'b', text: 'still pending', complexity: 'normal', done: false },
+    ],
+  });
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 5 });
+  const { home, calls: homeCalls } = makeHome({ alreadyCommittedTaskIds: ['a'] });
+  const { state, updates } = makeState([resumed]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, home, state, autoMerge: false }));
+  await loop.runGroup(resumed);
+
+  // Both tasks are checked; only the still-pending one runs the Worker.
+  assert.deepEqual(
+    homeCalls.hasTaskCommit.map((c) => c.taskId),
+    ['a', 'b'],
+  );
+  assert.equal(calls.runWorker.length, 1, 'the already-committed task must not re-run the Worker');
+  assert.equal(calls.runWorker[0]?.task?.id, 'b');
+  assert.equal(calls.finalizeCommit.length, 1, 'no second commit for the already-committed task');
+
+  const last = updates[updates.length - 1] as RunState;
+  assert.deepEqual(
+    last.prGroups.find((g) => g.id === 'resume-commit')?.tasks.map((t) => t.done),
+    [true, true],
+    'the already-committed task is marked done despite never re-running the Worker',
+  );
+});
+
+test('resume idempotency: finalizeCommit receives the task id so a stamped commit can be detected on a later resume', async () => {
+  const single = group('stamp', {
+    tasks: [{ id: 't1', text: 'do the thing', complexity: 'normal', done: false }],
+  });
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 9 });
+  const { state } = makeState([single]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(single);
+
+  assert.equal(calls.finalizeCommit.length, 1);
+  assert.equal(calls.finalizeCommit[0]?.taskId, 't1');
+});
+
 test('resume: group persisted at waiting-ci skips Worker and opens no new PR', async () => {
   // A run that crashed after persisting waiting-ci resumes directly at CI polling.
   // handleWorking and handlePrOpen must NOT be called again.
@@ -673,6 +746,22 @@ test('recoveredDelivery: done tasks + no PR → delivery; else null', () => {
   assert.equal(d.branch, 'aitm/g');
   assert.deepEqual(d.changes, []);
   assert.deepEqual(d.progressEntries, ['- first']);
+});
+
+test('alreadyCommittedDelivery: anchors on the group branch and the skipped task text', () => {
+  const g = group('g', { branch: 'aitm/g' });
+  const task: Task = { id: 'a', text: 'first', complexity: 'normal', done: false };
+  const d = alreadyCommittedDelivery(g, task);
+  assert.equal(d.branch, 'aitm/g');
+  assert.equal(d.draftCommitMessage, 'first');
+  assert.deepEqual(d.changes, []);
+  assert.deepEqual(d.progressEntries, ['- first']);
+});
+
+test('alreadyCommittedDelivery: falls back to aitm/<id> when the group has no branch yet', () => {
+  const g = group('g', { branch: null });
+  const task: Task = { id: 'a', text: 'first', complexity: 'normal', done: false };
+  assert.equal(alreadyCommittedDelivery(g, task).branch, 'aitm/g');
 });
 
 function twoTaskGroup(): PrGroup {
@@ -1168,6 +1257,47 @@ test('autoMerge: success path runs waitForChecks → mergePr and marks merged', 
   assert.equal(last.prGroups.find((p) => p.id === 'gamma')?.status, 'merged');
 });
 
+test('autoMerge: a thread already carrying our reply is skipped → merges without re-running the Reviewer', async () => {
+  // Wiring for the self-healing bot-reply skip (freshThreads via authenticatedLogin): the reply
+  // landed on GitHub on a prior pass but its addressed record was lost. On resume the loop must
+  // recognize our own reply and converge to merge, not re-feed the thread to the Reviewer. prContext
+  // is present only to guarantee termination if the skip ever regresses — with it working,
+  // addressReviews is never called.
+  const repliedThread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [
+      { id: 'c1', body: 'nit', author: 'coderabbit' },
+      { id: 'c2', body: 'fixed', author: 'aitm-bot' },
+    ],
+  };
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 11 });
+  const { github, calls: ghCalls } = makeGithub({
+    checks: [ciSuccess],
+    threads: [repliedThread],
+    botLogin: 'aitm-bot',
+  });
+  const { state, updates } = makeState([group('gamma')]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prContext: makeAddressedStore() }),
+  );
+  await loop.runGroup(group('gamma'));
+
+  assert.equal(
+    orchCalls.addressReviews.length,
+    0,
+    'the already-replied thread never reaches the Reviewer',
+  );
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [11],
+    'PR merged once, no re-address loop',
+  );
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'gamma')?.status, 'merged');
+});
+
 test('autoMerge: CI failure → ci-failed runs the fix session, re-polls green, merges', async () => {
   // waiting-ci sees a red run → ci-failed delegates to runCiFix (shared fix session) → waiting-ci
   // re-polls green → merge. Mirrors claudetm's handle_ci_failed_stage → waiting_ci loop.
@@ -1590,6 +1720,94 @@ test('runGroup serializes the worker edit/commit across a concurrent batch, yet 
   );
 });
 
+// Resolves to whether `p` has settled yet WITHOUT awaiting a pending promise to completion: a marker
+// that resolves next microtask races the promise's own continuation. If `p` already settled, its
+// continuation is queued first and wins; if `p` is still pending, only the marker resolves.
+async function settledState(p: Promise<unknown>): Promise<'pending' | 'fulfilled' | 'rejected'> {
+  const marker = Symbol('pending');
+  const outcome = await Promise.race([
+    p.then(
+      () => 'fulfilled' as const,
+      () => 'rejected' as const,
+    ),
+    Promise.resolve(marker),
+  ]);
+  return outcome === marker ? 'pending' : outcome;
+}
+
+test('run(): a session-count write failure waits for in-flight siblings before propagating (allSettled, not Promise.all)', async () => {
+  // Two groups dispatched at concurrency 2. g1's session-count write fails; g2's succeeds and its
+  // runGroup is mid-flight (worker parked on a gate). The failure must NOT surface until g2 settles —
+  // Promise.all would reject the moment g1's increment throws, while g2's Git/PR side effects run on.
+  const groups = [group('g1'), group('g2')];
+  let pass = 0;
+  const graph: WorkLoopGraph = {
+    ready: () => (pass++ === 0 ? groups.slice() : []),
+    isComplete: () => pass >= 1,
+  };
+
+  // Callbacks run in batch order and increment BEFORE runGroup, so the first state.update is g1's
+  // session-count bump — reject it; every later write (g2's bump, both groups' status writes) passes.
+  let updateCalls = 0;
+  let current: RunState = { ...baseState(), prGroups: groups };
+  const state: WorkLoopState = {
+    update: async (mutator) => {
+      updateCalls += 1;
+      if (updateCalls === 1) throw new Error('counter write failed');
+      current = mutator(current);
+      return current;
+    },
+  };
+
+  // g2's worker parks on a gate the test controls; `atGate` fires the instant it parks, so the run
+  // can be observed while g2 is provably still in flight.
+  let openGate = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  let reachedGate = (): void => {};
+  const atGate = new Promise<void>((resolve) => {
+    reachedGate = resolve;
+  });
+  const { orchestrator: base, calls } = makeOrchestrator();
+  const orchestrator: WorkLoopOrchestrator = {
+    ...base,
+    runWorker: async (input) => {
+      reachedGate();
+      await gate;
+      return base.runWorker(input);
+    },
+  };
+  const { home, calls: homeCalls } = makeHome();
+
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, graph, home, state, concurrency: 2, autoMerge: false }),
+  );
+
+  const run = loop.run();
+  await atGate;
+  // Drain any queued continuations so that, under the old Promise.all, g1's rejection has fully
+  // propagated into run() by now — making the pending assertion below a true fix-vs-bug discriminator.
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.equal(
+    await settledState(run),
+    'pending',
+    'run() must stay pending while g2 is still in flight — Promise.all would already have rejected',
+  );
+
+  openGate();
+  await assert.rejects(run, /counter write failed/);
+  assert.ok(
+    calls.runWorker.some((c) => c.group.id === 'g2'),
+    'g2 ran its worker to completion before the failure surfaced',
+  );
+  assert.deepEqual(
+    homeCalls.release.filter((id) => id === 'g2'),
+    ['g2'],
+    'g2 released its checkout (its runGroup fully settled) before run() rejected',
+  );
+});
+
 test('blocked propagation: WorkLoopResult.kind === "blocked" with reason from worker', async () => {
   const { orchestrator } = makeOrchestrator({
     workerResults: [{ kind: 'blocked', reason: 'cannot plan' }],
@@ -1716,7 +1934,11 @@ test('markStatus does not increment persisted sessionCount (status transitions a
   }
 });
 
-test('run() bumps persisted sessionCount once per batch, by batch.length', async () => {
+test('run() bumps persisted sessionCount once per started group, not once by batch.length', async () => {
+  // A batch of 3 groups charges one session AS EACH GROUP STARTS — three separate +1 writes whose
+  // distinct persisted values climb 1 → 2 → 3 — rather than a single upfront +3. A crash mid-batch
+  // then persists only the groups that actually started, so a resume never inherits an inflated
+  // count that trips the session cap before the still-unrun groups get their turn.
   const groups = [group('a'), group('b'), group('c')];
   let pass = 0;
   const graph: WorkLoopGraph = {
@@ -1733,13 +1955,11 @@ test('run() bumps persisted sessionCount once per batch, by batch.length', async
     makeDeps({ orchestrator, state, graph, concurrency: 3, autoMerge: true }),
   );
   await loop.run();
-  // First state update is the session-count bump (+3), preceding any group's in-progress write.
-  const sessionBumps = updates.filter(
-    (s, i) => i === 0 || s.sessionCount !== updates[i - 1]?.sessionCount,
-  );
-  assert.equal(sessionBumps.length, 1, 'sessionCount mutated exactly once');
+
+  const distinctCounts = updates.map((s) => s.sessionCount).filter((c, i, all) => c !== all[i - 1]);
+  assert.deepEqual(distinctCounts, [1, 2, 3], 'sessionCount climbs one per started group');
   const last = updates[updates.length - 1];
-  assert.equal(last?.sessionCount, 3, 'final persisted sessionCount equals batch size');
+  assert.equal(last?.sessionCount, 3, 'final persisted sessionCount equals groups started');
 });
 
 test('initialSessionCount seeds the in-memory counter so resume respects maxSessions', async () => {

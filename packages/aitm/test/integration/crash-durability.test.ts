@@ -16,11 +16,21 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import type { FileHandle } from 'node:fs/promises';
-import { appendFile, mkdtemp, open, readdir, readFile, rm, stat } from 'node:fs/promises';
+import {
+  appendFile,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { ModelMessage } from 'ai';
+import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
 import { runStart } from '../../src/cli/commands.ts';
 import { normalizeResumeStatus } from '../../src/loop/resume-normalize.ts';
@@ -38,11 +48,13 @@ import {
   type WorkLoopOrchestrator,
   type WorkLoopState,
 } from '../../src/loop/work-loop.ts';
+import { Orchestrator } from '../../src/orchestrator/orchestrator.ts';
 import { PlanGraph } from '../../src/plan/plan-graph.ts';
 import { type PrGroup, type RunState, RunStateSchema } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
 import { TranscriptStore } from '../../src/state/transcript-store.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
+import { InPlaceCheckout } from '../../src/workspace/in-place-checkout.ts';
 
 function baseState(overrides: Partial<RunState> = {}): RunState {
   return RunStateSchema.parse({
@@ -501,6 +513,236 @@ test('crash-durability: kill between the PR-open side effect and the stage persi
     assert.equal(finalGroup.pr, 501);
   } finally {
     await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task-commit crash boundary: kill after the Worker's commit lands, before completeTask persists
+// ---------------------------------------------------------------------------
+//
+// docs/plans/2026/07/18/101-parallel-agent-bug-hunt/03-review-loop-idempotency.md, durability #7.
+// The crash this models is a `kill -9` that lands after WorkLoop.runOneTask's finalizeCommit (a
+// real `git commit --amend`, on GitHub-independent local disk state that survives the crash) but
+// before completeTask persists the task as done in state.json. Before the fix, a resume in this
+// window re-ran the Worker for the same task, landing a SECOND commit on the reused branch — a
+// silent duplicate under merge/rebase merge methods (squash tolerates it, since the whole group
+// collapses into one commit anyway). The fix stamps a deterministic trailer on every task commit
+// (workspace/task-commit-marker.ts) and greps for it on resume (InPlaceCheckout.hasTaskCommit) so
+// runOneTask skips straight to completeTask instead. This test drives the real Orchestrator.
+// finalizeCommit (real trailer stamp) and a real InPlaceCheckout (real git-log detection) against a
+// real temp repo, then a real WorkLoop resume, and counts actual `git log` commits to prove no
+// duplicate lands.
+
+function mockModel(): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [{ type: 'text' as const, text: 'feat: add hello' }],
+      finishReason: { unified: 'stop' as const, raw: 'stop' },
+      usage: {
+        inputTokens: {
+          total: 10 as number | undefined,
+          noCache: 10 as number | undefined,
+          cacheRead: undefined as number | undefined,
+          cacheWrite: undefined as number | undefined,
+        },
+        outputTokens: {
+          total: 5 as number | undefined,
+          text: 5 as number | undefined,
+          reasoning: undefined as number | undefined,
+        },
+      },
+      warnings: [],
+    }),
+  });
+}
+
+async function commitCount(cwd: string, branch: string): Promise<number> {
+  const { stdout } = await execa('git', ['log', branch, '--oneline'], { cwd });
+  return stdout.split('\n').filter((line) => line.trim().length > 0).length;
+}
+
+test('crash-durability: kill after a task commit lands but before completeTask persists — resume detects it via git log, skips the Worker, and does not double the commit', async () => {
+  const repo = await makeTempRepo();
+  try {
+    await execa('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: repo.path });
+    await execa('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: repo.path });
+
+    const stateDir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(stateDir);
+    const twoTaskGroup: PrGroup = {
+      id: 'g1',
+      title: 'add hello and world',
+      tasks: [
+        { id: 't1', text: 'add hello.ts', complexity: 'normal', done: false },
+        { id: 't2', text: 'add world.ts', complexity: 'normal', done: false },
+      ],
+      dependsOn: [],
+      branch: 'aitm/g1',
+      pr: null,
+      status: 'in-progress',
+      stage: 'working',
+    };
+    await store.init(baseState({ status: 'working', prGroups: [twoTaskGroup] }));
+
+    const orch = new Orchestrator({
+      credentials: { modelFor: () => mockModel() },
+      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+      rollingContext: '',
+      maxSessions: null,
+      github: {
+        createPr: async () => {
+          throw new Error('createPr must not be called from finalizeCommit');
+        },
+      },
+    });
+
+    // ── Pre-crash: task t1's Worker pass + finalizeCommit land for real (the trailer-stamped
+    // amend), but completeTask (which would persist tasks[0].done = true) never runs — the exact
+    // instant a `kill -9` between the two would land.
+    const home = new InPlaceCheckout(repo.path);
+    const checkout = await home.acquire('g1', 'aitm/g1', 'main');
+    await writeFile(join(checkout.path, 'hello.ts'), 'export const hello = "hello";\n');
+    await execa('git', ['add', 'hello.ts'], { cwd: checkout.path });
+    await execa('git', ['commit', '-m', 'wip: add hello'], { cwd: checkout.path });
+    await orch.finalizeCommit(
+      twoTaskGroup,
+      {
+        branch: 'aitm/g1',
+        draftCommitMessage: 'feat: add hello',
+        changes: [{ path: 'hello.ts', kind: 'create', summary: 'creates hello export' }],
+        progressEntries: ['- add hello.ts'],
+      },
+      checkout.path,
+      't1',
+    );
+
+    const preResumeCommits = await commitCount(repo.path, 'aitm/g1');
+
+    // state.json still shows both tasks undone — the crash landed before completeTask's write.
+    const crashed = await store.read();
+    assert.deepEqual(
+      crashed.prGroups[0]?.tasks.map((t) => t.done),
+      [false, false],
+      'the crashed write must not have marked t1 done',
+    );
+
+    // The crashed group is still persisted 'in-progress' — the same production normalization
+    // runStart applies on resume (normalizeResumeStatus) so PlanGraph.ready() schedules it again.
+    await store.update((s) => ({ ...s, prGroups: normalizeResumeStatus(s.prGroups) }));
+
+    // ── Resume: fresh instances (new process) drive the group from persisted state. t1's Worker
+    // must never run again; t2's Worker must run exactly once.
+    const resumedStore = new StateStore(stateDir);
+    let liveGroups: readonly PrGroup[] = (await resumedStore.read()).prGroups;
+    const workLoopState: WorkLoopState = {
+      update: async (mutator) => {
+        const next = await resumedStore.update(mutator);
+        liveGroups = next.prGroups;
+        return next;
+      },
+    };
+    const graph: WorkLoopGraph = {
+      ready: () => new PlanGraph([...liveGroups]).ready(),
+      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+    };
+    const resumedHome = new InPlaceCheckout(repo.path);
+
+    let workerCallsForT1 = 0;
+    let workerCallsForT2 = 0;
+    let finalizeCallsForT1 = 0;
+    const workLoopOrchestrator: WorkLoopOrchestrator = {
+      runWorker: async ({ task, checkout: co }) => {
+        if (task?.id === 't1') {
+          workerCallsForT1 += 1;
+          return {
+            kind: 'blocked',
+            reason: 'must not re-run the Worker for an already-committed task',
+          };
+        }
+        workerCallsForT2 += 1;
+        await writeFile(join(co.path, 'world.ts'), 'export const world = "world";\n');
+        await execa('git', ['add', 'world.ts'], { cwd: co.path });
+        await execa('git', ['commit', '-m', 'wip: add world'], { cwd: co.path });
+        return {
+          kind: 'ok',
+          delivery: {
+            branch: 'aitm/g1',
+            draftCommitMessage: 'feat: add world',
+            changes: [{ path: 'world.ts', kind: 'create', summary: 'creates world export' }],
+            progressEntries: ['- add world.ts'],
+          },
+        };
+      },
+      finalizeCommit: async (group, delivery, checkoutPath, taskId) => {
+        if (taskId === 't1') finalizeCallsForT1 += 1;
+        return orch.finalizeCommit(group, delivery, checkoutPath, taskId);
+      },
+      openPr: async (group, _delivery, baseBranch) => ({
+        number: 1,
+        state: 'OPEN',
+        url: 'https://github.com/example/repo/pull/1',
+        headRefName: group.branch ?? 'aitm/g1',
+        baseRefName: baseBranch,
+      }),
+      runCiFix: async () => {
+        assert.fail('runCiFix must not run — no CI in this scenario');
+      },
+      addressReviews: async () => {
+        assert.fail('addressReviews must not run — no threads in this scenario');
+      },
+    };
+    const workLoopGithub: WorkLoopGithub = {
+      defaultBranch: async () => 'main',
+      waitForChecks: async () => ({ state: 'success', failedChecks: [] }),
+      listUnresolvedThreads: async () => [],
+      mergePr: async () => {
+        assert.fail('mergePr must not run — autoMerge is off');
+      },
+    };
+
+    const loop = new WorkLoop({
+      orchestrator: workLoopOrchestrator,
+      github: workLoopGithub,
+      state: workLoopState,
+      home: resumedHome,
+      graph,
+      concurrency: 1,
+      autoMerge: false,
+      maxSessions: null,
+    });
+    const result = await loop.run();
+
+    assert.equal(
+      workerCallsForT1,
+      0,
+      'the already-committed task must never re-run the Worker on resume',
+    );
+    assert.equal(finalizeCallsForT1, 0, 'no second finalizeCommit for the already-committed task');
+    assert.equal(workerCallsForT2, 1, 'the still-pending task must run the Worker exactly once');
+
+    const postResumeCommits = await commitCount(repo.path, 'aitm/g1');
+    assert.equal(
+      postResumeCommits,
+      preResumeCommits + 1,
+      'exactly one NEW commit (t2) must land on resume — t1 must not be duplicated',
+    );
+
+    assert.equal(
+      result.kind,
+      'awaiting-pr',
+      `expected the resumed group to complete cleanly, got: ${JSON.stringify(result)}`,
+    );
+
+    const final = await resumedStore.read();
+    const finalGroup = final.prGroups[0];
+    assert.ok(finalGroup);
+    assert.deepEqual(
+      finalGroup.tasks.map((t) => t.done),
+      [true, true],
+      'both tasks are marked done — t1 via the resume detection, t2 via a fresh Worker pass',
+    );
+  } finally {
+    await repo.cleanup();
   }
 });
 

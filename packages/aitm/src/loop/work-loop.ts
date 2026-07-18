@@ -72,7 +72,15 @@ export type SelfReviewInvocation = {
 
 export type WorkLoopOrchestrator = {
   runWorker(input: WorkerInvocation): Promise<WorkerResult>;
-  finalizeCommit(group: PrGroup, delivery: WorkerDelivery, checkoutPath: string): Promise<string>;
+  // `taskId`, when given, is stamped onto the finalized commit as a trailer so CheckoutHome.
+  // hasTaskCommit can recognize it on resume (see runOneTask). Optional so existing stubs compile;
+  // the real Orchestrator always receives it from runOneTask.
+  finalizeCommit(
+    group: PrGroup,
+    delivery: WorkerDelivery,
+    checkoutPath: string,
+    taskId?: string,
+  ): Promise<string>;
   openPr(group: PrGroup, delivery: WorkerDelivery, baseBranch: string): Promise<PullRequest>;
   // Pre-PR self-review: adversarially review + verify + fix the just-committed diff, committing any
   // fixes onto the group branch BEFORE openPr. Optional so existing stubs compile and so a run with
@@ -92,6 +100,10 @@ export type WorkLoopGithub = {
   waitForChecks(pr: number): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
   mergePr(pr: number, method: MergeMethod, opts?: { admin?: boolean }): Promise<void>;
+  // Login `gh` is authenticated as, forwarded to the addressing-reviews dedup so it can skip a thread
+  // it already replied to (self-healing across a crash before the addressed record lands). Optional —
+  // stubs that don't drive the review loop omit it; the real GitHubClient supplies it.
+  authenticatedLogin?(): Promise<string>;
 };
 
 export type CheckoutHome = {
@@ -103,6 +115,13 @@ export type CheckoutHome = {
   // prior task's tip (which, after a squash merge, would re-include the prior task's changes). Optional:
   // a home that omits it — or a --no-automerge run — keeps the single group branch (documented fallback).
   resetToBase?(groupId: string, branch: string, baseBranch: string): Promise<Checkout>;
+  // True when `branch` already carries a commit for this task — detects the crash window between
+  // finalizeCommit (the Worker's commit lands) and completeTask (state persists `done`): a resume
+  // that finds the commit already there would otherwise re-run the Worker and double it (harmless
+  // under squash-merge, wrong under merge/rebase — see runOneTask). Optional: a home without it
+  // (test stubs) always re-runs the Worker, byte-identical to pre-fix behavior for everything
+  // outside that narrow crash window.
+  hasTaskCommit?(branch: string, taskId: string): Promise<boolean>;
 };
 
 export type WorkLoopState = {
@@ -239,6 +258,19 @@ export function recoveredDelivery(group: PrGroup): WorkerDelivery | null {
   };
 }
 
+// Synthetic delivery for a task whose commit is already on the branch — runOneTask's
+// hasTaskCommit skip, the same crash window recoveredDelivery covers at the group level (a resumed
+// run whose Worker pass never happened this time). No Worker ran, so there is no fresh
+// draftCommitMessage/changed-file detail — only the task text. Exported for unit testing.
+export function alreadyCommittedDelivery(group: PrGroup, task: Task): WorkerDelivery {
+  return {
+    branch: group.branch ?? `aitm/${group.id}`,
+    draftCommitMessage: task.text,
+    changes: [],
+    progressEntries: [`- ${task.text}`],
+  };
+}
+
 // Mutable scratch the stage dispatcher threads through one group-run. `group` is the authoritative
 // in-memory copy the bridges keep current (tasks marked done by work(), pr set by openPr()); the
 // persisted GroupStage is the dispatcher's job. `delivery` is the merged Worker delivery work()
@@ -307,8 +339,26 @@ export class WorkLoop {
         return { kind: 'session-cap', outcomes: this.outcomes.slice() };
       }
       const batch = ready.slice(0, batchSize);
-      await this.incrementSessionCount(batch.length);
-      await Promise.all(batch.map((g) => this.runGroup(g)));
+      // Charge a session per group AS IT STARTS, persisted incrementally — not the whole batch
+      // upfront. batchSize already fits the remaining budget (nextBatchSize), so the per-group
+      // bumps sum to ≤ it; and a crash mid-batch leaves the persisted count at the groups that
+      // actually started, so a resume never inherits an inflated batch.length that trips maxSessions
+      // before the still-unrun groups get their turn.
+      // allSettled, not Promise.all: runGroup swallows its own failures into an outcome and never
+      // rejects, so the only rejection here is a counter-write failure in incrementSessionCount.
+      // Promise.all would surface that immediately while sibling groups — already past their own
+      // increment and into runGroup's Git/PR side effects — are still in flight, letting run()'s
+      // caller start failure cleanup over live work. Wait for every started group to settle, THEN
+      // rethrow the first counter-write failure.
+      const settled = await Promise.allSettled(
+        batch.map(async (g) => {
+          await this.incrementSessionCount();
+          await this.runGroup(g);
+        }),
+      );
+      for (const outcome of settled) {
+        if (outcome.status === 'rejected') throw outcome.reason;
+      }
       // Re-check post-batch: an abort mid-batch aborts each group's in-flight LLM calls
       // (worker.ts signal wiring), which runGroup's catch would otherwise report as `blocked`
       // (exit 1). A cancelled run must report cancelled (exit 2) regardless of the abort-induced
@@ -598,6 +648,7 @@ export class WorkLoop {
       addressReviews: (group, threads) =>
         this.deps.orchestrator.addressReviews({ pr: prNumberOf(group), threads, checkout }),
     };
+    const authenticatedLogin = this.deps.github.authenticatedLogin?.bind(this.deps.github);
     const github: StageGithub = {
       waitForChecks: (pr) => this.deps.github.waitForChecks(pr),
       listUnresolvedThreads: (pr) => this.deps.github.listUnresolvedThreads(pr),
@@ -605,6 +656,7 @@ export class WorkLoop {
         this.deps.github.mergePr(pr, this.deps.mergeMethod ?? DEFAULT_MERGE_METHOD, {
           admin: this.deps.adminMerge ?? false,
         }),
+      ...(authenticatedLogin ? { authenticatedLogin } : {}),
     };
     return {
       orchestrator,
@@ -685,10 +737,19 @@ export class WorkLoop {
   ): Promise<
     { kind: 'ok'; group: PrGroup; delivery: WorkerDelivery } | { kind: 'blocked'; reason: string }
   > {
+    // Resume idempotency: the Worker's commit for this task may already be on the branch — a crash
+    // between finalizeCommit and completeTask (below), or a resumed run reusing the branch across
+    // process restarts. Re-running the Worker here would produce a SECOND commit for the same task
+    // (harmless under squash-merge, which collapses the group into one commit anyway; a genuine
+    // duplicate under merge/rebase, which don't). Detect it and skip straight to completeTask.
+    if (await this.deps.home.hasTaskCommit?.(checkout.branch, task.id)) {
+      const next = await this.completeTask(group, task.id);
+      return { kind: 'ok', group: next, delivery: alreadyCommittedDelivery(group, task) };
+    }
     const result = await this.checkoutMutex.runExclusive(async () => {
       const worked = await this.deps.orchestrator.runWorker({ group, task, checkout, baseBranch });
       if (worked.kind === 'ok') {
-        await this.deps.orchestrator.finalizeCommit(group, worked.delivery, checkout.path);
+        await this.deps.orchestrator.finalizeCommit(group, worked.delivery, checkout.path, task.id);
       }
       return worked;
     });
@@ -912,23 +973,24 @@ export class WorkLoop {
     patch: Partial<Pick<PrGroup, 'branch' | 'pr' | 'stage' | 'ciFixAttempts' | 'humanNeeded'>> = {},
   ): Promise<void> {
     // Status transitions do not bump sessionCount — that's owned by incrementSessionCount,
-    // which fires once per batch dispatch so the in-memory and persisted counters agree.
+    // which fires once per started group so the in-memory and persisted counters agree.
     await this.deps.state.update((s) => ({
       ...s,
       prGroups: s.prGroups.map((g) => (g.id === id ? { ...g, ...patch, status } : g)),
     }));
   }
 
-  // Single source of truth for session counting: bump both the in-memory counter (used by
-  // run() to enforce maxSessions) and the persisted counter (used by reporting/resume) in
-  // one call. Drops in-memory if persistence fails so the two stay aligned.
-  private async incrementSessionCount(by: number): Promise<void> {
-    if (by <= 0) return;
-    this.sessionCount += by;
+  // Charge one session as a group starts: bump both the in-memory counter (run() reads it to
+  // enforce maxSessions) and the persisted counter (reporting/resume) in one call. Called once per
+  // started group — never once per batch — so the persisted count never exceeds groups that
+  // actually started and a resume can't inherit an inflated count. Rolls the in-memory bump back if
+  // persistence fails so the two stay aligned.
+  private async incrementSessionCount(): Promise<void> {
+    this.sessionCount += 1;
     try {
-      await this.deps.state.update((s) => ({ ...s, sessionCount: s.sessionCount + by }));
+      await this.deps.state.update((s) => ({ ...s, sessionCount: s.sessionCount + 1 }));
     } catch (err) {
-      this.sessionCount -= by;
+      this.sessionCount -= 1;
       throw err;
     }
   }

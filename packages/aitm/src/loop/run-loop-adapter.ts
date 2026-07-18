@@ -1039,8 +1039,8 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       await recorder?.end(runEndOutcome(result.kind));
       return result;
     },
-    finalizeCommit: (group, delivery, checkoutPath) =>
-      orch.finalizeCommit(group, delivery, checkoutPath),
+    finalizeCommit: (group, delivery, checkoutPath, taskId) =>
+      orch.finalizeCommit(group, delivery, checkoutPath, taskId),
     openPr: async (group, delivery, baseBranch) => {
       // The Worker's commits live on the group branch in the local checkout. Push it to origin
       // first — `gh pr create` won't open a PR for a branch that isn't on the remote

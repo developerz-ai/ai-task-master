@@ -38,6 +38,7 @@ import type { PlannerTools } from '../subagents/planner.ts';
 import { render } from '../subagents/prompts/templates.ts';
 import type { ReviewerTools } from '../subagents/reviewer.ts';
 import type { WorkerDelivery, WorkerTools } from '../subagents/worker.ts';
+import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
   type ModelProvider,
   makePlannerTool,
@@ -290,14 +291,22 @@ export class Orchestrator {
 
   // Re-write the Worker's draft commit message via the orchestrator model, then
   // `git commit --amend` on the active checkout. Returns the new HEAD SHA.
+  //
+  // `taskId`, when given, is stamped onto the message as a trailer (see task-commit-marker.ts) so
+  // CheckoutHome.hasTaskCommit can detect this exact commit on a resume — the crash window between
+  // this amend and WorkLoop persisting the task as done, which would otherwise re-run the Worker and
+  // double the commit. Optional so a caller finalizing a whole-group delivery with no single task in
+  // scope (or an existing test stub) still compiles and behaves byte-identically (no trailer).
   async finalizeCommit(
     group: PrGroup,
     delivery: WorkerDelivery,
     checkoutPath: string,
+    taskId?: string,
   ): Promise<string> {
     const refined = await this.refineCommitMessage(group, delivery);
+    const message = taskId === undefined ? refined : `${refined}\n\n${taskCommitTrailer(taskId)}`;
     const runCmd = this.init.runCmd ?? defaultRunCmd;
-    const amend = await runCmd('git', ['commit', '--amend', '-m', refined], { cwd: checkoutPath });
+    const amend = await runCmd('git', ['commit', '--amend', '-m', message], { cwd: checkoutPath });
     if (amend.exitCode !== 0) {
       throw new Error(`git commit --amend failed: ${amend.stderr.trim() || amend.stdout.trim()}`);
     }

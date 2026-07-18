@@ -21,6 +21,7 @@ import {
   type WriteFileInput,
   type WriteFileOutput,
 } from '../subagents/worker.ts';
+import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
   assertPrBodySections,
   DEFAULT_MAX_STEPS,
@@ -352,6 +353,36 @@ test('finalizeCommit rewrites commit message and amends via runCmd, returning th
   assert.deepEqual(calls[1], {
     file: 'git',
     args: ['rev-parse', 'HEAD'],
+    cwd: '/tmp/wt',
+  });
+});
+
+test('finalizeCommit stamps a task-id trailer onto the amended message when taskId is given', async () => {
+  const refinedMessage = 'feat(core): add module a';
+  const model = modelEmitting(refinedMessage);
+  const { provider } = recordingProvider(model);
+
+  type Call = { file: string; args: readonly string[]; cwd?: string };
+  const calls: Call[] = [];
+  const runCmd: RunCmd = async (file, args, options) => {
+    calls.push({ file, args, ...(options?.cwd !== undefined ? { cwd: options.cwd } : {}) });
+    if (args[0] === 'rev-parse') return { stdout: 'shaXYZ\n', stderr: '', exitCode: 0 };
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: {} as never,
+    runCmd,
+  });
+
+  await o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt', 'task-a');
+  assert.deepEqual(calls[0], {
+    file: 'git',
+    args: ['commit', '--amend', '-m', `${refinedMessage}\n\n${taskCommitTrailer('task-a')}`],
     cwd: '/tmp/wt',
   });
 });

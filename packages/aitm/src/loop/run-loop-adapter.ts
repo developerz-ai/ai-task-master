@@ -209,6 +209,15 @@ function runEndOutcome(kind: string): RunEndOutcome {
   return kind === 'ok' ? 'submitted' : kind === 'error' ? 'error' : 'no-submission';
 }
 
+// Reduce a caught value to display text the way every catch site in this file already did
+// (`err instanceof Error ? err.message : String(err)`), but without silently dropping the
+// original value: wrapping a non-Error in a real Error keeps it reachable as `.cause` instead of
+// discarding it once `String(err)` runs. A caught Error is returned as-is — same object, same
+// `.message`, whatever `.cause` it already carried. Exported for the cause-preservation unit test.
+export function describeError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err), { cause: err });
+}
+
 // Begin a transcript recorder, best-effort (issue #108 CR): a mkdir/readdir failure in begin() falls
 // back to null instead of aborting the run — transcripts are optional observability, and the recorder
 // itself already swallows write failures. Null store → null (no recording).
@@ -220,9 +229,7 @@ async function beginTranscript(
   try {
     return await store.begin(target);
   } catch (err) {
-    process.stderr.write(
-      `warning: transcript begin failed: ${err instanceof Error ? err.message : String(err)}\n`,
-    );
+    process.stderr.write(`warning: transcript begin failed: ${describeError(err).message}\n`);
     return null;
   }
 }
@@ -394,7 +401,7 @@ export async function persistRollingContext(
     await state.writeContext?.(next);
   } catch (err) {
     process.stderr.write(
-      `warning: failed to persist rolling context: ${err instanceof Error ? err.message : String(err)}\n`,
+      `warning: failed to persist rolling context: ${describeError(err).message}\n`,
     );
   }
   return next;
@@ -1265,7 +1272,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         } catch (err) {
           return {
             kind: 'blocked',
-            reason: `unable to push review fixes: ${err instanceof Error ? err.message : String(err)}`,
+            reason: `unable to push review fixes: ${describeError(err).message}`,
           };
         }
       }

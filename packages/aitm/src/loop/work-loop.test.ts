@@ -11,6 +11,7 @@ import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
 import type { SelfReviewResult } from './self-review.ts';
 import type { StageWorkResult } from './stage-handlers.ts';
 import {
+  alreadyCommittedDelivery,
   type CheckoutHome,
   mergeDeliveries,
   recoveredDelivery,
@@ -85,7 +86,7 @@ function baseState(): RunState {
 
 type OrchestratorCalls = {
   runWorker: WorkerInvocationCall[];
-  finalizeCommit: { group: PrGroup; checkoutPath: string }[];
+  finalizeCommit: { group: PrGroup; checkoutPath: string; taskId?: string }[];
   openPr: { group: PrGroup; baseBranch: string; delivery: WorkerDelivery }[];
   runCiFix: { group: PrGroup; pr: number; baseBranch: string }[];
   addressReviews: { pr: number; threads: ReviewThread[] }[];
@@ -130,8 +131,8 @@ function makeOrchestrator(
       if (!next) return { kind: 'ok', delivery: delivery() } as WorkerResult;
       return next;
     },
-    finalizeCommit: async (g, _d, checkoutPath) => {
-      calls.finalizeCommit.push({ group: g, checkoutPath });
+    finalizeCommit: async (g, _d, checkoutPath, taskId) => {
+      calls.finalizeCommit.push({ group: g, checkoutPath, ...(taskId ? { taskId } : {}) });
       return `sha-${g.id}`;
     },
     openPr: async (g, d, baseBranch) => {
@@ -238,18 +239,29 @@ type HomeCalls = {
   release: string[];
   activeAtAcquire: number[];
   resetToBase: { groupId: string; branch: string; baseBranch: string }[];
+  hasTaskCommit: { branch: string; taskId: string }[];
 };
 
 // `resetToBase: true` mounts the base-fresh-per-task seam so prPerTask + autoMerge branches each task
 // off the merged base; omitted (default) leaves the home without it, exercising the single-branch
-// fallback. `events` is a shared ordering log across stubs.
-function makeHome(opts: { resetToBase?: boolean; events?: string[] } = {}): {
+// fallback. `alreadyCommittedTaskIds` mounts hasTaskCommit, reporting true for exactly those task
+// ids (the resume-idempotency skip); omitted leaves the home without it, exercising the pre-fix
+// always-re-run-the-Worker fallback. `events` is a shared ordering log across stubs.
+function makeHome(
+  opts: { resetToBase?: boolean; alreadyCommittedTaskIds?: string[]; events?: string[] } = {},
+): {
   home: CheckoutHome;
   calls: HomeCalls;
   live: () => number;
 } {
   const live = new Set<string>();
-  const calls: HomeCalls = { acquire: [], release: [], activeAtAcquire: [], resetToBase: [] };
+  const calls: HomeCalls = {
+    acquire: [],
+    release: [],
+    activeAtAcquire: [],
+    resetToBase: [],
+    hasTaskCommit: [],
+  };
   const home: CheckoutHome = {
     acquire: async (groupId, branch) => {
       calls.acquire.push(groupId);
@@ -261,6 +273,14 @@ function makeHome(opts: { resetToBase?: boolean; events?: string[] } = {}): {
       calls.release.push(groupId);
       live.delete(groupId);
     },
+    ...(opts.alreadyCommittedTaskIds
+      ? {
+          hasTaskCommit: async (branch: string, taskId: string) => {
+            calls.hasTaskCommit.push({ branch, taskId });
+            return (opts.alreadyCommittedTaskIds ?? []).includes(taskId);
+          },
+        }
+      : {}),
     ...(opts.resetToBase
       ? {
           // A real METHOD (not an arrow) that touches `this` — so if the WorkLoop extracts a bare
@@ -571,6 +591,53 @@ test('resume: tasks already marked done are skipped', async () => {
   );
 });
 
+test('resume idempotency: a task whose commit already landed (hasTaskCommit) skips the Worker and is marked done', async () => {
+  // Models the crash window between finalizeCommit landing the commit and completeTask persisting
+  // `done` — state still shows the task undone, but the branch (checked via home.hasTaskCommit)
+  // already carries its commit. runOneTask must skip straight to completeTask, not re-run the Worker
+  // (which would double the commit).
+  const resumed = group('resume-commit', {
+    tasks: [
+      { id: 'a', text: 'already committed pre-crash', complexity: 'normal', done: false },
+      { id: 'b', text: 'still pending', complexity: 'normal', done: false },
+    ],
+  });
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 5 });
+  const { home, calls: homeCalls } = makeHome({ alreadyCommittedTaskIds: ['a'] });
+  const { state, updates } = makeState([resumed]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, home, state, autoMerge: false }));
+  await loop.runGroup(resumed);
+
+  // Both tasks are checked; only the still-pending one runs the Worker.
+  assert.deepEqual(
+    homeCalls.hasTaskCommit.map((c) => c.taskId),
+    ['a', 'b'],
+  );
+  assert.equal(calls.runWorker.length, 1, 'the already-committed task must not re-run the Worker');
+  assert.equal(calls.runWorker[0]?.task?.id, 'b');
+  assert.equal(calls.finalizeCommit.length, 1, 'no second commit for the already-committed task');
+
+  const last = updates[updates.length - 1] as RunState;
+  assert.deepEqual(
+    last.prGroups.find((g) => g.id === 'resume-commit')?.tasks.map((t) => t.done),
+    [true, true],
+    'the already-committed task is marked done despite never re-running the Worker',
+  );
+});
+
+test('resume idempotency: finalizeCommit receives the task id so a stamped commit can be detected on a later resume', async () => {
+  const single = group('stamp', {
+    tasks: [{ id: 't1', text: 'do the thing', complexity: 'normal', done: false }],
+  });
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 9 });
+  const { state } = makeState([single]);
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(single);
+
+  assert.equal(calls.finalizeCommit.length, 1);
+  assert.equal(calls.finalizeCommit[0]?.taskId, 't1');
+});
+
 test('resume: group persisted at waiting-ci skips Worker and opens no new PR', async () => {
   // A run that crashed after persisting waiting-ci resumes directly at CI polling.
   // handleWorking and handlePrOpen must NOT be called again.
@@ -679,6 +746,22 @@ test('recoveredDelivery: done tasks + no PR → delivery; else null', () => {
   assert.equal(d.branch, 'aitm/g');
   assert.deepEqual(d.changes, []);
   assert.deepEqual(d.progressEntries, ['- first']);
+});
+
+test('alreadyCommittedDelivery: anchors on the group branch and the skipped task text', () => {
+  const g = group('g', { branch: 'aitm/g' });
+  const task: Task = { id: 'a', text: 'first', complexity: 'normal', done: false };
+  const d = alreadyCommittedDelivery(g, task);
+  assert.equal(d.branch, 'aitm/g');
+  assert.equal(d.draftCommitMessage, 'first');
+  assert.deepEqual(d.changes, []);
+  assert.deepEqual(d.progressEntries, ['- first']);
+});
+
+test('alreadyCommittedDelivery: falls back to aitm/<id> when the group has no branch yet', () => {
+  const g = group('g', { branch: null });
+  const task: Task = { id: 'a', text: 'first', complexity: 'normal', done: false };
+  assert.equal(alreadyCommittedDelivery(g, task).branch, 'aitm/g');
 });
 
 function twoTaskGroup(): PrGroup {

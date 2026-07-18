@@ -11,6 +11,7 @@
 
 import { ExecaError } from 'execa';
 import { runGit } from './git-exec.ts';
+import { taskCommitTrailer } from './task-commit-marker.ts';
 
 export type Checkout = {
   groupId: string;
@@ -41,6 +42,32 @@ export async function branchExists(repoRoot: string, branch: string): Promise<bo
     if (err instanceof ExecaError && err.exitCode === 1) return false;
     throw err;
   }
+}
+
+// True when a commit on `branch` already carries this task's trailer (see task-commit-marker.ts) —
+// a resumed run whose crash landed the Worker's commit (finalizeCommit) but died before WorkLoop
+// persisted the task as done. Scoped to `branch`'s own history via `git log <branch>` so the grep
+// can only match a commit aitm itself made for this task, never one on an unrelated ref. A missing
+// branch (never acquired, or a fresh group) trivially has no such commit.
+export async function hasTaskCommit(
+  repoRoot: string,
+  branch: string,
+  taskId: string,
+): Promise<boolean> {
+  if (!(await branchExists(repoRoot, branch))) return false;
+  const { stdout } = await runGit(
+    [
+      'log',
+      branch,
+      '--fixed-strings',
+      `--grep=${taskCommitTrailer(taskId)}`,
+      '-n',
+      '1',
+      '--format=%H',
+    ],
+    { cwd: repoRoot },
+  );
+  return stdout.trim().length > 0;
 }
 
 export class InPlaceCheckout {
@@ -110,6 +137,11 @@ export class InPlaceCheckout {
     if (!dirty) return;
     await runGit(['reset', '--hard'], { cwd: this.repoRoot });
     await runGit(['clean', '-fd', '-e', '.ai-task-master'], { cwd: this.repoRoot });
+  }
+
+  // CheckoutHome.hasTaskCommit — see the free function above for the detection logic.
+  async hasTaskCommit(branch: string, taskId: string): Promise<boolean> {
+    return hasTaskCommit(this.repoRoot, branch, taskId);
   }
 
   async release(groupId: string): Promise<void> {

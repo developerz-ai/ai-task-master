@@ -154,6 +154,7 @@ test('createPr passes title/body/base/head and default label, then refetches', a
     baseRefName: 'main',
   };
   const { run, calls } = makeRun([
+    { exitCode: 1, stderr: 'no pull requests found for branch feature/bar' }, // gh pr view (pre-check → none)
     { stdout: '' }, // gh label create <default> --force (idempotent ensure)
     { stdout: 'https://github.com/org/repo/pull/7\n' }, // gh pr create
     { stdout: JSON.stringify(pr) }, // gh pr view (refetch)
@@ -166,9 +167,10 @@ test('createPr passes title/body/base/head and default label, then refetches', a
     head: 'feature/bar',
   });
   assert.deepEqual(result, pr);
-  assert.equal(calls.length, 3);
-  assert.deepEqual(calls[0]?.args, ['label', 'create', DEFAULT_PR_LABEL, '--force']);
-  assert.deepEqual(calls[1]?.args, [
+  assert.equal(calls.length, 4);
+  assert.deepEqual(calls[0]?.args.slice(0, 3), ['pr', 'view', 'feature/bar']);
+  assert.deepEqual(calls[1]?.args, ['label', 'create', DEFAULT_PR_LABEL, '--force']);
+  assert.deepEqual(calls[2]?.args, [
     'pr',
     'create',
     '--title',
@@ -182,7 +184,7 @@ test('createPr passes title/body/base/head and default label, then refetches', a
     '--label',
     DEFAULT_PR_LABEL,
   ]);
-  assert.deepEqual(calls[2]?.args.slice(0, 3), ['pr', 'view', 'feature/bar']);
+  assert.deepEqual(calls[3]?.args.slice(0, 3), ['pr', 'view', 'feature/bar']);
 });
 
 test('createPr appends --draft and custom labels', async () => {
@@ -193,8 +195,9 @@ test('createPr appends --draft and custom labels', async () => {
     headRefName: 'feature/baz',
     baseRefName: 'main',
   };
-  // 2 label-create calls (l1, l2) + pr create + pr view.
+  // pr view (pre-check → none) + 2 label-create calls (l1, l2) + pr create + pr view.
   const { run, calls } = makeRun([
+    { exitCode: 1, stderr: 'no pull requests found for branch feature/baz' },
     { stdout: '' },
     { stdout: '' },
     { stdout: 'url' },
@@ -227,8 +230,9 @@ test('createPr appends --draft and custom labels', async () => {
 });
 
 test('createPr throws if create fails', async () => {
-  // call #0 = label-create (ignored), call #1 = pr create (fails).
+  // call #0 = pr view pre-check (none), #1 = label-create (ignored), #2 = pr create (fails).
   const { run } = makeRun([
+    { exitCode: 1, stderr: 'no pull requests found for branch h' },
     { stdout: '' },
     { exitCode: 1, stderr: 'pull request create failed: validation error' },
   ]);
@@ -243,6 +247,32 @@ test('createPr throws if create fails', async () => {
       }),
     /gh pr create failed/,
   );
+});
+
+test('createPr adopts an existing PR for the head instead of creating a duplicate', async () => {
+  // Idempotent open: a kill between `gh pr create` and persisting the PR number resumes here with
+  // the PR already on GitHub. createPr must adopt it — a single `gh pr view`, no create, no label
+  // ensure — so the resumed group proceeds instead of failing the re-create.
+  const pr = {
+    number: 42,
+    state: 'OPEN',
+    url: 'https://github.com/org/repo/pull/42',
+    headRefName: 'feature/dup',
+    baseRefName: 'main',
+  };
+  const { run, calls } = makeRun([{ stdout: JSON.stringify(pr) }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  const result = await g.createPr({
+    title: 'feat: dup',
+    body: 'body',
+    base: 'main',
+    head: 'feature/dup',
+  });
+  assert.deepEqual(result, pr);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]?.args.slice(0, 3), ['pr', 'view', 'feature/dup']);
+  assert.ok(!calls.some((c) => c.args[0] === 'label'));
+  assert.ok(!calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create'));
 });
 
 test('mergePr passes pr number and method flag', async () => {

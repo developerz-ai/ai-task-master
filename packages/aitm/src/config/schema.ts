@@ -208,6 +208,12 @@ export const ConfigFileSchema = z
 
 export type ConfigFile = z.infer<typeof ConfigFileSchema>;
 
+// Every recognized top-level config key, derived from ConfigFileSchema's shape so it can never
+// drift from the schema. Single source of truth for both write and read surfaces: ConfigWriter
+// rejects a `config set` on any key outside this set, and ConfigLoader warns on any file key outside
+// it. Add a key to ConfigFileSchema and both tables pick it up automatically.
+export const CONFIG_KEYS: ReadonlySet<string> = new Set(Object.keys(ConfigFileSchema.shape));
+
 export type CliOverrides = {
   maxPrs?: number;
   maxSessions?: number | null;

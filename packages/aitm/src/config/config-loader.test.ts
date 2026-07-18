@@ -769,6 +769,37 @@ test('resolve: unknown keys produce a warning and the parse continues', async ()
   }
 });
 
+test('resolve: allowForcePush + prBodySections are known keys — no unknown-key warning (shared key table)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  const { calls, warn } = makeWarnCollector();
+  try {
+    // Both are consumed by resolve() but were absent from the loader's hand-maintained table, so a
+    // config that set them warned "unknown config key … ignored" while still honoring the value.
+    await writeProjectConfig(cwd.path, {
+      allowForcePush: false,
+      prBodySections: ['Summary', 'Changes', 'Testing'],
+    });
+    const loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn },
+    );
+    const resolved = await loader.resolve({});
+    assert.equal(resolved.allowForcePush, false, 'consumed value still applies');
+    assert.deepEqual(resolved.prBodySections, ['Summary', 'Changes', 'Testing']);
+    assert.equal(
+      calls.some((w) => /unknown config key "(allowForcePush|prBodySections)"/.test(w)),
+      false,
+      'neither consumed key warns as unknown',
+    );
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('readGlobal returns null when ~/.aitm.json is missing', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

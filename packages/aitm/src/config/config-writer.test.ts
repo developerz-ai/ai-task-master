@@ -147,6 +147,46 @@ test('set rejects a baseURL that is not a URL', async () => {
   });
 });
 
+test('set selfReview false succeeds (writer shares the schema key table)', async () => {
+  await withWriter(async ({ writer }) => {
+    await writer.set('global', 'selfReview', 'false');
+    assert.equal(await writer.get('global', 'selfReview'), false);
+  });
+});
+
+test('set accepts every schema key the old writer table omitted', async () => {
+  // Keys the loader/schema recognized but `config set` used to reject — now settable via the one
+  // shared CONFIG_KEYS table. Each value must also pass ConfigFileSchema on persist.
+  const cases: ReadonlyArray<[string, string]> = [
+    ['maxCiFixAttempts', '3'],
+    ['llmStepTimeoutMs', '120000'],
+    ['webSearch', 'false'],
+    ['formatCommand', 'bun run lint:fix'],
+    ['verifyCommand', 'bun test'],
+    ['selfReview', 'false'],
+    ['resolveConflicts', 'false'],
+    ['allowForcePush', 'false'],
+    ['bashRules', '[{"pattern":"rm -rf *","action":"deny"}]'],
+    ['mcpRoleAllowlist', '{"worker":["filesystem"]}'],
+    ['mcpDeferToolsOver', '0'],
+    ['prBodySections', '["Summary","Changes"]'],
+    ['hooks', '{"postToolUse":[{"command":"./x.sh"}]}'],
+  ];
+  await withWriter(async ({ writer }) => {
+    for (const [key, value] of cases) {
+      await writer.set('global', key, value);
+    }
+    const file = await writer.list('global');
+    assert.equal(file.selfReview, false);
+    assert.equal(file.allowForcePush, false);
+    assert.equal(file.webSearch, false);
+    assert.equal(file.maxCiFixAttempts, 3);
+    assert.equal(file.mcpDeferToolsOver, 0);
+    assert.deepEqual(file.prBodySections, ['Summary', 'Changes']);
+    assert.deepEqual(file.hooks, { postToolUse: [{ command: './x.sh' }] });
+  });
+});
+
 test('set rejects unknown top-level keys before any write', async () => {
   await withWriter(async ({ writer, home }) => {
     await assert.rejects(

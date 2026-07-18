@@ -100,7 +100,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
     const { flag, inlineValue, consumed } = splitFlag(raw);
     if (flag === '--criteria') {
       const v = takeValue(args, i, inlineValue);
-      if (v === null) return HELP;
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
       criteria = v;
       i += consumed(inlineValue !== null);
     } else if (flag === '--max-prs') {
@@ -148,20 +148,23 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
       i += 1;
     } else if (flag === '--style') {
       const v = takeValue(args, i, inlineValue);
-      if (v === null) return HELP;
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
       stylePath = v;
       i += consumed(inlineValue !== null);
     } else if (flag === '--model') {
       const v = takeValue(args, i, inlineValue);
-      if (v === null) return HELP;
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
       model = v;
       i += consumed(inlineValue !== null);
     } else if (flag === '--branch') {
       const v = takeValue(args, i, inlineValue);
-      if (v === null || !isValidBranchName(v)) return HELP;
+      if (v === null || (inlineValue === null && v.startsWith('--')) || !isValidBranchName(v))
+        return HELP;
       branch = v;
       i += consumed(inlineValue !== null);
     } else if (raw.startsWith('--')) {
+      return HELP;
+    } else if (raw.startsWith('-')) {
       return HELP;
     } else {
       positionals.push(raw);

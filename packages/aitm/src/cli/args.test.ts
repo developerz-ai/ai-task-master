@@ -297,6 +297,31 @@ const helpCases: Case[] = [
     expected: { kind: 'help' },
   },
   {
+    name: 'start: --criteria rejects following flag-like token',
+    argv: ['start', 'g', '--criteria', '--model'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: --style rejects following flag-like token',
+    argv: ['start', 'g', '--style', '--concurrency'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: --model rejects following flag-like token',
+    argv: ['start', 'g', '--model', '--max-prs'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: --branch rejects following flag-like token',
+    argv: ['start', 'g', '--branch', '--admin'],
+    expected: { kind: 'help' },
+  },
+  {
+    name: 'start: positional starting with single dash rejected',
+    argv: ['start', '-x'],
+    expected: { kind: 'help' },
+  },
+  {
     name: 'start: unknown flag',
     argv: ['start', 'g', '--bogus'],
     expected: { kind: 'help' },

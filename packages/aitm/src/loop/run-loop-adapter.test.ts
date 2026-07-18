@@ -635,18 +635,19 @@ test('localEditTools: a file changed on disk after its Read surfaces one file-ch
   }
 });
 
-test('harnessContextBlock: one envelope carrying the claudeMd and currentDate sections (issue #106)', () => {
-  const block = harnessContextBlock('# House style\n- single quotes only');
+test('harnessContextBlock: one envelope carrying the currentDate section, no style dup (issue #106/#231)', () => {
+  const block = harnessContextBlock();
   assert.equal((block.match(/<system-reminder>/g) ?? []).length, 1, 'single envelope');
-  assert.match(block, /# claudeMd\n# House style\n- single quotes only/);
   assert.match(block, /# currentDate\n\d{4}-\d{2}-\d{2}/);
   assert.match(block, /may or may not be relevant/);
+  // The style digest lives only in the system prompt (buildRolePrompt) — never repeated here.
+  assert.equal(block.includes('# claudeMd'), false, 'no duplicate style section');
   // No step supplied → no runProgress section (prompt-design.md §3).
   assert.equal(block.includes('# runProgress'), false, 'no progress section without a step');
 });
 
 test('harnessContextBlock: a step adds a runProgress section with the phase + N/M line (§3)', () => {
-  const block = harnessContextBlock('# style', {
+  const block = harnessContextBlock({
     phase: 'working',
     unit: 'group',
     index: 2,

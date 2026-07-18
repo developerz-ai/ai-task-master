@@ -1,0 +1,36 @@
+plan: 101-parallel-agent-bug-hunt
+title: Parallel-Agent Bug Hunt — remediation
+status: not_started        # not_started | in_progress | blocked | complete | superseded
+created_by: sebi
+worked_by: ""              # executor fills with their git user.name
+owner: sebi
+percent: 0
+current_focus: ""          # start with 01 (PR idempotency) + 02 (signals); owner decisions gate 01 steps 2/4
+slices:
+  - file: 01-pr-lifecycle-idempotency.md
+    status: not_started
+    percent: 0
+  - file: 02-signal-cancellation-cleanup.md
+    status: not_started
+    percent: 0
+  - file: 03-review-loop-idempotency.md
+    status: not_started
+    percent: 0
+  - file: 04-gh-client-parsing-caching.md
+    status: not_started
+    percent: 0
+  - file: 05-state-efficiency-durability.md
+    status: not_started
+    percent: 0
+  - file: 06-prompt-compression-fencing.md
+    status: not_started
+    percent: 0
+  - file: 07-cli-flag-correctness.md
+    status: not_started
+    percent: 0
+  - file: 08-tests.md
+    status: not_started
+    percent: 0
+evidence: []
+notes: "Findings from a 5-agent parallel sweep (2026-07-18, HEAD 7f9e8e5, post-PR-#215): logic, resource-cleanup/RAII, N+1, error-handling/durability, prompt compression + builder/fencing. Owner decisions before 01: partial-PR policy (blocked vs partial status) and prPerTask+no-automerge handling (reject combo vs one PR after last task). Prompt design intent: values SHOULD be injected via the typed-slot builder (buildRolePrompt/slots.ts) — 06 closes the one bypass (claudeMd in system-reminder) and the duplication, not the pattern. Verified clean at HEAD (do not re-fix): atomicWrite core, StateStore serialization, waitForChecks backoff, model-limits/CLAUDE.md caching, pagination bounds, mcp-client close paths, web-fetch/search body draining. Latent (concurrency=1 masks): non-mutexed openPr/autoMergeFlow/addressReviews — revisit only if concurrency > 1. Overlaps 2026/07/17 plan slice 08 (prompt templating) — reconcile."
+last_updated: 2026-07-18

@@ -57,7 +57,7 @@ import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
 import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
 import { type OnUsage, prependContextBlock, reportUsage, type SubagentInit } from './factory.ts';
 import { EDITOR_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
-import { buildRolePrompt } from './role-prompt.ts';
+import { buildEditorRolePrompt } from './role-prompt.ts';
 
 // The Claude-Code-style tool surface (from @developerz.ai/ai-claude-compat) the Worker drives:
 // read/write whole files, edit by exact string replace (single + atomic batch), and search the
@@ -203,6 +203,30 @@ const VERIFY_TIMEOUT_MS = 600_000;
 // Cap the verify output fed inline into the fix task / block reason so a megabyte of test output
 // can't blow the fix-pass prompt or the WorkerResult reason.
 const VERIFY_TAIL_MAX = 4000;
+
+// Manifest-prompt interpolation caps (issue: prompt compression + injected-value fencing, slice 06).
+// `group.title`/`task.text`/each subtask/`file.purpose` are short labels in the common case, but they
+// originate from the Planner's (or a prior run's) structured output, not a fixed harness string — an
+// unbounded field lets a runaway plan or a hostile task description blow up the manifest/editor prompt.
+// Same discipline as VERIFY_TAIL_MAX, sized for a label rather than a failure tail.
+const MANIFEST_FIELD_MAX = 500;
+// `rollingContext` accumulates one summary per prior PR group across the whole run, so it grows with
+// run length rather than staying label-sized; capped at the VERIFY_TAIL_MAX order of magnitude instead.
+const ROLLING_CONTEXT_MAX = 4000;
+// Editor leaves get a tighter style budget than the Coordinator's full digest (RAW_STYLE_MAX_CHARS in
+// run-loop-adapter.ts) — a leaf realizes one file and needs the essentials, not the complete guide,
+// and the cost multiplies by every parallel editor in the fanout.
+const EDITOR_STYLE_MAX = 1500;
+
+const TRUNCATION_MARKER = ' […truncated]';
+
+// Slice-cap a raw interpolated field to `max` chars, appending a marker so truncation is visible
+// rather than silently cutting off mid-sentence with no signal to the model or a reader of the prompt.
+function capText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const budget = Math.max(0, max - TRUNCATION_MARKER.length);
+  return text.slice(0, budget) + TRUNCATION_MARKER;
+}
 
 export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise<WorkerResult> {
   const init = workerInitRegistry.get(agent);
@@ -395,25 +419,36 @@ async function planManifest(
 
 function buildManifestPrompt(input: WorkerInput): string {
   const lines = [
-    `PR group: ${input.group.id} — ${input.group.title}`,
+    `PR group: ${input.group.id} — ${capText(input.group.title, MANIFEST_FIELD_MAX)}`,
     `Branch: ${input.group.branch ?? `aitm/${input.group.id}`}`,
     `Base branch: ${input.baseBranch}`,
     `Checkout: ${input.checkoutPath}`,
     '',
   ];
   if (input.task) {
-    lines.push(`Current task [${input.task.complexity}]: ${input.task.text}`);
+    lines.push(
+      `Current task [${input.task.complexity}]: ${capText(input.task.text, MANIFEST_FIELD_MAX)}`,
+    );
     if (input.task.subtasks && input.task.subtasks.length > 0) {
-      lines.push('Subtasks:', ...input.task.subtasks.map((s) => `  - ${s}`));
+      lines.push(
+        'Subtasks:',
+        ...input.task.subtasks.map((s) => `  - ${capText(s, MANIFEST_FIELD_MAX)}`),
+      );
     }
   } else {
     lines.push(
       'Tasks in this PR group:',
-      ...input.group.tasks.map((task, i) => `  ${i + 1}. ${task.text}`),
+      ...input.group.tasks.map(
+        (task, i) => `  ${i + 1}. ${capText(task.text, MANIFEST_FIELD_MAX)}`,
+      ),
     );
   }
   if (input.rollingContext.trim()) {
-    lines.push('', 'Rolling context from prior PRs:', input.rollingContext);
+    lines.push(
+      '',
+      'Rolling context from prior PRs:',
+      capText(input.rollingContext, ROLLING_CONTEXT_MAX),
+    );
   }
   lines.push('', 'Survey the repo, then call submit with the FileManifest.');
   return prependContextBlock(input.contextBlock, lines.join('\n'));
@@ -480,8 +515,8 @@ async function runEditor(
       generateText({
         model: init.model,
         tools: editorToolSet(init.tools),
-        system: buildRolePrompt({
-          style: input.styleContents,
+        system: buildEditorRolePrompt({
+          style: capText(input.styleContents, EDITOR_STYLE_MAX),
           roleGuidance: EDITOR_SYSTEM_PREFIX,
           cwd: input.checkoutPath,
           maxSteps: EDITOR_MAX_STEPS,
@@ -543,7 +578,7 @@ function buildEditorPrompt(file: FileManifestEntry, input: WorkerInput): string 
     `Checkout: ${input.checkoutPath}`,
     `File: ${file.path}`,
     `Change kind: ${file.kind}`,
-    `Purpose: ${file.purpose}`,
+    `Purpose: ${capText(file.purpose, MANIFEST_FIELD_MAX)}`,
     '',
     'Make the change. Reply with a one-line summary.',
   ].join('\n');

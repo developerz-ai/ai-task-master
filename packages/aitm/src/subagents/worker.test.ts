@@ -992,6 +992,114 @@ test('runWorker without verifyCommand: zero verify invocations, byte-identical g
   assert.match(bashes[3]?.command ?? '', /commit -m/);
 });
 
+test('runWorker: an oversized rollingContext is truncated in the manifest prompt (slice-cap discipline)', async () => {
+  let sent = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      if (sent === '') sent = JSON.stringify(opts.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const oversized = 'x'.repeat(10_000);
+  await runWorker(agent, { ...baseInput(), rollingContext: oversized });
+  assert.ok(!sent.includes(oversized), 'the raw oversized rollingContext never reaches the prompt');
+  assert.match(sent, /truncated/, 'a truncation marker is present');
+});
+
+test('runWorker: an oversized group.title / task.text is capped in the manifest prompt', async () => {
+  let sent = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      if (sent === '') sent = JSON.stringify(opts.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const oversizedTitle = 'T'.repeat(2_000);
+  const task: Task = { id: 'huge', text: 'A'.repeat(2_000), complexity: 'normal', done: false };
+  await runWorker(agent, {
+    ...baseInput(baseGroup({ title: oversizedTitle })),
+    task,
+  });
+  assert.ok(!sent.includes(oversizedTitle), 'the raw oversized title never reaches the prompt');
+  assert.ok(!sent.includes(task.text), 'the raw oversized task text never reaches the prompt');
+  assert.match(sent, /truncated/, 'a truncation marker is present');
+});
+
+test('runEditor system prompt: drops the harness/communication/autonomy contract stack, keeps role guidance + style + env (lean leaf)', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  let editorSystem = '';
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorSystem = JSON.stringify(opts.prompt);
+      return {
+        content: [{ type: 'text', text: 'created a' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), styleContents: '# style essentials' });
+  assert.equal(result.kind, 'ok');
+  assert.doesNotMatch(editorSystem, /Harness contract:/);
+  assert.doesNotMatch(editorSystem, /Communication contract:/);
+  assert.doesNotMatch(editorSystem, /Autonomy:/);
+  assert.match(editorSystem, /leaf editor/i, 'EDITOR_SYSTEM_PREFIX guidance retained');
+  assert.match(editorSystem, /# style essentials/, 'style essentials retained');
+  assert.match(editorSystem, /<env>/, 'env block retained');
+});
+
 test('runWorker verifyCommand emits one structured log event per verify invocation', async () => {
   const { model } = makeManifestModel([
     { at: 0, manifest: oneFileManifest },

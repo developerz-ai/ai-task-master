@@ -47,3 +47,29 @@ export function buildRolePrompt(input: RolePromptInput): string {
     ...(input.memoryIndex !== undefined ? { memoryIndex: input.memoryIndex } : {}),
   });
 }
+
+export type EditorRolePromptInput = {
+  // Coding-style digest, already capped by the caller. Empty → omitted.
+  style: string;
+  // EDITOR_SYSTEM_PREFIX.
+  roleGuidance: string;
+  // Checkout cwd for the <env> block.
+  cwd: string;
+  // The editor's step budget (EDITOR_MAX_STEPS).
+  maxSteps: number;
+};
+
+// Lean-leaf variant of buildRolePrompt for the per-file editor (worker.ts's Layer B fanout): drops
+// the contract blocks, self-id, and memory index that buildRolePrompt bakes in for the Coordinator
+// and other non-leaf roles — an editor cannot spawn, delegate, or see the plan, so the governance
+// text that constrains those behaviors is dead weight paid ×N per manifest. Keeps roleGuidance,
+// style, and `<env>` — an editor still writes code and needs both.
+export function buildEditorRolePrompt(input: EditorRolePromptInput): string {
+  const env = envBlock({ cwd: input.cwd, isGitRepo: detectGitRepo(input.cwd) });
+  return render('editor-prompt', {
+    roleGuidance: input.roleGuidance,
+    maxSteps: input.maxSteps,
+    style: input.style,
+    env,
+  });
+}

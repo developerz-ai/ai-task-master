@@ -602,6 +602,7 @@ export async function runLoopAdapter(
       initialSessionCount: current.sessionCount,
       progress: harnessProgress,
       stepCounter,
+      ...(input.signal ? { signal: input.signal } : {}),
     });
     return await loop.run();
   } finally {

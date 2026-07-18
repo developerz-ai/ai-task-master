@@ -1153,7 +1153,7 @@ function countingMcp(): { mcp: McpClientManager; closes: () => number } {
   return { mcp, closes: () => clientClosed };
 }
 
-test('runLoopAdapter: aborting the run closes MCP to reap stdio children', async () => {
+test('runLoopAdapter: aborting the run closes MCP to reap stdio children and surfaces cancelled', async () => {
   const controller = new AbortController();
   const { mcp, closes } = countingMcp();
   await mcp.connectAll();
@@ -1172,7 +1172,9 @@ test('runLoopAdapter: aborting the run closes MCP to reap stdio children', async
     }),
   );
 
-  assert.equal(result.kind, 'success', 'run still completes after the abort fires');
+  // The WorkLoop threads this signal too (run-loop-adapter.ts new WorkLoop({..., signal})), so
+  // once aborted it reports cancelled (exit 2) instead of quietly finishing the group to success.
+  assert.equal(result.kind, 'cancelled', 'an aborted run must surface cancelled, not success');
   assert.equal(closes(), 1, 'MCP client closed once when the run aborts');
 });
 

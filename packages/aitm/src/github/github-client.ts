@@ -128,6 +128,11 @@ export class GitHubClient {
   // review loop spawns a `gh repo view` subprocess every tick for a value that never changes.
   private cachedRepoMeta: { owner: string; name: string } | null = null;
 
+  // Default branch resolved once via `gh repo view` and reused — WorkLoop.runGroup calls
+  // defaultBranch() per group, and it never changes mid-run, so without this a multi-group run
+  // spawns a `gh repo view` subprocess per group instead of once.
+  private cachedDefaultBranch: string | null = null;
+
   async currentBranch(): Promise<string> {
     const r = await this.runCmd('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: this.cwd });
     if (r.exitCode !== 0) {
@@ -137,6 +142,7 @@ export class GitHubClient {
   }
 
   async defaultBranch(): Promise<string> {
+    if (this.cachedDefaultBranch !== null) return this.cachedDefaultBranch;
     const r = await this.runCmd('gh', ['repo', 'view', '--json', 'defaultBranchRef'], {
       cwd: this.cwd,
     });
@@ -153,7 +159,8 @@ export class GitHubClient {
       'name' in parsed.defaultBranchRef &&
       typeof parsed.defaultBranchRef.name === 'string'
     ) {
-      return parsed.defaultBranchRef.name;
+      this.cachedDefaultBranch = parsed.defaultBranchRef.name;
+      return this.cachedDefaultBranch;
     }
     throw new Error(`gh repo view: unexpected JSON shape: ${r.stdout}`);
   }

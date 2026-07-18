@@ -103,6 +103,16 @@ test('defaultBranch shells gh repo view and parses JSON', async () => {
   assert.equal(calls[0]?.file, 'gh');
 });
 
+test('defaultBranch caches the branch (one subprocess across calls)', async () => {
+  const { run, calls } = makeRun([
+    { stdout: JSON.stringify({ defaultBranchRef: { name: 'main' } }) },
+  ]);
+  const g = new GitHubClient('/tmp/repo', run);
+  assert.equal(await g.defaultBranch(), 'main');
+  assert.equal(await g.defaultBranch(), 'main');
+  assert.equal(calls.length, 1, 'second lookup is served from cache');
+});
+
 test('defaultBranch throws on unexpected JSON shape', async () => {
   const { run } = makeRun([{ stdout: JSON.stringify({ wrong: 'shape' }) }]);
   const g = new GitHubClient('/tmp/repo', run);

@@ -43,7 +43,10 @@ export function githubThreadTool(
     inputSchema: githubInputSchema,
     execute: async (input): Promise<GithubToolOutput> => {
       if (input.action === 'replyToThread') {
-        await init.github.replyToThread(input.threadId, input.body ?? '');
+        if (!input.body?.trim()) {
+          return { ok: false };
+        }
+        await init.github.replyToThread(input.threadId, input.body);
         return { ok: true };
       }
       await init.github.resolveThread(input.threadId);

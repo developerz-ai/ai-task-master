@@ -4,6 +4,10 @@
 
 import type { OpenRouterClient } from './client.ts';
 
+// Minimal catalog contract the registry actually needs — lets stubs (and any narrower client) pass
+// without an `as unknown as OpenRouterClient` cast at the constructor boundary.
+export type ModelCatalogClient = Pick<OpenRouterClient, 'listModels'>;
+
 export type ModelLimits = {
   modelId: string;
   contextLength: number;
@@ -41,8 +45,9 @@ export class ModelNotFound extends Error {
 
 export class ModelLimitsRegistry implements ModelLimitsLookup {
   private cache: Map<string, ModelLimits> | undefined;
+  private loadPromise: Promise<void> | undefined;
 
-  constructor(private readonly client: OpenRouterClient) {}
+  constructor(private readonly client: ModelCatalogClient) {}
 
   async forModel(modelId: string): Promise<ModelLimits> {
     if (!this.cache) {
@@ -57,6 +62,19 @@ export class ModelLimitsRegistry implements ModelLimitsLookup {
 
   async preload(): Promise<void> {
     if (this.cache) return;
+    if (this.loadPromise) return this.loadPromise;
+    // Clear the in-flight promise on failure so a transient catalog error (network/HTTP/schema)
+    // doesn't wedge every later preload()/forModel() call on a permanently-rejected promise.
+    // Concurrent callers still share this promise and see the same rejection.
+    const loadPromise = this.load();
+    this.loadPromise = loadPromise.catch((error: unknown) => {
+      this.loadPromise = undefined;
+      throw error;
+    });
+    return this.loadPromise;
+  }
+
+  private async load(): Promise<void> {
     const models = await this.client.listModels();
     const next = new Map<string, ModelLimits>();
     for (const m of models) {

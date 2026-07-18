@@ -119,3 +119,76 @@ test('webSearchTool: a network failure is caught and reported, never thrown', as
   assert.deepEqual(out.results, []);
   assert.match(out.error ?? '', /boom/);
 });
+
+test('webSearchTool: validates content-type and rejects unexpected types', async () => {
+  const tool = webSearchTool({
+    fetchImpl: (async () =>
+      jsonResponse('not html', 200) as Response & {
+        headers: { get: (h: string) => string | null };
+      }) as typeof fetch,
+  });
+  // Mock headers getter to return application/json
+  const mockResponse = jsonResponse('{}', 200);
+  Object.defineProperty(mockResponse.headers, 'get', {
+    value: (h: string) => (h.toLowerCase() === 'content-type' ? 'application/json' : null),
+  });
+  const tool2 = webSearchTool({
+    fetchImpl: (async () => mockResponse) as typeof fetch,
+  });
+  const out = (await tool2.execute?.(
+    { query: 'test' },
+    { toolCallId: 't4', messages: [] },
+  )) as WebSearchOutput;
+  assert.deepEqual(out.results, []);
+  assert.match(out.error ?? '', /unexpected content-type/);
+});
+
+function fixtureWithContentType(contentType: string | null): typeof fetch {
+  return (async () => {
+    const response = jsonResponse(FIXTURE, 200);
+    Object.defineProperty(response.headers, 'get', {
+      value: (h: string) => (h.toLowerCase() === 'content-type' ? contentType : null),
+    });
+    return response;
+  }) as typeof fetch;
+}
+
+test('webSearchTool: accepts text/html and text/plain content types', async () => {
+  for (const contentType of ['text/html', 'text/plain'] as const) {
+    const tool = webSearchTool({
+      endpoint: 'https://search.test/html/',
+      fetchImpl: fixtureWithContentType(contentType),
+    });
+    const out = (await tool.execute?.(
+      { query: 'test' },
+      { toolCallId: `t5-${contentType}`, messages: [] },
+    )) as WebSearchOutput;
+    assert.equal(out.error, undefined, `${contentType} should be accepted`);
+    assert.ok(out.results.length > 0, `${contentType} should yield results`);
+  }
+});
+
+test('webSearchTool: normalizes content-type — charset/casing accepted, substring trap rejected', async () => {
+  const accepted = webSearchTool({
+    endpoint: 'https://search.test/html/',
+    fetchImpl: fixtureWithContentType('TEXT/HTML; charset=utf-8'),
+  });
+  const okOut = (await accepted.execute?.(
+    { query: 'test' },
+    { toolCallId: 't6', messages: [] },
+  )) as WebSearchOutput;
+  assert.equal(okOut.error, undefined, 'media type is compared after trim + lowercase');
+  assert.ok(okOut.results.length > 0);
+
+  // A value that only *contains* text/html (e.g. `application/json+text/html`) must be rejected —
+  // the old substring check accepted it.
+  const trap = webSearchTool({
+    fetchImpl: fixtureWithContentType('application/json+text/html'),
+  });
+  const trapOut = (await trap.execute?.(
+    { query: 'test' },
+    { toolCallId: 't7', messages: [] },
+  )) as WebSearchOutput;
+  assert.deepEqual(trapOut.results, []);
+  assert.match(trapOut.error ?? '', /unexpected content-type/);
+});

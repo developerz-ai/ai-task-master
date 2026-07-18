@@ -203,7 +203,7 @@ function isRedirectStatus(status: number): boolean {
 
 // Stream the body until `maxChars` UTF-8 characters have been collected, then cancel
 // the reader. Avoids buffering an entire huge response into memory just to slice it.
-async function readBodyCapped(
+export async function readBodyCapped(
   response: Response,
   maxChars: number,
 ): Promise<{ body: string; truncated: boolean }> {
@@ -224,7 +224,7 @@ async function readBodyCapped(
         truncated = body.length > maxChars;
         body = body.slice(0, maxChars);
         await reader.cancel();
-        return { body, truncated: true };
+        return { body, truncated };
       }
     }
   } finally {
@@ -246,7 +246,7 @@ export const DEFAULT_STEALTH_HEADERS: Readonly<Record<string, string>> = Object.
   Accept:
     'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
   'Accept-Language': 'en-US,en;q=0.9',
-  'Accept-Encoding': 'gzip, deflate, br, zstd',
+  'Accept-Encoding': 'gzip, deflate, br',
   'Sec-Ch-Ua': '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
   'Sec-Ch-Ua-Mobile': '?0',
   'Sec-Ch-Ua-Platform': '"macOS"',

@@ -23,13 +23,13 @@ const opus: OpenRouterModel = {
 const gpt5: OpenRouterModel = { id: 'openai/gpt-5', context_length: 128_000 };
 
 test('ModelLimitsRegistry is constructible', () => {
-  const r = new ModelLimitsRegistry({} as never);
+  const r = new ModelLimitsRegistry(makeStub([]));
   assert.ok(r instanceof ModelLimitsRegistry);
 });
 
 test('forModel returns context length from catalog', async () => {
   const stub = makeStub([opus, gpt5]);
-  const r = new ModelLimitsRegistry(stub as unknown as OpenRouterClient);
+  const r = new ModelLimitsRegistry(stub);
   const limits = await r.forModel('openai/gpt-5');
   assert.equal(limits.modelId, 'openai/gpt-5');
   assert.equal(limits.contextLength, 128_000);
@@ -37,7 +37,7 @@ test('forModel returns context length from catalog', async () => {
 
 test('forModel caches across calls — listModels invoked once', async () => {
   const stub = makeStub([opus, gpt5]);
-  const r = new ModelLimitsRegistry(stub as unknown as OpenRouterClient);
+  const r = new ModelLimitsRegistry(stub);
   await r.forModel('anthropic/claude-opus-4.7');
   await r.forModel('openai/gpt-5');
   await r.forModel('anthropic/claude-opus-4.7');
@@ -46,7 +46,7 @@ test('forModel caches across calls — listModels invoked once', async () => {
 
 test('preload populates cache and is idempotent', async () => {
   const stub = makeStub([opus]);
-  const r = new ModelLimitsRegistry(stub as unknown as OpenRouterClient);
+  const r = new ModelLimitsRegistry(stub);
   await r.preload();
   await r.preload();
   assert.equal(stub.calls, 1);
@@ -67,7 +67,7 @@ test('preload parses per-token pricing incl. cache read/write; blank/missing →
     },
   };
   const noPricing: OpenRouterModel = { id: 'x/y', context_length: 1000 };
-  const r = new ModelLimitsRegistry(makeStub([priced, noPricing]) as unknown as OpenRouterClient);
+  const r = new ModelLimitsRegistry(makeStub([priced, noPricing]));
   const p = await r.forModel('anthropic/opus');
   assert.equal(p.promptUsdPerToken, 5e-6);
   assert.equal(p.completionUsdPerToken, 1.5e-5);
@@ -86,7 +86,7 @@ test('preload treats blank/whitespace pricing strings as missing, not $0 (issue 
     context_length: 1000,
     pricing: { prompt: '', completion: '   ' },
   };
-  const r = new ModelLimitsRegistry(makeStub([blank]) as unknown as OpenRouterClient);
+  const r = new ModelLimitsRegistry(makeStub([blank]));
   const p = await r.forModel('blank/price');
   assert.equal(p.promptUsdPerToken, undefined, 'blank prompt → undefined, not 0');
   assert.equal(p.completionUsdPerToken, undefined, 'whitespace completion → undefined, not 0');
@@ -94,7 +94,7 @@ test('preload treats blank/whitespace pricing strings as missing, not $0 (issue 
 
 test('forModel throws ModelNotFound for unknown id', async () => {
   const stub = makeStub([opus]);
-  const r = new ModelLimitsRegistry(stub as unknown as OpenRouterClient);
+  const r = new ModelLimitsRegistry(stub);
   await assert.rejects(
     () => r.forModel('mystery/model'),
     (err: unknown) => {
@@ -105,4 +105,47 @@ test('forModel throws ModelNotFound for unknown id', async () => {
       return true;
     },
   );
+});
+
+test('concurrent preload() calls are memoized — only one listModels() round-trip', async () => {
+  const stub = makeStub([opus, gpt5]);
+  const r = new ModelLimitsRegistry(stub);
+  // Fire three concurrent preload calls without awaiting sequentially.
+  await Promise.all([r.preload(), r.preload(), r.preload()]);
+  assert.equal(stub.calls, 1, 'only one listModels() call despite concurrent preload()');
+});
+
+test('concurrent forModel() calls are memoized via preload() — single listModels() round-trip', async () => {
+  const stub = makeStub([opus, gpt5]);
+  const r = new ModelLimitsRegistry(stub);
+  // Fire concurrent forModel calls before any cache is populated.
+  await Promise.all([
+    r.forModel('anthropic/claude-opus-4.7'),
+    r.forModel('openai/gpt-5'),
+    r.forModel('anthropic/claude-opus-4.7'),
+  ]);
+  assert.equal(
+    stub.calls,
+    1,
+    'only one listModels() call despite three concurrent forModel() calls',
+  );
+});
+
+test('a failed load is not cached — a later preload() retries and succeeds', async () => {
+  // First listModels() rejects (transient network/HTTP/schema failure), the second succeeds.
+  let calls = 0;
+  const flaky: Pick<OpenRouterClient, 'listModels'> = {
+    listModels: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('catalog fetch failed');
+      return [opus];
+    },
+  };
+  const r = new ModelLimitsRegistry(flaky);
+  await assert.rejects(() => r.preload(), /catalog fetch failed/);
+  // The rejected in-flight promise must be cleared so this retries instead of re-throwing.
+  await r.preload();
+  const limits = await r.forModel('anthropic/claude-opus-4.7');
+  assert.equal(limits.contextLength, 200_000);
+  assert.equal(calls, 2, 'exactly one retry after the initial failure');
 });

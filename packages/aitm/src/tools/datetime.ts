@@ -38,12 +38,15 @@ export function datetimeTool(): Tool<DatetimeInput, DatetimeOutput> {
     description: 'Get the current date and time, optionally formatted for a specific timezone',
     inputSchema: datetimeInputSchema,
     execute: async (input: DatetimeInput): Promise<DatetimeOutput> => {
-      const datetime = new Date().toLocaleString('en-US', {
+      const date = new Date();
+      const dateTime = date.toISOString();
+      const formatter = new Intl.DateTimeFormat('en-US', {
         timeZone: input.timezone,
       });
+      const resolvedTimeZone = formatter.resolvedOptions().timeZone;
       return {
-        datetime,
-        timezone: input.timezone ?? '',
+        datetime: dateTime,
+        timezone: resolvedTimeZone,
       };
     },
   });

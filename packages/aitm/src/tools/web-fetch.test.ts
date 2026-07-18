@@ -44,6 +44,14 @@ test('DEFAULT_STEALTH_HEADERS look like a real browser', () => {
   });
 });
 
+test('DEFAULT_STEALTH_HEADERS do not advertise zstd encoding (Node 20 undici cannot decode it)', () => {
+  const acceptEncoding = DEFAULT_STEALTH_HEADERS['Accept-Encoding'] ?? '';
+  assert.equal(acceptEncoding.includes('zstd'), false);
+  assert.ok(acceptEncoding.includes('gzip'));
+  assert.ok(acceptEncoding.includes('deflate'));
+  assert.ok(acceptEncoding.includes('br'));
+});
+
 test('webFetchTool returns a Tool with description and inputSchema', () => {
   const t = webFetchTool();
   assert.ok(t.description);

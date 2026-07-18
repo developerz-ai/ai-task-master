@@ -10,7 +10,7 @@
 import type { Tool } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
-import { DEFAULT_STEALTH_HEADERS } from './web-fetch.ts';
+import { DEFAULT_STEALTH_HEADERS, readBodyCapped } from './web-fetch.ts';
 
 const webSearchInputSchema = z.object({
   query: z.string().min(1),
@@ -39,6 +39,7 @@ const DEFAULT_ENDPOINT = 'https://html.duckduckgo.com/html/';
 const DEFAULT_MAX_RESULTS = 6;
 const RESULTS_CEILING = 15;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const MAX_RESPONSE_CHARS = 1_000_000; // 1MB limit to avoid buffering huge responses
 
 // A small, sufficient HTML-entity decoder for the text DuckDuckGo emits in titles/snippets — named
 // entities plus decimal/hex numeric refs. `&amp;` is decoded first so a following pass never
@@ -134,6 +135,17 @@ export function parseDuckDuckGoHtml(html: string, maxResults: number): WebSearch
   return out;
 }
 
+// Accept a `text/html` or `text/plain` response. Parse the media type (the part before `;`), trim,
+// and lowercase it so `TEXT/HTML; charset=utf-8` is accepted while a value that merely contains
+// `text/html` as a substring is not. A missing header is accepted: some runtimes/proxies omit it on
+// an otherwise-valid body (`new Response(str)` sets no content-type under Bun), and the parser
+// tolerates non-HTML input by simply returning no results.
+function isAcceptableContentType(raw: string | null): boolean {
+  if (raw === null) return true;
+  const mediaType = raw.split(';')[0]?.trim().toLowerCase() ?? '';
+  return mediaType === 'text/html' || mediaType === 'text/plain';
+}
+
 const WEB_SEARCH_DESCRIPTION = [
   'Search the web and return the top results as {title, url, snippet}. Provider-agnostic — works',
   'with any model/provider (backed by DuckDuckGo, no API key). Use it to find current docs, error',
@@ -172,13 +184,24 @@ export function webSearchTool(init: WebSearchInit = {}): Tool<WebSearchInput, We
       // counts as success) and an empty body — surface that as an error note, not silent "no
       // results", so the model can retry rather than conclude nothing was found.
       if (response.status !== 200) {
+        // Release the unread stream/socket promptly before bailing.
+        await response.body?.cancel();
         return {
           query: input.query,
           results: [],
           error: `web search returned HTTP ${response.status}`,
         };
       }
-      const html = await response.text();
+      const contentType = response.headers.get('content-type');
+      if (!isAcceptableContentType(contentType)) {
+        await response.body?.cancel();
+        return {
+          query: input.query,
+          results: [],
+          error: `unexpected content-type: ${contentType ?? '(none)'}`,
+        };
+      }
+      const { body: html } = await readBodyCapped(response, MAX_RESPONSE_CHARS);
       return { query: input.query, results: parseDuckDuckGoHtml(html, n) };
     },
   });

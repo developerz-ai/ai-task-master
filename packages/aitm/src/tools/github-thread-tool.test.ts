@@ -45,6 +45,41 @@ test('githubThreadTool: replyToThread invokes client.replyToThread with body', a
   ]);
 });
 
+test('githubThreadTool: replyToThread rejects empty body', async () => {
+  const rec = recorder();
+  const tool = githubThreadTool({ github: rec.github });
+  const out = await run(tool, {
+    action: 'replyToThread',
+    threadId: 'TH_1',
+    body: '',
+  });
+  assert.deepEqual(out, { ok: false });
+  assert.deepEqual(rec.calls, []);
+});
+
+test('githubThreadTool: replyToThread rejects whitespace-only body', async () => {
+  const rec = recorder();
+  const tool = githubThreadTool({ github: rec.github });
+  const out = await run(tool, {
+    action: 'replyToThread',
+    threadId: 'TH_1',
+    body: '   \n  \t  ',
+  });
+  assert.deepEqual(out, { ok: false });
+  assert.deepEqual(rec.calls, []);
+});
+
+test('githubThreadTool: replyToThread rejects omitted body', async () => {
+  const rec = recorder();
+  const tool = githubThreadTool({ github: rec.github });
+  const out = await run(tool, {
+    action: 'replyToThread',
+    threadId: 'TH_1',
+  });
+  assert.deepEqual(out, { ok: false });
+  assert.deepEqual(rec.calls, []);
+});
+
 test('githubThreadTool: resolveThread invokes client.resolveThread', async () => {
   const rec = recorder();
   const tool = githubThreadTool({ github: rec.github });

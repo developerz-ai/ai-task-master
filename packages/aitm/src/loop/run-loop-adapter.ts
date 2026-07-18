@@ -556,12 +556,17 @@ export async function runLoopAdapter(
     const stepCounter = makeStepCounter(groups, current.options.prPerTask ?? false);
 
     // ---- Live graph + state proxy ------------------------------------------
+    // Validate the plan's structure ONCE, here at acceptance: duplicate ids, dangling deps, and cycles
+    // are functions of group ids + dependsOn edges, which stay fixed for the whole run. The per-tick
+    // ready()/isComplete() below only read live statuses, so they rebuild via PlanGraph.trusted() and
+    // skip re-paying validate()'s DFS every tick (this gate also keeps that memoized DFS terminating).
+    PlanGraph.validate(groups);
     // PlanGraph captures its groups at construction, so rebuild it per call against the
     // mirror that workLoopState keeps in sync after every persisted update.
     let liveGroups: readonly PrGroup[] = groups;
     const graph: WorkLoopGraph = {
-      ready: () => new PlanGraph([...liveGroups]).ready(),
-      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+      ready: () => PlanGraph.trusted(liveGroups).ready(),
+      isComplete: () => PlanGraph.trusted(liveGroups).isComplete(),
     };
     const workLoopState: WorkLoopState = {
       update: async (mutator) => {

@@ -7,9 +7,23 @@ import type { PrGroup } from '../state/schema.ts';
 export class PlanGraph {
   private readonly index: Map<string, PrGroup>;
 
-  constructor(private readonly groups: ReadonlyArray<PrGroup>) {
-    PlanGraph.validate(groups);
+  private constructor(private readonly groups: ReadonlyArray<PrGroup>) {
     this.index = new Map(groups.map((g) => [g.id, g]));
+  }
+
+  // Validate the plan's structure, then build. The safe entry for untrusted groups and the gate run
+  // once at plan acceptance — throws on duplicate ids, dangling deps, or cycles.
+  static from(groups: ReadonlyArray<PrGroup>): PlanGraph {
+    PlanGraph.validate(groups);
+    return new PlanGraph(groups);
+  }
+
+  // Rebuild over an already-validated plan whose only per-tick change is group status. Skips the
+  // O(V+E) validate() DFS that ready()/isComplete() would otherwise re-pay every tick. Ids and
+  // dependsOn edges are fixed for a run, so one from()/validate() at acceptance covers every rebuild;
+  // trusting an unvalidated cycle would make isComplete()'s memoized DFS recurse forever.
+  static trusted(groups: ReadonlyArray<PrGroup>): PlanGraph {
+    return new PlanGraph(groups);
   }
 
   // Groups currently ready to run: status === 'pending' AND all deps merged.
@@ -44,8 +58,8 @@ export class PlanGraph {
 
   // Ids of groups that can never reach 'merged': a 'blocked' group is terminal (its PR won't land —
   // 'blocked' is the sole terminal non-merged status), and a 'pending' group with a transitively
-  // dead dependency can never become ready(). Memoized DFS; validate() rules out cycles + dangling
-  // deps at construction, so the recursion terminates and every dep resolves in the index.
+  // dead dependency can never become ready(). Memoized DFS; callers validate the plan up front
+  // (from(), or validate() at plan acceptance), so the recursion terminates and every dep resolves.
   private deadGroupIds(): Set<string> {
     const memo = new Map<string, boolean>();
     const isDead = (id: string): boolean => {

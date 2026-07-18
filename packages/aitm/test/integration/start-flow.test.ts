@@ -92,8 +92,8 @@ function makeRunLoop(
 
     // Live graph: re-constructs PlanGraph on each call so status changes are visible.
     const graph = {
-      ready: () => new PlanGraph([...liveGroups]).ready(),
-      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+      ready: () => PlanGraph.from([...liveGroups]).ready(),
+      isComplete: () => PlanGraph.from([...liveGroups]).isComplete(),
     };
 
     // State proxy: keeps liveGroups in sync after each persisted update.
@@ -279,8 +279,8 @@ test('start-flow: 2-task group writes [x] per completed task in plan.md', async 
           }));
 
           const graph = {
-            ready: () => new PlanGraph([...liveGroups]).ready(),
-            isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+            ready: () => PlanGraph.from([...liveGroups]).ready(),
+            isComplete: () => PlanGraph.from([...liveGroups]).isComplete(),
           };
 
           const workLoopState = {

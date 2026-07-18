@@ -135,8 +135,8 @@ test('concurrent-groups: two ready groups share one checkout with no branch/tree
 
     let liveGroups: readonly PrGroup[] = [groupA, groupB];
     const graph = {
-      ready: () => new PlanGraph([...liveGroups]).ready(),
-      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+      ready: () => PlanGraph.from([...liveGroups]).ready(),
+      isComplete: () => PlanGraph.from([...liveGroups]).isComplete(),
     };
     // Both groups are ready from the start: neither depends on the other, so PlanGraph.ready()
     // returns both in the same batch even though the checkout only lets one run at a time.

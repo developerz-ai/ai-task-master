@@ -97,8 +97,8 @@ function makeRunLoop(
     }));
 
     const graph = {
-      ready: () => new PlanGraph([...liveGroups]).ready(),
-      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+      ready: () => PlanGraph.from([...liveGroups]).ready(),
+      isComplete: () => PlanGraph.from([...liveGroups]).isComplete(),
     };
 
     const workLoopState = {
@@ -422,8 +422,8 @@ test('resume-flow: interrupt after pr-open; resume picks up at waiting-ci withou
           };
 
           const graph = {
-            ready: () => new PlanGraph([...liveGroups]).ready(),
-            isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+            ready: () => PlanGraph.from([...liveGroups]).ready(),
+            isComplete: () => PlanGraph.from([...liveGroups]).isComplete(),
           };
 
           // Stub home: waiting-ci and beyond require no git checkout operations.

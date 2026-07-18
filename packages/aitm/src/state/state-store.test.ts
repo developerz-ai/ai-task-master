@@ -292,6 +292,55 @@ test('update survives a failing mutator without poisoning subsequent calls', asy
   }
 });
 
+test('update: after warm-up, a burst of updates hits the cache — one disk read total', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const store = new StateStore(join(repo.path, '.ai-task-master'));
+    await store.init(baseState());
+
+    // Spy the disk read the RMW path calls internally. Under the cached contract only the first
+    // update (cold cache) reads state.json; the rest mutate from the in-memory last-written state.
+    let reads = 0;
+    const realRead = store.read.bind(store);
+    store.read = async () => {
+      reads += 1;
+      return realRead();
+    };
+
+    const N = 5;
+    for (let i = 0; i < N; i += 1) {
+      await store.update((s) => ({ ...s, sessionCount: s.sessionCount + 1 }));
+    }
+
+    assert.equal(reads, 1);
+    assert.equal((await realRead()).sessionCount, N);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('update: mutates from the cache, ignoring external corruption of state.json', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+    // Warm the cache: the store now holds the last-written state in memory.
+    await store.update((s) => ({ ...s, sessionCount: 1 }));
+
+    // Corrupt state.json out from under the store. The cached RMW must not re-read it — the
+    // pre-cache contract would have thrown here on the disk re-read.
+    await writeFile(join(dir, 'state.json'), '{ not json');
+
+    const after = await store.update((s) => ({ ...s, sessionCount: s.sessionCount + 1 }));
+    assert.equal(after.sessionCount, 2);
+    // The successful write also repaired the file, so a fresh read round-trips.
+    assert.equal((await store.read()).sessionCount, 2);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('writeGoal writes goal.txt and optional criteria.txt with trailing newline', async () => {
   const repo = await makeTempRepo();
   try {

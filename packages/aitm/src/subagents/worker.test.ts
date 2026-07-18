@@ -319,6 +319,57 @@ test('createWorkerAgent forwards timeout → a stalled manifest step surfaces as
   if (result.kind === 'error') assert.match(result.error, /exceeded the configured deadline/);
 });
 
+test('runWorker: one editor rejecting aborts its siblings (editor-fanout shared abort)', async () => {
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
+      { path: 'src/b.ts', kind: 'modify', purpose: 'fix b' },
+    ],
+    draftCommitMessage: 'feat: add a + fix b',
+  };
+  const { tools } = makeTools();
+  let siblingAborted = false;
+  let i = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = i++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      // First editor call (src/a.ts) rejects outright; the second (src/b.ts) never resolves on its
+      // own — it only settles once it observes the shared controller's abort, proving the reject
+      // above propagated to its sibling instead of letting it run to completion (issue: editor
+      // fanout shared abort).
+      if (idx === 1) {
+        throw new Error('editor for src/a.ts failed');
+      }
+      return new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          siblingAborted = true;
+          reject(new DOMException('This operation was aborted', 'AbortError'));
+        });
+      });
+    },
+  });
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'error');
+  assert.ok(siblingAborted, 'the sibling editor observed the shared abort signal');
+});
+
 test('runWorker: manifest → per-file edits → commit sequence', async () => {
   const manifest: FileManifest = {
     files: [

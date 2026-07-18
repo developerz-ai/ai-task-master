@@ -15,12 +15,17 @@ export type TempRepo = {
 export async function makeTempRepo(opts?: { withClaudeMd?: boolean }): Promise<TempRepo> {
   const path = await mkdtemp(join(tmpdir(), 'aitm-test-'));
 
-  await execa('git', ['init'], { cwd: path });
-  await execa('git', ['config', 'user.email', 'test@aitm.local'], { cwd: path });
-  await execa('git', ['config', 'user.name', 'aitm-test'], { cwd: path });
+  try {
+    await execa('git', ['init'], { cwd: path });
+    await execa('git', ['config', 'user.email', 'test@aitm.local'], { cwd: path });
+    await execa('git', ['config', 'user.name', 'aitm-test'], { cwd: path });
 
-  if (opts?.withClaudeMd) {
-    await writeFile(join(path, 'CLAUDE.md'), '# CLAUDE.md\n');
+    if (opts?.withClaudeMd) {
+      await writeFile(join(path, 'CLAUDE.md'), '# CLAUDE.md\n');
+    }
+  } catch (err) {
+    await rm(path, { recursive: true, force: true });
+    throw err;
   }
 
   const cleanup = async (): Promise<void> => {

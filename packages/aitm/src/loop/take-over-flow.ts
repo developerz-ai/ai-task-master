@@ -223,6 +223,9 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
     }
 
     let pushedSomething = false;
+    // A reviewer error is terminal for this run, but deferred until after the shared push below so a
+    // pass that errored mid-way still lands the threads it finished (see the reviewer block).
+    let reviewerBlock: string | null = null;
 
     if (ciStatus === 'failure' || ciStatus === 'cancelled') {
       const fixed = await runWorkerCiFix(input, ciLogsDir);
@@ -240,14 +243,16 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
       if (reviewed.kind === 'blocked') {
         return { kind: 'blocked', reason: reviewed.reason, iterations: iteration };
       }
+      // A mid-pass reviewer error is terminal, but the threads it finished before throwing were
+      // already replied/resolved on GitHub and committed locally. Defer the block until AFTER the
+      // shared push below so those completed fixes reach the remote — otherwise the commits sit
+      // unpushed while their threads read resolved, and a resume neither replays them (GitHub shows
+      // them done) nor re-pushes them, silently dropping the work (durability #4).
       if (reviewed.kind === 'error') {
-        return {
-          kind: 'blocked',
-          reason: `reviewer error: ${reviewed.error}`,
-          iterations: iteration,
-        };
+        reviewerBlock = `reviewer error: ${reviewed.error}`;
       }
-      // Reviewer commits per-thread fixes via the bash tool; we still need to push them.
+      // Reviewer commits per-thread fixes via the bash tool; we still need to push them — including
+      // the ones an errored pass completed before it threw.
       if (reviewed.resolutions.some((r) => r.kind === 'fixed')) {
         pushedSomething = true;
       }
@@ -269,6 +274,11 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
       if (pushed.kind === 'blocked') {
         return { kind: 'blocked', reason: pushed.reason, iterations: iteration };
       }
+    }
+
+    // A deferred reviewer error is now surfaced — after its completed fixes were pushed above.
+    if (reviewerBlock !== null) {
+      return { kind: 'blocked', reason: reviewerBlock, iterations: iteration };
     }
 
     // Sleep so the next iteration's waitForChecks sees fresh CI state, not the stale

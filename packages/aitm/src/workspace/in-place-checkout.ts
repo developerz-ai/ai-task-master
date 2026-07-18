@@ -55,19 +55,19 @@ export async function hasTaskCommit(
   taskId: string,
 ): Promise<boolean> {
   if (!(await branchExists(repoRoot, branch))) return false;
+  const trailer = taskCommitTrailer(taskId);
+  // `--grep` with `--fixed-strings` is a SUBSTRING match, so grepping for `Aitm-Task-Id: t1` also
+  // matches a `Aitm-Task-Id: t10` trailer and a resumed run would skip the wrong task. Use the grep
+  // only to narrow candidates (fast, branch-scoped), then confirm at least one carries the trailer
+  // as a COMPLETE line so `t1` never matches `t10` (see the t1/t10 regression test). Bodies are
+  // NUL-delimited so a multi-line message can't blur the commit boundary.
   const { stdout } = await runGit(
-    [
-      'log',
-      branch,
-      '--fixed-strings',
-      `--grep=${taskCommitTrailer(taskId)}`,
-      '-n',
-      '1',
-      '--format=%H',
-    ],
+    ['log', branch, '--fixed-strings', `--grep=${trailer}`, '--format=%B%x00'],
     { cwd: repoRoot },
   );
-  return stdout.trim().length > 0;
+  return stdout
+    .split('\0')
+    .some((body) => body.split('\n').some((line) => line.trim() === trailer));
 }
 
 export class InPlaceCheckout {

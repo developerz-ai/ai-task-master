@@ -313,6 +313,28 @@ test('hasTaskCommit: true once a commit stamped with the task trailer lands on t
   }
 });
 
+test('hasTaskCommit: a t1 trailer does not match a t10 task id (full-line, not substring)', async () => {
+  const repo = await seedRepo();
+  try {
+    await execa('git', ['checkout', '-b', 'aitm/g1'], { cwd: repo.path });
+    // Only t10's trailer is on the branch. A substring grep for `Aitm-Task-Id: t1` would match it.
+    const message = `feat: add tenth\n\n${taskCommitTrailer('t10')}`;
+    await execa('git', ['commit', '--allow-empty', '-m', message], { cwd: repo.path });
+    assert.equal(
+      await hasTaskCommit(repo.path, 'aitm/g1', 't1'),
+      false,
+      't1 must not match the t10 trailer line',
+    );
+    assert.equal(
+      await hasTaskCommit(repo.path, 'aitm/g1', 't10'),
+      true,
+      't10 matches its own complete trailer line',
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
 test('InPlaceCheckout.hasTaskCommit: reachable as a CheckoutHome method, same result as the free function', async () => {
   const repo = await seedRepo();
   try {

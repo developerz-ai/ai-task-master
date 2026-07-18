@@ -1720,6 +1720,94 @@ test('runGroup serializes the worker edit/commit across a concurrent batch, yet 
   );
 });
 
+// Resolves to whether `p` has settled yet WITHOUT awaiting a pending promise to completion: a marker
+// that resolves next microtask races the promise's own continuation. If `p` already settled, its
+// continuation is queued first and wins; if `p` is still pending, only the marker resolves.
+async function settledState(p: Promise<unknown>): Promise<'pending' | 'fulfilled' | 'rejected'> {
+  const marker = Symbol('pending');
+  const outcome = await Promise.race([
+    p.then(
+      () => 'fulfilled' as const,
+      () => 'rejected' as const,
+    ),
+    Promise.resolve(marker),
+  ]);
+  return outcome === marker ? 'pending' : outcome;
+}
+
+test('run(): a session-count write failure waits for in-flight siblings before propagating (allSettled, not Promise.all)', async () => {
+  // Two groups dispatched at concurrency 2. g1's session-count write fails; g2's succeeds and its
+  // runGroup is mid-flight (worker parked on a gate). The failure must NOT surface until g2 settles —
+  // Promise.all would reject the moment g1's increment throws, while g2's Git/PR side effects run on.
+  const groups = [group('g1'), group('g2')];
+  let pass = 0;
+  const graph: WorkLoopGraph = {
+    ready: () => (pass++ === 0 ? groups.slice() : []),
+    isComplete: () => pass >= 1,
+  };
+
+  // Callbacks run in batch order and increment BEFORE runGroup, so the first state.update is g1's
+  // session-count bump — reject it; every later write (g2's bump, both groups' status writes) passes.
+  let updateCalls = 0;
+  let current: RunState = { ...baseState(), prGroups: groups };
+  const state: WorkLoopState = {
+    update: async (mutator) => {
+      updateCalls += 1;
+      if (updateCalls === 1) throw new Error('counter write failed');
+      current = mutator(current);
+      return current;
+    },
+  };
+
+  // g2's worker parks on a gate the test controls; `atGate` fires the instant it parks, so the run
+  // can be observed while g2 is provably still in flight.
+  let openGate = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  let reachedGate = (): void => {};
+  const atGate = new Promise<void>((resolve) => {
+    reachedGate = resolve;
+  });
+  const { orchestrator: base, calls } = makeOrchestrator();
+  const orchestrator: WorkLoopOrchestrator = {
+    ...base,
+    runWorker: async (input) => {
+      reachedGate();
+      await gate;
+      return base.runWorker(input);
+    },
+  };
+  const { home, calls: homeCalls } = makeHome();
+
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, graph, home, state, concurrency: 2, autoMerge: false }),
+  );
+
+  const run = loop.run();
+  await atGate;
+  // Drain any queued continuations so that, under the old Promise.all, g1's rejection has fully
+  // propagated into run() by now — making the pending assertion below a true fix-vs-bug discriminator.
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.equal(
+    await settledState(run),
+    'pending',
+    'run() must stay pending while g2 is still in flight — Promise.all would already have rejected',
+  );
+
+  openGate();
+  await assert.rejects(run, /counter write failed/);
+  assert.ok(
+    calls.runWorker.some((c) => c.group.id === 'g2'),
+    'g2 ran its worker to completion before the failure surfaced',
+  );
+  assert.deepEqual(
+    homeCalls.release.filter((id) => id === 'g2'),
+    ['g2'],
+    'g2 released its checkout (its runGroup fully settled) before run() rejected',
+  );
+});
+
 test('blocked propagation: WorkLoopResult.kind === "blocked" with reason from worker', async () => {
   const { orchestrator } = makeOrchestrator({
     workerResults: [{ kind: 'blocked', reason: 'cannot plan' }],

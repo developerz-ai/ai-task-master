@@ -344,12 +344,21 @@ export class WorkLoop {
       // bumps sum to ≤ it; and a crash mid-batch leaves the persisted count at the groups that
       // actually started, so a resume never inherits an inflated batch.length that trips maxSessions
       // before the still-unrun groups get their turn.
-      await Promise.all(
+      // allSettled, not Promise.all: runGroup swallows its own failures into an outcome and never
+      // rejects, so the only rejection here is a counter-write failure in incrementSessionCount.
+      // Promise.all would surface that immediately while sibling groups — already past their own
+      // increment and into runGroup's Git/PR side effects — are still in flight, letting run()'s
+      // caller start failure cleanup over live work. Wait for every started group to settle, THEN
+      // rethrow the first counter-write failure.
+      const settled = await Promise.allSettled(
         batch.map(async (g) => {
           await this.incrementSessionCount();
           await this.runGroup(g);
         }),
       );
+      for (const outcome of settled) {
+        if (outcome.status === 'rejected') throw outcome.reason;
+      }
       // Re-check post-batch: an abort mid-batch aborts each group's in-flight LLM calls
       // (worker.ts signal wiring), which runGroup's catch would otherwise report as `blocked`
       // (exit 1). A cancelled run must report cancelled (exit 2) regardless of the abort-induced

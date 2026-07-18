@@ -37,6 +37,7 @@ import {
   branchFor,
   createRollingContextAccumulator,
   defaultMakeOrchestrator,
+  describeError,
   exploreReadTools,
   githubThreadTool,
   harnessContextBlock,
@@ -893,6 +894,22 @@ test('persistRollingContext tolerates a state port without writeContext (optiona
     delivery: delivery(),
   });
   assert.ok(out.includes('PR #3 — g1'), 'accumulates even when nothing persists it');
+});
+
+// ---- cause preservation (issue #101 slice 04, task 18) --------------------
+
+test('describeError: an Error is returned as-is — same object, same message, cause untouched', () => {
+  const original = new Error('boom', { cause: 'root cause' });
+  const described = describeError(original);
+  assert.equal(described, original);
+  assert.equal(described.message, 'boom');
+  assert.equal(described.cause, 'root cause');
+});
+
+test('describeError: a non-Error throw is wrapped, same message text, original value as cause', () => {
+  const described = describeError('disk full');
+  assert.equal(described.message, 'disk full');
+  assert.equal(described.cause, 'disk full');
 });
 
 test('createRollingContextAccumulator serializes concurrent appends without losing a digest', async () => {

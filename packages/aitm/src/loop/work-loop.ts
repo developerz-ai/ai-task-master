@@ -293,6 +293,27 @@ type StageCtx = {
   fixAttempts: number;
 };
 
+// Reduce a caught value to display text the way every catch site in this file already did
+// (`err instanceof Error ? err.message : String(err)`), but without silently dropping the
+// original value: wrapping a non-Error in a real Error keeps it reachable as `.cause` instead of
+// discarding it once `String(err)` runs. A caught Error is returned as-is — same object, same
+// `.message`, whatever `.cause` it already carried. Exported for the cause-preservation unit test.
+export function describeError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err), { cause: err });
+}
+
+// The two Errors autoMergeFlow throws when a recovery session reports 'blocked' — pulled out as
+// named, pure functions (same message text as before) so `{cause}` is unit-testable without
+// wiring the whole stage machine, and so the StageWorkResult that explains WHY it blocked isn't
+// discarded at the throw the way a bare `${fix.reason}` interpolation would.
+export function ciFixFailedError(fix: Extract<StageWorkResult, { kind: 'blocked' }>): Error {
+  return new Error(`worker CI fix failed: ${fix.reason}`, { cause: fix });
+}
+
+export function reviewFailedError(review: Extract<StageWorkResult, { kind: 'blocked' }>): Error {
+  return new Error(`reviewer failed: ${review.reason}`, { cause: review });
+}
+
 // Thrown when a state-write fails *after* an external side effect (openPr/mergePr) already
 // succeeded. Carries the real outcome so runGroup doesn't roll the group back to 'blocked'
 // and cause a retry to reopen/re-merge work that already landed.
@@ -420,7 +441,7 @@ export class WorkLoop {
         this.outcomes.push(err.outcome);
         return;
       }
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = describeError(err).message;
       // Surface the reason live — this catch path (e.g. an openPr throw at pr-open) otherwise blocks
       // the group SILENTLY: unlike driveStages' in-loop block, no progress line is emitted, so the run
       // log shows a group vanish with no cause. The reason still rides the outcome for the run summary.
@@ -821,7 +842,7 @@ export class WorkLoop {
       this.deps.progress?.(selfReviewProgress(group.id, result), step);
     } catch (err) {
       // A crash in the safety net must never strand the committed work or gate the PR.
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = describeError(err).message;
       this.deps.progress?.(
         `group ${group.id}: self-review errored (${reason}) — opening PR anyway`,
         step,
@@ -922,7 +943,7 @@ export class WorkLoop {
     if (ci.state === 'failure') {
       const fix = await orchestrator.runCiFix({ group, pr: pr.number, checkout, baseBranch });
       if (fix.kind !== 'ok') {
-        throw new Error(`worker CI fix failed: ${fix.reason}`);
+        throw ciFixFailedError(fix);
       }
       const recheck = await github.waitForChecks(pr.number);
       if (recheck.state === 'failure') {
@@ -937,7 +958,7 @@ export class WorkLoop {
     if (threads.length > 0) {
       const review = await orchestrator.addressReviews({ pr: pr.number, threads, checkout });
       if (review.kind !== 'ok') {
-        throw new Error(`reviewer failed: ${review.reason}`);
+        throw reviewFailedError(review);
       }
     }
 

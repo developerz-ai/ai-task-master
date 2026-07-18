@@ -13,8 +13,11 @@ import type { StageWorkResult } from './stage-handlers.ts';
 import {
   alreadyCommittedDelivery,
   type CheckoutHome,
+  ciFixFailedError,
+  describeError,
   mergeDeliveries,
   recoveredDelivery,
+  reviewFailedError,
   type SelfReviewInvocation,
   WorkLoop,
   type WorkLoopDeps,
@@ -2111,4 +2114,40 @@ test('state write failure after mergePr → outcome stays merged', async () => {
     'merge outcome preserved despite state write failure',
   );
   assert.notEqual(result.kind, 'blocked');
+});
+
+// ---- cause preservation (issue #101 slice 04, task 18) --------------------
+
+test('describeError: an Error is returned as-is — same object, same message, cause untouched', () => {
+  const original = new Error('boom', { cause: 'root cause' });
+  const described = describeError(original);
+  assert.equal(described, original);
+  assert.equal(described.message, 'boom');
+  assert.equal(described.cause, 'root cause');
+});
+
+test('describeError: a non-Error throw is wrapped, same message text, original value as cause', () => {
+  const described = describeError('disk full');
+  assert.equal(described.message, 'disk full');
+  assert.equal(described.cause, 'disk full');
+});
+
+test('ciFixFailedError: same message as before, cause is the blocked StageWorkResult', () => {
+  const fix: Extract<StageWorkResult, { kind: 'blocked' }> = {
+    kind: 'blocked',
+    reason: 'rebase conflict',
+  };
+  const err = ciFixFailedError(fix);
+  assert.equal(err.message, 'worker CI fix failed: rebase conflict');
+  assert.equal(err.cause, fix);
+});
+
+test('reviewFailedError: same message as before, cause is the blocked StageWorkResult', () => {
+  const review: Extract<StageWorkResult, { kind: 'blocked' }> = {
+    kind: 'blocked',
+    reason: 'push rejected',
+  };
+  const err = reviewFailedError(review);
+  assert.equal(err.message, 'reviewer failed: push rejected');
+  assert.equal(err.cause, review);
 });

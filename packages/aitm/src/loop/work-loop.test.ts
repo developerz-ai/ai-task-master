@@ -1646,6 +1646,44 @@ test('state write failure after openPr → loop yields awaiting-pr outcome, not 
   assert.notEqual(result.kind, 'blocked', 'result must not flip to blocked');
 });
 
+test('autoMerge: state write failure after openPr → dangling PR is non-success, not exit-0 success', async () => {
+  // The autoMerge counterpart of the test above. Same StateWriteAfterSuccess (openPr landed, the
+  // pr-persist failed), but under autoMerge the group never reached 'merged'. The recovered outcome
+  // stays awaiting-pr so a retry doesn't reopen the PR — yet the RUN must NOT report 'success', which
+  // would exit 0 with a dangling unmerged PR. finalResult surfaces it as blocked (non-success).
+  const { orchestrator } = makeOrchestrator({ prNumber: 77 });
+  let callCount = 0;
+  const state: WorkLoopState = {
+    update: async (mutator) => {
+      callCount++;
+      // Writes 1–5 are autoMerge-independent (autoMerge only affects the writes AFTER pr-open):
+      // 1 sessionCount, 2 in-progress(+working), 3 task-done, 4 working→pr-open, 5 pr-persist (fail).
+      if (callCount === 5) throw new Error('disk full');
+      return mutator(baseState());
+    },
+  };
+  const ready = makeGraph([group('nu')], { completeAfter: 1 });
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, graph: ready.graph, autoMerge: true }));
+  const result = await loop.run();
+
+  // The external side effect is preserved so a retry never reopens the PR…
+  assert.equal(result.outcomes.length, 1);
+  assert.equal(result.outcomes[0]?.status, 'awaiting-pr');
+  if (result.outcomes[0]?.status === 'awaiting-pr') {
+    assert.equal(result.outcomes[0].pr, 77);
+  }
+  // …but the run itself is non-success: a dangling unmerged PR under autoMerge must not exit 0.
+  assert.equal(
+    result.kind,
+    'blocked',
+    'awaiting-pr under autoMerge must be non-success, not reported as merged',
+  );
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /77/, 'the reason names the dangling PR');
+    assert.match(result.reason, /not merged/i);
+  }
+});
+
 test('run(): CI fix rebase conflict → WorkLoopResult.kind === "blocked" with conflict reason', async () => {
   // Conflict scenario propagated through run(): ciFixResult blocked → group blocked → run blocked.
   const { orchestrator } = makeOrchestrator({

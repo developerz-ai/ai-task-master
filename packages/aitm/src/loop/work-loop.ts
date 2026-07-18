@@ -884,13 +884,23 @@ export class WorkLoop {
         outcomes: this.outcomes.slice(),
       };
     }
-    if (!this.deps.autoMerge) {
-      const prs = this.outcomes
-        .filter((o): o is GroupOutcome & { status: 'awaiting-pr' } => o.status === 'awaiting-pr')
-        .map((o) => o.pr);
-      if (prs.length > 0) {
-        return { kind: 'awaiting-pr', prs, outcomes: this.outcomes.slice() };
+    const awaitingPrs = this.outcomes
+      .filter((o): o is GroupOutcome & { status: 'awaiting-pr' } => o.status === 'awaiting-pr')
+      .map((o) => o.pr);
+    if (awaitingPrs.length > 0) {
+      // autoMerge off: the PRs are deliberately left open for `aitm merge-pr` — a clean terminal
+      // (exit 0). Under autoMerge an awaiting-pr outcome is instead a DANGLING PR: openPr landed but
+      // the group never reached 'merged' (a StateWriteAfterSuccess at pr-open). Reporting 'success'
+      // there would exit 0 while a PR sits unmerged; surface it as non-success so a resume/human
+      // finishes the merge (the idempotent open adopts the PR on the next `aitm start`).
+      if (this.deps.autoMerge) {
+        return {
+          kind: 'blocked',
+          reason: `PR(s) ${awaitingPrs.join(', ')} opened but not merged under auto-merge (interrupted after PR open) — rerun \`aitm start\` to resume the merge`,
+          outcomes: this.outcomes.slice(),
+        };
       }
+      return { kind: 'awaiting-pr', prs: awaitingPrs, outcomes: this.outcomes.slice() };
     }
     return { kind: 'success', outcomes: this.outcomes.slice() };
   }

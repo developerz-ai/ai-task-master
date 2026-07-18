@@ -254,6 +254,61 @@ test('runStart: --no-automerge suppresses the banner', async () => {
   }
 });
 
+test('runStart: --pr-per-task with --no-automerge → exit 1, loop never runs', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    // The combo is rejected right after config resolution — before detect/auth/state/loop — so no
+    // plan is persisted and the loop never starts.
+    const result = await runStart(
+      { kind: 'start', goal: 'g', prPerTask: true, autoMerge: false },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        runLoop: async () => {
+          assert.fail('runLoop must not run for a rejected flag combo');
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /--pr-per-task/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: --pr-per-task with config autoMerge:false → exit 1 (config path, not just flag)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    // auto-merge disabled via project config, prPerTask via flag: the resolved-config guard must
+    // still reject it — an args-only (flag-combo) check would miss this path.
+    const dir = join(repo.path, '.ai-task-master');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'config.json'), `${JSON.stringify({ autoMerge: false })}\n`);
+    const result = await runStart(
+      { kind: 'start', goal: 'g', prPerTask: true },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        runLoop: async () => {
+          assert.fail('runLoop must not run for a rejected config combo');
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /--pr-per-task/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('runStart: missing API key → exit 1 with actionable message', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();

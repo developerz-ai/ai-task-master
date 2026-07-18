@@ -11,7 +11,7 @@
 // SRP: this module only persists/clears the context. Fetching the logs is GitHubClient's job
 // (getFailedCiLogs + listUnresolvedThreads); wiring lives in the merge-pr flow.
 
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import type { ReviewThread } from '../github/schema.ts';
@@ -55,9 +55,9 @@ export class PrContextStore {
       used.set(base, n + 1);
       const file = n === 0 ? `failed_${base}.txt` : `failed_${base}_${n}.txt`;
       const header = `CI check failed: ${check}\nPR: #${pr}\n${'='.repeat(60)}\n\n`;
-      await writeFile(join(ciDir, file), header + logs);
+      await atomicWrite(join(ciDir, file), header + logs);
     }
-    await writeFile(
+    await atomicWrite(
       join(ciDir, 'summary.txt'),
       [
         `PR #${pr} — ${failures.length} failed check(s):`,
@@ -79,13 +79,13 @@ export class PrContextStore {
         .map((c) => `@${c.author}:\n${c.body}`)
         .join(`\n${'-'.repeat(40)}\n`);
       const header = `Review thread on ${path} (thread ${thread.id})\nPR: #${pr}\n${'='.repeat(60)}\n\n`;
-      await writeFile(
+      await atomicWrite(
         join(commentsDir, `${String(i).padStart(3, '0')}_${sanitize(path)}.txt`),
         header + body,
       );
     }
     const paths = [...new Set(threads.map((t) => t.path ?? 'general'))].sort();
-    await writeFile(
+    await atomicWrite(
       join(commentsDir, 'summary.txt'),
       [
         `PR #${pr} — ${threads.length} unresolved review thread(s).`,

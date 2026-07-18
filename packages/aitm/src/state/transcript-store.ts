@@ -8,7 +8,7 @@
 // every step (O(n²)) and lose the crash-tail property. Records pass through Logger.redact before
 // serialization (best-effort key-name redaction of key/token/secret/authorization).
 
-import { appendFile, mkdir, open, readdir, readFile } from 'node:fs/promises';
+import { access, appendFile, mkdir, open, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LanguageModelUsage, ModelMessage } from 'ai';
 import { modelMessageSchema } from 'ai';
@@ -17,6 +17,16 @@ import type { GroupStage } from './schema.ts';
 
 const TRANSCRIPTS_DIR = 'transcripts';
 const PLANNER_SUBDIR = 'planner';
+
+// Consecutive FileRecorder.append failures before we flag the transcript as having a dead
+// recording (as opposed to a run truncated by a crash — see FileRecorder.append).
+const PERSISTENT_FAILURE_THRESHOLD = 3;
+
+// Sentinel written beside a transcript file once its recorder crosses the failure threshold. Its
+// mere existence is the signal; content is irrelevant.
+function failureMarkerFile(transcriptFile: string): string {
+  return `${transcriptFile}.recording-failed`;
+}
 
 export type RunEndOutcome = 'submitted' | 'no-submission' | 'error';
 
@@ -129,6 +139,7 @@ export function reconstructTranscript(
 
 class FileRecorder implements TranscriptRecorder {
   private chain: Promise<unknown> = Promise.resolve();
+  private consecutiveFailures = 0;
 
   constructor(
     private readonly file: string,
@@ -150,17 +161,39 @@ class FileRecorder implements TranscriptRecorder {
   // Best-effort (issue #108 CR): a serialize or disk failure warns and resolves — a transcript write
   // must never reject into and abort the agent loop. The serialize runs inside the try so a
   // synchronous JSON.stringify failure is caught too, and the chain still advances so ordering holds.
+  //
+  // A single failure is noise (a transient disk hiccup); PERSISTENT_FAILURE_THRESHOLD consecutive
+  // failures means this recording is dead, not just this record. That distinction matters on resume:
+  // a transcript that stops mid-run because the PROCESS crashed still has a healthy append history,
+  // while one that stops because appends kept failing needs findResumable to say so rather than hand
+  // back a transcript nobody was able to keep writing.
   private append(record: Record<string, unknown>): Promise<void> {
     const step = this.chain.then(async () => {
       try {
         const line = `${JSON.stringify(Logger.redact({ ts: new Date().toISOString(), ...record }))}\n`;
         await appendFile(this.file, line);
+        this.consecutiveFailures = 0;
       } catch (err) {
         this.onWarn(`transcript write failed: ${err instanceof Error ? err.message : String(err)}`);
+        this.consecutiveFailures += 1;
+        if (this.consecutiveFailures === PERSISTENT_FAILURE_THRESHOLD) {
+          await this.markPersistentFailure();
+        }
       }
     });
     this.chain = step;
     return step;
+  }
+
+  // Never throws: this is a best-effort signal on top of an already-best-effort recorder.
+  private async markPersistentFailure(): Promise<void> {
+    try {
+      await writeFile(failureMarkerFile(this.file), '');
+    } catch (err) {
+      this.onWarn(
+        `transcript failure marker write failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }
 
@@ -216,10 +249,13 @@ export class TranscriptStore {
 
   // The newest INTERRUPTED transcript for (group, stage) — highest ordinal without a `run-end` — with
   // its reconstructed messages, or null when none is resumable (no dir, or all complete). Never throws.
+  // `recordingFailed` is set when that transcript's recorder hit PERSISTENT_FAILURE_THRESHOLD
+  // consecutive append failures — i.e. it stopped because writes were failing, not just because the
+  // process crashed mid-run — so callers can decide whether resuming from it is trustworthy.
   async findResumable(
     group: string,
     stage: GroupStage,
-  ): Promise<{ messages: ModelMessage[] } | null> {
+  ): Promise<{ messages: ModelMessage[]; recordingFailed: boolean } | null> {
     const { subdir, prefix } = locate({ group, stage });
     const dir = join(this.dir(), subdir);
     let files: string[];
@@ -247,8 +283,21 @@ export class TranscriptStore {
       // if it is complete, the last run for this (group, stage) finished, so there is nothing to
       // resume. Falling through to an OLDER interrupted transcript would hand a later task a dead,
       // already-superseded conversation.
-      return parsed.complete ? null : { messages: parsed.messages };
+      if (parsed.complete) return null;
+      return {
+        messages: parsed.messages,
+        recordingFailed: await this.hasFailureMarker(join(dir, f)),
+      };
     }
     return null;
+  }
+
+  private async hasFailureMarker(transcriptFile: string): Promise<boolean> {
+    try {
+      await access(failureMarkerFile(transcriptFile));
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

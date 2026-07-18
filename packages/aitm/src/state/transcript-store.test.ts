@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { access, chmod, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -287,6 +287,72 @@ test('a transcript write that fails to serialize warns and resolves — never re
     assert.ok(
       warns.some((w) => /transcript write failed/.test(w)),
       'the serialize failure warned instead of throwing',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a recorder that hits 3 consecutive append failures sets a persistent failure marker; findResumable surfaces it', async () => {
+  if (process.platform === 'win32') return; // chmod-based perms don't apply on Windows
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return; // root bypasses perms
+  const dir = await tmp();
+  try {
+    const store = new TranscriptStore(dir, () => {});
+    const rec = await store.begin({ group: 'g', stage: 'working' });
+    await rec.step([msg('assistant', 'ok')]); // succeeds — transcript has real content
+    const file = join(dir, 'transcripts', 'g', 'working-1.jsonl');
+    await chmod(file, 0o000); // every further append now fails to open
+    await rec.step([msg('assistant', 'fail-1')]);
+    await rec.step([msg('assistant', 'fail-2')]);
+    await rec.step([msg('assistant', 'fail-3')]); // 3rd consecutive failure — marker should land
+    await chmod(file, 0o600); // restore so findResumable can read it back
+
+    assert.equal(
+      await access(`${file}.recording-failed`).then(
+        () => true,
+        () => false,
+      ),
+      true,
+      'marker file written after the 3rd consecutive failure',
+    );
+    const resumable = await store.findResumable('g', 'working');
+    assert.deepEqual(
+      resumable?.messages,
+      [msg('assistant', 'ok')],
+      'content before the failures survived',
+    );
+    assert.equal(
+      resumable?.recordingFailed,
+      true,
+      'findResumable distinguishes a dead recording from a plain crash-truncated one',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('fewer than 3 consecutive append failures do not set the persistent failure marker', async () => {
+  if (process.platform === 'win32') return;
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return;
+  const dir = await tmp();
+  try {
+    const store = new TranscriptStore(dir, () => {});
+    const rec = await store.begin({ group: 'g', stage: 'working' });
+    await rec.step([msg('assistant', 'ok')]);
+    const file = join(dir, 'transcripts', 'g', 'working-1.jsonl');
+    await chmod(file, 0o000);
+    await rec.step([msg('assistant', 'fail-1')]);
+    await rec.step([msg('assistant', 'fail-2')]); // only 2 — below threshold
+    await chmod(file, 0o600);
+
+    assert.equal(
+      await access(`${file}.recording-failed`).then(
+        () => true,
+        () => false,
+      ),
+      false,
+      'no marker below the consecutive-failure threshold',
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

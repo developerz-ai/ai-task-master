@@ -201,7 +201,13 @@ async function resumeMessagesFor(
 ): Promise<ModelMessage[] | null> {
   if (!store) return null;
   const found = await store.findResumable(group, stage);
-  return found ? found.messages : null;
+  if (!found) return null;
+  if (found.recordingFailed) {
+    process.stderr.write(
+      `warning: resuming ${group}/${stage} from a transcript whose recorder had persistent write failures — resume context may be incomplete\n`,
+    );
+  }
+  return found.messages;
 }
 
 // Map a subagent result kind to the transcript run-end outcome (issue #108).

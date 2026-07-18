@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
+import { mkdtemp, open, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -150,6 +151,40 @@ test('recordAddressedThreads writes nothing for an empty id list', async () => {
     const store = new PrContextStore(dir.path);
     await store.recordAddressedThreads(3, []);
     await assert.rejects(() => readdir(store.prDir(3)));
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('saveCiFailures: a crash mid-write leaves no partial or orphan-tmp file (atomic write)', async () => {
+  if (process.platform === 'win32') return;
+  const dir = await tempDir();
+  try {
+    const store = new PrContextStore(dir.path);
+    // Patch FileHandle.prototype.writeFile (the shared module boundary atomicWrite goes through)
+    // to fail on its first call, simulating a crash mid-write. Mirrors atomic-write.test.ts.
+    const probe = await open(join(dir.path, 'probe'), 'w');
+    const proto = Object.getPrototypeOf(probe) as {
+      writeFile: (this: FileHandle, data: string) => Promise<void>;
+    };
+    const real = proto.writeFile;
+    await probe.close();
+    await rm(join(dir.path, 'probe'), { force: true });
+    proto.writeFile = function patched(this: FileHandle) {
+      return Promise.reject(new Error('simulated crash mid-write'));
+    };
+    try {
+      await assert.rejects(
+        store.saveCiFailures(7, [{ check: 'bun', logs: 'log body' }]),
+        /simulated crash mid-write/,
+      );
+    } finally {
+      proto.writeFile = real;
+    }
+    // The target dir exists (mkdir ran) but holds neither the final file nor an orphaned .tmp —
+    // atomicWrite's own failure path already cleaned up the temp file before rethrowing.
+    const ciDir = join(store.prDir(7), 'ci');
+    assert.deepEqual(await readdir(ciDir), [], 'no partial or tmp file left behind');
   } finally {
     await dir.cleanup();
   }

@@ -233,15 +233,21 @@ export class TranscriptStore {
       .filter((x): x is { f: string; n: number } => x.n !== null)
       .sort((a, b) => b.n - a.n);
     for (const { f } of ordered) {
+      let parsed: ReturnType<typeof reconstructTranscript>;
       try {
-        const parsed = reconstructTranscript(await readFile(join(dir, f), 'utf8'), this.onWarn);
-        // An interrupted transcript with no reconstructable messages (e.g. an ordinal reserved by
-        // begin whose agent died before its first step) has nothing to resume — skip it so an empty
-        // reservation can't shadow an earlier transcript that does.
-        if (!parsed.complete && parsed.messages.length > 0) return { messages: parsed.messages };
+        parsed = reconstructTranscript(await readFile(join(dir, f), 'utf8'), this.onWarn);
       } catch {
         // Unreadable transcript → try the next; resume must never block the run.
+        continue;
       }
+      // An empty transcript (an ordinal reserved by begin whose agent died before its first step)
+      // carries no state — skip it so it can't shadow an earlier one that does.
+      if (parsed.messages.length === 0) continue;
+      // The NEWEST non-empty transcript decides the whole answer: if it is interrupted, resume it;
+      // if it is complete, the last run for this (group, stage) finished, so there is nothing to
+      // resume. Falling through to an OLDER interrupted transcript would hand a later task a dead,
+      // already-superseded conversation.
+      return parsed.complete ? null : { messages: parsed.messages };
     }
     return null;
   }

@@ -69,6 +69,20 @@ test('decodeDdgHref: a direct external link is accepted', () => {
   assert.equal(decodeDdgHref('https://docs.example.com/page'), 'https://docs.example.com/page');
 });
 
+test('parseDuckDuckGoHtml: an escaped entity decodes exactly once (&amp;lt; → literal &lt;, not <)', () => {
+  const html = `
+  <div class="result results_links results_links_deep web-result">
+  <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fx">Generic vs T&amp;lt;U&amp;gt; and A &amp;amp; B</a>
+  <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fx">Use &amp;lt;div&amp;gt; tags and cats &amp;amp; dogs.</a>
+  </div>`;
+  const [result] = parseDuckDuckGoHtml(html, 5);
+  assert.ok(result);
+  // `&amp;lt;` is one level of escaping over the literal text `<`; decoding must yield `&lt;` (the
+  // literal the page meant to show), never the doubly-decoded `<`.
+  assert.equal(result.title, 'Generic vs T&lt;U&gt; and A &amp; B');
+  assert.equal(result.snippet, 'Use &lt;div&gt; tags and cats &amp; dogs.');
+});
+
 function jsonResponse(body: string, status = 200): Response {
   return new Response(body, { status });
 }

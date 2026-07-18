@@ -91,19 +91,25 @@ export class InPlaceCheckout {
   }
 
   // Drop stale uncommitted edits before switching branches. A crashed or blocked prior group can
-  // leave modified tracked files in the shared tree; `git checkout` would carry them onto the next
-  // group's branch (contamination) or abort the switch. `git reset --hard` restores tracked files to
-  // the current HEAD — committed work is untouched (HEAD does not move), so a resumed branch's saved
-  // commits survive. Untracked files, including aitm's own `.ai-task-master/` state dir at the repo
-  // root, are deliberately left alone (`reset --hard` never removes them). `--untracked-files=no`
-  // keeps that state dir from reading as "dirty" so a genuinely clean tree skips the reset entirely.
+  // leave junk in the shared tree; `git checkout` would carry it onto the next group's branch
+  // (contamination) or abort the switch. Two kinds of junk, both cleaned:
+  //   - modified/deleted TRACKED files → `git reset --hard` restores them to HEAD. Committed work is
+  //     untouched (HEAD does not move), so a resumed branch's saved commits survive.
+  //   - UNTRACKED files a prior group's editors created but never committed (its verify gate stayed
+  //     red, or it crashed) → `git clean -fd` removes them, so the worker's `git add -A` can't sweep
+  //     them into the NEXT group's commit and ship a foreign file in its PR.
+  // aitm's own `.ai-task-master/` state dir must survive: `git clean` skips gitignored paths (no
+  // `-x`), which covers the common case, and `-e .ai-task-master` protects it when the target repo
+  // does not ignore it. Gitignored build output (node_modules/, dist/) is likewise preserved.
   private async ensureCleanTree(): Promise<void> {
-    const { stdout } = await runGit(['status', '--porcelain', '--untracked-files=no'], {
-      cwd: this.repoRoot,
-    });
-    if (stdout.trim() !== '') {
-      await runGit(['reset', '--hard'], { cwd: this.repoRoot });
-    }
+    const { stdout } = await runGit(['status', '--porcelain'], { cwd: this.repoRoot });
+    // Any dirty entry EXCEPT the state dir itself means there is something to clean.
+    const dirty = stdout
+      .split('\n')
+      .some((line) => line.trim() !== '' && !line.slice(3).startsWith('.ai-task-master'));
+    if (!dirty) return;
+    await runGit(['reset', '--hard'], { cwd: this.repoRoot });
+    await runGit(['clean', '-fd', '-e', '.ai-task-master'], { cwd: this.repoRoot });
   }
 
   async release(groupId: string): Promise<void> {

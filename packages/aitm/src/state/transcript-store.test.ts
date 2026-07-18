@@ -220,6 +220,29 @@ test('findResumable skips an empty reserved transcript and returns the earlier r
   }
 });
 
+test('findResumable: a newer COMPLETE transcript over an older interrupted one returns null (no stale resume)', async () => {
+  const dir = await tmp();
+  try {
+    const store = new TranscriptStore(dir);
+    // Ordinal 1: a run crashed mid-task — interrupted, has content, no run-end.
+    const crashed = await store.begin({ group: 'g', stage: 'working' });
+    await crashed.step([msg('assistant', 'crashed task 1')]);
+    // Ordinal 2: the resumed run finished (run-end lands here). The next task must NOT be handed
+    // the older crashed conversation just because ordinal 1 is still interrupted.
+    const resumed = await store.begin({ group: 'g', stage: 'working' });
+    await resumed.step([msg('assistant', 'finished task 1')]);
+    await resumed.end('submitted');
+
+    assert.equal(
+      await store.findResumable('g', 'working'),
+      null,
+      'newest transcript is complete → nothing to resume; the older crashed one must not surface',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('records redact key/token/secret/authorization fields before serialization', async () => {
   const dir = await tmp();
   try {

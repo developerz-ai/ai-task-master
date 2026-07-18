@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import { PlanGraph } from '../plan/plan-graph.ts';
 import type { Plan } from '../plan/schema.ts';
+import type { PrGroup } from '../state/schema.ts';
 import { createPlannerAgent, PLANNER_SYSTEM_PREFIX, runPlanner } from './planner.ts';
 
 let submitCallId = 0;
@@ -46,6 +48,55 @@ function basicPlan(groupCount: number): Plan {
     dependsOn: i === 0 ? [] : [`g${i}`],
   }));
   return { goal: 'do the thing', groups };
+}
+
+function planWith(specs: ReadonlyArray<{ id: string; dependsOn: string[] }>): Plan {
+  return {
+    goal: 'do the thing',
+    groups: specs.map((s) => ({
+      id: s.id,
+      title: `Group ${s.id}`,
+      tasks: [{ description: `task ${s.id}` }],
+      dependsOn: s.dependsOn,
+    })),
+  };
+}
+
+// Mirror of run-loop-adapter.planToPrGroups' id/dependsOn mapping — enough to run the real
+// PlanGraph.validate over a capped plan, which is where a dangling dep would actually throw.
+function toPrGroups(plan: Plan): PrGroup[] {
+  return plan.groups.map((g) => ({
+    id: g.id,
+    title: g.title,
+    tasks: g.tasks.map((t, i) => ({
+      id: `${g.id}-${i + 1}`,
+      text: t.description,
+      complexity: t.complexity,
+      done: false,
+    })),
+    dependsOn: g.dependsOn,
+    branch: null,
+    pr: null,
+    status: 'pending' as const,
+    stage: 'pending' as const,
+  }));
+}
+
+async function capPlan(plan: Plan, maxPrs: number): Promise<Plan> {
+  const agent = createPlannerAgent({
+    model: planJsonModel(plan),
+    tools: {},
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
+  const result = await runPlanner(agent, { goal: plan.goal, styleContents: '', maxPrs });
+  if (result.kind !== 'ok') throw new Error(`expected ok, got ${result.kind}`);
+  return result.plan;
+}
+
+function depsOf(plan: Plan, id: string): string[] {
+  const group = plan.groups.find((g) => g.id === id);
+  assert.ok(group, `group ${id} present`);
+  return group.dependsOn;
 }
 
 test('PLANNER_SYSTEM_PREFIX names the read tools including explore, gated on availability (issue #126)', () => {
@@ -114,6 +165,54 @@ test('runPlanner caps groups to maxPrs and folds overflow into a remainder task'
     assert.match(remainder.description, /g4/);
     assert.match(remainder.description, /g7/);
   }
+});
+
+test('capGroups: a kept group depending on a dropped group is redirected to the last-kept group', async () => {
+  // g2 depends on the dropped g4; g3 (last-kept) depends only on g1, so redirecting g2 → g3 is safe.
+  const plan = planWith([
+    { id: 'g1', dependsOn: [] },
+    { id: 'g2', dependsOn: ['g4'] },
+    { id: 'g3', dependsOn: ['g1'] },
+    { id: 'g4', dependsOn: [] },
+    { id: 'g5', dependsOn: [] },
+  ]);
+  const capped = await capPlan(plan, 3);
+  assert.deepEqual(
+    capped.groups.map((g) => g.id),
+    ['g1', 'g2', 'g3'],
+  );
+  assert.deepEqual(depsOf(capped, 'g2'), ['g3'], 'dangling g4 dep redirected to last-kept g3');
+  assert.deepEqual(depsOf(capped, 'g3'), ['g1']);
+  assert.doesNotThrow(() => PlanGraph.validate(toPrGroups(capped)));
+});
+
+test('capGroups: dangling deps are dropped when redirecting would close a cycle', async () => {
+  // g3 (last-kept) depends on g2, so redirecting g2's dropped-g5 dep onto g3 would form g2⇄g3.
+  // The edge is dropped instead, leaving a valid DAG.
+  const plan = planWith([
+    { id: 'g1', dependsOn: [] },
+    { id: 'g2', dependsOn: ['g1', 'g5'] },
+    { id: 'g3', dependsOn: ['g2'] },
+    { id: 'g4', dependsOn: [] },
+    { id: 'g5', dependsOn: [] },
+  ]);
+  const capped = await capPlan(plan, 3);
+  assert.deepEqual(depsOf(capped, 'g2'), ['g1'], 'cycle-forming dangling dep dropped, g1 kept');
+  assert.deepEqual(depsOf(capped, 'g3'), ['g2']);
+  assert.doesNotThrow(() => PlanGraph.validate(toPrGroups(capped)));
+});
+
+test('capGroups: a dangling dep on the last-kept group itself is dropped, not made a self-loop', async () => {
+  const plan = planWith([
+    { id: 'g1', dependsOn: [] },
+    { id: 'g2', dependsOn: ['g1'] },
+    { id: 'g3', dependsOn: ['g2', 'g4'] },
+    { id: 'g4', dependsOn: [] },
+    { id: 'g5', dependsOn: [] },
+  ]);
+  const capped = await capPlan(plan, 3);
+  assert.deepEqual(depsOf(capped, 'g3'), ['g2'], 'g3 does not depend on itself after remap');
+  assert.doesNotThrow(() => PlanGraph.validate(toPrGroups(capped)));
 });
 
 test('runPlanner returns blocked when the model emits an empty plan', async () => {

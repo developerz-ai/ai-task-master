@@ -61,6 +61,9 @@ export type RunLoopInput = {
   // The single ModelLimitsRegistry for the run, shared by the tracker's pricing and the Compactor's
   // context lookup (#102) so the catalog is fetched at most once. Unset → the adapter builds its own.
   modelLimits?: ModelLimitsLookup;
+  // Abort handle threaded from the CLI's SIGINT/SIGTERM handler (cli.ts). On abort the adapter closes
+  // MCP so a force-exit can't orphan its stdio children; unset → no cancellation wiring.
+  signal?: AbortSignal;
 };
 
 export type RunMergeFlowInput = {
@@ -131,6 +134,9 @@ export type StartCtx = {
   // reuse the cached `coding-style.md`, else distill once and cache it — never blocking the run
   // (degrades to raw AgentConfig.contents). Injected so unit tests skip the real LLM call.
   resolveStyle?: (input: ResolveStyleInput) => Promise<string>;
+  // Abort handle threaded into the run loop (→ RunLoopInput.signal). The CLI wires it to
+  // SIGINT/SIGTERM; the adapter closes MCP on abort. Tests drive it directly.
+  signal?: AbortSignal;
 };
 
 // Minimal slice of GitHubClient used during the take-over precondition path (branch
@@ -396,6 +402,7 @@ export async function runStart(
       branch: args.branch,
       usage,
       modelLimits,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
     });
   } catch (err) {
     return { code: 1, message: errMsg(err) };

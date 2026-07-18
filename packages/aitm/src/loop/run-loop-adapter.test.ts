@@ -1134,6 +1134,64 @@ test('deferred loading end-to-end: an over-threshold MCP server surfaces name-on
   await mcp.close();
 });
 
+// ---- MCP reap on abort (signal cancellation cleanup, slice 02) --------------
+
+// A pre-connected McpClientManager whose single fake client counts its close() calls, so a test can
+// assert the adapter reaps it. `close` is what kills the stdio child in production.
+function countingMcp(): { mcp: McpClientManager; closes: () => number } {
+  let clientClosed = 0;
+  const mcp = new McpClientManager({
+    servers: { local: { command: 'local-mcp' } },
+    createClient: (async () =>
+      ({
+        tools: async () => ({}),
+        close: async () => {
+          clientClosed += 1;
+        },
+      }) as never) as never,
+  });
+  return { mcp, closes: () => clientClosed };
+}
+
+test('runLoopAdapter: aborting the run closes MCP to reap stdio children', async () => {
+  const controller = new AbortController();
+  const { mcp, closes } = countingMcp();
+  await mcp.connectAll();
+  const { state } = makeState();
+
+  const result = await runLoopAdapter(
+    { ...makeInput(), signal: controller.signal },
+    seams({
+      state,
+      makeMcp: () => mcp,
+      // Abort mid-run — before the `finally` — so only the eager abort listener can close MCP.
+      planGroups: async () => {
+        controller.abort();
+        return { kind: 'ok', groups: [group('only')] };
+      },
+    }),
+  );
+
+  assert.equal(result.kind, 'success', 'run still completes after the abort fires');
+  assert.equal(closes(), 1, 'MCP client closed once when the run aborts');
+});
+
+test('runLoopAdapter: a completed run without abort never fires the reap listener', async () => {
+  const { mcp, closes } = countingMcp();
+  await mcp.connectAll();
+  const { state } = makeState();
+
+  const result = await runLoopAdapter(
+    { ...makeInput(), signal: new AbortController().signal },
+    seams({ state, makeMcp: () => mcp }),
+  );
+
+  assert.equal(result.kind, 'success');
+  // A seam-provided MCP is owned by the caller (the adapter never connected it), so the normal path
+  // leaves it open; only an abort reaps it. This guards the listener against firing unconditionally.
+  assert.equal(closes(), 0, 'no abort → seam-owned MCP left untouched');
+});
+
 // ---- recordStepDeltas: per-step transcript deltas from cumulative SDK events (issue #175) ----
 
 test('recordStepDeltas: records only the per-step delta from cumulative onStepFinish events (issue #175)', () => {

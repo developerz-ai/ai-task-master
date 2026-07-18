@@ -19,7 +19,8 @@ export type MainCtx = {
   runPlanner?: StartCtx['runPlanner'];
   runLoop?: StartCtx['runLoop'];
   runMergeFlow?: MergePrCtx['runMergeFlow'];
-  // Abort handle threaded into the merge-pr take-over loop → `{ kind: 'cancelled' }` (exit 2).
+  // Abort handle threaded into both flows: the merge-pr take-over loop → `{ kind: 'cancelled' }`
+  // (exit 2), and the start loop → eager MCP close so a force-exit can't orphan stdio children.
   // The entrypoint wires this to SIGINT/SIGTERM; tests drive it directly.
   signal?: AbortSignal;
 };
@@ -60,6 +61,7 @@ function buildStartCtx(ctx: MainCtx): StartCtx {
   if (ctx.authStatus !== undefined) out.authStatus = ctx.authStatus;
   if (ctx.runPlanner !== undefined) out.runPlanner = ctx.runPlanner;
   if (ctx.runLoop !== undefined) out.runLoop = ctx.runLoop;
+  if (ctx.signal !== undefined) out.signal = ctx.signal;
   return out;
 }
 

@@ -110,6 +110,33 @@ test('main: start with stubbed env routes to runStart and forwards exit code', a
   }
 });
 
+test('main: start threads ctx.signal into the run loop', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const cap = capture();
+  const controller = new AbortController();
+  try {
+    let received: AbortSignal | undefined;
+    const code = await main(['start', 'goal'], {
+      ...cap.ctx,
+      cwd: repo.path,
+      homeDir: home.path,
+      env: { OPENROUTER_API_KEY: FAKE_KEY },
+      authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      signal: controller.signal,
+      runLoop: async (input) => {
+        received = input.signal;
+        return { kind: 'success', outcomes: [] };
+      },
+    });
+    assert.equal(code, 0, cap.err.join(''));
+    assert.equal(received, controller.signal);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('main: start without OPENROUTER_API_KEY → exit 1, message on stderr', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();

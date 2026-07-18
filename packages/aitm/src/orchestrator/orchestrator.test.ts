@@ -9,15 +9,17 @@ import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
 import type { GithubToolInput, GithubToolOutput, ReviewerTools } from '../subagents/reviewer.ts';
-import type {
-  BashInput,
-  BashOutput,
-  ReadFileInput,
-  ReadFileOutput,
-  WorkerDelivery,
-  WorkerTools,
-  WriteFileInput,
-  WriteFileOutput,
+import {
+  type BashInput,
+  type BashOutput,
+  type FileManifest,
+  type ReadFileInput,
+  type ReadFileOutput,
+  WORKER_MAX_STEPS,
+  type WorkerDelivery,
+  type WorkerTools,
+  type WriteFileInput,
+  type WriteFileOutput,
 } from '../subagents/worker.ts';
 import {
   assertPrBodySections,
@@ -202,6 +204,57 @@ test('resolveMaxSteps: null / 0 / negative fall back to DEFAULT_MAX_STEPS', () =
   assert.equal(resolveMaxSteps(null), DEFAULT_MAX_STEPS);
   assert.equal(resolveMaxSteps(0), DEFAULT_MAX_STEPS);
   assert.equal(resolveMaxSteps(-3), DEFAULT_MAX_STEPS);
+});
+
+test("build: the Worker subagent tool keeps its own fixed step-budget regardless of the orchestrator's maxSteps (decoupled)", async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
+    draftCommitMessage: 'feat: x',
+  };
+  let sentSystem = '';
+  let i = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      if (sentSystem === '') sentSystem = JSON.stringify(opts.prompt);
+      if (i++ === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-manifest',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      return {
+        content: [{ type: 'text', text: 'created x' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  // An orchestrator maxSteps wildly different from WORKER_MAX_STEPS — if the two were coupled, the
+  // Worker's system prompt would report this number instead of its own fixed budget.
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: 3,
+    github: {} as never,
+  });
+  const agent = o.build(baseContext());
+  const workerExec = agent.tools.worker.execute;
+  if (typeof workerExec !== 'function') throw new Error('no worker execute');
+  await workerExec({}, { toolCallId: 'tc', messages: [] });
+  assert.match(sentSystem, new RegExp(`hard budget of ${WORKER_MAX_STEPS} tool steps`));
+  assert.doesNotMatch(sentSystem, /hard budget of 3 tool steps/);
 });
 
 test('Orchestrator is constructible', () => {

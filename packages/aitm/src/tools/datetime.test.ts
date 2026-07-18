@@ -20,20 +20,21 @@ test('datetimeTool inputSchema parses valid input', async () => {
   assert.deepEqual(result2, { timezone: 'America/New_York' });
 });
 
-test('datetimeTool execute returns datetime and timezone', async () => {
+test('datetimeTool execute returns datetime in ISO-8601 format and resolved timezone', async () => {
   const tool = datetimeTool();
   assert.ok(tool.execute);
-  // Test without timezone
+  // Test without timezone (should resolve to UTC)
   const result1 = await tool.execute({});
   assert.ok(result1.datetime);
   assert.equal(typeof result1.datetime, 'string');
-  assert.match(result1.datetime, /\d+\/\d+\/\d+/); // Basic date pattern MM/DD/YYYY
-  assert.equal(result1.timezone, '');
+  assert.match(result1.datetime, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/); // ISO-8601 format
+  assert.equal(typeof result1.timezone, 'string');
+  assert.ok(result1.timezone.length > 0, 'timezone should be a resolved IANA timezone');
   // Test with timezone
   const result2 = await tool.execute({ timezone: 'America/Los_Angeles' });
   assert.ok(result2.datetime);
   assert.equal(typeof result2.datetime, 'string');
-  assert.match(result2.datetime, /\d+\/\d+\/\d+/); // Basic date pattern
+  assert.match(result2.datetime, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/); // ISO-8601 format
   assert.equal(result2.timezone, 'America/Los_Angeles');
 });
 

@@ -178,19 +178,21 @@ export function guardDeferred(
 ): AnyTool {
   const baseExecute = base.execute;
   const baseToModelOutput = base.toModelOutput;
+  const inputSchema = base.inputSchema;
   return {
     ...base,
     execute: async (input: unknown, options: ToolCallOptions) => {
       if (!activated.has(name)) return guardResult(name);
       if (!baseExecute) return guardResult(name);
-      return baseExecute(input as never, options);
+      // Narrow via the tool's own input schema if available, else pass through
+      const narrowedInput =
+        inputSchema && 'parseAsync' in inputSchema ? await inputSchema.parseAsync(input) : input;
+      return baseExecute(narrowedInput, options);
     },
     toModelOutput: (options: { toolCallId: string; input: unknown; output: unknown }) => {
       if (isGuardResult(options.output)) return { type: 'text', value: options.output.error };
       if (baseToModelOutput) {
-        return (baseToModelOutput as (o: typeof options) => { type: 'text'; value: string })(
-          options,
-        );
+        return baseToModelOutput(options);
       }
       const out = options.output;
       return { type: 'text', value: typeof out === 'string' ? out : JSON.stringify(out) };

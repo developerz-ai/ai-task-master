@@ -1219,10 +1219,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       return { kind: 'blocked', reason: result.reason };
     },
     // addressing-reviews stage → run the Reviewer, then push its commits so the PR updates. The
-    // Reviewer commits code fixes locally (worker pattern). Fetch the remote branch first, then
-    // push with --force-with-lease to handle non-ff cases safely (if another process pushed to the
-    // PR branch while the Reviewer ran). Replied/wontfix-only rounds make no commit, so there's
-    // nothing to push.
+    // Reviewer commits code fixes locally (worker pattern) on top of the PR branch (which a prior
+    // CI-fix rebase may have rewritten, so the push needs --force-with-lease, never plain push).
+    // Do NOT fetch before the lease push: the lease's expected value is our remote-tracking ref, so
+    // fetching first would refresh it to the current remote tip and clobber any commit pushed to the
+    // PR branch while the Reviewer ran — exactly what the lease is meant to refuse. Replied/wontfix-
+    // only rounds make no commit, so there's nothing to push.
     addressReviews: async ({ pr, threads, checkout }) => {
       const result = await runReviewerThreads({ pr, threads, checkout });
       if (result.kind !== 'ok') {
@@ -1232,19 +1234,25 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         };
       }
       if (result.resolutions.some((r) => r.kind === 'fixed')) {
-        const cwd = { cwd: checkout.path };
-        const fetch = await runGit(['fetch', 'origin', checkout.branch], cwd);
-        if (fetch.exitCode !== 0) {
+        if (!input.resolved.allowForcePush) {
           return {
             kind: 'blocked',
-            reason: `git fetch origin ${checkout.branch} failed: unable to push review fixes`,
+            reason:
+              'review fixes are committed locally but force-push is disabled by policy ' +
+              '(allowForcePush=false); push the PR branch manually.',
           };
         }
-        const push = await runGit(['push', '--force-with-lease'], cwd);
-        if (push.exitCode !== 0) {
+        try {
+          // runGit throws (execa reject) on a non-zero exit — a failed lease (someone else pushed)
+          // or any push error surfaces here as a blocked reason rather than crashing the run.
+          await runGit(['push', '--force-with-lease'], {
+            cwd: checkout.path,
+            allowForcePush: input.resolved.allowForcePush,
+          });
+        } catch (err) {
           return {
             kind: 'blocked',
-            reason: `git push --force-with-lease failed: unable to push review fixes`,
+            reason: `unable to push review fixes: ${err instanceof Error ? err.message : String(err)}`,
           };
         }
       }

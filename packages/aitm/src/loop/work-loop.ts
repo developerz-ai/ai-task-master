@@ -606,6 +606,13 @@ export class WorkLoop {
         // pass, don't discard it: open a PR for what landed instead of stranding those commits on
         // the branch with no PR. Block outright only when nothing has been committed yet.
         if (deliveries.length > 0) {
+          // Surface the block even though the group proceeds to a partial PR — otherwise the failed
+          // task and its reason vanish (the PR ships the earlier tasks and the operator sees a green
+          // run with this task's work silently missing).
+          this.deps.progress?.(
+            `group ${group.id} task ${task.id}: → blocked, shipping partial PR (${result.reason})`,
+            this.stepFor(group.id, 'blocked', task),
+          );
           return { kind: 'ok', group: worked, delivery: mergeDeliveries(deliveries) };
         }
         return result;

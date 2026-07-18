@@ -302,6 +302,82 @@ test('buildSystemPrompt: styleDigest replaces agentConfig.contents as the style 
   assert.ok(sys.includes('prior PRs: 1'), 'rolling context must be present');
 });
 
+test('finalizeCommit sends buildSystemPrompt() via the system field, not duplicated into the user prompt', async () => {
+  let captured: unknown;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      captured = opts.prompt;
+      return {
+        content: [{ type: 'text', text: 'feat: message' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# repo style' },
+    rollingContext: 'prior PRs: 1',
+    maxSteps: null,
+    github: {} as never,
+    runCmd: async (file, args) =>
+      args[0] === 'rev-parse'
+        ? { stdout: 'deadbeef\n', stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: '', exitCode: 0 },
+  });
+  await o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt');
+
+  const messages = captured as ReadonlyArray<{ role: string; content: unknown }>;
+  const system = messages.find((m) => m.role === 'system');
+  const rest = JSON.stringify(messages.filter((m) => m.role !== 'system'));
+  assert.ok(system, 'a system message must be present');
+  assert.match(JSON.stringify(system), /# repo style/);
+  assert.match(JSON.stringify(system), new RegExp(ORCHESTRATOR_ROLE_PREFIX.split('\n')[1] ?? ''));
+  // The role prefix (part of buildSystemPrompt) must not be re-concatenated into the user turn.
+  assert.doesNotMatch(rest, /Only you spawn; leaves never spawn|## Role: Orchestrator/);
+});
+
+test('openPr sends buildSystemPrompt() via the system field, not duplicated into the user prompt', async () => {
+  let captured: unknown;
+  const composition = { title: 't', body: COMPLIANT_BODY };
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      captured = opts.prompt;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify(composition),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# repo style' },
+    rollingContext: 'prior PRs: 1',
+    maxSteps: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await o.openPr(baseGroup(), baseDelivery(), 'main');
+
+  const messages = captured as ReadonlyArray<{ role: string; content: unknown }>;
+  const system = messages.find((m) => m.role === 'system');
+  const rest = JSON.stringify(messages.filter((m) => m.role !== 'system'));
+  assert.ok(system, 'a system message must be present');
+  assert.match(JSON.stringify(system), /# repo style/);
+  assert.doesNotMatch(rest, /## Role: Orchestrator/);
+});
+
 test('build composes planner/worker/reviewer/done tools and resolves orchestrator model', () => {
   const model = new MockLanguageModelV3();
   const { provider, roles } = recordingProvider(model);

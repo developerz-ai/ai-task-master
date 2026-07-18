@@ -330,6 +330,7 @@ export class Orchestrator {
       () =>
         generateText({
           model: this.init.credentials.modelFor('orchestrator'),
+          system: this.buildSystemPrompt(),
           prompt: this.buildCommitPrompt(group, delivery),
           ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
         }),
@@ -339,10 +340,10 @@ export class Orchestrator {
     return result.text.trim();
   }
 
+  // Task-specific ask only — the shared system prompt (style/role/rolling-context) is sent once via
+  // the `system` field (see refineCommitMessage), not re-concatenated here per call.
   private buildCommitPrompt(group: PrGroup, delivery: WorkerDelivery): string {
     return [
-      this.buildSystemPrompt(),
-      '',
       'Rewrite the worker draft into a final commit message.',
       'Subject ≤72 chars, conventional-commit style. Body optional, one paragraph.',
       'Output ONLY the message — no labels, no quotes.',
@@ -366,6 +367,7 @@ export class Orchestrator {
       () =>
         generateText({
           model: this.init.credentials.modelFor('orchestrator'),
+          system: this.buildSystemPrompt(),
           prompt: this.buildPrPrompt(group, delivery),
           tools: {
             submit: tool({
@@ -395,10 +397,9 @@ export class Orchestrator {
     return out.value;
   }
 
+  // Task-specific ask only — the shared system prompt is sent once via `system` (see composePr).
   private buildPrPrompt(group: PrGroup, delivery: WorkerDelivery): string {
     return [
-      this.buildSystemPrompt(),
-      '',
       'Compose the pull-request title and body for this PR group, then call the submit tool with it.',
       '- title: conventional-commit style, ≤72 chars, summarizing the PR group goal below.',
       '  Do NOT copy a single commit message — the title describes the whole group, not one task.',

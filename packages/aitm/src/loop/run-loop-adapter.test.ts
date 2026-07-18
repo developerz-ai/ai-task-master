@@ -48,10 +48,12 @@ import {
   type PlanGroupsOutcome,
   persistRollingContext,
   planToPrGroups,
+  RAW_STYLE_MAX_CHARS,
   type RunLoopAdapterSeams,
   recordStepDeltas,
   reminderAgentSystemPrompt,
   resolvePlannerTools,
+  resolveStyleContents,
   resolveWorkerTools,
   runLoopAdapter,
   runStepContextLine,
@@ -633,18 +635,19 @@ test('localEditTools: a file changed on disk after its Read surfaces one file-ch
   }
 });
 
-test('harnessContextBlock: one envelope carrying the claudeMd and currentDate sections (issue #106)', () => {
-  const block = harnessContextBlock('# House style\n- single quotes only');
+test('harnessContextBlock: one envelope carrying the currentDate section, no style dup (issue #106/#231)', () => {
+  const block = harnessContextBlock();
   assert.equal((block.match(/<system-reminder>/g) ?? []).length, 1, 'single envelope');
-  assert.match(block, /# claudeMd\n# House style\n- single quotes only/);
   assert.match(block, /# currentDate\n\d{4}-\d{2}-\d{2}/);
   assert.match(block, /may or may not be relevant/);
+  // The style digest lives only in the system prompt (buildRolePrompt) — never repeated here.
+  assert.equal(block.includes('# claudeMd'), false, 'no duplicate style section');
   // No step supplied → no runProgress section (prompt-design.md §3).
   assert.equal(block.includes('# runProgress'), false, 'no progress section without a step');
 });
 
 test('harnessContextBlock: a step adds a runProgress section with the phase + N/M line (§3)', () => {
-  const block = harnessContextBlock('# style', {
+  const block = harnessContextBlock({
     phase: 'working',
     unit: 'group',
     index: 2,
@@ -652,6 +655,33 @@ test('harnessContextBlock: a step adds a runProgress section with the phase + N/
   });
   assert.equal((block.match(/<system-reminder>/g) ?? []).length, 1, 'still one envelope');
   assert.match(block, /# runProgress\nStep 2 of 5 — working/);
+});
+
+test('resolveStyleContents: distilled digest wins and is left uncapped (already bounded)', () => {
+  const digest = 'd'.repeat(RAW_STYLE_MAX_CHARS + 500);
+  const style = resolveStyleContents({
+    styleDigest: digest,
+    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: 'ignored raw file', sources: [] },
+  });
+  assert.equal(style, digest, 'the digest is trusted as bounded — not re-capped');
+});
+
+test('resolveStyleContents: unbounded raw fallback is capped with a signposted marker', () => {
+  const raw = 'r'.repeat(RAW_STYLE_MAX_CHARS + 2000);
+  const style = resolveStyleContents({
+    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: raw, sources: [] },
+  });
+  assert.ok(style.length <= RAW_STYLE_MAX_CHARS, 'never exceeds the cap');
+  assert.ok(style.endsWith('[style truncated]'), 'truncation is signposted to the model');
+  assert.ok(style.startsWith('rrr'), 'the head — where house-style rules lead — is kept');
+});
+
+test('resolveStyleContents: raw fallback under the cap is returned verbatim', () => {
+  const raw = '# Coding Style\n- single quotes only';
+  const style = resolveStyleContents({
+    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: raw, sources: [] },
+  });
+  assert.equal(style, raw, 'short style files are untouched');
 });
 
 test('runStepContextLine: counter → "Step N of M — phase"; phase-only → "Phase: x"; empty → ""', () => {

@@ -27,10 +27,27 @@ export type ReminderProvider = (ctx: {
 // `currentDate`); any `Contents of {path}:` framing goes inside `body`.
 export type ContextSection = { label: string; body: string };
 
-// Wrap text in exactly one `<system-reminder>` envelope. Text is embedded verbatim — no escaping,
-// trimming, or extra decoration.
+// Wrap text in exactly one `<system-reminder>` envelope. Any literal `<system-reminder>` /
+// `</system-reminder>` tag inside `text` is defused to an entity first (see defuseReminderTags), so
+// untrusted content — a target repo's CLAUDE.md, a pasted log, a review comment — can neither close
+// the envelope early nor spoof a nested one. All other characters are embedded verbatim.
 export function wrapReminder(text: string): string {
-  return `<system-reminder>\n${text}\n</system-reminder>`;
+  return `<system-reminder>\n${defuseReminderTags(text)}\n</system-reminder>`;
+}
+
+// A `<system-reminder>` or `</system-reminder>` tag, tolerating internal whitespace and any case —
+// the shapes a hostile payload might use to forge the boundary. The `g` flag defuses every match;
+// the capture keeps the optional closing slash so both opener and closer round-trip.
+const REMINDER_TAG_PATTERN = /<\s*(\/?)\s*system-reminder\s*>/gi;
+
+// Escape the angle brackets of every envelope tag in `text` so the only real `<system-reminder>`
+// boundary in the render is the one wrapReminder emits. Mirrors slots.ts's defuseEnvelopeTags; the
+// tag name is a fixed literal, never attacker-controlled, so the pattern is safe.
+function defuseReminderTags(text: string): string {
+  return text.replace(
+    REMINDER_TAG_PATTERN,
+    (_match, slash: string) => `&lt;${slash}system-reminder&gt;`,
+  );
 }
 
 // Decorate a tool so harness reminders ride on its model-visible result. `execute` and the typed

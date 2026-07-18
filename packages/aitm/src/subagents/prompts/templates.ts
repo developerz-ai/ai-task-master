@@ -94,6 +94,34 @@ function rolePrompt(slots: RolePromptSlots): string {
   return renderPromptBlocks(blocks);
 }
 
+// Editor-leaf system prompt: role guidance + step-budget, style, and `<env>` only — no contract
+// blocks, no self-id, no memory index. Mirrors the `explore` leaf's contract-free pattern (a leaf
+// can't spawn/delegate, so the harness/communication/autonomy governance text it exists to constrain
+// doesn't apply), but unlike `explore` the editor writes code, so it keeps the style digest and the
+// `<env>` block a code-writing leaf still needs. Fans out once per manifest file, so trimming the
+// per-call frame here compounds across the whole fanout.
+export type EditorPromptSlots = {
+  // EDITOR_SYSTEM_PREFIX. Trusted, verbatim.
+  readonly roleGuidance: string;
+  // The editor's step budget; interpolated into the baked-in step-budget reminder.
+  readonly maxSteps: number;
+  // Coding-style digest, already capped by the caller. Empty → the style block is omitted.
+  readonly style: string;
+  // The pre-rendered `<env>` block.
+  readonly env: string;
+};
+
+function editorPrompt(slots: EditorPromptSlots): string {
+  return renderPromptBlocks([
+    {
+      kind: 'sessionGuidance',
+      text: `${slots.roleGuidance}\n\n${stepBudgetLine(slots.maxSteps)}`,
+    },
+    { kind: 'style', text: slots.style },
+    { kind: 'env', text: slots.env },
+  ]);
+}
+
 // Orchestrator top-level system prompt: the coding-style digest, the orchestrator role guidance, and
 // the rolling summary of prior PRs. All three are harness-authored (aitm's own governance prose and its
 // own run summary — nothing external is concatenated here), so all three are trusted instruction slots.
@@ -123,6 +151,7 @@ export type PromptSlots = {
   'review-thread': ReviewThreadSlots;
   'specialist-guidance': SpecialistGuidanceSlots;
   'role-prompt': RolePromptSlots;
+  'editor-prompt': EditorPromptSlots;
   'orchestrator-system': OrchestratorSystemSlots;
 };
 
@@ -132,6 +161,7 @@ const TEMPLATES: { [N in PromptName]: (slots: PromptSlots[N]) => string } = {
   'review-thread': reviewThread,
   'specialist-guidance': specialistGuidance,
   'role-prompt': rolePrompt,
+  'editor-prompt': editorPrompt,
   'orchestrator-system': orchestratorSystem,
 };
 

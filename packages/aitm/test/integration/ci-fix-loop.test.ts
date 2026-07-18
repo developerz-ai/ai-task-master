@@ -21,9 +21,22 @@
 // Test 4 — cancel → exit 2:
 //   Pre-aborted AbortSignal. runTakeOverFlow bails on iteration 0 → { kind: 'cancelled' }
 //   → runMergeFlow returns { kind: 'cancelled' } → mapResultToExit → exit 2.
+//
+// Test 5 — WorkLoop/autoMerge, real remote: fix lands on origin before the PR merges:
+//   Real bare `origin` remote. runCiFix pushes a real commit to it; mergePr's stub captures the
+//   remote branch's HEAD sha at the moment it fires. Asserts that sha already equals the local
+//   fix commit — the push happened before, not after, the merge (docs/plans/.../03-*.md).
+//
+// Test 6 — WorkLoop/autoMerge: unfixable PR never merges red, stays blocked across a resumed WorkLoop:
+//   waitForChecks always fails; runCiFix always lands a (real, useless) commit. With
+//   maxCiFixAttempts=2 the group blocks after exactly 2 fix passes — mergePr is never called. A
+//   second, freshly-constructed WorkLoop against the SAME on-disk StateStore (after the production
+//   normalizeResumeStatus pass) must not spend any further budget or merge — the human-needed block
+//   survives the "process restart".
 
 import assert from 'node:assert/strict';
-import { readdir } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { execa } from 'execa';
@@ -33,13 +46,25 @@ import { MergeConflict } from '../../src/github/errors.ts';
 import type { CiResult, RunCmd } from '../../src/github/github-client.ts';
 import { defaultRunCmd } from '../../src/github/github-client.ts';
 import type { ReviewThread } from '../../src/github/schema.ts';
+import { normalizeResumeStatus } from '../../src/loop/resume-normalize.ts';
 import { localEditTools } from '../../src/loop/run-loop-adapter.ts';
 import type { TakeOverResult } from '../../src/loop/take-over-flow.ts';
 import { runTakeOverFlow } from '../../src/loop/take-over-flow.ts';
-import type { WorkLoopResult } from '../../src/loop/work-loop.ts';
+import type {
+  WorkLoopGithub,
+  WorkLoopOrchestrator,
+  WorkLoopResult,
+  WorkLoopState,
+} from '../../src/loop/work-loop.ts';
+import { WorkLoop } from '../../src/loop/work-loop.ts';
+import { PlanGraph } from '../../src/plan/plan-graph.ts';
 import { PrContextStore } from '../../src/state/pr-context-store.ts';
+import type { PrGroup, RunState } from '../../src/state/schema.ts';
+import { RunStateSchema } from '../../src/state/schema.ts';
+import { StateStore } from '../../src/state/state-store.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
 import { githubThreadTool } from '../../src/tools/github-thread-tool.ts';
+import { InPlaceCheckout } from '../../src/workspace/in-place-checkout.ts';
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -386,6 +411,383 @@ test('ci-fix-loop: pre-aborted AbortSignal yields exit 2 (cancelled)', async () 
     );
 
     assert.equal(result.code, 2, `expected exit 2 for cancel, got ${result.code}`);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+// ── Tests 5-6: WorkLoop/autoMerge, real git + real StateStore ───────────────────────────────
+//
+// Tests 1-4 drive runTakeOverFlow (the `merge-pr` take-over loop). These drive WorkLoop directly
+// (the `aitm start --auto-merge` path — loop/work-loop.ts's autoMergeFlow / driveStages), the same
+// pattern as concurrent-groups.test.ts and resume-flow.test.ts: real git operations, a real
+// StateStore, GitHub/orchestrator ports stubbed structurally (no real gh, no real AI SDK call).
+
+function baseWorkLoopState(): RunState {
+  return RunStateSchema.parse({
+    status: 'working',
+    prGroups: [],
+    currentGroupIndex: 0,
+    currentTaskIndex: 0,
+    sessionCount: 0,
+    currentPr: null,
+    runId: '01HFAKERUNID0000000000002',
+    provider: 'openrouter',
+    model: 'anthropic/claude-opus-4',
+    agentConfigFile: 'CLAUDE.md',
+    createdAt: '2026-07-17T00:00:00.000Z',
+    updatedAt: '2026-07-17T00:00:00.000Z',
+    options: {
+      autoMerge: true,
+      maxPrs: 5,
+      maxSessions: null,
+      mergeMethod: 'squash',
+      stylePath: null,
+      concurrency: 1,
+    },
+  });
+}
+
+function ciFixGroup(id: string, branch: string): PrGroup {
+  return {
+    id,
+    title: `work for ${id}`,
+    tasks: [{ id: `${id}-t1`, text: `implement ${id}`, complexity: 'normal', done: false }],
+    dependsOn: [],
+    branch,
+    pr: null,
+    status: 'pending',
+    stage: 'pending',
+  };
+}
+
+/** Bare `origin` remote seeded with the repo's default branch — for real-push assertions. */
+async function withOrigin(
+  repoPath: string,
+  defaultBranch: string,
+): Promise<{ remotePath: string; cleanup: () => Promise<void> }> {
+  const remotePath = await mkdtemp(join(tmpdir(), 'aitm-origin-'));
+  await execa('git', ['init', '--bare', `--initial-branch=${defaultBranch}`, remotePath]);
+  await execa('git', ['remote', 'add', 'origin', remotePath], { cwd: repoPath });
+  await execa('git', ['push', 'origin', defaultBranch], { cwd: repoPath });
+  return { remotePath, cleanup: () => rm(remotePath, { recursive: true, force: true }) };
+}
+
+/** HEAD sha the bare remote holds for `branch`, or null if the branch doesn't exist there yet. */
+async function remoteHeadSha(remotePath: string, branch: string): Promise<string | null> {
+  try {
+    const { stdout } = await execa('git', ['rev-parse', branch], { cwd: remotePath });
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+async function localHeadSha(repoPath: string): Promise<string> {
+  const { stdout } = await execa('git', ['rev-parse', 'HEAD'], { cwd: repoPath });
+  return stdout.trim();
+}
+
+test('ci-fix-loop (WorkLoop/autoMerge): CI fix reaches the real remote before the PR merges', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  let origin: { remotePath: string; cleanup: () => Promise<void> } | undefined;
+  try {
+    await execa('git', ['add', 'CLAUDE.md'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'initial commit'], { cwd: repo.path });
+
+    const { stdout: rawBranch } = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: repo.path,
+    });
+    const defaultBranch = rawBranch.trim();
+    origin = await withOrigin(repo.path, defaultBranch);
+
+    const stateDir = join(repo.path, '.ai-task-master');
+    const stateStore = new StateStore(stateDir);
+    const groupBranch = 'aitm/ci-fix-remote';
+    const grp = ciFixGroup('ci-fix-remote', groupBranch);
+    await stateStore.init({ ...baseWorkLoopState(), prGroups: [grp] });
+
+    let liveGroups: readonly PrGroup[] = [grp];
+    const graph = {
+      ready: () => new PlanGraph([...liveGroups]).ready(),
+      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+    };
+    const state: WorkLoopState = {
+      update: async (mutator) => {
+        const next = await stateStore.update(mutator);
+        liveGroups = next.prGroups;
+        return next;
+      },
+    };
+    const home = new InPlaceCheckout(repo.path);
+
+    let waitForChecksCalls = 0;
+    let runCiFixCalls = 0;
+    const mergeCalls: number[] = [];
+    // Remote branch HEAD sha captured at the instant each mergePr fires — proves the fix push
+    // happened BEFORE the merge, not after.
+    const remoteShaAtMerge: (string | null)[] = [];
+
+    const orchestrator: WorkLoopOrchestrator = {
+      runWorker: async ({ checkout }) => {
+        await writeFile(join(checkout.path, 'feature.ts'), 'export const feature = true;\n');
+        await execa('git', ['add', 'feature.ts'], { cwd: checkout.path });
+        await execa('git', ['commit', '-m', 'feat: add feature'], { cwd: checkout.path });
+        return {
+          kind: 'ok',
+          delivery: {
+            branch: checkout.branch,
+            draftCommitMessage: 'feat: add feature',
+            changes: [{ path: 'feature.ts', kind: 'create', summary: 'adds feature' }],
+            progressEntries: ['- added feature.ts'],
+          },
+        };
+      },
+      finalizeCommit: async (_group, _delivery, checkoutPath) => {
+        const { stdout } = await execa('git', ['rev-parse', 'HEAD'], { cwd: checkoutPath });
+        return stdout.trim();
+      },
+      // Mirrors production (run-loop-adapter.ts openPr): push the branch to origin before
+      // "opening" the PR — gh can't open a PR for a branch the remote doesn't have yet.
+      openPr: async (_group, delivery, baseBranch) => {
+        await execa('git', ['push', '-u', 'origin', delivery.branch], { cwd: repo.path });
+        return {
+          number: 1,
+          state: 'OPEN',
+          url: 'https://github.com/example/repo/pull/1',
+          headRefName: delivery.branch,
+          baseRefName: baseBranch,
+        };
+      },
+      // Mirrors the shared ci-fix session (loop/ci-fix.ts runFixSession): a real fix commit,
+      // rebased-and-pushed to the remote as part of this call — before WorkLoop re-polls CI.
+      runCiFix: async ({ checkout }) => {
+        runCiFixCalls++;
+        await writeFile(join(checkout.path, 'fix.ts'), 'export const fixed = true;\n');
+        await execa('git', ['add', 'fix.ts'], { cwd: checkout.path });
+        await execa('git', ['commit', '-m', 'fix: lint error'], { cwd: checkout.path });
+        await execa('git', ['push', 'origin', checkout.branch], { cwd: checkout.path });
+        return { kind: 'ok' };
+      },
+      addressReviews: async () => ({ kind: 'ok' }),
+    };
+
+    const github: WorkLoopGithub = {
+      defaultBranch: async () => defaultBranch,
+      waitForChecks: async () => {
+        waitForChecksCalls++;
+        // The first poll (right after pr-open) fails; every poll after the fix lands succeeds.
+        return waitForChecksCalls === 1
+          ? {
+              state: 'failure' as const,
+              failedChecks: [{ name: 'test', status: 'failure' as const }],
+            }
+          : { state: 'success' as const, failedChecks: [] };
+      },
+      listUnresolvedThreads: async () => [],
+      mergePr: async (pr) => {
+        mergeCalls.push(pr);
+        // biome-ignore lint/style/noNonNullAssertion: origin is assigned above before the loop runs
+        remoteShaAtMerge.push(await remoteHeadSha(origin!.remotePath, groupBranch));
+      },
+    };
+
+    const loop = new WorkLoop({
+      orchestrator,
+      github,
+      state,
+      home,
+      graph,
+      concurrency: 1,
+      autoMerge: true,
+      maxSessions: null,
+      sleep: async () => {}, // skip the real post-CI review grace
+    });
+
+    const result = await loop.run();
+    assert.equal(result.kind, 'success', `expected success, got: ${JSON.stringify(result)}`);
+    assert.equal(runCiFixCalls, 1, 'the fix session runs exactly once on the red PR');
+    assert.deepEqual(mergeCalls, [1], 'PR merges exactly once, after CI goes green');
+
+    const localSha = await localHeadSha(repo.path);
+    assert.equal(
+      remoteShaAtMerge[0],
+      localSha,
+      'the remote branch must already carry the fix commit at the moment mergePr fires',
+    );
+
+    const remoteFix = await execa('git', ['show', `${groupBranch}:fix.ts`], {
+      cwd: origin.remotePath,
+    });
+    assert.ok(
+      remoteFix.stdout.includes('fixed'),
+      `fix.ts must be present on the remote branch, got: ${remoteFix.stdout}`,
+    );
+  } finally {
+    await origin?.cleanup();
+    await repo.cleanup();
+  }
+});
+
+test('ci-fix-loop (WorkLoop/autoMerge): an unfixable red PR never merges and stays durably blocked across a resumed WorkLoop', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    await execa('git', ['add', 'CLAUDE.md'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'initial commit'], { cwd: repo.path });
+
+    const { stdout: rawBranch } = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: repo.path,
+    });
+    const defaultBranch = rawBranch.trim();
+
+    const stateDir = join(repo.path, '.ai-task-master');
+    const stateStore = new StateStore(stateDir);
+    const groupBranch = 'aitm/unfixable';
+    const grp = ciFixGroup('unfixable', groupBranch);
+    await stateStore.init({ ...baseWorkLoopState(), prGroups: [grp] });
+
+    const home = new InPlaceCheckout(repo.path);
+
+    let runCiFixCalls = 0;
+    const mergeCalls: number[] = [];
+
+    // Shared across both WorkLoop constructions below: the fix session lands a real commit every
+    // call, but CI never turns green — an unfixable failure (flaky infra, missing secret, ...).
+    const orchestrator: WorkLoopOrchestrator = {
+      runWorker: async ({ checkout }) => {
+        await writeFile(join(checkout.path, 'feature.ts'), 'export const feature = true;\n');
+        await execa('git', ['add', 'feature.ts'], { cwd: checkout.path });
+        await execa('git', ['commit', '-m', 'feat: add feature'], { cwd: checkout.path });
+        return {
+          kind: 'ok',
+          delivery: {
+            branch: checkout.branch,
+            draftCommitMessage: 'feat: add feature',
+            changes: [{ path: 'feature.ts', kind: 'create', summary: 'adds feature' }],
+            progressEntries: ['- added feature.ts'],
+          },
+        };
+      },
+      finalizeCommit: async (_group, _delivery, checkoutPath) => {
+        const { stdout } = await execa('git', ['rev-parse', 'HEAD'], { cwd: checkoutPath });
+        return stdout.trim();
+      },
+      openPr: async (_group, delivery, baseBranch) => ({
+        number: 1,
+        state: 'OPEN',
+        url: 'https://github.com/example/repo/pull/1',
+        headRefName: delivery.branch,
+        baseRefName: baseBranch,
+      }),
+      runCiFix: async ({ checkout }) => {
+        runCiFixCalls++;
+        const file = `attempt-${runCiFixCalls}.ts`;
+        await writeFile(join(checkout.path, file), 'export const x = 1;\n');
+        await execa('git', ['add', file], { cwd: checkout.path });
+        await execa('git', ['commit', '-m', `fix: attempt ${runCiFixCalls}`], {
+          cwd: checkout.path,
+        });
+        return { kind: 'ok' }; // a commit lands, but it never actually fixes the flake below
+      },
+      addressReviews: async () => ({ kind: 'ok' }),
+    };
+
+    const github: WorkLoopGithub = {
+      defaultBranch: async () => defaultBranch,
+      waitForChecks: async () => ({
+        state: 'failure' as const,
+        failedChecks: [{ name: 'flaky', status: 'failure' as const }],
+      }),
+      listUnresolvedThreads: async () => [],
+      mergePr: async (pr) => {
+        mergeCalls.push(pr);
+      },
+    };
+
+    // ── First run: burn the CI-fix budget, block for a human, never merge ──────────────────
+    let liveGroups: readonly PrGroup[] = [grp];
+    const graph1 = {
+      ready: () => new PlanGraph([...liveGroups]).ready(),
+      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+    };
+    const state1: WorkLoopState = {
+      update: async (mutator) => {
+        const next = await stateStore.update(mutator);
+        liveGroups = next.prGroups;
+        return next;
+      },
+    };
+    const loop1 = new WorkLoop({
+      orchestrator,
+      github,
+      state: state1,
+      home,
+      graph: graph1,
+      concurrency: 1,
+      autoMerge: true,
+      maxSessions: null,
+      maxCiFixAttempts: 2,
+      sleep: async () => {},
+    });
+
+    const result1 = await loop1.run();
+    assert.equal(result1.kind, 'blocked', `expected blocked, got: ${JSON.stringify(result1)}`);
+    assert.equal(runCiFixCalls, 2, 'the fix session runs exactly maxCiFixAttempts times');
+    assert.deepEqual(mergeCalls, [], 'a still-red PR must never be merged');
+
+    const afterFirstRun = await stateStore.read();
+    const persisted1 = afterFirstRun.prGroups.find((g) => g.id === 'unfixable');
+    assert.ok(persisted1, 'group must exist in persisted state');
+    assert.equal(persisted1?.status, 'blocked');
+    assert.equal(persisted1?.humanNeeded, true, 'budget exhaustion must flag human-needed');
+    assert.equal(persisted1?.ciFixAttempts, 3);
+
+    // ── Simulate a process restart: apply the SAME resume normalization runStart applies ────
+    await stateStore.update((s) => ({ ...s, prGroups: normalizeResumeStatus(s.prGroups) }));
+
+    // ── Second run: a FRESH WorkLoop against the same on-disk state must not re-attempt ─────
+    const afterNormalize = await stateStore.read();
+    let liveGroups2: readonly PrGroup[] = afterNormalize.prGroups;
+    const graph2 = {
+      ready: () => new PlanGraph([...liveGroups2]).ready(),
+      isComplete: () => new PlanGraph([...liveGroups2]).isComplete(),
+    };
+    assert.equal(graph2.ready().length, 0, 'a human-needed group must never be rescheduled');
+    assert.equal(graph2.isComplete(), true, 'the blocked group is terminal for the graph');
+
+    const state2: WorkLoopState = {
+      update: async (mutator) => {
+        const next = await stateStore.update(mutator);
+        liveGroups2 = next.prGroups;
+        return next;
+      },
+    };
+    const loop2 = new WorkLoop({
+      orchestrator,
+      github,
+      state: state2,
+      home,
+      graph: graph2,
+      concurrency: 1,
+      autoMerge: true,
+      maxSessions: null,
+      maxCiFixAttempts: 2,
+      sleep: async () => {},
+    });
+
+    const result2 = await loop2.run();
+    // Nothing is ready to schedule, so this fresh instance's own outcome list stays empty — that
+    // reads as a no-op 'success', not a claim the group itself succeeded. The group's real status
+    // is asserted from the persisted StateStore below, which is what an operator actually inspects.
+    assert.equal(result2.kind, 'success', `expected a no-op run, got: ${JSON.stringify(result2)}`);
+    assert.equal(runCiFixCalls, 2, 'resume must not spend any further CI-fix budget');
+    assert.deepEqual(mergeCalls, [], 'resume must never merge the still-blocked PR');
+
+    const afterSecondRun = await stateStore.read();
+    const persisted2 = afterSecondRun.prGroups.find((g) => g.id === 'unfixable');
+    assert.equal(persisted2?.status, 'blocked', 'group must remain durably blocked');
+    assert.equal(persisted2?.humanNeeded, true);
+    assert.equal(persisted2?.ciFixAttempts, 3, 'the durable counter must not advance further');
   } finally {
     await repo.cleanup();
   }

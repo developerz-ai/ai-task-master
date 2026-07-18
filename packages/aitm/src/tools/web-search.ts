@@ -42,18 +42,19 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_RESPONSE_CHARS = 1_000_000; // 1MB limit to avoid buffering huge responses
 
 // A small, sufficient HTML-entity decoder for the text DuckDuckGo emits in titles/snippets — named
-// entities plus decimal/hex numeric refs. `&amp;` is decoded first so a following pass never
-// double-decodes an already-literal `&`.
+// entities plus decimal/hex numeric refs. `&amp;` is decoded LAST so an escaped entity like
+// `&amp;lt;` decodes once to the literal `&lt;`, not twice to `<` (decoding `&amp;` first would let
+// the `&lt;` pass then consume it).
 function decodeEntities(s: string): string {
   return s
-    .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&nbsp;/g, ' ')
     .replace(/&#x([0-9a-f]+);/gi, (_, h: string) => codePoint(parseInt(h, 16)))
     .replace(/&#(\d+);/g, (_, d: string) => codePoint(Number(d)))
-    .replace(/&#0*39;/g, "'");
+    .replace(/&#0*39;/g, "'")
+    .replace(/&amp;/g, '&');
 }
 
 function codePoint(n: number): string {

@@ -97,6 +97,37 @@ test('PlanGraph.isComplete is true only when all groups merged or blocked', () =
   assert.equal(new PlanGraph([group('a', 'merged'), group('b', 'pending')]).isComplete(), false);
 });
 
+test('PlanGraph.isComplete: transitively-blocked pending group → terminal (true)', () => {
+  // b can never run — its only dep is blocked — so an all-terminal plan is complete, not hung.
+  const a = group('a', 'blocked');
+  const b = group('b', 'pending', ['a']);
+  assert.equal(new PlanGraph([a, b]).isComplete(), true);
+});
+
+test('PlanGraph.isComplete: block propagates down a dependency chain → true', () => {
+  const a = group('a', 'blocked');
+  const b = group('b', 'pending', ['a']);
+  const c = group('c', 'pending', ['b']);
+  const g = new PlanGraph([a, b, c]);
+  assert.equal(g.isComplete(), true);
+  assert.deepEqual(g.ready(), []); // and nothing downstream is schedulable
+});
+
+test('PlanGraph.isComplete: diamond with one blocked leg → true', () => {
+  const root = group('root', 'merged');
+  const left = group('left', 'blocked');
+  const right = group('right', 'merged');
+  const join = group('join', 'pending', ['left', 'right']);
+  assert.equal(new PlanGraph([root, left, right, join]).isComplete(), true);
+});
+
+test('PlanGraph.isComplete: pending behind an in-progress dep → false', () => {
+  // The dep may still merge and unblock b, so the plan is not yet terminal.
+  const a = group('a', 'in-progress');
+  const b = group('b', 'pending', ['a']);
+  assert.equal(new PlanGraph([a, b]).isComplete(), false);
+});
+
 test('PlanGraph.validate throws on dangling dep', () => {
   assert.throws(
     () => PlanGraph.validate([group('a', 'pending', ['ghost'])]),

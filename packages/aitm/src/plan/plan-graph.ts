@@ -34,9 +34,36 @@ export class PlanGraph {
     return this.index.get(id);
   }
 
-  // True when every group is in a terminal state (merged or blocked).
+  // True when every group is terminal: 'merged', 'blocked', or transitively blocked. A 'pending'
+  // group whose dependency chain hits a dead ancestor can never satisfy ready()'s all-deps-merged
+  // rule, so counting it as terminal stops the loop spinning forever on work that can't progress.
   isComplete(): boolean {
-    return this.groups.every((g) => g.status === 'merged' || g.status === 'blocked');
+    const dead = this.deadGroupIds();
+    return this.groups.every((g) => g.status === 'merged' || dead.has(g.id));
+  }
+
+  // Ids of groups that can never reach 'merged': a 'blocked' group is terminal (its PR won't land —
+  // 'blocked' is the sole terminal non-merged status), and a 'pending' group with a transitively
+  // dead dependency can never become ready(). Memoized DFS; validate() rules out cycles + dangling
+  // deps at construction, so the recursion terminates and every dep resolves in the index.
+  private deadGroupIds(): Set<string> {
+    const memo = new Map<string, boolean>();
+    const isDead = (id: string): boolean => {
+      const cached = memo.get(id);
+      if (cached !== undefined) return cached;
+      const g = this.index.get(id);
+      const dead =
+        g !== undefined &&
+        (g.status === 'blocked' ||
+          (g.status === 'pending' && g.dependsOn.some((dep) => isDead(dep))));
+      memo.set(id, dead);
+      return dead;
+    };
+    const result = new Set<string>();
+    for (const g of this.groups) {
+      if (isDead(g.id)) result.add(g.id);
+    }
+    return result;
   }
 
   // Static: detect cycles + dangling deps at plan-acceptance time.

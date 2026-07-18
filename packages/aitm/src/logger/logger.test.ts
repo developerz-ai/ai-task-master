@@ -152,6 +152,32 @@ test('Logger emits applied redaction in JSON output', () => {
   assert.equal(record.user, 'sebi');
 });
 
+test('Logger scrubs secret-shaped substrings embedded in msg', () => {
+  const err = captureStream(process.stderr);
+  try {
+    const log = new Logger('info', 'run-secret-msg');
+    log.error('request failed: Authorization: Bearer sk-abcdef1234567890');
+  } finally {
+    err.restore();
+  }
+  const [record] = parseLines(err.lines);
+  assert.ok(record);
+  assert.equal(record.msg, 'request failed: Authorization: Bearer [REDACTED]');
+});
+
+test('Logger scrubs secret-shaped substrings embedded in field values (not just key-name matches)', () => {
+  const err = captureStream(process.stderr);
+  try {
+    const log = new Logger('info', 'run-secret-field');
+    log.info('cloning', { url: 'https://user:hunter2@github.com/org/repo.git' });
+  } finally {
+    err.restore();
+  }
+  const [record] = parseLines(err.lines);
+  assert.ok(record);
+  assert.equal(record.url, 'https://[REDACTED]github.com/org/repo.git');
+});
+
 test('Logger writes to logFile, creating parent dir lazily', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'aitm-logger-'));
   const logFile = join(dir, 'logs', 'run.log');

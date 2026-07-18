@@ -3,6 +3,9 @@
 // (no-DSN) path, and runtimes where it isn't installed (e.g. Deno), never load it and pay nothing.
 // Every failure degrades to a no-op: observability must never break a run.
 
+import type { EventHint, ErrorEvent as SentryEvent } from '@sentry/node';
+import { scrubSecrets } from '../logger/secret-scrubber.ts';
+
 export type ErrorReporter = {
   // Record an error for delivery. A no-op when reporting is disabled.
   captureException(error: unknown): void;
@@ -20,6 +23,30 @@ const NOOP_REPORTER: ErrorReporter = {
 export function dsnFromEnv(env: Record<string, string | undefined>): string | undefined {
   const dsn = env.AITM_SENTRY_DSN ?? env.SENTRY_DSN;
   return dsn !== undefined && dsn.trim() !== '' ? dsn : undefined;
+}
+
+// Scrub secret-shaped substrings (tokens, bearer/basic headers, token-bearing URLs) out of an
+// event before it leaves the process. Key-name redaction (Logger.redact) catches structured
+// fields; this catches secrets embedded in free text — error messages, stack frames, request
+// URLs — which GlitchTip events carry plenty of. Exported for unit testing.
+export function scrubEvent(event: SentryEvent): SentryEvent {
+  if (event.message !== undefined) {
+    event.message = scrubSecrets(event.message);
+  }
+  for (const exception of event.exception?.values ?? []) {
+    if (exception.value !== undefined) {
+      exception.value = scrubSecrets(exception.value);
+    }
+  }
+  if (event.request?.url !== undefined) {
+    event.request.url = scrubSecrets(event.request.url);
+  }
+  for (const breadcrumb of event.breadcrumbs ?? []) {
+    if (breadcrumb.message !== undefined) {
+      breadcrumb.message = scrubSecrets(breadcrumb.message);
+    }
+  }
+  return event;
 }
 
 // Initialise error reporting. Returns a no-op reporter when no DSN is set or the SDK can't be
@@ -40,6 +67,7 @@ export async function initErrorReporter(
         : {}),
       // aitm is a short-lived CLI, not a service — report errors only, no performance tracing.
       tracesSampleRate: 0,
+      beforeSend: (event: SentryEvent, _hint: EventHint) => scrubEvent(event),
     });
     return {
       // Swallow any SDK error here so reporting can never affect the run — including its exit code:

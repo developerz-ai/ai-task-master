@@ -10,6 +10,7 @@ import {
   DEFAULT_PR_LABEL,
   defaultSleep,
   GitHubClient,
+  isInstantSleepEnabled,
   MAX_REVIEW_THREAD_PAGES,
   type RunCmd,
   type RunCmdResult,
@@ -925,11 +926,12 @@ test('listUnresolvedThreads breaks on non-advancing cursor in thread comments', 
   assert.equal(calls.length, 4, 'should detect non-advancing cursor after fetching page 2');
 });
 
-// defaultSleep short-circuits to a microtask under a test runner (NODE_TEST_CONTEXT is set by
-// `node --test`), so un-injected grace/poll waits don't burn real minutes in CI. Production, with
-// no such env, keeps the real timer. A 1-hour ask must return effectively instantly here.
-test('defaultSleep: instant under the test runner (NODE_TEST_CONTEXT set)', async () => {
-  assert.ok(process.env.NODE_TEST_CONTEXT !== undefined, 'precondition: running under node --test');
+// defaultSleep short-circuits to a microtask under a test runner (NODE_TEST_CONTEXT under
+// `node --test`, NODE_ENV=test under `bun test`), so un-injected grace/poll waits don't burn real
+// minutes in CI. Production, with neither signal, keeps the real timer. A 1-hour ask must return
+// effectively instantly here, under either runtime.
+test('defaultSleep: instant under the test runner', async () => {
+  assert.ok(isInstantSleepEnabled(), 'precondition: running under a detected test runner');
   const start = Date.now();
   await defaultSleep(60 * 60_000);
   assert.ok(Date.now() - start < 250, 'defaultSleep must not wait real time in tests');

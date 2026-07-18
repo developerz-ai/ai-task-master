@@ -153,6 +153,31 @@ function fixtureWithContentType(contentType: string | null): typeof fetch {
   }) as typeof fetch;
 }
 
+function manyResultsFixture(count: number): string {
+  return Array.from({ length: count }, (_, i) => {
+    const url = encodeURIComponent(`https://example.com/page${i}`);
+    return [
+      '<div class="result results_links">',
+      `  <a class="result__a" href="//duckduckgo.com/l/?uddg=${url}&amp;rut=r${i}">Result ${i}</a>`,
+      `  <a class="result__snippet">Snippet ${i}</a>`,
+      '</div>',
+    ].join('\n');
+  }).join('\n');
+}
+
+test('webSearchTool: caller-requested maxResults above the ceiling is clamped to RESULTS_CEILING (15)', async () => {
+  const tool = webSearchTool({
+    endpoint: 'https://search.test/html/',
+    fetchImpl: (async () => jsonResponse(manyResultsFixture(20))) as typeof fetch,
+  });
+  const out = (await tool.execute?.(
+    { query: 'test', maxResults: 100 },
+    { toolCallId: 't8', messages: [] },
+  )) as WebSearchOutput;
+  assert.equal(out.error, undefined);
+  assert.equal(out.results.length, 15, 'clamped to the 15-result ceiling despite 20 available');
+});
+
 test('webSearchTool: accepts text/html and text/plain content types', async () => {
   for (const contentType of ['text/html', 'text/plain'] as const) {
     const tool = webSearchTool({

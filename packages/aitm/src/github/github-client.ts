@@ -62,17 +62,17 @@ export type Sleep = (ms: number) => Promise<void>;
 
 // Real grace/poll waits (REVIEW_COMMENTS_GRACE 2min, CHECKS_START_WAIT_MS 60s, backoff…) are correct in
 // the released CLI but would make the test suite crawl. So defaultSleep collapses to a microtask
-// under a test runner: `node --test` sets NODE_TEST_CONTEXT in every test child, which is the
-// zero-config signal (an explicit env var / NODE_ENV override also works). Tests that assert
-// timing/backoff still inject their own recording Sleep and bypass this; this only shortcuts the
-// un-injected grace/poll waits that would otherwise burn real minutes in CI.
-const INSTANT_SLEEP =
+// under a test runner, detected portably across both: `node --test` sets NODE_TEST_CONTEXT in every
+// test child; `bun test` sets NODE_ENV=test (an explicit AITM_INSTANT_SLEEP override also works).
+// Tests that assert timing/backoff still inject their own recording Sleep and bypass this; this only
+// shortcuts the un-injected grace/poll waits that would otherwise burn real minutes in CI.
+export const isInstantSleepEnabled = (): boolean =>
   process.env.AITM_INSTANT_SLEEP === '1' ||
   process.env.NODE_ENV === 'test' ||
   process.env.NODE_TEST_CONTEXT !== undefined;
 
 export const defaultSleep: Sleep = (ms) =>
-  INSTANT_SLEEP
+  isInstantSleepEnabled()
     ? Promise.resolve()
     : new Promise((resolve) => {
         setTimeout(resolve, ms);

@@ -48,10 +48,12 @@ import {
   type PlanGroupsOutcome,
   persistRollingContext,
   planToPrGroups,
+  RAW_STYLE_MAX_CHARS,
   type RunLoopAdapterSeams,
   recordStepDeltas,
   reminderAgentSystemPrompt,
   resolvePlannerTools,
+  resolveStyleContents,
   resolveWorkerTools,
   runLoopAdapter,
   runStepContextLine,
@@ -652,6 +654,33 @@ test('harnessContextBlock: a step adds a runProgress section with the phase + N/
   });
   assert.equal((block.match(/<system-reminder>/g) ?? []).length, 1, 'still one envelope');
   assert.match(block, /# runProgress\nStep 2 of 5 — working/);
+});
+
+test('resolveStyleContents: distilled digest wins and is left uncapped (already bounded)', () => {
+  const digest = 'd'.repeat(RAW_STYLE_MAX_CHARS + 500);
+  const style = resolveStyleContents({
+    styleDigest: digest,
+    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: 'ignored raw file', sources: [] },
+  });
+  assert.equal(style, digest, 'the digest is trusted as bounded — not re-capped');
+});
+
+test('resolveStyleContents: unbounded raw fallback is capped with a signposted marker', () => {
+  const raw = 'r'.repeat(RAW_STYLE_MAX_CHARS + 2000);
+  const style = resolveStyleContents({
+    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: raw, sources: [] },
+  });
+  assert.ok(style.length <= RAW_STYLE_MAX_CHARS, 'never exceeds the cap');
+  assert.ok(style.endsWith('[style truncated]'), 'truncation is signposted to the model');
+  assert.ok(style.startsWith('rrr'), 'the head — where house-style rules lead — is kept');
+});
+
+test('resolveStyleContents: raw fallback under the cap is returned verbatim', () => {
+  const raw = '# Coding Style\n- single quotes only';
+  const style = resolveStyleContents({
+    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: raw, sources: [] },
+  });
+  assert.equal(style, raw, 'short style files are untouched');
 });
 
 test('runStepContextLine: counter → "Step N of M — phase"; phase-only → "Phase: x"; empty → ""', () => {

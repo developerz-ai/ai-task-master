@@ -340,6 +340,28 @@ function staleFileReminders(fileState: FileStateTracker, cwd: string): string[] 
     );
 }
 
+// The distiller bounds its digest to ~600 words (coding-style.ts INTRO), but the raw fallback — the
+// target repo's verbatim CLAUDE.md/AGENTS.md, used when no digest was produced — is unbounded and
+// would bloat every planner/worker/reviewer/self-review/CI-fix prompt (paid per subagent call). Cap
+// it to a char budget matching that ceiling; keep the head, where house-style rules lead.
+export const RAW_STYLE_MAX_CHARS = 4000;
+const STYLE_TRUNCATION_MARKER = '\n\n[style truncated]';
+
+// The style string injected into subagent prompts: the distilled digest when present (already
+// bounded), else the raw style file capped to RAW_STYLE_MAX_CHARS. Single-sourced so the Planner and
+// the Orchestrator bridge resolve style identically. Exported for the raw-fallback cap unit test.
+export function resolveStyleContents(
+  input: Pick<RunLoopInput, 'styleDigest' | 'agentConfig'>,
+): string {
+  return input.styleDigest ?? capRawStyle(input.agentConfig.contents);
+}
+
+function capRawStyle(contents: string): string {
+  if (contents.length <= RAW_STYLE_MAX_CHARS) return contents;
+  const budget = RAW_STYLE_MAX_CHARS - STYLE_TRUNCATION_MARKER.length;
+  return contents.slice(0, budget) + STYLE_TRUNCATION_MARKER;
+}
+
 // First-message context block for the subagents: the target-repo instructions + today's date, framed
 // as advisory <system-reminder> context (issue #106). When a `step` is supplied, the run's phase +
 // N/M position rides along as a `runProgress` section so the model knows where it is in the run
@@ -678,7 +700,7 @@ async function defaultPlanGroups(
   mcp: McpClientManager,
   fetchHtmlAvailable: boolean,
 ): Promise<PlanGroupsOutcome> {
-  const style = input.styleDigest ?? input.agentConfig.contents;
+  const style = resolveStyleContents(input);
   const plannerUsage = roleUsageSink(
     input.usage,
     'planner',
@@ -776,7 +798,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // worker + ci-fix bridges — so group N+1 plans against group N's digest. Appends are serialized so
   // the concurrent-batch openPr path (WorkLoop's Promise.all) can't lose a group's digest.
   const rollingCtx = createRollingContextAccumulator(state, rollingContext);
-  const style = input.styleDigest ?? input.agentConfig.contents;
+  const style = resolveStyleContents(input);
   // Per-step LLM deadline armed on every generate site in this bridge (issue #129).
   const stepTimeout = { stepMs: input.resolved.llmStepTimeoutMs };
 

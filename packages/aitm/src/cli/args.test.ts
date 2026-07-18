@@ -54,7 +54,7 @@ const startCases: Case[] = [
   {
     name: 'start: --admin rejects inline value',
     argv: ['start', 'goal', '--admin=true'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: zero is valid for numeric flag',
@@ -94,17 +94,17 @@ const startCases: Case[] = [
   {
     name: 'start: invalid --branch (whitespace) rejected',
     argv: ['start', 'goal', '--branch', 'bad name'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: invalid --branch (leading dash) rejected',
     argv: ['start', 'goal', '--branch=-x'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --branch without value',
     argv: ['start', 'g', '--branch'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: mix of inline and two-token flags',
@@ -157,7 +157,7 @@ const mergeCases: Case[] = [
   {
     name: 'merge-pr: --admin rejects inline value',
     argv: ['merge-pr', '--admin=true'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'merge-pr: --max-iterations',
@@ -229,203 +229,206 @@ const helpCases: Case[] = [
   { name: 'help command', argv: ['help'], expected: { kind: 'help' } },
   { name: '--help flag', argv: ['--help'], expected: { kind: 'help' } },
   { name: '-h flag', argv: ['-h'], expected: { kind: 'help' } },
-  { name: 'unknown command', argv: ['nope'], expected: { kind: 'help' } },
-  { name: 'start: missing goal', argv: ['start'], expected: { kind: 'help' } },
+];
+
+const usageErrorCases: Case[] = [
+  { name: 'unknown command', argv: ['nope'], expected: { kind: 'usage-error' } },
+  { name: 'start: missing goal', argv: ['start'], expected: { kind: 'usage-error' } },
   {
     name: 'start: missing goal with only flags',
     argv: ['start', '--max-prs', '3'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: extra positional',
     argv: ['start', 'goal', 'extra'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: bad --max-prs (non-numeric)',
     argv: ['start', 'g', '--max-prs', 'abc'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: bad --max-prs (float)',
     argv: ['start', 'g', '--max-prs', '1.5'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: bad --max-prs (negative)',
     argv: ['start', 'g', '--max-prs', '-1'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: bad --max-sessions',
     argv: ['start', 'g', '--max-sessions', 'inf'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --max-fix-attempts zero rejected (issue #128)',
     argv: ['start', 'g', '--max-fix-attempts', '0'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: bad --max-fix-attempts (non-numeric)',
     argv: ['start', 'g', '--max-fix-attempts', 'abc'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: bad --concurrency',
     argv: ['start', 'g', '--concurrency', ''],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --concurrency zero rejected',
     argv: ['start', 'g', '--concurrency', '0'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --criteria without value',
     argv: ['start', 'g', '--criteria'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --style without value',
     argv: ['start', 'g', '--style'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --model without value',
     argv: ['start', 'g', '--model'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --criteria rejects following flag-like token',
     argv: ['start', 'g', '--criteria', '--model'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --style rejects following flag-like token',
     argv: ['start', 'g', '--style', '--concurrency'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --model rejects following flag-like token',
     argv: ['start', 'g', '--model', '--max-prs'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --branch rejects following flag-like token',
     argv: ['start', 'g', '--branch', '--admin'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: positional starting with single dash rejected',
     argv: ['start', '-x'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: unknown flag',
     argv: ['start', 'g', '--bogus'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --no-automerge=true rejected (boolean flag, no value allowed)',
     argv: ['start', 'g', '--no-automerge=true'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --max-prs= with empty value',
     argv: ['start', 'g', '--max-prs='],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'start: --max-prs=abc inline rejected',
     argv: ['start', 'g', '--max-prs=abc'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'merge-pr: bad --pr',
     argv: ['merge-pr', '--pr', 'abc'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'merge-pr: --pr zero rejected',
     argv: ['merge-pr', '--pr', '0'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'merge-pr: --pr without value',
     argv: ['merge-pr', '--pr'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'merge-pr: unknown flag',
     argv: ['merge-pr', '--weird'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'merge-pr: stray positional',
     argv: ['merge-pr', 'foo'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'merge-pr: bad --max-iterations (non-numeric)',
     argv: ['merge-pr', '--max-iterations', 'abc'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'merge-pr: bad --max-iterations (zero)',
     argv: ['merge-pr', '--max-iterations', '0'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'merge-pr: bad --max-iterations (negative)',
     argv: ['merge-pr', '--max-iterations', '-5'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'merge-pr: --max-iterations without value',
     argv: ['merge-pr', '--max-iterations'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
-  { name: 'config: no subcommand', argv: ['config'], expected: { kind: 'help' } },
+  { name: 'config: no subcommand', argv: ['config'], expected: { kind: 'usage-error' } },
   {
     name: 'config: unknown sub',
     argv: ['config', 'wat'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'config set: missing value',
     argv: ['config', 'set', 'foo'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'config set: missing both',
     argv: ['config', 'set'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'config set: extra positional',
     argv: ['config', 'set', 'a', 'b', 'c'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'config unset: missing key',
     argv: ['config', 'unset'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'config get: missing key',
     argv: ['config', 'get'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'config list: stray positional',
     argv: ['config', 'list', 'oops'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'config: unknown flag',
     argv: ['config', 'set', 'k', 'v', '--global'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
 ];
 
@@ -481,45 +484,64 @@ const profileCases: Case[] = [
   {
     name: 'profile add: --api-key and --api-key-stdin are mutually exclusive',
     argv: ['profile', 'add', 'p', '--api-key', 'sk', '--api-key-stdin'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'profile add: --api-key-stdin with an inline value is rejected',
     argv: ['profile', 'add', 'p', '--api-key-stdin=sk'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
-  { name: 'profile: no subcommand', argv: ['profile'], expected: { kind: 'help' } },
-  { name: 'profile: unknown subcommand', argv: ['profile', 'nope'], expected: { kind: 'help' } },
-  { name: 'profile list: extra arg', argv: ['profile', 'list', 'x'], expected: { kind: 'help' } },
-  { name: 'profile use: missing name', argv: ['profile', 'use'], expected: { kind: 'help' } },
+  { name: 'profile: no subcommand', argv: ['profile'], expected: { kind: 'usage-error' } },
+  {
+    name: 'profile: unknown subcommand',
+    argv: ['profile', 'nope'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'profile list: extra arg',
+    argv: ['profile', 'list', 'x'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'profile use: missing name',
+    argv: ['profile', 'use'],
+    expected: { kind: 'usage-error' },
+  },
   {
     name: 'profile use: extra arg',
     argv: ['profile', 'use', 'a', 'b'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'profile set: too few args',
     argv: ['profile', 'set', 'a', 'b'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'profile add: unknown preset',
     argv: ['profile', 'add', 'p', '--preset', 'bogus'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'profile add: unknown flag',
     argv: ['profile', 'add', 'p', '--nope'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
   {
     name: 'profile add: flag-like value is rejected as missing',
     argv: ['profile', 'add', 'p', '--base-url', '--api-key', 'sk'],
-    expected: { kind: 'help' },
+    expected: { kind: 'usage-error' },
   },
 ];
 
-for (const c of [...startCases, ...mergeCases, ...configCases, ...profileCases, ...helpCases]) {
+for (const c of [
+  ...startCases,
+  ...mergeCases,
+  ...configCases,
+  ...profileCases,
+  ...helpCases,
+  ...usageErrorCases,
+]) {
   test(c.name, () => {
     assert.deepEqual(parseArgs(c.argv), c.expected);
   });

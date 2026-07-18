@@ -1051,6 +1051,41 @@ test('runMergePr: falls back to state.currentPr when --pr absent', async () => {
   }
 });
 
+test('runMergePr: resume false ignores stale persisted currentPr, takes over current branch', async () => {
+  // `--no-resume` must not trust a prior run's persisted currentPr (73 here) — it should
+  // force the take-over flow and resolve the PR from the current branch instead.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path, { currentPr: 73 });
+    let prSeen: number | undefined;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: false },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async (input) => {
+          prSeen = input.pr;
+          return { kind: 'success', outcomes: [] };
+        },
+        github: stubGithub({ currentBranch: 'feature-branch', prForBranch: { number: 99 } }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(prSeen, 99, 'PR resolved from current branch, not the stale persisted currentPr');
+    const persisted = JSON.parse(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+    ) as { currentPr: number };
+    assert.equal(persisted.currentPr, 99, 'stale state.json overwritten with the take-over PR');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('runMergePr: no state file + --pr synthesizes state and runs the flow', async () => {
   // Take-over flow: user opened the PR by hand (Claude Code, `gh pr create`) and
   // never ran `aitm start`. `aitm merge-pr --pr N` must auto-init state and proceed,

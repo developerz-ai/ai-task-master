@@ -74,11 +74,29 @@ for (const flag of ['--help', '-h']) {
   });
 }
 
-test('main: unknown command → falls through to help, exit 0', async () => {
+// ---- usage errors ------------------------------------------------------------
+
+test('main: unknown command → usage on stderr, exit 2', async () => {
   const cap = capture();
   const code = await main(['nope'], cap.ctx);
-  assert.equal(code, 0);
-  assert.match(cap.out.join(''), /Usage:/);
+  assert.equal(code, 2);
+  assert.equal(cap.out.join(''), '');
+  assert.match(cap.err.join(''), /Usage:/);
+});
+
+test('main: malformed flag value → usage on stderr, exit 2', async () => {
+  const cap = capture();
+  const code = await main(['start', 'goal', '--max-prs', 'abc'], cap.ctx);
+  assert.equal(code, 2);
+  assert.equal(cap.out.join(''), '');
+  assert.match(cap.err.join(''), /Usage:/);
+});
+
+test('main: missing goal → usage on stderr, exit 2', async () => {
+  const cap = capture();
+  const code = await main(['start'], cap.ctx);
+  assert.equal(code, 2);
+  assert.match(cap.err.join(''), /Usage:/);
 });
 
 // ---- start dispatch --------------------------------------------------------

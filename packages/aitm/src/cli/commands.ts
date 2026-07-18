@@ -471,15 +471,9 @@ export async function runMergePr(
   // synthesize a minimal one from --pr (or the current branch's PR) and persist it so
   // subsequent calls resume.
   let runState: RunState;
-  try {
-    runState = await state.read();
-  } catch (err) {
-    if (!isFileNotFound(err)) {
-      return {
-        code: 1,
-        message: `Run state at ${join(stateDir, 'state.json')} is unreadable: ${errMsg(err)}. Fix or delete the file to start fresh.`,
-      };
-    }
+  // `--no-resume` means don't trust a persisted `currentPr` from a prior run — always
+  // force the take-over flow so the PR comes from --pr or the current branch instead.
+  if (args.resume === false) {
     const synth = await synthesizeTakeoverState({ args, github, resolved });
     if (synth.kind === 'error') return synth.exit;
     runState = synth.state;
@@ -487,6 +481,25 @@ export async function runMergePr(
       await state.init(runState);
     } catch (initErr) {
       return { code: 1, message: errMsg(initErr) };
+    }
+  } else {
+    try {
+      runState = await state.read();
+    } catch (err) {
+      if (!isFileNotFound(err)) {
+        return {
+          code: 1,
+          message: `Run state at ${join(stateDir, 'state.json')} is unreadable: ${errMsg(err)}. Fix or delete the file to start fresh.`,
+        };
+      }
+      const synth = await synthesizeTakeoverState({ args, github, resolved });
+      if (synth.kind === 'error') return synth.exit;
+      runState = synth.state;
+      try {
+        await state.init(runState);
+      } catch (initErr) {
+        return { code: 1, message: errMsg(initErr) };
+      }
     }
   }
 

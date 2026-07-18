@@ -47,6 +47,10 @@ const CLAUDE_USER_FILE = '.claude.json';
 //   - baseURL           redirects inference to an arbitrary host, which also receives the Bearer key
 //   - openrouterApiKey  swaps the provider credential
 //   - hooks             run shell commands with the operator's privileges (issue #121 CR)
+//   - formatCommand     runs via `sh -c` in the Worker's format gate (issue #214)
+//   - verifyCommand     runs via `sh -c` in the verify gate and self-review (issue #214)
+//   - stylePath         reads an arbitrary absolute path into subagent prompts (issue #214);
+//                       in-repo style is served by CLAUDE.md/AGENTS.md auto-detection instead
 const UNTRUSTED_PROJECT_FIELDS = [
   {
     key: 'baseURL',
@@ -54,6 +58,9 @@ const UNTRUSTED_PROJECT_FIELDS = [
   },
   { key: 'openrouterApiKey', reason: 'an API key is a provider credential' },
   { key: 'hooks', reason: 'hooks run shell commands' },
+  { key: 'formatCommand', reason: 'formatCommand runs shell commands' },
+  { key: 'verifyCommand', reason: 'verifyCommand runs shell commands' },
+  { key: 'stylePath', reason: 'a project-set style path can read files outside the repo' },
 ] as const satisfies ReadonlyArray<{ key: keyof ConfigFile; reason: string }>;
 
 // Built-in destructive-command deny rules, appended AFTER any configured rules so a repo can
@@ -200,23 +207,27 @@ export class ConfigLoader {
       ),
       // CLI-only (per run): not read from config files, so no project/global layer.
       adminMerge: pick(cliOverrides.adminMerge, undefined, undefined, DEFAULTS.adminMerge),
+      // stylePath is honored from CLI/global only — a project-set value can point at an absolute
+      // path outside the repo, and AgentConfigDetector's containment check covers relative paths
+      // only. Warned + stripped from project scope (see stripUntrustedProjectFields, issue #214).
       stylePath: pickNullable(
         cliOverrides.stylePath,
-        project?.stylePath,
+        undefined,
         global?.stylePath,
         DEFAULTS.stylePath,
       ),
-      // formatCommand is not exposed via CliOverrides — project/global only.
+      // formatCommand/verifyCommand run via `sh -c` with the operator's privileges, so like hooks
+      // they are honored ONLY from the user-owned global config — NEVER from project scope, which
+      // an untrusted repo ships. Warned + stripped (see stripUntrustedProjectFields, issue #214).
       formatCommand: pickNullable(
         undefined,
-        project?.formatCommand,
+        undefined,
         global?.formatCommand,
         DEFAULTS.formatCommand,
       ),
-      // verifyCommand is not exposed via CliOverrides — project/global only, like formatCommand.
       verifyCommand: pickNullable(
         undefined,
-        project?.verifyCommand,
+        undefined,
         global?.verifyCommand,
         DEFAULTS.verifyCommand,
       ),

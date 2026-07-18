@@ -163,6 +163,13 @@ export class GitHubClient {
   }
 
   async createPr(input: CreatePrInput): Promise<PullRequest> {
+    // Idempotent open: if a PR already exists for this head, adopt it instead of opening a second
+    // one. A kill between `gh pr create` and persisting the PR number otherwise resumes into a
+    // re-create that `gh` rejects ("a pull request for branch … already exists"), blocking the
+    // group. This is the same lookup as the post-create refetch below, moved ahead of the create.
+    const existing = await this.getPrForBranch(input.head);
+    if (existing) return existing;
+
     const labels = input.labels ?? [DEFAULT_PR_LABEL];
     const args: string[] = [
       'pr',

@@ -16,12 +16,30 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import type { FileHandle } from 'node:fs/promises';
-import { appendFile, open, readdir, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, open, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { ModelMessage } from 'ai';
-import { type RunState, RunStateSchema } from '../../src/state/schema.ts';
+import { execa } from 'execa';
+import { runStart } from '../../src/cli/commands.ts';
+import { normalizeResumeStatus } from '../../src/loop/resume-normalize.ts';
+import {
+  handlePrOpen,
+  type StageDeps,
+  type StageGithub,
+  type StageOrchestrator,
+} from '../../src/loop/stage-handlers.ts';
+import {
+  type CheckoutHome,
+  WorkLoop,
+  type WorkLoopGithub,
+  type WorkLoopGraph,
+  type WorkLoopOrchestrator,
+  type WorkLoopState,
+} from '../../src/loop/work-loop.ts';
+import { PlanGraph } from '../../src/plan/plan-graph.ts';
+import { type PrGroup, type RunState, RunStateSchema } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
 import { TranscriptStore } from '../../src/state/transcript-store.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
@@ -270,6 +288,262 @@ test('crash-durability: state write and transcript append crash together; resume
       /crash/,
       'the fresh transcript must not carry the crash-tailed content',
     );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PR-lifecycle crash boundary: kill between the PR-open side effect and the stage persist
+// ---------------------------------------------------------------------------
+//
+// docs/plans/2026/07/18/101-parallel-agent-bug-hunt/01-pr-lifecycle-idempotency.md — the crash this
+// models is a `kill -9` that lands after `gh pr create` (an external side effect on GitHub, which
+// survives the crash) but before WorkLoop persists the PR number to state.json. Before the fix
+// (github-client.ts createPr / stage-handlers.ts handlePrOpen), a resume in this window called
+// `gh pr create` again, which GitHub rejects for a branch that already has an open PR — permanently
+// blocking the group. The fix adopts the existing PR instead. This test drives the real
+// `handlePrOpen` stage handler (not a reimplementation) against a real StateStore with the same
+// fault-injection technique as the rest of this file, then a real WorkLoop to prove the group
+// actually completes on resume instead of landing anywhere near `blocked`.
+
+function crashGroup(overrides: Partial<PrGroup> = {}): PrGroup {
+  return {
+    id: 'g1',
+    title: 'add hello',
+    tasks: [{ id: 't1', text: 'add hello', complexity: 'normal', done: true }],
+    dependsOn: [],
+    branch: 'aitm/g1',
+    pr: null,
+    status: 'in-progress',
+    stage: 'pr-open',
+    ...overrides,
+  };
+}
+
+// Fake GitHub remote: a Map that outlives the crash (an external system, not process memory),
+// mirroring the real GitHubClient.createPr contract — adopt the existing PR for a branch instead of
+// creating a duplicate. `createCalls` counts genuine creates only; an adopt never increments it.
+function makeFakeRemote(): { openPr: StageOrchestrator['openPr']; createCalls: () => number } {
+  const remote = new Map<string, number>();
+  let createCalls = 0;
+  return {
+    openPr: async (group) => {
+      const branch = group.branch ?? `aitm/${group.id}`;
+      const existing = remote.get(branch);
+      if (existing !== undefined) return existing;
+      createCalls += 1;
+      const pr = 501;
+      remote.set(branch, pr);
+      return pr;
+    },
+    createCalls: () => createCalls,
+  };
+}
+
+test('crash-durability: kill between the PR-open side effect and the stage persist — resume adopts the existing PR, group completes without ever blocking', async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'aitm-crash-pr-'));
+  try {
+    const store = new StateStore(stateDir);
+    await store.init(baseState({ status: 'working', prGroups: [crashGroup()] }));
+
+    const remote = makeFakeRemote();
+    const stageGithub: StageGithub = {
+      waitForChecks: async () => ({ state: 'success', failedChecks: [] }),
+      listUnresolvedThreads: async () => [],
+      mergePr: async () => {},
+    };
+    const stageOrchestrator: StageOrchestrator = {
+      work: async () => {
+        assert.fail('work() must not run — the group resumes past the working stage');
+      },
+      openPr: remote.openPr,
+      fixCi: async () => {
+        assert.fail('fixCi() must not run — CI succeeds');
+      },
+      addressReviews: async () => {
+        assert.fail('addressReviews() must not run — no unresolved threads');
+      },
+    };
+
+    // ── Crash: gh pr create lands (createCalls 0 → 1), then handlePrOpen's own state.update dies
+    // mid-fsync — the exact instant a `kill -9` between PR creation and persisting the PR number
+    // would land. Same fault-injection technique as the rest of this file.
+    const crashErr = Object.assign(new Error('power loss mid-fsync'), { code: 'EIO' });
+    const deps1: StageDeps = { github: stageGithub, orchestrator: stageOrchestrator, state: store };
+    await withArmedSyncFault(crashErr, async () => {
+      await assert.rejects(handlePrOpen(deps1, crashGroup()), /power loss mid-fsync/);
+    });
+    assert.equal(remote.createCalls(), 1, 'the PR-open side effect landed exactly once');
+    assert.deepEqual(
+      await tmpArtifacts(stateDir),
+      [],
+      'a failed write must not leave a .tmp file behind',
+    );
+
+    // The crashed write never renamed — state.json still shows no PR.
+    const crashed = await store.read();
+    const crashedGroup = crashed.prGroups[0];
+    assert.ok(crashedGroup, 'group must survive the crash');
+    assert.equal(crashedGroup.pr, null, 'the crashed write must not have partially applied');
+    assert.equal(crashedGroup.stage, 'pr-open');
+
+    // ── Resume, attempt 1: a fresh StateStore (new process) re-reads group.pr as still null, so
+    // handlePrOpen calls openPr again. It must adopt the SAME PR rather than create a duplicate.
+    const resumedStore = new StateStore(stateDir);
+    const resumedState = await resumedStore.read();
+    const resumedGroup = resumedState.prGroups[0];
+    assert.ok(resumedGroup, 'group must be readable on resume');
+    const deps2: StageDeps = {
+      github: stageGithub,
+      orchestrator: stageOrchestrator,
+      state: resumedStore,
+    };
+    const nextStage = await handlePrOpen(deps2, resumedGroup);
+    assert.equal(nextStage, 'waiting-ci');
+    assert.equal(
+      remote.createCalls(),
+      1,
+      'resume must adopt the existing PR, not open a duplicate',
+    );
+
+    const afterAdopt = await resumedStore.read();
+    const afterAdoptGroup = afterAdopt.prGroups[0];
+    assert.ok(afterAdoptGroup);
+    assert.equal(afterAdoptGroup.pr, 501, 'the adopted PR number must be persisted');
+    assert.notEqual(afterAdoptGroup.status, 'blocked', 'no recoverable state may reach blocked');
+
+    // ── Resume, attempt 2: drive the real WorkLoop from the persisted (still stage:'pr-open',
+    // status:'in-progress') group through to a clean merge — the same normalization the production
+    // resume path applies (normalizeResumeStatus) before the graph schedules the group again.
+    await resumedStore.update((s) => ({ ...s, prGroups: normalizeResumeStatus(s.prGroups) }));
+
+    let liveGroups: readonly PrGroup[] = (await resumedStore.read()).prGroups;
+    const workLoopState: WorkLoopState = {
+      update: async (mutator) => {
+        const next = await resumedStore.update(mutator);
+        liveGroups = next.prGroups;
+        return next;
+      },
+    };
+    const graph: WorkLoopGraph = {
+      ready: () => new PlanGraph([...liveGroups]).ready(),
+      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+    };
+    const home: CheckoutHome = {
+      acquire: async (groupId, branch) => ({ groupId, branch, path: stateDir }),
+      release: async () => {},
+    };
+    let openPrCalls = 0;
+    const workLoopOrchestrator: WorkLoopOrchestrator = {
+      runWorker: async () => {
+        assert.fail('runWorker must not run — the group already has an open PR');
+      },
+      finalizeCommit: async () => {
+        assert.fail('finalizeCommit must not run — the group already has an open PR');
+      },
+      openPr: async () => {
+        // handlePrOpen's own `group.pr !== null` guard must short-circuit before this is ever
+        // reached — proves the idempotent-open fix, not just this test's fake.
+        openPrCalls += 1;
+        return {
+          number: 999,
+          state: 'OPEN',
+          url: 'unused',
+          headRefName: 'aitm/g1',
+          baseRefName: 'main',
+        };
+      },
+      runCiFix: async () => {
+        assert.fail('runCiFix must not run — CI succeeds');
+      },
+      addressReviews: async () => {
+        assert.fail('addressReviews must not run — no unresolved threads');
+      },
+    };
+    let mergeCalls = 0;
+    const workLoopGithub: WorkLoopGithub = {
+      defaultBranch: async () => 'main',
+      waitForChecks: async () => ({ state: 'success', failedChecks: [] }),
+      listUnresolvedThreads: async () => [],
+      mergePr: async () => {
+        mergeCalls += 1;
+      },
+    };
+
+    const loop = new WorkLoop({
+      orchestrator: workLoopOrchestrator,
+      github: workLoopGithub,
+      state: workLoopState,
+      home,
+      graph,
+      concurrency: 1,
+      autoMerge: true,
+      maxSessions: null,
+      sleep: async () => {},
+    });
+    const result = await loop.run();
+
+    assert.equal(
+      result.kind,
+      'success',
+      `expected the resumed group to complete cleanly, got: ${JSON.stringify(result)}`,
+    );
+    assert.equal(openPrCalls, 0, 'openPr must never run again once a PR is already persisted');
+    assert.equal(mergeCalls, 1, 'the group must merge exactly once');
+    assert.equal(remote.createCalls(), 1, 'exactly one PR must ever exist for the branch');
+
+    const final = await resumedStore.read();
+    const finalGroup = final.prGroups[0];
+    assert.ok(finalGroup);
+    assert.equal(finalGroup.status, 'merged');
+    assert.equal(finalGroup.stage, 'merged');
+    assert.equal(finalGroup.pr, 501);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// prPerTask + no-automerge: rejected up front, before any side effect — nothing to crash-recover
+// ---------------------------------------------------------------------------
+//
+// 01-pr-lifecycle-idempotency.md T2/owner decision: per-task PR isolation resets each task's branch
+// off the base the PREVIOUS task's PR merged into. Without auto-merge there is no merged base
+// mid-group, so every task piles onto one branch and only the first PR can open — a by-design
+// duplicate-PR-create GitHub rejects. The chosen fix (commands.ts runStart) rejects the combo before
+// state.init, detect, auth, or the loop ever run, so there is no crash window to test here — the
+// integration-level guarantee this asserts is that no side effect (no .ai-task-master dir, no git
+// branch, no loop invocation) happens at all for this combo, in a real repo.
+test('crash-durability: prPerTask + no-automerge is rejected before any side effect — no state, no branch, no loop', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    const result = await runStart(
+      { kind: 'start', goal: 'add hello', prPerTask: true, autoMerge: false },
+      {
+        cwd: repo.path,
+        homeDir: repo.path,
+        env: { OPENROUTER_API_KEY: 'test-key-x' },
+        authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        runLoop: async () => {
+          assert.fail('runLoop must not run for a rejected --pr-per-task/--no-automerge combo');
+        },
+      },
+    );
+
+    assert.equal(result.code, 1, `expected exit 1, got ${result.code}: ${result.message ?? ''}`);
+    assert.match(result.message ?? '', /--pr-per-task/);
+
+    await assert.rejects(
+      stat(join(repo.path, '.ai-task-master')),
+      /ENOENT/,
+      'no .ai-task-master state must be created for a rejected combo',
+    );
+
+    const { stdout: branches } = await execa('git', ['branch', '--list', 'aitm/*'], {
+      cwd: repo.path,
+    });
+    assert.equal(branches.trim(), '', 'no aitm/* branch must be created for a rejected combo');
   } finally {
     await repo.cleanup();
   }

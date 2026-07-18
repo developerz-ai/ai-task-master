@@ -236,6 +236,23 @@ export async function runStart(
     return { code: 1, message: errMsg(err) };
   }
 
+  // --pr-per-task needs auto-merge. Per-task PR isolation branches each task off the base the
+  // PREVIOUS task's PR merged into (resetToBase off origin/<base>); with auto-merge off there is no
+  // merged base mid-group, so every task piles onto one branch and only the first PR can open
+  // (GitHub allows one open PR per head→base). Reject the combo up front instead of silently
+  // degrading to a single group PR. Checked on the resolved config so a config `autoMerge: false`
+  // is caught alongside `--no-automerge`; prPerTask only ever comes from the --pr-per-task flag.
+  if (resolved.prPerTask && !resolved.autoMerge) {
+    return {
+      code: 1,
+      message:
+        'Cannot combine --pr-per-task with auto-merge disabled: per-task PRs each branch off the ' +
+        'base the previous task merged into, so without auto-merge every task lands on one branch ' +
+        'and only the first PR can open. Re-run with auto-merge on (drop --no-automerge or ' +
+        '`aitm config set autoMerge true`), or drop --pr-per-task.',
+    };
+  }
+
   try {
     Credentials.assertApiKeyPresent(resolved);
   } catch (err) {

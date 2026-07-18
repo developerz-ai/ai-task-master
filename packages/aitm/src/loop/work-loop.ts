@@ -169,6 +169,13 @@ export type WorkLoopDeps = {
 export type GroupOutcome =
   | { groupId: string; status: 'merged'; pr: number }
   | { groupId: string; status: 'awaiting-pr'; pr: number }
+  // A group that opened (and, under autoMerge, merged) a PR for its committed tasks but left at least
+  // one task undone — a mid-group block after earlier tasks landed, where workTasks ships the
+  // committed work rather than stranding it on the branch. NOT a clean terminal: the dropped task(s)
+  // are never rescheduled (a shipped group leaves PlanGraph.ready(), and resume re-enters past
+  // 'working'), so finalResult reports it as non-success instead of exiting 0 on lost work. `pr` is
+  // the shipped PR; `dropped` names the still-undone task ids.
+  | { groupId: string; status: 'partial'; pr: number; dropped: string[] }
   | { groupId: string; status: 'blocked'; reason: string };
 
 export type WorkLoopResult =
@@ -235,6 +242,12 @@ type StageCtx = {
   group: PrGroup;
   delivery: WorkerDelivery | null;
   blockedReason: string | undefined;
+  // Ids of tasks work() dropped this pass while still shipping a PR for earlier committed tasks (a
+  // mid-group block, or a resume that recovers prior commits but can't finish a later task). Set only
+  // at those active-drop points — a resume that re-enters past 'working' never runs work(), so it
+  // stays empty and the group keeps its clean terminal. Non-empty → terminalOutcome yields 'partial'
+  // so finalResult reports the dropped work instead of exiting 0.
+  dropped: string[];
   // CI-fix passes dispatched for this group, seeded from the persisted PrGroup.ciFixAttempts and
   // mirrored back to state on each increment, so the recovery budget survives a resume: a
   // crash-resumed group continues counting from where it left off instead of restarting at zero and
@@ -441,6 +454,7 @@ export class WorkLoop {
       group,
       delivery: null,
       blockedReason: undefined,
+      dropped: [],
       // Seed from the persisted count so a resumed group keeps its remaining budget (issue #128).
       fixAttempts: group.ciFixAttempts ?? 0,
     };
@@ -528,6 +542,9 @@ export class WorkLoop {
           const recovered = recoveredDelivery(ctx.group);
           if (recovered) {
             ctx.delivery = recovered;
+            // The recovered PR ships the prior run's committed tasks, but the task that blocked this
+            // pass (and any after it) is dropped — mark the group partial, not a clean terminal.
+            ctx.dropped = ctx.group.tasks.filter((t) => !t.done).map((t) => t.id);
             return { kind: 'ok' };
           }
           ctx.blockedReason = result.reason;
@@ -535,6 +552,7 @@ export class WorkLoop {
         }
         ctx.group = result.group;
         ctx.delivery = result.delivery;
+        ctx.dropped = result.dropped;
         if (result.delivery === null && ctx.group.pr === null) {
           // No new work this pass and no PR. If earlier tasks were already committed by a prior run,
           // open a PR for that recovered work rather than blocking; otherwise there is nothing to
@@ -586,14 +604,16 @@ export class WorkLoop {
   // delivery — the merge of every task's delivery — for openPr, so the composed PR body reflects the
   // whole group's changes rather than only the last task's. Idempotent on resume: tasks already
   // `done` are skipped. If a task blocks after earlier tasks already committed this pass, the
-  // committed work still opens a PR (the block is not propagated); blocking is reserved for when
-  // nothing has been committed.
+  // committed work still opens a PR (the block is not propagated here); blocking is reserved for when
+  // nothing has been committed. A group that ships such a partial PR keeps an undone task, so its
+  // terminal outcome is `partial` (see terminalOutcome), not `merged`/`awaiting-pr` — the run reports
+  // it as non-success rather than exiting 0 on silently dropped work.
   private async workTasks(
     group: PrGroup,
     checkout: Checkout,
     baseBranch: string,
   ): Promise<
-    | { kind: 'ok'; group: PrGroup; delivery: WorkerDelivery | null }
+    | { kind: 'ok'; group: PrGroup; delivery: WorkerDelivery | null; dropped: string[] }
     | { kind: 'blocked'; reason: string }
   > {
     let worked = group;
@@ -606,14 +626,21 @@ export class WorkLoop {
         // pass, don't discard it: open a PR for what landed instead of stranding those commits on
         // the branch with no PR. Block outright only when nothing has been committed yet.
         if (deliveries.length > 0) {
-          // Surface the block even though the group proceeds to a partial PR — otherwise the failed
-          // task and its reason vanish (the PR ships the earlier tasks and the operator sees a green
-          // run with this task's work silently missing).
+          // Ship the earlier tasks' PR, but surface the block live: the still-undone task leaves the
+          // group's terminal outcome `partial` (non-success), so the run reflects the dropped work
+          // instead of exiting 0 on a green-looking merge with this task's work silently missing.
           this.deps.progress?.(
             `group ${group.id} task ${task.id}: → blocked, shipping partial PR (${result.reason})`,
             this.stepFor(group.id, 'blocked', task),
           );
-          return { kind: 'ok', group: worked, delivery: mergeDeliveries(deliveries) };
+          return {
+            kind: 'ok',
+            group: worked,
+            delivery: mergeDeliveries(deliveries),
+            // Everything still undone this pass — the task that blocked plus any tasks after it that
+            // never ran — is dropped from the shipped PR.
+            dropped: worked.tasks.filter((t) => !t.done).map((t) => t.id),
+          };
         }
         return result;
       }
@@ -624,6 +651,7 @@ export class WorkLoop {
       kind: 'ok',
       group: worked,
       delivery: deliveries.length > 0 ? mergeDeliveries(deliveries) : null,
+      dropped: [],
     };
   }
 
@@ -672,11 +700,27 @@ export class WorkLoop {
   }
 
   private mergedOutcome(ctx: StageCtx): GroupOutcome {
-    return { groupId: ctx.group.id, status: 'merged', pr: prNumberOf(ctx.group) };
+    return this.terminalOutcome(ctx, 'merged');
   }
 
   private awaitingPrOutcome(ctx: StageCtx): GroupOutcome {
-    return { groupId: ctx.group.id, status: 'awaiting-pr', pr: prNumberOf(ctx.group) };
+    return this.terminalOutcome(ctx, 'awaiting-pr');
+  }
+
+  // Terminal outcome for a group whose PR is open. `physical` is what actually happened to that PR —
+  // 'merged' (autoMerge drove it home) or 'awaiting-pr' (autoMerge off, or a crash right after
+  // pr-open). If work() dropped a task this pass (ctx.dropped) — an earlier task committed, a later
+  // one blocked — the PR shipped the committed work but the group isn't fully done: downgrade to
+  // 'partial' so the run reflects the dropped task rather than counting a not-fully-done group as a
+  // clean merge/awaiting-pr. Keyed on ctx.dropped (an active this-pass drop), NOT the raw task-done
+  // flags, so a resume that re-enters past 'working' — its tasks already finished upstream — keeps
+  // its clean terminal. prNumberOf is safe — every terminal path reaches here with an open PR.
+  private terminalOutcome(ctx: StageCtx, physical: 'merged' | 'awaiting-pr'): GroupOutcome {
+    const pr = prNumberOf(ctx.group);
+    if (ctx.dropped.length > 0) {
+      return { groupId: ctx.group.id, status: 'partial', pr, dropped: ctx.dropped };
+    }
+    return { groupId: ctx.group.id, status: physical, pr };
   }
 
   // Run the pre-PR self-review pass at the single choke point before every openPr (stage machine +
@@ -884,13 +928,40 @@ export class WorkLoop {
         outcomes: this.outcomes.slice(),
       };
     }
-    if (!this.deps.autoMerge) {
-      const prs = this.outcomes
-        .filter((o): o is GroupOutcome & { status: 'awaiting-pr' } => o.status === 'awaiting-pr')
-        .map((o) => o.pr);
-      if (prs.length > 0) {
-        return { kind: 'awaiting-pr', prs, outcomes: this.outcomes.slice() };
+    const partials = this.outcomes.filter(
+      (o): o is GroupOutcome & { status: 'partial' } => o.status === 'partial',
+    );
+    if (partials.length > 0) {
+      // A group shipped a PR for its committed tasks but blocked on a later one. The landed work is
+      // NOT rolled back, yet the run must be non-success: the dropped task(s) are never
+      // auto-rescheduled (a shipped group leaves PlanGraph.ready()), so exiting 0 would hide lost
+      // work. Surface as blocked so the operator adds a follow-up for the undone task(s).
+      const detail = partials
+        .map((p) => `group ${p.groupId} (PR #${p.pr}) left task(s) ${p.dropped.join(', ')} undone`)
+        .join('; ');
+      return {
+        kind: 'blocked',
+        reason: `partial delivery — ${detail}; the dropped task(s) are not auto-rescheduled and need a follow-up`,
+        outcomes: this.outcomes.slice(),
+      };
+    }
+    const awaitingPrs = this.outcomes
+      .filter((o): o is GroupOutcome & { status: 'awaiting-pr' } => o.status === 'awaiting-pr')
+      .map((o) => o.pr);
+    if (awaitingPrs.length > 0) {
+      // autoMerge off: the PRs are deliberately left open for `aitm merge-pr` — a clean terminal
+      // (exit 0). Under autoMerge an awaiting-pr outcome is instead a DANGLING PR: openPr landed but
+      // the group never reached 'merged' (a StateWriteAfterSuccess at pr-open). Reporting 'success'
+      // there would exit 0 while a PR sits unmerged; surface it as non-success so a resume/human
+      // finishes the merge (the idempotent open adopts the PR on the next `aitm start`).
+      if (this.deps.autoMerge) {
+        return {
+          kind: 'blocked',
+          reason: `PR(s) ${awaitingPrs.join(', ')} opened but not merged under auto-merge (interrupted after PR open) — rerun \`aitm start\` to resume the merge`,
+          outcomes: this.outcomes.slice(),
+        };
       }
+      return { kind: 'awaiting-pr', prs: awaitingPrs, outcomes: this.outcomes.slice() };
     }
     return { kind: 'success', outcomes: this.outcomes.slice() };
   }

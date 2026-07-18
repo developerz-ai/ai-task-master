@@ -694,6 +694,104 @@ test('group mode (default): a multi-task group opens exactly one PR after the fi
   assert.equal(calls.openPr.length, 1, 'single group PR, opened after the last task');
 });
 
+// A Worker success result. The `ok` variant also carries a `handle` the WorkLoop never reads on this
+// path, so — like makeOrchestrator's default stub — a cast keeps the fixture terse.
+function okWorker(): WorkerResult {
+  return { kind: 'ok', delivery: delivery() } as WorkerResult;
+}
+
+test('group mode: an earlier task commits then a later one blocks → partial PR merges, run is non-success', async () => {
+  // Task A commits this pass; task B blocks this pass. workTasks ships A's work in the group PR (not
+  // stranded), which merges under autoMerge — but B is left undone and is never rescheduled. The
+  // group's terminal outcome must be `partial`, not `merged`, so the run does not exit 0 on the
+  // silently dropped task.
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 42,
+    workerResults: [okWorker(), { kind: 'blocked', reason: 'empty manifest' }],
+  });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciSuccess], threads: [] });
+  const ready = makeGraph([twoTaskGroup()], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, graph: ready.graph, autoMerge: true }),
+  );
+  const result = await loop.run();
+
+  assert.equal(calls.runWorker.length, 2, 'both tasks attempted (A then B)');
+  assert.equal(calls.openPr.length, 1, "A's committed work still ships a PR");
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [42],
+    'the partial PR still merges — the landed work is not discarded',
+  );
+
+  assert.equal(result.outcomes.length, 1);
+  assert.equal(result.outcomes[0]?.status, 'partial', 'terminal outcome is partial, not merged');
+  if (result.outcomes[0]?.status === 'partial') {
+    assert.equal(result.outcomes[0].pr, 42);
+    assert.deepEqual(result.outcomes[0].dropped, ['b'], 'the dropped task is named');
+  }
+  assert.equal(result.kind, 'blocked', 'a merged group with an undone task must not exit 0');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /partial/i);
+    assert.match(result.reason, /\bb\b/, 'reason names the dropped task');
+    assert.match(result.reason, /42/, 'reason names the shipped PR');
+  }
+});
+
+test('group mode (no auto-merge): a partial PR opens but the run is non-success, not clean awaiting-pr', async () => {
+  // Same partial group, autoMerge off: A's work opens a PR that stops at awaiting-pr. Without the
+  // partial downgrade this would report a clean awaiting-pr (exit 0), hiding that B was dropped.
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 42,
+    workerResults: [okWorker(), { kind: 'blocked', reason: 'empty manifest' }],
+  });
+  const { github, calls: ghCalls } = makeGithub();
+  const ready = makeGraph([twoTaskGroup()], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, graph: ready.graph, autoMerge: false }),
+  );
+  const result = await loop.run();
+
+  assert.equal(calls.openPr.length, 1, "A's committed work still ships a PR");
+  assert.deepEqual(ghCalls.mergePr, [], 'no merge under --no-automerge');
+  assert.equal(result.outcomes[0]?.status, 'partial', 'partial, not a clean awaiting-pr');
+  assert.equal(result.kind, 'blocked', 'non-success: task B was dropped');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /\bb\b/);
+  }
+});
+
+test('group mode: resume recovers a committed task into a PR, but a still-blocked task makes it partial', async () => {
+  // Task A committed in a prior run (done); B is undone and blocks this pass. The recovered PR ships
+  // A's work (recoveredDelivery) rather than stranding it, but B stays dropped — so the run is
+  // non-success (partial), not a clean merge that exits 0.
+  const resumed = group('multi', {
+    branch: 'aitm/multi',
+    tasks: [
+      { id: 'a', text: 'first', complexity: 'normal', done: true },
+      { id: 'b', text: 'second', complexity: 'complex', done: false },
+    ],
+  });
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 9,
+    workerResults: [{ kind: 'blocked', reason: 'empty file manifest' }],
+  });
+  const { github } = makeGithub({ checks: [ciSuccess], threads: [] });
+  const ready = makeGraph([resumed], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, graph: ready.graph, autoMerge: true }),
+  );
+  const result = await loop.run();
+
+  assert.equal(calls.runWorker.length, 1, 'only the undone task B is attempted');
+  assert.equal(calls.openPr.length, 1, "A's recovered work still ships a PR");
+  assert.equal(result.outcomes[0]?.status, 'partial');
+  if (result.outcomes[0]?.status === 'partial') {
+    assert.deepEqual(result.outcomes[0].dropped, ['b']);
+  }
+  assert.equal(result.kind, 'blocked', 'B dropped → non-success');
+});
+
 test('mergeDeliveries: a single delivery is returned unchanged', () => {
   const d = delivery();
   assert.equal(mergeDeliveries([d]), d);
@@ -1644,6 +1742,44 @@ test('state write failure after openPr → loop yields awaiting-pr outcome, not 
     assert.equal(result.outcomes[0].pr, 77);
   }
   assert.notEqual(result.kind, 'blocked', 'result must not flip to blocked');
+});
+
+test('autoMerge: state write failure after openPr → dangling PR is non-success, not exit-0 success', async () => {
+  // The autoMerge counterpart of the test above. Same StateWriteAfterSuccess (openPr landed, the
+  // pr-persist failed), but under autoMerge the group never reached 'merged'. The recovered outcome
+  // stays awaiting-pr so a retry doesn't reopen the PR — yet the RUN must NOT report 'success', which
+  // would exit 0 with a dangling unmerged PR. finalResult surfaces it as blocked (non-success).
+  const { orchestrator } = makeOrchestrator({ prNumber: 77 });
+  let callCount = 0;
+  const state: WorkLoopState = {
+    update: async (mutator) => {
+      callCount++;
+      // Writes 1–5 are autoMerge-independent (autoMerge only affects the writes AFTER pr-open):
+      // 1 sessionCount, 2 in-progress(+working), 3 task-done, 4 working→pr-open, 5 pr-persist (fail).
+      if (callCount === 5) throw new Error('disk full');
+      return mutator(baseState());
+    },
+  };
+  const ready = makeGraph([group('nu')], { completeAfter: 1 });
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, graph: ready.graph, autoMerge: true }));
+  const result = await loop.run();
+
+  // The external side effect is preserved so a retry never reopens the PR…
+  assert.equal(result.outcomes.length, 1);
+  assert.equal(result.outcomes[0]?.status, 'awaiting-pr');
+  if (result.outcomes[0]?.status === 'awaiting-pr') {
+    assert.equal(result.outcomes[0].pr, 77);
+  }
+  // …but the run itself is non-success: a dangling unmerged PR under autoMerge must not exit 0.
+  assert.equal(
+    result.kind,
+    'blocked',
+    'awaiting-pr under autoMerge must be non-success, not reported as merged',
+  );
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /77/, 'the reason names the dangling PR');
+    assert.match(result.reason, /not merged/i);
+  }
 });
 
 test('run(): CI fix rebase conflict → WorkLoopResult.kind === "blocked" with conflict reason', async () => {

@@ -138,7 +138,7 @@ export class GitHubClient {
     if (r.exitCode !== 0) {
       throw new Error(`gh repo view failed: ${r.stderr.trim() || r.stdout.trim()}`);
     }
-    const parsed: unknown = JSON.parse(r.stdout);
+    const parsed: unknown = parseGhJson('gh repo view', r.stdout);
     if (
       typeof parsed === 'object' &&
       parsed !== null &&
@@ -163,7 +163,7 @@ export class GitHubClient {
       if (isPrNotFoundStderr(r.stderr)) return null;
       throw new Error(`gh pr view failed: ${r.stderr.trim() || r.stdout.trim()}`);
     }
-    return PullRequestSchema.parse(JSON.parse(r.stdout));
+    return PullRequestSchema.parse(parseGhJson('gh pr view', r.stdout));
   }
 
   async createPr(input: CreatePrInput): Promise<PullRequest> {
@@ -392,7 +392,9 @@ export class GitHubClient {
           `gh api graphql (reviewThreads) failed: ${r.stderr.trim() || r.stdout.trim()}`,
         );
       }
-      const parsed = GqlReviewThreadsResponseSchema.parse(JSON.parse(r.stdout));
+      const parsed = GqlReviewThreadsResponseSchema.parse(
+        parseGhJson('gh api graphql (reviewThreads)', r.stdout),
+      );
       const conn = parsed.data.repository.pullRequest.reviewThreads;
       pageCount++;
       if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) {
@@ -438,7 +440,9 @@ export class GitHubClient {
           `gh api graphql (threadComments) failed: ${r.stderr.trim() || r.stdout.trim()}`,
         );
       }
-      const parsed = GqlThreadCommentsResponseSchema.parse(JSON.parse(r.stdout));
+      const parsed = GqlThreadCommentsResponseSchema.parse(
+        parseGhJson('gh api graphql (threadComments)', r.stdout),
+      );
       const conn = parsed.data.node.comments;
       pageCount++;
       // Break if cursor is not advancing (broken pagination) — before adding nodes
@@ -515,7 +519,7 @@ export class GitHubClient {
     if (r.exitCode !== 0) {
       throw new Error(`gh repo view failed: ${r.stderr.trim() || r.stdout.trim()}`);
     }
-    const parsed = RepoOwnerNameSchema.parse(JSON.parse(r.stdout));
+    const parsed = RepoOwnerNameSchema.parse(parseGhJson('gh repo view', r.stdout));
     return { owner: parsed.owner.login, name: parsed.name };
   }
 
@@ -573,6 +577,26 @@ function safeJson(s: string): unknown {
     return JSON.parse(s);
   } catch {
     return null;
+  }
+}
+
+// gh can exit 0 yet print non-JSON to stdout — a deprecation banner, an HTML error page, an empty
+// body. A bare JSON.parse then throws a context-free SyntaxError with no clue which command emitted
+// it. The strict parse sites route through this so the throw names the gh command and shows a
+// stdout excerpt, keeping the SyntaxError as `cause`. Mirrors safeJson/tryParseChecks but surfaces
+// the failure instead of degrading to null — these callers must not proceed on garbage.
+const GH_STDOUT_EXCERPT_LIMIT = 500;
+
+function parseGhJson(command: string, stdout: string): unknown {
+  try {
+    return JSON.parse(stdout);
+  } catch (cause) {
+    const trimmed = stdout.trim();
+    let excerpt = trimmed === '' ? '<empty>' : trimmed;
+    if (excerpt.length > GH_STDOUT_EXCERPT_LIMIT) {
+      excerpt = `${excerpt.slice(0, GH_STDOUT_EXCERPT_LIMIT)}... (${trimmed.length} chars total)`;
+    }
+    throw new Error(`${command}: unparseable JSON stdout: ${excerpt}`, { cause });
   }
 }
 

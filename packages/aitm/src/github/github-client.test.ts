@@ -109,6 +109,20 @@ test('defaultBranch throws on unexpected JSON shape', async () => {
   await assert.rejects(() => g.defaultBranch(), /unexpected JSON shape/);
 });
 
+test('defaultBranch: exit-0 non-JSON stdout throws naming the command, cause preserved', async () => {
+  const { run } = makeRun([{ stdout: 'gh: a deprecation notice, not JSON', exitCode: 0 }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(
+    () => g.defaultBranch(),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /gh repo view: unparseable JSON stdout/);
+      assert.ok(err.cause instanceof SyntaxError, 'JSON.parse SyntaxError is preserved as cause');
+      return true;
+    },
+  );
+});
+
 test('authenticatedLogin shells gh api user and returns the raw login', async () => {
   const { run, calls } = makeRun([{ stdout: 'aitm-bot\n' }]);
   const g = new GitHubClient('/tmp/repo', run);
@@ -172,6 +186,20 @@ test('getPrForBranch surfaces unrelated errors', async () => {
   const { run } = makeRun([{ exitCode: 1, stderr: 'HTTP 500: server is down' }]);
   const g = new GitHubClient('/tmp/repo', run);
   await assert.rejects(() => g.getPrForBranch('feature/foo'), /gh pr view failed/);
+});
+
+test('getPrForBranch: exit-0 non-JSON stdout throws naming the command, cause preserved', async () => {
+  const { run } = makeRun([{ stdout: '<!DOCTYPE html>not json', exitCode: 0 }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(
+    () => g.getPrForBranch('feature/foo'),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /gh pr view: unparseable JSON stdout/);
+      assert.ok(err.cause instanceof SyntaxError, 'JSON.parse SyntaxError is preserved as cause');
+      return true;
+    },
+  );
 });
 
 test('createPr passes title/body/base/head and default label, then refetches', async () => {
@@ -734,6 +762,63 @@ test('listUnresolvedThreads surfaces threadComments failures distinctly', async 
   await assert.rejects(
     () => g.listUnresolvedThreads(1),
     /gh api graphql \(threadComments\) failed/,
+  );
+});
+
+test('listUnresolvedThreads: exit-0 non-JSON repo view stdout throws naming the command, cause preserved', async () => {
+  // repoMeta runs first; its parse must surface the offending command, not a bare SyntaxError.
+  const { run } = makeRun([{ stdout: 'error: something went wrong', exitCode: 0 }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(
+    () => g.listUnresolvedThreads(1),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /gh repo view: unparseable JSON stdout/);
+      assert.ok(err.cause instanceof SyntaxError, 'JSON.parse SyntaxError is preserved as cause');
+      return true;
+    },
+  );
+});
+
+test('listUnresolvedThreads: exit-0 non-JSON reviewThreads stdout throws naming the command, cause preserved', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  const { run } = makeRun([{ stdout: meta }, { stdout: 'not json', exitCode: 0 }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(
+    () => g.listUnresolvedThreads(1),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /gh api graphql \(reviewThreads\): unparseable JSON stdout/);
+      assert.ok(err.cause instanceof SyntaxError, 'JSON.parse SyntaxError is preserved as cause');
+      return true;
+    },
+  );
+});
+
+test('listUnresolvedThreads: exit-0 non-JSON threadComments stdout throws naming the command, cause preserved', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  // An unresolved thread whose comments page has a next page forces the threadComments fetch.
+  const gql = threadsResponse([
+    {
+      id: 'PRRT_1',
+      isResolved: false,
+      path: 'a.ts',
+      comments: {
+        pageInfo: { hasNextPage: true, endCursor: 'c-1' },
+        nodes: [{ id: 'IC_1', body: 'x', author: { login: 'r' } }],
+      },
+    },
+  ]);
+  const { run } = makeRun([{ stdout: meta }, { stdout: gql }, { stdout: 'not json', exitCode: 0 }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(
+    () => g.listUnresolvedThreads(1),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /gh api graphql \(threadComments\): unparseable JSON stdout/);
+      assert.ok(err.cause instanceof SyntaxError, 'JSON.parse SyntaxError is preserved as cause');
+      return true;
+    },
   );
 });
 

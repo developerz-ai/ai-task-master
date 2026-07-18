@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -140,6 +140,37 @@ test('acquire cleans a dirty tree (stale tracked edit) before switching, not car
       'base\n',
       'the stale edit is reset, not carried onto the new branch',
     );
+    const { stdout } = await execa('git', ['status', '--porcelain', '--untracked-files=no'], {
+      cwd: repo.path,
+    });
+    assert.equal(stdout.trim(), '', 'the new group branch starts on a clean tree');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('acquire removes untracked leftovers from a prior group but preserves .ai-task-master state', async () => {
+  const repo = await seedRepo();
+  try {
+    // A prior group's editors created a new file but its verify gate stayed red, so it was never
+    // committed — it lingers UNTRACKED in the shared tree. And aitm's own state dir sits at the root.
+    await writeFile(join(repo.path, 'leftover.ts'), 'export const leaked = 1;\n');
+    await mkdir(join(repo.path, '.ai-task-master'), { recursive: true });
+    await writeFile(join(repo.path, '.ai-task-master', 'state.json'), '{"keep":true}\n');
+
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g2', 'aitm/g2', 'main');
+
+    assert.equal(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+      '{"keep":true}\n',
+      "aitm's own state dir must survive the clean gate",
+    );
+    const leftoverGone = await readFile(join(repo.path, 'leftover.ts'), 'utf8').then(
+      () => false,
+      () => true,
+    );
+    assert.ok(leftoverGone, "a prior group's untracked file must not survive onto the next branch");
     const { stdout } = await execa('git', ['status', '--porcelain', '--untracked-files=no'], {
       cwd: repo.path,
     });

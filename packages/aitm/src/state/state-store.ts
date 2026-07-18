@@ -33,6 +33,11 @@ export class StateStore {
   // block state updates (or vice versa).
   private progressChain: Promise<unknown> = Promise.resolve();
 
+  // Last RunState this store persisted. update() mutates from here instead of re-reading state.json:
+  // the store is the sole writer and update()s serialize on updateChain, so the cache never lags disk.
+  // Null until the first successful write — the first update after construction still reads to seed it.
+  private cached: RunState | null = null;
+
   constructor(private readonly stateDir: string) {}
 
   async init(initial: RunState): Promise<void> {
@@ -57,11 +62,12 @@ export class StateStore {
 
   async update(mutator: (s: RunState) => RunState): Promise<RunState> {
     const next = this.updateChain.then(async (): Promise<RunState> => {
-      const current = await this.read();
+      const current = this.cached ?? (await this.read());
       const draft = mutator(current);
       const updated: RunState = { ...draft, updatedAt: new Date().toISOString() };
       const validated = parseState(updated, this.path(STATE_FILE));
       await atomicWrite(this.path(STATE_FILE), `${JSON.stringify(validated, null, 2)}\n`);
+      this.cached = validated;
       return validated;
     });
     // Swallow rejection on the chain so a failed update doesn't poison subsequent callers.

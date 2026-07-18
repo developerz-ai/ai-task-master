@@ -439,8 +439,8 @@ test('crash-durability: kill between the PR-open side effect and the stage persi
       },
     };
     const graph: WorkLoopGraph = {
-      ready: () => new PlanGraph([...liveGroups]).ready(),
-      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+      ready: () => PlanGraph.from([...liveGroups]).ready(),
+      isComplete: () => PlanGraph.from([...liveGroups]).isComplete(),
     };
     const home: CheckoutHome = {
       acquire: async (groupId, branch) => ({ groupId, branch, path: stateDir }),
@@ -642,8 +642,8 @@ test('crash-durability: kill after a task commit lands but before completeTask p
       },
     };
     const graph: WorkLoopGraph = {
-      ready: () => new PlanGraph([...liveGroups]).ready(),
-      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+      ready: () => PlanGraph.from([...liveGroups]).ready(),
+      isComplete: () => PlanGraph.from([...liveGroups]).isComplete(),
     };
     const resumedHome = new InPlaceCheckout(repo.path);
 

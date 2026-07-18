@@ -31,7 +31,16 @@ export async function atomicWrite(path: string, contents: string): Promise<void>
     await rm(tmp, { force: true });
     throw err;
   }
-  await fsyncParentDir(dirname(path));
+  // The rename already landed — the write is durable data-wise. A failure to additionally fsync the
+  // parent dir only risks the rename itself surviving a concurrent OS crash, a much narrower window;
+  // it must not report an otherwise-successful write as failed, so warn rather than throw.
+  try {
+    await fsyncParentDir(dirname(path));
+  } catch (err) {
+    process.stderr.write(
+      `warning: atomic write to ${path} succeeded but parent-dir fsync failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
 }
 
 // fsync the directory so the rename (the step that makes the new file visible) is itself durable,

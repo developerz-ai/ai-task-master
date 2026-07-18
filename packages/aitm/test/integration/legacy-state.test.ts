@@ -297,8 +297,8 @@ test('legacy-state: runStart resumes from legacy state.json and drives WorkLoop 
           };
 
           const graph = {
-            ready: () => new PlanGraph([...liveGroups]).ready(),
-            isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+            ready: () => PlanGraph.from([...liveGroups]).ready(),
+            isComplete: () => PlanGraph.from([...liveGroups]).isComplete(),
           };
 
           const { stdout: rawBranch } = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {

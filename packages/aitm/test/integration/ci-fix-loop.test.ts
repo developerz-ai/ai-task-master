@@ -509,8 +509,8 @@ test('ci-fix-loop (WorkLoop/autoMerge): CI fix reaches the real remote before th
 
     let liveGroups: readonly PrGroup[] = [grp];
     const graph = {
-      ready: () => new PlanGraph([...liveGroups]).ready(),
-      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+      ready: () => PlanGraph.from([...liveGroups]).ready(),
+      isComplete: () => PlanGraph.from([...liveGroups]).isComplete(),
     };
     const state: WorkLoopState = {
       update: async (mutator) => {
@@ -707,8 +707,8 @@ test('ci-fix-loop (WorkLoop/autoMerge): an unfixable red PR never merges and sta
     // ── First run: burn the CI-fix budget, block for a human, never merge ──────────────────
     let liveGroups: readonly PrGroup[] = [grp];
     const graph1 = {
-      ready: () => new PlanGraph([...liveGroups]).ready(),
-      isComplete: () => new PlanGraph([...liveGroups]).isComplete(),
+      ready: () => PlanGraph.from([...liveGroups]).ready(),
+      isComplete: () => PlanGraph.from([...liveGroups]).isComplete(),
     };
     const state1: WorkLoopState = {
       update: async (mutator) => {
@@ -749,8 +749,8 @@ test('ci-fix-loop (WorkLoop/autoMerge): an unfixable red PR never merges and sta
     const afterNormalize = await stateStore.read();
     let liveGroups2: readonly PrGroup[] = afterNormalize.prGroups;
     const graph2 = {
-      ready: () => new PlanGraph([...liveGroups2]).ready(),
-      isComplete: () => new PlanGraph([...liveGroups2]).isComplete(),
+      ready: () => PlanGraph.from([...liveGroups2]).ready(),
+      isComplete: () => PlanGraph.from([...liveGroups2]).isComplete(),
     };
     assert.equal(graph2.ready().length, 0, 'a human-needed group must never be rescheduled');
     assert.equal(graph2.isComplete(), true, 'the blocked group is terminal for the graph');

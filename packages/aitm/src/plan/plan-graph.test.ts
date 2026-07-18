@@ -15,7 +15,7 @@ const group = (id: string, status: PrGroupStatus, dependsOn: string[] = []): PrG
 });
 
 test('PlanGraph is constructible with empty groups', () => {
-  const g = new PlanGraph([]);
+  const g = PlanGraph.from([]);
   assert.ok(g instanceof PlanGraph);
   assert.deepEqual(g.ready(), []);
   assert.deepEqual(g.blocked(), []);
@@ -25,7 +25,7 @@ test('PlanGraph is constructible with empty groups', () => {
 test('PlanGraph.ready returns roots when nothing is merged yet', () => {
   const a = group('a', 'pending');
   const b = group('b', 'pending', ['a']);
-  const g = new PlanGraph([a, b]);
+  const g = PlanGraph.from([a, b]);
   assert.deepEqual(
     g.ready().map((x) => x.id),
     ['a'],
@@ -36,7 +36,7 @@ test('PlanGraph.ready unlocks dependents once deps merge (linear plan)', () => {
   const a = group('a', 'merged');
   const b = group('b', 'pending', ['a']);
   const c = group('c', 'pending', ['b']);
-  const g = new PlanGraph([a, b, c]);
+  const g = PlanGraph.from([a, b, c]);
   assert.deepEqual(
     g.ready().map((x) => x.id),
     ['b'],
@@ -47,7 +47,7 @@ test('PlanGraph.ready surfaces parallel siblings with shared dep', () => {
   const root = group('root', 'merged');
   const left = group('left', 'pending', ['root']);
   const right = group('right', 'pending', ['root']);
-  const g = new PlanGraph([root, left, right]);
+  const g = PlanGraph.from([root, left, right]);
   assert.deepEqual(
     g
       .ready()
@@ -58,7 +58,7 @@ test('PlanGraph.ready surfaces parallel siblings with shared dep', () => {
 });
 
 test('PlanGraph.ready excludes in-progress / awaiting-pr / merged / blocked groups', () => {
-  const g = new PlanGraph([
+  const g = PlanGraph.from([
     group('pending', 'pending'),
     group('inprog', 'in-progress'),
     group('await', 'awaiting-pr'),
@@ -75,7 +75,7 @@ test('PlanGraph.blocked lists pending groups with unmerged deps', () => {
   const a = group('a', 'in-progress');
   const b = group('b', 'pending', ['a']);
   const c = group('c', 'pending', ['b']);
-  const g = new PlanGraph([a, b, c]);
+  const g = PlanGraph.from([a, b, c]);
   assert.deepEqual(
     g
       .blocked()
@@ -87,28 +87,28 @@ test('PlanGraph.blocked lists pending groups with unmerged deps', () => {
 
 test('PlanGraph.byId returns the group or undefined', () => {
   const a = group('a', 'pending');
-  const g = new PlanGraph([a]);
+  const g = PlanGraph.from([a]);
   assert.equal(g.byId('a'), a);
   assert.equal(g.byId('missing'), undefined);
 });
 
 test('PlanGraph.isComplete is true only when all groups merged or blocked', () => {
-  assert.equal(new PlanGraph([group('a', 'merged'), group('b', 'blocked')]).isComplete(), true);
-  assert.equal(new PlanGraph([group('a', 'merged'), group('b', 'pending')]).isComplete(), false);
+  assert.equal(PlanGraph.from([group('a', 'merged'), group('b', 'blocked')]).isComplete(), true);
+  assert.equal(PlanGraph.from([group('a', 'merged'), group('b', 'pending')]).isComplete(), false);
 });
 
 test('PlanGraph.isComplete: transitively-blocked pending group → terminal (true)', () => {
   // b can never run — its only dep is blocked — so an all-terminal plan is complete, not hung.
   const a = group('a', 'blocked');
   const b = group('b', 'pending', ['a']);
-  assert.equal(new PlanGraph([a, b]).isComplete(), true);
+  assert.equal(PlanGraph.from([a, b]).isComplete(), true);
 });
 
 test('PlanGraph.isComplete: block propagates down a dependency chain → true', () => {
   const a = group('a', 'blocked');
   const b = group('b', 'pending', ['a']);
   const c = group('c', 'pending', ['b']);
-  const g = new PlanGraph([a, b, c]);
+  const g = PlanGraph.from([a, b, c]);
   assert.equal(g.isComplete(), true);
   assert.deepEqual(g.ready(), []); // and nothing downstream is schedulable
 });
@@ -118,14 +118,14 @@ test('PlanGraph.isComplete: diamond with one blocked leg → true', () => {
   const left = group('left', 'blocked');
   const right = group('right', 'merged');
   const join = group('join', 'pending', ['left', 'right']);
-  assert.equal(new PlanGraph([root, left, right, join]).isComplete(), true);
+  assert.equal(PlanGraph.from([root, left, right, join]).isComplete(), true);
 });
 
 test('PlanGraph.isComplete: pending behind an in-progress dep → false', () => {
   // The dep may still merge and unblock b, so the plan is not yet terminal.
   const a = group('a', 'in-progress');
   const b = group('b', 'pending', ['a']);
-  assert.equal(new PlanGraph([a, b]).isComplete(), false);
+  assert.equal(PlanGraph.from([a, b]).isComplete(), false);
 });
 
 test('PlanGraph.validate throws on dangling dep', () => {
@@ -154,8 +154,38 @@ test('PlanGraph.validate throws on longer cycle', () => {
   );
 });
 
-test('PlanGraph constructor runs validation', () => {
-  assert.throws(() => new PlanGraph([group('a', 'pending', ['nope'])]), /unknown group 'nope'/);
+test('PlanGraph.from runs validation', () => {
+  assert.throws(() => PlanGraph.from([group('a', 'pending', ['nope'])]), /unknown group 'nope'/);
+});
+
+test('PlanGraph.trusted skips validation (assumes prior acceptance-time validate)', () => {
+  // A dangling dep makes from()/validate() throw; trusted() builds anyway and just reads live
+  // statuses — 'a' stays unready because its missing 'ghost' dep can never merge.
+  const g = PlanGraph.trusted([group('a', 'pending', ['ghost'])]);
+  assert.deepEqual(g.ready(), []);
+  assert.equal(g.isComplete(), false);
+});
+
+test('PlanGraph: validate runs once at acceptance, per-tick trusted rebuilds skip it', () => {
+  const a = group('a', 'pending');
+  const b = group('b', 'pending', ['a']);
+  const original = PlanGraph.validate;
+  let calls = 0;
+  PlanGraph.validate = (groups) => {
+    calls += 1;
+    original(groups);
+  };
+  try {
+    PlanGraph.validate([a, b]); // acceptance: one structural check for the whole run
+    for (let i = 0; i < 5; i++) {
+      // each tick rebuilds a graph against live statuses — no re-validation
+      PlanGraph.trusted([a, b]).ready();
+      PlanGraph.trusted([a, b]).isComplete();
+    }
+    assert.equal(calls, 1);
+  } finally {
+    PlanGraph.validate = original;
+  }
 });
 
 test('PlanGraph.validate throws on duplicate group id', () => {

@@ -144,3 +144,44 @@ test('atomicWrite: parent-dir fsync runs after rename and tolerates EINVAL', asy
     await d.cleanup();
   }
 });
+
+test('atomicWrite: a post-rename parent-dir fsync failure warns and resolves — the write already landed', async () => {
+  if (process.platform === 'win32') return;
+  const d = await temp();
+  const realStderrWrite = process.stderr.write.bind(process.stderr);
+  const warnings: string[] = [];
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    warnings.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const path = join(d.path, 'file.txt');
+    let syncCalls = 0;
+    await withPatchedSync(
+      d.path,
+      (real) =>
+        async function countedSync(this: FileHandle) {
+          syncCalls += 1;
+          if (syncCalls === 1) return real.call(this);
+          // A code NOT in the tolerated-unsupported set — this must still be downgraded to a
+          // warning by atomicWrite, not rethrown, because the rename already made the write durable.
+          throw Object.assign(new Error('simulated dir fsync failure'), { code: 'EIO' });
+        },
+      async () => {
+        await atomicWrite(path, 'durable\n');
+      },
+    );
+    assert.equal(
+      await readFile(path, 'utf8'),
+      'durable\n',
+      'the rename already succeeded — content is durable despite the fsync failure',
+    );
+    assert.ok(
+      warnings.some((w) => /parent-dir fsync failed/.test(w)),
+      'the fsync failure was warned, not thrown',
+    );
+  } finally {
+    process.stderr.write = realStderrWrite;
+    await d.cleanup();
+  }
+});

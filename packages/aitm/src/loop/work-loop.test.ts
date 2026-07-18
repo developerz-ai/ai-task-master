@@ -1763,7 +1763,11 @@ test('markStatus does not increment persisted sessionCount (status transitions a
   }
 });
 
-test('run() bumps persisted sessionCount once per batch, by batch.length', async () => {
+test('run() bumps persisted sessionCount once per started group, not once by batch.length', async () => {
+  // A batch of 3 groups charges one session AS EACH GROUP STARTS — three separate +1 writes whose
+  // distinct persisted values climb 1 → 2 → 3 — rather than a single upfront +3. A crash mid-batch
+  // then persists only the groups that actually started, so a resume never inherits an inflated
+  // count that trips the session cap before the still-unrun groups get their turn.
   const groups = [group('a'), group('b'), group('c')];
   let pass = 0;
   const graph: WorkLoopGraph = {
@@ -1780,13 +1784,11 @@ test('run() bumps persisted sessionCount once per batch, by batch.length', async
     makeDeps({ orchestrator, state, graph, concurrency: 3, autoMerge: true }),
   );
   await loop.run();
-  // First state update is the session-count bump (+3), preceding any group's in-progress write.
-  const sessionBumps = updates.filter(
-    (s, i) => i === 0 || s.sessionCount !== updates[i - 1]?.sessionCount,
-  );
-  assert.equal(sessionBumps.length, 1, 'sessionCount mutated exactly once');
+
+  const distinctCounts = updates.map((s) => s.sessionCount).filter((c, i, all) => c !== all[i - 1]);
+  assert.deepEqual(distinctCounts, [1, 2, 3], 'sessionCount climbs one per started group');
   const last = updates[updates.length - 1];
-  assert.equal(last?.sessionCount, 3, 'final persisted sessionCount equals batch size');
+  assert.equal(last?.sessionCount, 3, 'final persisted sessionCount equals groups started');
 });
 
 test('initialSessionCount seeds the in-memory counter so resume respects maxSessions', async () => {

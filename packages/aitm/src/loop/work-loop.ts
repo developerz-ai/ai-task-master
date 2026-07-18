@@ -311,8 +311,17 @@ export class WorkLoop {
         return { kind: 'session-cap', outcomes: this.outcomes.slice() };
       }
       const batch = ready.slice(0, batchSize);
-      await this.incrementSessionCount(batch.length);
-      await Promise.all(batch.map((g) => this.runGroup(g)));
+      // Charge a session per group AS IT STARTS, persisted incrementally — not the whole batch
+      // upfront. batchSize already fits the remaining budget (nextBatchSize), so the per-group
+      // bumps sum to ≤ it; and a crash mid-batch leaves the persisted count at the groups that
+      // actually started, so a resume never inherits an inflated batch.length that trips maxSessions
+      // before the still-unrun groups get their turn.
+      await Promise.all(
+        batch.map(async (g) => {
+          await this.incrementSessionCount();
+          await this.runGroup(g);
+        }),
+      );
       // Re-check post-batch: an abort mid-batch aborts each group's in-flight LLM calls
       // (worker.ts signal wiring), which runGroup's catch would otherwise report as `blocked`
       // (exit 1). A cancelled run must report cancelled (exit 2) regardless of the abort-induced
@@ -918,23 +927,24 @@ export class WorkLoop {
     patch: Partial<Pick<PrGroup, 'branch' | 'pr' | 'stage' | 'ciFixAttempts' | 'humanNeeded'>> = {},
   ): Promise<void> {
     // Status transitions do not bump sessionCount — that's owned by incrementSessionCount,
-    // which fires once per batch dispatch so the in-memory and persisted counters agree.
+    // which fires once per started group so the in-memory and persisted counters agree.
     await this.deps.state.update((s) => ({
       ...s,
       prGroups: s.prGroups.map((g) => (g.id === id ? { ...g, ...patch, status } : g)),
     }));
   }
 
-  // Single source of truth for session counting: bump both the in-memory counter (used by
-  // run() to enforce maxSessions) and the persisted counter (used by reporting/resume) in
-  // one call. Drops in-memory if persistence fails so the two stay aligned.
-  private async incrementSessionCount(by: number): Promise<void> {
-    if (by <= 0) return;
-    this.sessionCount += by;
+  // Charge one session as a group starts: bump both the in-memory counter (run() reads it to
+  // enforce maxSessions) and the persisted counter (reporting/resume) in one call. Called once per
+  // started group — never once per batch — so the persisted count never exceeds groups that
+  // actually started and a resume can't inherit an inflated count. Rolls the in-memory bump back if
+  // persistence fails so the two stay aligned.
+  private async incrementSessionCount(): Promise<void> {
+    this.sessionCount += 1;
     try {
-      await this.deps.state.update((s) => ({ ...s, sessionCount: s.sessionCount + by }));
+      await this.deps.state.update((s) => ({ ...s, sessionCount: s.sessionCount + 1 }));
     } catch (err) {
-      this.sessionCount -= by;
+      this.sessionCount -= 1;
       throw err;
     }
   }

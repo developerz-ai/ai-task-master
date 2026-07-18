@@ -21,6 +21,7 @@ import { type McpServer, type McpServers, McpServersSchema } from '../mcp/schema
 import { DEFAULT_LLM_STEP_TIMEOUT_MS } from '../subagents/factory.ts';
 import {
   type CliOverrides,
+  CONFIG_KEYS,
   type ConfigFile,
   ConfigFileSchema,
   type McpServerSource,
@@ -38,36 +39,6 @@ const SNAPSHOT_FILE = 'config.snapshot.json';
 // "User scope" = ~/.claude.json with an mcpServers key).
 const CLAUDE_PROJECT_MCP_FILE = '.mcp.json';
 const CLAUDE_USER_FILE = '.claude.json';
-
-const KNOWN_KEYS = new Set<string>([
-  'openrouterApiKey',
-  'activeProfile',
-  'profiles',
-  'baseURL',
-  'models',
-  'maxPrs',
-  'maxSessions',
-  'maxCiFixAttempts',
-  'llmStepTimeoutMs',
-  'autoMerge',
-  'webSearch',
-  'mergeMethod',
-  'stylePath',
-  'formatCommand',
-  'verifyCommand',
-  'selfReview',
-  'resolveConflicts',
-  'logLevel',
-  'concurrency',
-  'bashRules',
-  'providerRouting',
-  'fallbackModels',
-  'reasoningEffort',
-  'mcpServers',
-  'mcpRoleAllowlist',
-  'mcpDeferToolsOver',
-  'hooks',
-]);
 
 // Fields a project-scoped .ai-task-master/config.json must NEVER control — an autonomous run points
 // at untrusted repos, so honoring these would let a checked-in file steer the harness. Honored ONLY
@@ -481,7 +452,7 @@ export class ConfigLoader {
       throw err;
     }
     for (const k of Object.keys(validated)) {
-      if (!KNOWN_KEYS.has(k)) {
+      if (!CONFIG_KEYS.has(k)) {
         this.warn(`${path}: unknown config key "${k}" — ignored`);
       }
     }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CapabilityModelsSchema, ConfigFileSchema, ProfileSchema } from './schema.ts';
+import { CapabilityModelsSchema, CONFIG_KEYS, ConfigFileSchema, ProfileSchema } from './schema.ts';
 
 test('ConfigFileSchema accepts empty object (all fields optional)', () => {
   const parsed = ConfigFileSchema.parse({});
@@ -148,4 +148,23 @@ test('ConfigFileSchema accepts a baseURL that is a valid URL', () => {
 
 test('ConfigFileSchema rejects a baseURL that is not a URL', () => {
   assert.throws(() => ConfigFileSchema.parse({ baseURL: 'not a url' }));
+});
+
+test('CONFIG_KEYS: is the schema shape verbatim → writer + loader share one table', () => {
+  // Derived from ConfigFileSchema so writer (set-time) and loader (read-time) can never drift.
+  assert.deepEqual([...CONFIG_KEYS].sort(), Object.keys(ConfigFileSchema.shape).sort());
+  assert.ok(CONFIG_KEYS.size > 0, 'a broken shape extraction would leave the set empty');
+  // Every consumed key must be recognized — including ones a prior loader table omitted.
+  for (const key of [
+    'openrouterApiKey',
+    'activeProfile',
+    'profiles',
+    'selfReview',
+    'allowForcePush',
+    'prBodySections',
+    'hooks',
+    'mcpRoleAllowlist',
+  ]) {
+    assert.ok(CONFIG_KEYS.has(key), `CONFIG_KEYS must include "${key}"`);
+  }
 });

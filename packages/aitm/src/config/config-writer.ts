@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { ZodError } from 'zod';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { FORBIDDEN_KEY_SEGMENTS } from './profiles.ts';
-import { type ConfigFile, ConfigFileSchema } from './schema.ts';
+import { CONFIG_KEYS, type ConfigFile, ConfigFileSchema } from './schema.ts';
 
 export type ConfigScope = 'global' | 'project';
 
@@ -16,25 +16,9 @@ const PROJECT_DIR = '.ai-task-master';
 const PROJECT_FILE = 'config.json';
 
 // Keys owned by `aitm profile …`. Readable via `config list`/`get`, but the generic
-// `config set`/`unset` refuse them so profile state has a single write surface.
+// `config set`/`unset` refuse them so profile state has a single write surface. A subset of
+// CONFIG_KEYS: they are valid config keys, just not writable through this surface.
 const PROFILE_MANAGED_KEYS: ReadonlySet<string> = new Set(['activeProfile', 'profiles']);
-
-const KNOWN_KEYS: ReadonlySet<string> = new Set([
-  'openrouterApiKey',
-  'baseURL',
-  'models',
-  'maxPrs',
-  'maxSessions',
-  'autoMerge',
-  'mergeMethod',
-  'stylePath',
-  'logLevel',
-  'concurrency',
-  'providerRouting',
-  'fallbackModels',
-  'reasoningEffort',
-  'mcpServers',
-]);
 
 export class ConfigWriter {
   constructor(
@@ -46,7 +30,7 @@ export class ConfigWriter {
     const parts = splitKey(key);
     const top = parts[0];
     assertNotProfileManaged(top);
-    if (!KNOWN_KEYS.has(top)) {
+    if (!CONFIG_KEYS.has(top)) {
       throw new Error(unknownKeyMessage(top));
     }
     const file = await this.readRaw(scope);
@@ -200,7 +184,11 @@ function assertNotProfileManaged(top: string): void {
 }
 
 function unknownKeyMessage(top: string): string {
-  const allowed = [...KNOWN_KEYS].sort().join(', ');
+  // List only keys `config set` actually accepts — the profile-managed ones are refused earlier.
+  const allowed = [...CONFIG_KEYS]
+    .filter((k) => !PROFILE_MANAGED_KEYS.has(k))
+    .sort()
+    .join(', ');
   return `Unknown config key "${top}". Allowed top-level keys: ${allowed}`;
 }
 

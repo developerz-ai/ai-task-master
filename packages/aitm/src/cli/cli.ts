@@ -27,14 +27,14 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
   const parsed = parseArgs(argv);
   switch (parsed.kind) {
     case 'start':
-      return emit(await runStart(parsed, buildStartCtx(ctx)), stderr);
+      return emit(await runStart(parsed, buildStartCtx(ctx)), stdout, stderr);
     case 'merge-pr':
-      return emit(await runMergePr(parsed, buildMergePrCtx(ctx)), stderr);
+      return emit(await runMergePr(parsed, buildMergePrCtx(ctx)), stdout, stderr);
     case 'config-set':
     case 'config-unset':
     case 'config-get':
     case 'config-list':
-      return emit(await runConfig(parsed, buildConfigCtx(ctx, stdout)), stderr);
+      return emit(await runConfig(parsed, buildConfigCtx(ctx, stdout)), stdout, stderr);
     case 'profile-list':
     case 'profile-use':
     case 'profile-add':
@@ -42,7 +42,7 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
     case 'profile-get':
     case 'profile-remove':
     case 'profile-show':
-      return emit(await runProfile(parsed, buildProfileCtx(ctx, stdout)), stderr);
+      return emit(await runProfile(parsed, buildProfileCtx(ctx, stdout)), stdout, stderr);
     case 'help':
       stdout(`${HELP_TEXT}\n`);
       return 0;
@@ -88,9 +88,13 @@ function buildProfileCtx(ctx: MainCtx, stdout: (chunk: string) => void): Profile
 
 function emit(
   exit: { code: 0 | 1 | 2; message?: string },
+  stdout: (chunk: string) => void,
   stderr: (chunk: string) => void,
 ): number {
-  if (exit.message !== undefined && exit.message !== '') stderr(`${exit.message}\n`);
+  if (exit.message !== undefined && exit.message !== '') {
+    const dest = exit.code === 0 ? stdout : stderr;
+    dest(`${exit.message}\n`);
+  }
   return exit.code;
 }
 

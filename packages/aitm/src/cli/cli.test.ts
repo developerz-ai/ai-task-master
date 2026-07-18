@@ -288,3 +288,121 @@ test('isEntrypoint: imported as a module (argv[1] points elsewhere) is false', a
 test('isEntrypoint: undefined argv[1] is false (no crash)', () => {
   assert.equal(isEntrypoint('file:///whatever', undefined), false);
 });
+
+// ---- message routing: code-0 to stdout, code≥1 to stderr -------------------
+
+test('main: start success (code 0) routes message to stdout, not stderr', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const cap = capture();
+  try {
+    const code = await main(['start', 'goal'], {
+      ...cap.ctx,
+      cwd: repo.path,
+      homeDir: home.path,
+      env: { OPENROUTER_API_KEY: FAKE_KEY },
+      authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      runLoop: async () => {
+        return { kind: 'success', outcomes: [] };
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(cap.err.join(''), '');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('main: start session-cap (code 0, message) routes to stdout, not stderr', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const cap = capture();
+  try {
+    const code = await main(['start', 'goal'], {
+      ...cap.ctx,
+      cwd: repo.path,
+      homeDir: home.path,
+      env: { OPENROUTER_API_KEY: FAKE_KEY },
+      authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      runLoop: async () => {
+        return { kind: 'session-cap', outcomes: [] };
+      },
+    });
+    assert.equal(code, 0);
+    assert.match(cap.out.join(''), /Session cap reached/);
+    assert.equal(cap.err.join(''), '');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('main: start awaiting-pr (code 0, message) routes to stdout, not stderr', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const cap = capture();
+  try {
+    const code = await main(['start', 'goal'], {
+      ...cap.ctx,
+      cwd: repo.path,
+      homeDir: home.path,
+      env: { OPENROUTER_API_KEY: FAKE_KEY },
+      authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      runLoop: async () => {
+        return { kind: 'awaiting-pr', outcomes: [], prs: [42] };
+      },
+    });
+    assert.equal(code, 0);
+    assert.match(cap.out.join(''), /PR\(s\) opened/);
+    assert.equal(cap.err.join(''), '');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('main: start error (code 1, message) routes to stderr, not stdout', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const cap = capture();
+  try {
+    const code = await main(['start', 'goal'], {
+      ...cap.ctx,
+      cwd: repo.path,
+      homeDir: home.path,
+      env: { OPENROUTER_API_KEY: FAKE_KEY },
+      authStatus: async () => ({ ok: false, scopes: [] }),
+    });
+    assert.equal(code, 1);
+    assert.match(cap.err.join(''), /not authenticated/);
+    assert.equal(cap.out.join(''), '');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('main: start cancelled (code 2, message) routes to stderr, not stdout', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const cap = capture();
+  try {
+    const code = await main(['start', 'goal'], {
+      ...cap.ctx,
+      cwd: repo.path,
+      homeDir: home.path,
+      env: { OPENROUTER_API_KEY: FAKE_KEY },
+      authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      runLoop: async () => {
+        return { kind: 'cancelled', outcomes: [] };
+      },
+    });
+    assert.equal(code, 2);
+    assert.match(cap.err.join(''), /Cancelled/);
+    assert.equal(cap.out.join(''), '');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});

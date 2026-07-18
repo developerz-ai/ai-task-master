@@ -4,6 +4,7 @@
 
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { scrubSecrets } from './secret-scrubber.ts';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -97,7 +98,13 @@ export class Logger implements LoggerLike {
     const ts = new Date().toISOString();
     try {
       const safeFields = fields ? Logger.redact(fields) : {};
-      const record: LogRecord = { ...safeFields, level, msg, ts, runId: this.runId };
+      const record: LogRecord = {
+        ...safeFields,
+        level,
+        msg: scrubSecrets(msg),
+        ts,
+        runId: this.runId,
+      };
       return `${JSON.stringify(record, bigintReplacer)}\n`;
     } catch (err) {
       const fallback: LogRecord = {
@@ -146,7 +153,7 @@ function redactValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unk
     }
     return out;
   }
-  return value;
+  return typeof value === 'string' ? scrubSecrets(value) : value;
 }
 
 function bigintReplacer(_key: string, value: unknown): unknown {

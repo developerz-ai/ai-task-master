@@ -92,6 +92,10 @@ export type WorkLoopGithub = {
   waitForChecks(pr: number): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
   mergePr(pr: number, method: MergeMethod, opts?: { admin?: boolean }): Promise<void>;
+  // Login `gh` is authenticated as, forwarded to the addressing-reviews dedup so it can skip a thread
+  // it already replied to (self-healing across a crash before the addressed record lands). Optional —
+  // stubs that don't drive the review loop omit it; the real GitHubClient supplies it.
+  authenticatedLogin?(): Promise<string>;
 };
 
 export type CheckoutHome = {
@@ -598,6 +602,7 @@ export class WorkLoop {
       addressReviews: (group, threads) =>
         this.deps.orchestrator.addressReviews({ pr: prNumberOf(group), threads, checkout }),
     };
+    const authenticatedLogin = this.deps.github.authenticatedLogin?.bind(this.deps.github);
     const github: StageGithub = {
       waitForChecks: (pr) => this.deps.github.waitForChecks(pr),
       listUnresolvedThreads: (pr) => this.deps.github.listUnresolvedThreads(pr),
@@ -605,6 +610,7 @@ export class WorkLoop {
         this.deps.github.mergePr(pr, this.deps.mergeMethod ?? DEFAULT_MERGE_METHOD, {
           admin: this.deps.adminMerge ?? false,
         }),
+      ...(authenticatedLogin ? { authenticatedLogin } : {}),
     };
     return {
       orchestrator,

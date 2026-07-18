@@ -193,6 +193,9 @@ function makeGithub(
     defaultBranch?: string;
     checks?: Array<CiResult | CiFailed>;
     threads?: ReviewThread[];
+    // Login the addressing-reviews dedup treats as ours: a thread already carrying a comment from it
+    // is skipped as already-replied. Unset → authenticatedLogin omitted (dedup falls back to record).
+    botLogin?: string;
     // Shared ordering log (see makeOrchestrator).
     events?: string[];
   } = {},
@@ -223,6 +226,9 @@ function makeGithub(
       calls.mergePr.push({ pr, method });
       config.events?.push(`merge:${pr}`);
     },
+    ...(config.botLogin !== undefined
+      ? { authenticatedLogin: async () => config.botLogin ?? '' }
+      : {}),
   };
   return { github, calls };
 }
@@ -1164,6 +1170,47 @@ test('autoMerge: success path runs waitForChecks → mergePr and marks merged', 
   assert.deepEqual(ghCalls.waitForChecks, [11]);
   assert.deepEqual(ghCalls.mergePr, [{ pr: 11, method: 'squash' }]);
   assert.equal(orchCalls.addressReviews.length, 0, 'reviewer not invoked when no threads');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'gamma')?.status, 'merged');
+});
+
+test('autoMerge: a thread already carrying our reply is skipped → merges without re-running the Reviewer', async () => {
+  // Wiring for the self-healing bot-reply skip (freshThreads via authenticatedLogin): the reply
+  // landed on GitHub on a prior pass but its addressed record was lost. On resume the loop must
+  // recognize our own reply and converge to merge, not re-feed the thread to the Reviewer. prContext
+  // is present only to guarantee termination if the skip ever regresses — with it working,
+  // addressReviews is never called.
+  const repliedThread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [
+      { id: 'c1', body: 'nit', author: 'coderabbit' },
+      { id: 'c2', body: 'fixed', author: 'aitm-bot' },
+    ],
+  };
+  const { orchestrator, calls: orchCalls } = makeOrchestrator({ prNumber: 11 });
+  const { github, calls: ghCalls } = makeGithub({
+    checks: [ciSuccess],
+    threads: [repliedThread],
+    botLogin: 'aitm-bot',
+  });
+  const { state, updates } = makeState([group('gamma')]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prContext: makeAddressedStore() }),
+  );
+  await loop.runGroup(group('gamma'));
+
+  assert.equal(
+    orchCalls.addressReviews.length,
+    0,
+    'the already-replied thread never reaches the Reviewer',
+  );
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [11],
+    'PR merged once, no re-address loop',
+  );
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((p) => p.id === 'gamma')?.status, 'merged');
 });

@@ -109,6 +109,35 @@ test('defaultBranch throws on unexpected JSON shape', async () => {
   await assert.rejects(() => g.defaultBranch(), /unexpected JSON shape/);
 });
 
+test('authenticatedLogin shells gh api user and returns the raw login', async () => {
+  const { run, calls } = makeRun([{ stdout: 'aitm-bot\n' }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  assert.equal(await g.authenticatedLogin(), 'aitm-bot');
+  assert.deepEqual(calls[0]?.args, ['api', 'user', '--jq', '.login']);
+  assert.equal(calls[0]?.file, 'gh');
+  assert.equal(calls[0]?.cwd, '/tmp/repo');
+});
+
+test('authenticatedLogin caches the login (one subprocess across calls)', async () => {
+  const { run, calls } = makeRun([{ stdout: 'aitm-bot\n' }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  assert.equal(await g.authenticatedLogin(), 'aitm-bot');
+  assert.equal(await g.authenticatedLogin(), 'aitm-bot');
+  assert.equal(calls.length, 1, 'second lookup is served from cache');
+});
+
+test('authenticatedLogin throws when gh api user fails', async () => {
+  const { run } = makeRun([{ exitCode: 1, stderr: 'gh: not logged in' }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(() => g.authenticatedLogin(), /gh api user failed/);
+});
+
+test('authenticatedLogin throws on an empty login', async () => {
+  const { run } = makeRun([{ stdout: '\n' }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(() => g.authenticatedLogin(), /empty login/);
+});
+
 test('getPrForBranch passes branch + json fields and parses result', async () => {
   const pr = {
     number: 42,

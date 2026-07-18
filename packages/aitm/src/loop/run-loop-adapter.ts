@@ -60,7 +60,7 @@ import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
 import { providerOptionsWithServerTools, webSearchServerTool } from '../openrouter/server-tools.ts';
-import { Orchestrator } from '../orchestrator/orchestrator.ts';
+import { DEFAULT_MAX_STEPS, Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { Plan } from '../plan/schema.ts';
@@ -809,7 +809,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     agentConfig: input.agentConfig,
     ...(input.styleDigest !== undefined ? { styleDigest: input.styleDigest } : {}),
     rollingContext,
-    maxSessions: input.resolved.maxSessions,
+    maxSteps: DEFAULT_MAX_STEPS,
     github: input.github,
     ...(input.resolved.prBodySections !== undefined
       ? { prBodySections: input.resolved.prBodySections }

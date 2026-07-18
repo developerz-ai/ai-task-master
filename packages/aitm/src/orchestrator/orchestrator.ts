@@ -23,6 +23,7 @@ import {
   hasToolCall,
   stepCountIs,
   type TimeoutConfiguration,
+  type Tool,
   ToolLoopAgent,
   tool,
 } from 'ai';
@@ -110,7 +111,9 @@ export type OrchestratorInit = {
   // prefix for the orchestrator prompt and every subagent tool; absent → raw contents.
   styleDigest?: string;
   rollingContext: string;
-  maxSessions: number | null;
+  // LLM step budget for the orchestrator loop (separate from maxSessions, a PR/session count).
+  // Null/0/negative → DEFAULT_MAX_STEPS. Caller responsibility to set a sensible value.
+  maxSteps: number | null;
   github: GhClient;
   // Optional per-repo PR body section headings (each a `## ` heading). Undefined/empty/malformed
   // falls back to the default Summary/Changes/Testing. See resolvePrBodySections.
@@ -141,6 +144,7 @@ export type OrchestratorTools = {
   planner: ReturnType<typeof makePlannerTool>;
   worker: ReturnType<typeof makeWorkerTool>;
   reviewer: ReturnType<typeof makeReviewerTool>;
+  done: Tool<Record<string, never>, Record<string, never>>;
 };
 
 // The default PR body section headings, in order. Used when a repo does not configure its own
@@ -218,13 +222,13 @@ function sameSections(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((s, i) => s === b[i]);
 }
 
-// Fallback session cap when caller passes null / 0 / negative `maxSessions`.
+// Fallback LLM step cap when caller passes null / 0 / negative `maxSteps`.
 export const DEFAULT_MAX_STEPS = 50;
 
-// Resolve the agent step cap from caller-provided `maxSessions`. Falls back to the
+// Resolve the agent step cap from caller-provided `maxSteps`. Falls back to the
 // default when the value is null, zero, or negative. Exported for unit testing.
-export function resolveMaxSteps(maxSessions: number | null): number {
-  return typeof maxSessions === 'number' && maxSessions > 0 ? maxSessions : DEFAULT_MAX_STEPS;
+export function resolveMaxSteps(maxSteps: number | null): number {
+  return typeof maxSteps === 'number' && maxSteps > 0 ? maxSteps : DEFAULT_MAX_STEPS;
 }
 
 export class Orchestrator {
@@ -261,12 +265,18 @@ export class Orchestrator {
         pr: context.pr,
         threads: context.threads,
       }),
+      done: tool<Record<string, never>, Record<string, never>>({
+        description:
+          'Signal that all PR groups have been processed and the orchestration is complete.',
+        inputSchema: z.object({}),
+        execute: async () => ({}),
+      }),
     };
     return new ToolLoopAgent<never, OrchestratorTools>({
       model: this.init.credentials.modelFor('orchestrator'),
       instructions: this.buildSystemPrompt(),
       tools,
-      stopWhen: [stepCountIs(resolveMaxSteps(this.init.maxSessions)), hasToolCall('done')],
+      stopWhen: [stepCountIs(resolveMaxSteps(this.init.maxSteps)), hasToolCall('done')],
     });
   }
 

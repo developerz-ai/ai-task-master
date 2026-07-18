@@ -106,3 +106,27 @@ test('forModel throws ModelNotFound for unknown id', async () => {
     },
   );
 });
+
+test('concurrent preload() calls are memoized — only one listModels() round-trip', async () => {
+  const stub = makeStub([opus, gpt5]);
+  const r = new ModelLimitsRegistry(stub as unknown as OpenRouterClient);
+  // Fire three concurrent preload calls without awaiting sequentially.
+  await Promise.all([r.preload(), r.preload(), r.preload()]);
+  assert.equal(stub.calls, 1, 'only one listModels() call despite concurrent preload()');
+});
+
+test('concurrent forModel() calls are memoized via preload() — single listModels() round-trip', async () => {
+  const stub = makeStub([opus, gpt5]);
+  const r = new ModelLimitsRegistry(stub as unknown as OpenRouterClient);
+  // Fire concurrent forModel calls before any cache is populated.
+  await Promise.all([
+    r.forModel('anthropic/claude-opus-4.7'),
+    r.forModel('openai/gpt-5'),
+    r.forModel('anthropic/claude-opus-4.7'),
+  ]);
+  assert.equal(
+    stub.calls,
+    1,
+    'only one listModels() call despite three concurrent forModel() calls',
+  );
+});

@@ -41,6 +41,7 @@ export class ModelNotFound extends Error {
 
 export class ModelLimitsRegistry implements ModelLimitsLookup {
   private cache: Map<string, ModelLimits> | undefined;
+  private loadPromise: Promise<void> | undefined;
 
   constructor(private readonly client: OpenRouterClient) {}
 
@@ -57,6 +58,12 @@ export class ModelLimitsRegistry implements ModelLimitsLookup {
 
   async preload(): Promise<void> {
     if (this.cache) return;
+    if (this.loadPromise) return this.loadPromise;
+    this.loadPromise = this.load();
+    return this.loadPromise;
+  }
+
+  private async load(): Promise<void> {
     const models = await this.client.listModels();
     const next = new Map<string, ModelLimits>();
     for (const m of models) {

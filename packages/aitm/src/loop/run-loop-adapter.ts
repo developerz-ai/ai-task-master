@@ -60,7 +60,7 @@ import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
 import { providerOptionsWithServerTools, webSearchServerTool } from '../openrouter/server-tools.ts';
-import { Orchestrator } from '../orchestrator/orchestrator.ts';
+import { DEFAULT_MAX_STEPS, Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { Plan } from '../plan/schema.ts';
@@ -809,7 +809,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     agentConfig: input.agentConfig,
     ...(input.styleDigest !== undefined ? { styleDigest: input.styleDigest } : {}),
     rollingContext,
-    maxSessions: input.resolved.maxSessions,
+    maxSteps: DEFAULT_MAX_STEPS,
     github: input.github,
     ...(input.resolved.prBodySections !== undefined
       ? { prBodySections: input.resolved.prBodySections }
@@ -1219,8 +1219,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       return { kind: 'blocked', reason: result.reason };
     },
     // addressing-reviews stage → run the Reviewer, then push its commits so the PR updates. The
-    // Reviewer commits code fixes locally (worker pattern); a plain push suffices (additive commits,
-    // no history rewrite). Replied/wontfix-only rounds make no commit, so there's nothing to push.
+    // Reviewer commits code fixes locally (worker pattern). Fetch the remote branch first, then
+    // push with --force-with-lease to handle non-ff cases safely (if another process pushed to the
+    // PR branch while the Reviewer ran). Replied/wontfix-only rounds make no commit, so there's
+    // nothing to push.
     addressReviews: async ({ pr, threads, checkout }) => {
       const result = await runReviewerThreads({ pr, threads, checkout });
       if (result.kind !== 'ok') {
@@ -1230,7 +1232,21 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         };
       }
       if (result.resolutions.some((r) => r.kind === 'fixed')) {
-        await runGit(['push'], { cwd: checkout.path });
+        const cwd = { cwd: checkout.path };
+        const fetch = await runGit(['fetch', 'origin', checkout.branch], cwd);
+        if (fetch.exitCode !== 0) {
+          return {
+            kind: 'blocked',
+            reason: `git fetch origin ${checkout.branch} failed: unable to push review fixes`,
+          };
+        }
+        const push = await runGit(['push', '--force-with-lease'], cwd);
+        if (push.exitCode !== 0) {
+          return {
+            kind: 'blocked',
+            reason: `git push --force-with-lease failed: unable to push review fixes`,
+          };
+        }
       }
       return { kind: 'ok' };
     },

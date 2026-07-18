@@ -209,7 +209,7 @@ test('Orchestrator is constructible', () => {
     credentials: {} as never,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github: {} as never,
   });
   assert.ok(o instanceof Orchestrator);
@@ -220,7 +220,7 @@ test('buildSystemPrompt = agentConfig.contents + ORCHESTRATOR_ROLE_PREFIX + roll
     credentials: {} as never,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# repo style' },
     rollingContext: 'prior PRs: 1, 2',
-    maxSessions: null,
+    maxSteps: null,
     github: {} as never,
   });
   const sys = o.buildSystemPrompt();
@@ -238,7 +238,7 @@ test('buildSystemPrompt: styleDigest replaces agentConfig.contents as the style 
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# raw style' },
     styleDigest: '# distilled digest',
     rollingContext: 'prior PRs: 1',
-    maxSessions: null,
+    maxSteps: null,
     github: {} as never,
   });
   const sys = o.buildSystemPrompt();
@@ -248,19 +248,19 @@ test('buildSystemPrompt: styleDigest replaces agentConfig.contents as the style 
   assert.ok(sys.includes('prior PRs: 1'), 'rolling context must be present');
 });
 
-test('build composes planner/worker/reviewer tools and resolves orchestrator model', () => {
+test('build composes planner/worker/reviewer/done tools and resolves orchestrator model', () => {
   const model = new MockLanguageModelV3();
   const { provider, roles } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github: {} as never,
   });
   const agent = o.build(baseContext());
   assert.ok(agent);
-  assert.deepEqual(Object.keys(agent.tools).sort(), ['planner', 'reviewer', 'worker']);
+  assert.deepEqual(Object.keys(agent.tools).sort(), ['done', 'planner', 'reviewer', 'worker']);
   // build itself only resolves the orchestrator's own model — subagent role models
   // resolve lazily inside each tool's execute, so we expect a single entry here.
   assert.deepEqual(roles, ['orchestrator']);
@@ -283,7 +283,7 @@ test('finalizeCommit rewrites commit message and amends via runCmd, returning th
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github: {} as never,
     runCmd,
   });
@@ -315,7 +315,7 @@ test('finalizeCommit throws when git amend fails', async () => {
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github: {} as never,
     runCmd,
   });
@@ -331,7 +331,7 @@ test('finalizeCommit arms the per-step deadline — a stalled refine call surfac
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github: {} as never,
     runCmd: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     timeout: { stepMs: 40 },
@@ -351,7 +351,7 @@ test('openPr arms the per-step deadline — a stalled compose call surfaces a St
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github: {
       createPr: async () => {
         createPrCalled = true;
@@ -384,7 +384,7 @@ test('openPr composes title + body via the orchestrator model and calls github.c
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: 'prior: nothing yet',
-    maxSessions: null,
+    maxSteps: null,
     github,
   });
   const pr = await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -431,7 +431,7 @@ test('composePr requests submit via toolChoice "auto" (thinking-model compat)', 
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: 'prior: nothing yet',
-    maxSessions: null,
+    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -520,7 +520,7 @@ test('openPr prompt instructs the standard PR body template', async () => {
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -552,7 +552,7 @@ test('composePr throws a schema-validation error when the submitted composition 
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await assert.rejects(o.openPr(baseGroup(), baseDelivery(), 'main'), /schema validation/i);
@@ -572,7 +572,7 @@ test('composePr throws a no-submission error when the model never submits a comp
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await assert.rejects(
@@ -606,7 +606,7 @@ test('openPr prompt anchors the title on the group goal, not the worker draft me
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -634,7 +634,7 @@ test('openPr uses group.branch when set, otherwise aitm/<id>', async () => {
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSessions: null,
+    maxSteps: null,
     github,
   });
   const customGroup = { ...baseGroup(), branch: 'feature/custom' };

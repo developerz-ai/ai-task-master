@@ -78,6 +78,11 @@ export const defaultSleep: Sleep = (ms) =>
         setTimeout(resolve, ms);
       });
 
+// GraphQL pagination bounds: GitHub caps at 100 nodes/page; these bounds prevent infinite loops
+// on broken pagination (non-advancing cursor, infinite pages) while allowing very large PRs.
+export const MAX_REVIEW_THREAD_PAGES = 100; // ≈ 10k threads (extremely conservative upper bound)
+export const MAX_THREAD_COMMENT_PAGES = 100; // ≈ 10k comments per thread (idem)
+
 export const CHECKS_INITIAL_DELAY_MS = 1000;
 export const CHECKS_MAX_DELAY_MS = 60_000;
 // Hard ceiling on how long waitForChecks polls before giving up — ports claude-task-master's
@@ -354,7 +359,9 @@ export class GitHubClient {
   ): Promise<RawReviewThread[]> {
     const collected: RawReviewThread[] = [];
     let cursor: string | null = null;
-    while (true) {
+    let pageCount = 0;
+    let prevEndCursor: string | null = null;
+    while (pageCount < MAX_REVIEW_THREAD_PAGES) {
       const args: string[] = [
         'api',
         'graphql',
@@ -376,10 +383,20 @@ export class GitHubClient {
       }
       const parsed = GqlReviewThreadsResponseSchema.parse(JSON.parse(r.stdout));
       const conn = parsed.data.repository.pullRequest.reviewThreads;
+      pageCount++;
+      if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) {
+        collected.push(...conn.nodes);
+        return collected;
+      }
+      // Break if cursor is not advancing (broken pagination) — before adding nodes
+      if (conn.pageInfo.endCursor === prevEndCursor) {
+        return collected;
+      }
       collected.push(...conn.nodes);
-      if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) return collected;
+      prevEndCursor = conn.pageInfo.endCursor;
       cursor = conn.pageInfo.endCursor;
     }
+    return collected;
   }
 
   private async paginateThreadComments(
@@ -388,7 +405,9 @@ export class GitHubClient {
   ): Promise<RawReviewComment[]> {
     const collected: RawReviewComment[] = [];
     let cursor: string | null = startCursor;
-    while (cursor) {
+    let pageCount = 0;
+    let prevEndCursor: string | null = null;
+    while (cursor && pageCount < MAX_THREAD_COMMENT_PAGES) {
       const r = await this.runCmd(
         'gh',
         [
@@ -410,9 +429,16 @@ export class GitHubClient {
       }
       const parsed = GqlThreadCommentsResponseSchema.parse(JSON.parse(r.stdout));
       const conn = parsed.data.node.comments;
-      collected.push(...conn.nodes);
-      cursor =
-        conn.pageInfo.hasNextPage && conn.pageInfo.endCursor ? conn.pageInfo.endCursor : null;
+      pageCount++;
+      // Break if cursor is not advancing (broken pagination) — before adding nodes
+      if (conn.pageInfo.endCursor === prevEndCursor) {
+        cursor = null;
+      } else {
+        collected.push(...conn.nodes);
+        prevEndCursor = conn.pageInfo.endCursor;
+        cursor =
+          conn.pageInfo.hasNextPage && conn.pageInfo.endCursor ? conn.pageInfo.endCursor : null;
+      }
     }
     return collected;
   }

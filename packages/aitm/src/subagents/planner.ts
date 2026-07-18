@@ -125,8 +125,9 @@ function buildUserPrompt(input: PlannerInput): string {
   return prependContextBlock(input.contextBlock, lines.join('\n'));
 }
 
-// Truncate to maxPrs groups; fold any overflow into a single remainder task on
-// the last kept group so no work is silently dropped.
+// Truncate to maxPrs groups; fold any overflow into a single remainder task on the last kept group
+// so no work is silently dropped, then redirect any dep that pointed at a dropped group to that
+// last-kept group so PlanGraph.validate still sees a closed DAG (issue: capped cross-group deps).
 function capGroups(plan: Plan, maxPrs: number): Plan {
   if (plan.groups.length <= maxPrs) return plan;
   const kept = plan.groups.slice(0, maxPrs);
@@ -138,10 +139,51 @@ function capGroups(plan: Plan, maxPrs: number): Plan {
     complexity: 'normal',
   };
   const merged: PlannedGroup = { ...lastKept, tasks: [...lastKept.tasks, remainder] };
-  const newGroups = [...kept.slice(0, maxPrs - 1), merged];
-  return { ...plan, groups: newGroups };
+  const capped = [...kept.slice(0, maxPrs - 1), merged];
+  return { ...plan, groups: remapDanglingDeps(capped, lastKept.id) };
 }
 
 function summarizeGroup(g: PlannedGroup): string {
   return `${g.id} (${g.tasks.length} tasks)`;
+}
+
+// Dropping overflow groups can leave a kept group depending on a dropped id. The dropped work is
+// folded into lastKept, so redirect each dangling dep there — except when that would self-loop or
+// close a cycle lastKept already sits on, where the edge is dropped instead. Kept deps pass through
+// unchanged (deduped). The result is always a valid DAG over the surviving ids.
+function remapDanglingDeps(groups: PlannedGroup[], lastKeptId: string): PlannedGroup[] {
+  const keptIds = new Set(groups.map((g) => g.id));
+  const reachableFromLast = reachableFrom(groups, lastKeptId, keptIds);
+  return groups.map((group) => {
+    const dependsOn: string[] = [];
+    for (const dep of group.dependsOn) {
+      if (keptIds.has(dep)) {
+        if (!dependsOn.includes(dep)) dependsOn.push(dep);
+        continue;
+      }
+      const wouldCycle = group.id === lastKeptId || reachableFromLast.has(group.id);
+      if (!wouldCycle && !dependsOn.includes(lastKeptId)) dependsOn.push(lastKeptId);
+    }
+    return { ...group, dependsOn };
+  });
+}
+
+// Kept ids that startId transitively depends on (following dependsOn over kept ids only). The
+// visited set keeps it cycle-safe, so a malformed cyclic plan can't spin here.
+function reachableFrom(
+  groups: PlannedGroup[],
+  startId: string,
+  keptIds: ReadonlySet<string>,
+): Set<string> {
+  const depsById = new Map(groups.map((g) => [g.id, g.dependsOn]));
+  const seen = new Set<string>();
+  const stack = [...(depsById.get(startId) ?? [])];
+  while (stack.length > 0) {
+    const id = stack.pop();
+    if (id === undefined || seen.has(id) || !keptIds.has(id)) continue;
+    seen.add(id);
+    const next = depsById.get(id);
+    if (next) stack.push(...next);
+  }
+  return seen;
 }

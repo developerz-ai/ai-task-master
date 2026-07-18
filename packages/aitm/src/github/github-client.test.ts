@@ -10,6 +10,7 @@ import {
   DEFAULT_PR_LABEL,
   defaultSleep,
   GitHubClient,
+  MAX_REVIEW_THREAD_PAGES,
   type RunCmd,
   type RunCmdResult,
   type Sleep,
@@ -789,6 +790,139 @@ test('getFailedCiLogs returns [] when the PR has no failed runs', async () => {
   };
   const g = new GitHubClient('/tmp/repo', run);
   assert.deepEqual(await g.getFailedCiLogs(42), []);
+});
+
+test('listUnresolvedThreads stops paginating review threads at max pages', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  // Test with a small cap to verify the bound logic without generating huge mock arrays.
+  // Use a custom makeRun that generates replies on-the-fly.
+  let callCount = 0;
+  const run: RunCmd = async () => {
+    if (callCount === 0) {
+      callCount++;
+      return { stdout: meta, stderr: '', exitCode: 0 };
+    }
+    // Return pages that have more pages until we hit the limit.
+    // After MAX_REVIEW_THREAD_PAGES requests, each page will signal hasNextPage: false.
+    const pageNum = callCount - 1;
+    const hasMore = pageNum < MAX_REVIEW_THREAD_PAGES - 1;
+    callCount++;
+    return {
+      stdout: threadsResponse(
+        [
+          {
+            id: `PRRT_${pageNum}`,
+            isResolved: false,
+            path: 'a.ts',
+            comments: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [{ id: `IC_${pageNum}`, body: 'x', author: { login: 'r' } }],
+            },
+          },
+        ],
+        {
+          hasNextPage: hasMore,
+          endCursor: hasMore ? `cursor-${pageNum}` : null,
+        },
+      ),
+      stderr: '',
+      exitCode: 0,
+    };
+  };
+  const g = new GitHubClient('/tmp/repo', run);
+  const threads = await g.listUnresolvedThreads(7);
+
+  // Should have collected only up to MAX_REVIEW_THREAD_PAGES threads.
+  assert.equal(threads.length, MAX_REVIEW_THREAD_PAGES);
+  // Should have made max pages + 1 (repoMeta + pages) calls.
+  assert.equal(
+    callCount,
+    MAX_REVIEW_THREAD_PAGES + 1,
+    'should not paginate beyond MAX_REVIEW_THREAD_PAGES',
+  );
+});
+
+test('listUnresolvedThreads breaks on non-advancing cursor in review threads', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  // Page 1: has next page
+  const page1 = threadsResponse(
+    [
+      {
+        id: 'PRRT_1',
+        isResolved: false,
+        path: 'a.ts',
+        comments: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [{ id: 'IC_1', body: 'x', author: { login: 'r' } }],
+        },
+      },
+    ],
+    { hasNextPage: true, endCursor: 'stuck-cursor' },
+  );
+  // Page 2: same cursor (broken pagination) — should break after this
+  const page2 = threadsResponse(
+    [
+      {
+        id: 'PRRT_2',
+        isResolved: false,
+        path: 'b.ts',
+        comments: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [{ id: 'IC_2', body: 'y', author: { login: 'r' } }],
+        },
+      },
+    ],
+    { hasNextPage: true, endCursor: 'stuck-cursor' }, // same as before
+  );
+  const { run, calls } = makeRun([{ stdout: meta }, { stdout: page1 }, { stdout: page2 }]);
+  const g = new GitHubClient('/tmp/repo', run);
+  const threads = await g.listUnresolvedThreads(7);
+
+  // Should have only 1 thread (from page 1); detects non-advancing cursor and stops after page 2.
+  assert.equal(threads.length, 1);
+  assert.equal(threads[0]?.id, 'PRRT_1');
+  // Should have made 3 calls (repoMeta + page1 + page2 where page2 detects the stuck cursor).
+  assert.equal(calls.length, 3, 'should detect non-advancing cursor and stop');
+});
+
+test('listUnresolvedThreads breaks on non-advancing cursor in thread comments', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  const thread = threadsResponse([
+    {
+      id: 'PRRT_long',
+      isResolved: false,
+      path: 'big.ts',
+      comments: {
+        pageInfo: { hasNextPage: true, endCursor: 'c-1' },
+        nodes: [{ id: 'IC_a', body: 'first', author: { login: 'r' } }],
+      },
+    },
+  ]);
+  // Comment page 1: has next page with cursor
+  const commentPage1 = commentsResponse([{ id: 'IC_b', body: 'second', author: { login: 'r' } }], {
+    hasNextPage: true,
+    endCursor: 'stuck-cursor',
+  });
+  // Comment page 2: same cursor (broken pagination) — should break after this
+  const commentPage2 = commentsResponse(
+    [{ id: 'IC_c', body: 'third', author: { login: 'r' } }],
+    { hasNextPage: true, endCursor: 'stuck-cursor' }, // same as before
+  );
+  const { run, calls } = makeRun([
+    { stdout: meta },
+    { stdout: thread },
+    { stdout: commentPage1 },
+    { stdout: commentPage2 },
+  ]);
+  const g = new GitHubClient('/tmp/repo', run);
+  const threads = await g.listUnresolvedThreads(3);
+
+  // Should have thread with only first 2 comments (detected non-advancing cursor after page 2).
+  assert.equal(threads.length, 1);
+  assert.equal(threads[0]?.comments.length, 2, 'should have 2 comments (first + second)');
+  // Should have made 4 calls (repoMeta + threads + commentPage1 + commentPage2).
+  // commentPage2 detects the stuck cursor and breaks.
+  assert.equal(calls.length, 4, 'should detect non-advancing cursor after fetching page 2');
 });
 
 // defaultSleep short-circuits to a microtask under a test runner (NODE_TEST_CONTEXT is set by

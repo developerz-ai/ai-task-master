@@ -224,7 +224,7 @@ export async function readBodyCapped(
         truncated = body.length > maxChars;
         body = body.slice(0, maxChars);
         await reader.cancel();
-        return { body, truncated: true };
+        return { body, truncated };
       }
     }
   } finally {

@@ -119,3 +119,45 @@ test('webSearchTool: a network failure is caught and reported, never thrown', as
   assert.deepEqual(out.results, []);
   assert.match(out.error ?? '', /boom/);
 });
+
+test('webSearchTool: validates content-type and rejects unexpected types', async () => {
+  const tool = webSearchTool({
+    fetchImpl: (async () =>
+      jsonResponse('not html', 200) as Response & {
+        headers: { get: (h: string) => string | null };
+      }) as typeof fetch,
+  });
+  // Mock headers getter to return application/json
+  const mockResponse = jsonResponse('{}', 200);
+  Object.defineProperty(mockResponse.headers, 'get', {
+    value: (h: string) => (h.toLowerCase() === 'content-type' ? 'application/json' : null),
+  });
+  const tool2 = webSearchTool({
+    fetchImpl: (async () => mockResponse) as typeof fetch,
+  });
+  const out = (await tool2.execute?.(
+    { query: 'test' },
+    { toolCallId: 't4', messages: [] },
+  )) as WebSearchOutput;
+  assert.deepEqual(out.results, []);
+  assert.match(out.error ?? '', /unexpected content-type/);
+});
+
+test('webSearchTool: accepts text/html and text/plain content types', async () => {
+  const tool = webSearchTool({
+    endpoint: 'https://search.test/html/',
+    fetchImpl: (async () => {
+      const response = jsonResponse(FIXTURE, 200);
+      Object.defineProperty(response.headers, 'get', {
+        value: (h: string) => (h.toLowerCase() === 'content-type' ? 'text/html' : null),
+      });
+      return response;
+    }) as typeof fetch,
+  });
+  const out = (await tool.execute?.(
+    { query: 'test' },
+    { toolCallId: 't5', messages: [] },
+  )) as WebSearchOutput;
+  assert.equal(out.error, undefined);
+  assert.ok(out.results.length > 0);
+});

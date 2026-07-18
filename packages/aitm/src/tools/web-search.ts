@@ -10,7 +10,7 @@
 import type { Tool } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
-import { DEFAULT_STEALTH_HEADERS } from './web-fetch.ts';
+import { DEFAULT_STEALTH_HEADERS, readBodyCapped } from './web-fetch.ts';
 
 const webSearchInputSchema = z.object({
   query: z.string().min(1),
@@ -39,6 +39,7 @@ const DEFAULT_ENDPOINT = 'https://html.duckduckgo.com/html/';
 const DEFAULT_MAX_RESULTS = 6;
 const RESULTS_CEILING = 15;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const MAX_RESPONSE_CHARS = 1_000_000; // 1MB limit to avoid buffering huge responses
 
 // A small, sufficient HTML-entity decoder for the text DuckDuckGo emits in titles/snippets — named
 // entities plus decimal/hex numeric refs. `&amp;` is decoded first so a following pass never
@@ -178,7 +179,19 @@ export function webSearchTool(init: WebSearchInit = {}): Tool<WebSearchInput, We
           error: `web search returned HTTP ${response.status}`,
         };
       }
-      const html = await response.text();
+      const contentType = response.headers.get('content-type');
+      if (
+        contentType &&
+        !contentType.includes('text/html') &&
+        !contentType.includes('text/plain')
+      ) {
+        return {
+          query: input.query,
+          results: [],
+          error: `unexpected content-type: ${contentType}`,
+        };
+      }
+      const { body: html } = await readBodyCapped(response, MAX_RESPONSE_CHARS);
       return { query: input.query, results: parseDuckDuckGoHtml(html, n) };
     },
   });

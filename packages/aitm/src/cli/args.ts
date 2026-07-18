@@ -57,9 +57,19 @@ export type ProfileArgs =
   | { kind: 'profile-remove'; name: string }
   | { kind: 'profile-show'; name?: string };
 
-export type ParsedArgs = StartArgs | MergePrArgs | ConfigArgs | ProfileArgs | { kind: 'help' };
+export type ParsedArgs =
+  | StartArgs
+  | MergePrArgs
+  | ConfigArgs
+  | ProfileArgs
+  | { kind: 'help' }
+  | { kind: 'usage-error' };
 
 const HELP: ParsedArgs = { kind: 'help' };
+// Malformed input (bad flag value, unknown flag, missing required arg): distinct from
+// explicitly-requested help so the CLI can exit nonzero and print to stderr instead of
+// masking a CI-wrapper typo behind exit 0.
+const USAGE_ERROR: ParsedArgs = { kind: 'usage-error' };
 
 export function parseArgs(argv: ReadonlyArray<string>): ParsedArgs {
   const [command, ...rest] = argv;
@@ -75,7 +85,7 @@ export function parseArgs(argv: ReadonlyArray<string>): ParsedArgs {
     case 'profile':
       return parseProfile(rest);
     default:
-      return HELP;
+      return USAGE_ERROR;
   }
 }
 
@@ -100,25 +110,25 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
     const { flag, inlineValue, consumed } = splitFlag(raw);
     if (flag === '--criteria') {
       const v = takeValue(args, i, inlineValue);
-      if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return USAGE_ERROR;
       criteria = v;
       i += consumed(inlineValue !== null);
     } else if (flag === '--max-prs') {
       const v = takeValue(args, i, inlineValue);
       const n = parseNonNegativeInt(v);
-      if (n === null) return HELP;
+      if (n === null) return USAGE_ERROR;
       maxPrs = n;
       i += consumed(inlineValue !== null);
     } else if (flag === '--max-sessions') {
       const v = takeValue(args, i, inlineValue);
       const n = parseNonNegativeInt(v);
-      if (n === null) return HELP;
+      if (n === null) return USAGE_ERROR;
       maxSessions = n;
       i += consumed(inlineValue !== null);
     } else if (flag === '--concurrency') {
       const v = takeValue(args, i, inlineValue);
       const n = parsePositiveInt(v);
-      if (n === null) return HELP;
+      if (n === null) return USAGE_ERROR;
       concurrency = n;
       i += consumed(inlineValue !== null);
     } else if (flag === '--max-fix-attempts') {
@@ -126,46 +136,46 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
       // --max-sessions where 0 means unlimited.
       const v = takeValue(args, i, inlineValue);
       const n = parsePositiveInt(v);
-      if (n === null) return HELP;
+      if (n === null) return USAGE_ERROR;
       maxFixAttempts = n;
       i += consumed(inlineValue !== null);
     } else if (flag === '--no-automerge') {
       // Boolean flag rejects any inline value: `--no-automerge=true` is a usage error,
       // not silently treated as the boolean.
-      if (inlineValue !== null) return HELP;
+      if (inlineValue !== null) return USAGE_ERROR;
       autoMerge = false;
       i += 1;
     } else if (flag === '--admin') {
       // Boolean flag: force-merge past base-branch policy. Rejects inline values.
-      if (inlineValue !== null) return HELP;
+      if (inlineValue !== null) return USAGE_ERROR;
       adminMerge = true;
       i += 1;
     } else if (flag === '--pr-per-task') {
       // Boolean flag rejects any inline value: `--pr-per-task=true` is a usage error,
       // not silently treated as the boolean.
-      if (inlineValue !== null) return HELP;
+      if (inlineValue !== null) return USAGE_ERROR;
       prPerTask = true;
       i += 1;
     } else if (flag === '--style') {
       const v = takeValue(args, i, inlineValue);
-      if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return USAGE_ERROR;
       stylePath = v;
       i += consumed(inlineValue !== null);
     } else if (flag === '--model') {
       const v = takeValue(args, i, inlineValue);
-      if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return USAGE_ERROR;
       model = v;
       i += consumed(inlineValue !== null);
     } else if (flag === '--branch') {
       const v = takeValue(args, i, inlineValue);
       if (v === null || (inlineValue === null && v.startsWith('--')) || !isValidBranchName(v))
-        return HELP;
+        return USAGE_ERROR;
       branch = v;
       i += consumed(inlineValue !== null);
     } else if (raw.startsWith('--')) {
-      return HELP;
+      return USAGE_ERROR;
     } else if (raw.startsWith('-')) {
-      return HELP;
+      return USAGE_ERROR;
     } else {
       positionals.push(raw);
       i += 1;
@@ -173,7 +183,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   }
 
   const goal = positionals[0];
-  if (goal === undefined || positionals.length > 1) return HELP;
+  if (goal === undefined || positionals.length > 1) return USAGE_ERROR;
 
   const out: StartArgs = { kind: 'start', goal };
   if (criteria !== undefined) out.criteria = criteria;
@@ -221,25 +231,25 @@ function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {
     if (flag === '--pr') {
       const v = takeValue(args, i, inlineValue);
       const n = parsePositiveInt(v);
-      if (n === null) return HELP;
+      if (n === null) return USAGE_ERROR;
       pr = n;
       i += consumed(inlineValue !== null);
     } else if (flag === '--max-iterations') {
       const v = takeValue(args, i, inlineValue);
       const n = parsePositiveInt(v);
-      if (n === null) return HELP;
+      if (n === null) return USAGE_ERROR;
       maxIterations = n;
       i += consumed(inlineValue !== null);
     } else if (flag === '--no-resume') {
-      if (inlineValue !== null) return HELP;
+      if (inlineValue !== null) return USAGE_ERROR;
       resume = false;
       i += 1;
     } else if (flag === '--admin') {
-      if (inlineValue !== null) return HELP;
+      if (inlineValue !== null) return USAGE_ERROR;
       adminMerge = true;
       i += 1;
     } else {
-      return HELP;
+      return USAGE_ERROR;
     }
   }
   const out: MergePrArgs = { kind: 'merge-pr', resume };
@@ -251,7 +261,7 @@ function parseMergePr(args: ReadonlyArray<string>): ParsedArgs {
 
 function parseConfig(args: ReadonlyArray<string>): ParsedArgs {
   const sub = args[0];
-  if (sub === undefined) return HELP;
+  if (sub === undefined) return USAGE_ERROR;
   const tail = args.slice(1);
   const positionals: string[] = [];
   let scope: 'global' | 'project' = 'global';
@@ -260,61 +270,61 @@ function parseConfig(args: ReadonlyArray<string>): ParsedArgs {
       scope = 'project';
     } else if (arg.startsWith('--')) {
       // `--project=anything` is a usage error: --project is a boolean flag.
-      return HELP;
+      return USAGE_ERROR;
     } else {
       positionals.push(arg);
     }
   }
   switch (sub) {
     case 'set': {
-      if (positionals.length !== 2) return HELP;
+      if (positionals.length !== 2) return USAGE_ERROR;
       const [key, value] = positionals;
-      if (key === undefined || value === undefined) return HELP;
+      if (key === undefined || value === undefined) return USAGE_ERROR;
       return { kind: 'config-set', scope, key, value };
     }
     case 'unset': {
-      if (positionals.length !== 1) return HELP;
+      if (positionals.length !== 1) return USAGE_ERROR;
       const [key] = positionals;
-      if (key === undefined) return HELP;
+      if (key === undefined) return USAGE_ERROR;
       return { kind: 'config-unset', scope, key };
     }
     case 'get': {
-      if (positionals.length !== 1) return HELP;
+      if (positionals.length !== 1) return USAGE_ERROR;
       const [key] = positionals;
-      if (key === undefined) return HELP;
+      if (key === undefined) return USAGE_ERROR;
       return { kind: 'config-get', scope, key };
     }
     case 'list': {
-      if (positionals.length !== 0) return HELP;
+      if (positionals.length !== 0) return USAGE_ERROR;
       return { kind: 'config-list', scope };
     }
     default:
-      return HELP;
+      return USAGE_ERROR;
   }
 }
 
 function parseProfile(args: ReadonlyArray<string>): ParsedArgs {
   const sub = args[0];
-  if (sub === undefined) return HELP;
+  if (sub === undefined) return USAGE_ERROR;
   const tail = args.slice(1);
   switch (sub) {
     case 'list':
-      return tail.length === 0 ? { kind: 'profile-list' } : HELP;
+      return tail.length === 0 ? { kind: 'profile-list' } : USAGE_ERROR;
     case 'use': {
       const name = onlyName(tail);
-      return name === null ? HELP : { kind: 'profile-use', name };
+      return name === null ? USAGE_ERROR : { kind: 'profile-use', name };
     }
     case 'remove': {
       const name = onlyName(tail);
-      return name === null ? HELP : { kind: 'profile-remove', name };
+      return name === null ? USAGE_ERROR : { kind: 'profile-remove', name };
     }
     case 'show': {
       if (tail.length === 0) return { kind: 'profile-show' };
       const name = onlyName(tail);
-      return name === null ? HELP : { kind: 'profile-show', name };
+      return name === null ? USAGE_ERROR : { kind: 'profile-show', name };
     }
     case 'get': {
-      if (tail.length !== 2) return HELP;
+      if (tail.length !== 2) return USAGE_ERROR;
       const [name, key] = tail;
       if (
         name === undefined ||
@@ -322,21 +332,21 @@ function parseProfile(args: ReadonlyArray<string>): ParsedArgs {
         name.startsWith('--') ||
         key.startsWith('--')
       ) {
-        return HELP;
+        return USAGE_ERROR;
       }
       return { kind: 'profile-get', name, key };
     }
     case 'set': {
-      if (tail.length !== 3) return HELP;
+      if (tail.length !== 3) return USAGE_ERROR;
       const [name, key, value] = tail;
-      if (name === undefined || key === undefined || value === undefined) return HELP;
-      if (name.startsWith('--') || key.startsWith('--')) return HELP;
+      if (name === undefined || key === undefined || value === undefined) return USAGE_ERROR;
+      if (name.startsWith('--') || key.startsWith('--')) return USAGE_ERROR;
       return { kind: 'profile-set', name, key, value };
     }
     case 'add':
       return parseProfileAdd(tail);
     default:
-      return HELP;
+      return USAGE_ERROR;
   }
 }
 
@@ -353,36 +363,36 @@ function parseProfileAdd(tail: ReadonlyArray<string>): ParsedArgs {
     const { flag, inlineValue, consumed } = splitFlag(raw);
     if (flag === '--preset') {
       const v = takeValue(tail, i, inlineValue);
-      if (v === null || !isPresetName(v)) return HELP;
+      if (v === null || !isPresetName(v)) return USAGE_ERROR;
       preset = v;
       i += consumed(inlineValue !== null);
     } else if (flag === '--base-url') {
       const v = takeValue(tail, i, inlineValue);
       // Reject a following flag-like token (`--base-url --api-key`) as a missing value.
-      if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return USAGE_ERROR;
       baseURL = v;
       i += consumed(inlineValue !== null);
     } else if (flag === '--api-key') {
       const v = takeValue(tail, i, inlineValue);
-      if (v === null || (inlineValue === null && v.startsWith('--'))) return HELP;
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return USAGE_ERROR;
       apiKey = v;
       i += consumed(inlineValue !== null);
     } else if (flag === '--api-key-stdin') {
       // Boolean flag — read the secret from stdin, never argv. An inline value is a usage error.
-      if (inlineValue !== null) return HELP;
+      if (inlineValue !== null) return USAGE_ERROR;
       apiKeyStdin = true;
       i += 1;
     } else if (raw.startsWith('--')) {
-      return HELP;
+      return USAGE_ERROR;
     } else {
       positionals.push(raw);
       i += 1;
     }
   }
   const name = positionals[0];
-  if (name === undefined || positionals.length > 1) return HELP;
+  if (name === undefined || positionals.length > 1) return USAGE_ERROR;
   // --api-key and --api-key-stdin are mutually exclusive: one source for the secret.
-  if (apiKey !== undefined && apiKeyStdin) return HELP;
+  if (apiKey !== undefined && apiKeyStdin) return USAGE_ERROR;
   const out: ProfileArgs = { kind: 'profile-add', name };
   if (preset !== undefined) out.preset = preset;
   if (baseURL !== undefined) out.baseURL = baseURL;
@@ -391,7 +401,7 @@ function parseProfileAdd(tail: ReadonlyArray<string>): ParsedArgs {
   return out;
 }
 
-// Exactly one positional name, no flags. Returns null on any deviation (→ HELP).
+// Exactly one positional name, no flags. Returns null on any deviation (→ usage-error).
 function onlyName(tail: ReadonlyArray<string>): string | null {
   if (tail.length !== 1) return null;
   const name = tail[0];

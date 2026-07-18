@@ -50,6 +50,9 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
     case 'help':
       stdout(`${HELP_TEXT}\n`);
       return 0;
+    case 'usage-error':
+      stderr(`${HELP_TEXT}\n`);
+      return 2;
   }
 }
 
@@ -128,7 +131,7 @@ Usage:
 Exit codes:
   0  success
   1  precondition failure or run blocked
-  2  cancelled
+  2  cancelled, or invalid/malformed command-line usage
 
 Docs: docs/commands/start.md, docs/commands/merge-pr.md, docs/commands/config.md, docs/commands/profile.md`;
 

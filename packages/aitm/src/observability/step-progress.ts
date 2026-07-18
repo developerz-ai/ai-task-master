@@ -86,8 +86,22 @@ function prefix(label: string, sink: ProgressSink, colorCode: string, tag = ''):
   return sink.color ? `${colorCode}${body}${RESET}` : body;
 }
 
+// Model text and tool inputs are attacker-influenced strings, and every one of them reaches stderr
+// under a colored `[aitm …]`/`[<agent> …]` prefix. Left raw they could carry ANSI escapes (recolor
+// a forged line to impersonate the cyan harness prefix) or C0/C1 controls (CR/BS to overwrite what
+// was printed, ESC/BEL to drive the operator's terminal). Strip both before any emit so untrusted
+// text can neither spoof a harness line nor manipulate the terminal.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control bytes is the intent.
+const ANSI_ESCAPE = /\x1b[[\]()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[@-~]/g;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control bytes is the intent.
+const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
+
+function stripControl(s: string): string {
+  return s.replace(ANSI_ESCAPE, '').replace(CONTROL_CHARS, '');
+}
+
 function clip(s: string, max = DETAIL_MAX): string {
-  const flat = s.replace(/\s*\n\s*/g, ' ⏎ ').trim();
+  const flat = stripControl(s.replace(/\s*\n\s*/g, ' ⏎ ')).trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 

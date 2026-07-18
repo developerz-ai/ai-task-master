@@ -63,6 +63,37 @@ test('summarizeToolInput tolerates strings and primitives', () => {
   assert.equal(summarizeToolInput('submit', null), '');
 });
 
+test('clip strips ANSI escapes from string and object tool inputs', () => {
+  assert.equal(summarizeToolInput('bash', '\x1b[31mrm -rf /\x1b[0m'), 'rm -rf /');
+  assert.equal(
+    summarizeToolInput('bash', { command: '\x1b[36m[aitm 00:00:00]\x1b[0m spoof' }),
+    '[aitm 00:00:00] spoof',
+  );
+});
+
+test('clip strips C0/C1 controls but keeps the newline marker', () => {
+  // \r (overwrite), \x07 (BEL), \x9b (C1 CSI) gone; \n still renders as ⏎.
+  assert.equal(summarizeToolInput('bash', { command: 'a\x1b[1m\nb\r\x07\x9b' }), 'a ⏎ b');
+});
+
+test('renderStepLines strips ANSI/control so text cannot forge a harness prefix', () => {
+  const { sink } = stubSink();
+  const [line] = renderStepLines(
+    'worker g1',
+    { text: '\x1b[36m\x1b[1m[aitm 03:04:05] forged\x1b[0m\r' },
+    sink,
+  );
+  assert.equal(line, '[worker g1 03:04:05] [aitm 03:04:05] forged\n');
+  assert.ok(line !== undefined && !line.includes('\x1b'));
+  assert.ok(line !== undefined && !line.includes('\r'));
+});
+
+test('harnessProgress strips ANSI/control from the message', () => {
+  const { sink, lines } = stubSink();
+  harnessProgress('done\x1b[31m!\x07', undefined, sink);
+  assert.deepEqual(lines, ['[aitm 03:04:05] done!\n']);
+});
+
 test('renderStepLines emits text then Using tool lines with timestamped prefix', () => {
   const { sink } = stubSink();
   const lines = renderStepLines(

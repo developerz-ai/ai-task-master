@@ -40,6 +40,15 @@ test('ConfigFileSchema accepts a positive maxCiFixAttempts and rejects non-posit
   assert.throws(() => ConfigFileSchema.parse({ maxCiFixAttempts: 'three' }));
 });
 
+test('ConfigFileSchema accepts editorConcurrency >= 1 and rejects < 1 / non-int / non-number', () => {
+  assert.equal(ConfigFileSchema.parse({ editorConcurrency: 4 }).editorConcurrency, 4);
+  assert.equal(ConfigFileSchema.parse({ editorConcurrency: 1 }).editorConcurrency, 1);
+  assert.throws(() => ConfigFileSchema.parse({ editorConcurrency: 0 }));
+  assert.throws(() => ConfigFileSchema.parse({ editorConcurrency: -1 }));
+  assert.throws(() => ConfigFileSchema.parse({ editorConcurrency: 2.5 }));
+  assert.throws(() => ConfigFileSchema.parse({ editorConcurrency: 'four' }));
+});
+
 test('ConfigFileSchema accepts a valid llmStepTimeoutMs and rejects < 1000 / non-integer (issue #129)', () => {
   assert.equal(ConfigFileSchema.parse({ llmStepTimeoutMs: 900_000 }).llmStepTimeoutMs, 900_000);
   assert.equal(ConfigFileSchema.parse({ llmStepTimeoutMs: 1000 }).llmStepTimeoutMs, 1000);

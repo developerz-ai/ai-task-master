@@ -7,9 +7,14 @@ import type { PrGroup, Task } from '../state/schema.ts';
 import {
   type BashInput,
   type BashOutput,
+  buildTeamBrief,
   createWorkerAgent,
   editorToolSet,
   type FileManifest,
+  type FileManifestEntry,
+  groupManifestByDir,
+  labelEditorGroups,
+  MAX_FILES_PER_EDITOR,
   type ReadFileInput,
   type ReadFileOutput,
   runWorker,
@@ -368,10 +373,11 @@ test('createWorkerAgent forwards timeout → a stalled manifest step surfaces as
 });
 
 test('runWorker: one editor rejecting aborts its siblings (editor-fanout shared abort)', async () => {
+  // Distinct directories so the manifest fans out to two leaves (same-dir files collapse to one).
   const manifest: FileManifest = {
     files: [
       { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
-      { path: 'src/b.ts', kind: 'modify', purpose: 'fix b' },
+      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b' },
     ],
     draftCommitMessage: 'feat: add a + fix b',
   };
@@ -396,7 +402,7 @@ test('runWorker: one editor rejecting aborts its siblings (editor-fanout shared 
           warnings: [],
         };
       }
-      // First editor call (src/a.ts) rejects outright; the second (src/b.ts) never resolves on its
+      // First editor call (src/a.ts) rejects outright; the second (lib/b.ts) never resolves on its
       // own — it only settles once it observes the shared controller's abort, proving the reject
       // above propagated to its sibling instead of letting it run to completion (issue: editor
       // fanout shared abort).
@@ -419,10 +425,11 @@ test('runWorker: one editor rejecting aborts its siblings (editor-fanout shared 
 });
 
 test('runWorker: manifest → per-file edits → commit sequence', async () => {
+  // Distinct directories → two leaves, each fanned out in group order (src first, then lib).
   const manifest: FileManifest = {
     files: [
       { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
-      { path: 'src/b.ts', kind: 'modify', purpose: 'fix b' },
+      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b' },
     ],
     draftCommitMessage: 'feat: add a + fix b',
   };
@@ -439,7 +446,7 @@ test('runWorker: manifest → per-file edits → commit sequence', async () => {
   assert.equal(d.draftCommitMessage, 'feat: add a + fix b');
   assert.deepEqual(d.changes, [
     { path: 'src/a.ts', kind: 'create', summary: 'created a' },
-    { path: 'src/b.ts', kind: 'modify', summary: 'fixed b' },
+    { path: 'lib/b.ts', kind: 'modify', summary: 'fixed b' },
   ]);
   assert.deepEqual(d.progressEntries, ['- task A', '- task B']);
 
@@ -757,11 +764,12 @@ test('runWorker rejects an agent not built by createWorkerAgent', async () => {
 });
 
 test('runWorker fans out editors in parallel — manifest call comes first, edits afterwards', async () => {
+  // Three distinct directories → three leaves, so the fanout has genuine parallelism to observe.
   const manifest: FileManifest = {
     files: [
       { path: 'src/a.ts', kind: 'create', purpose: 'a' },
-      { path: 'src/b.ts', kind: 'create', purpose: 'b' },
-      { path: 'src/c.ts', kind: 'create', purpose: 'c' },
+      { path: 'lib/b.ts', kind: 'create', purpose: 'b' },
+      { path: 'api/c.ts', kind: 'create', purpose: 'c' },
     ],
     draftCommitMessage: 'feat: abc',
   };
@@ -824,6 +832,457 @@ test('runWorker fans out editors in parallel — manifest call comes first, edit
     );
     assert.ok(maxInFlight >= 2, `expected parallel fanout, got ${summaries.join(' / ')}`);
   }
+});
+
+// ---- editor team fanout: dir grouping + bounded pool + shared brief (slice 05) ----
+
+test('groupManifestByDir: files in the same directory collapse onto one leaf', () => {
+  const files: FileManifestEntry[] = [
+    { path: 'src/a.ts', kind: 'create', purpose: 'a' },
+    { path: 'src/b.ts', kind: 'modify', purpose: 'b' },
+  ];
+  const groups = groupManifestByDir(files, MAX_FILES_PER_EDITOR);
+  assert.equal(groups.length, 1);
+  assert.deepEqual(
+    groups[0]?.map((f) => f.path),
+    ['src/a.ts', 'src/b.ts'],
+  );
+});
+
+test('groupManifestByDir: distinct directories fan out to separate leaves, order preserved', () => {
+  const files: FileManifestEntry[] = [
+    { path: 'src/a.ts', kind: 'create', purpose: 'a' },
+    { path: 'lib/b.ts', kind: 'create', purpose: 'b' },
+    { path: 'README.md', kind: 'modify', purpose: 'root file' },
+  ];
+  const groups = groupManifestByDir(files, MAX_FILES_PER_EDITOR);
+  assert.deepEqual(
+    groups.map((g) => g.map((f) => f.path)),
+    [['src/a.ts'], ['lib/b.ts'], ['README.md']],
+  );
+});
+
+test('groupManifestByDir: a directory over the cap is chunked, manifest order preserved', () => {
+  const files: FileManifestEntry[] = ['1', '2', '3', '4', '5'].map((n) => ({
+    path: `src/f${n}.ts`,
+    kind: 'create',
+    purpose: n,
+  }));
+  const groups = groupManifestByDir(files, 3);
+  assert.deepEqual(
+    groups.map((g) => g.map((f) => f.path)),
+    [
+      ['src/f1.ts', 'src/f2.ts', 'src/f3.ts'],
+      ['src/f4.ts', 'src/f5.ts'],
+    ],
+  );
+});
+
+test('groupManifestByDir: a single-file manifest yields one single-file group (byte-identical path)', () => {
+  const files: FileManifestEntry[] = [{ path: 'src/a.ts', kind: 'create', purpose: 'a' }];
+  assert.deepEqual(groupManifestByDir(files, MAX_FILES_PER_EDITOR), [
+    [{ path: 'src/a.ts', kind: 'create', purpose: 'a' }],
+  ]);
+});
+
+test('labelEditorGroups: chunked same-directory leaves get distinct #n labels (issue #131)', () => {
+  const files: FileManifestEntry[] = ['1', '2', '3', '4', '5'].map((n) => ({
+    path: `src/f${n}.ts`,
+    kind: 'create',
+    purpose: n,
+  }));
+  const leaves = labelEditorGroups(groupManifestByDir(files, 3));
+  assert.deepEqual(
+    leaves.map((l) => l.label),
+    ['src/ #1', 'src/ #2'],
+    'two chunks of one oversized directory no longer collide on the bare `src/` label',
+  );
+});
+
+test('labelEditorGroups: an unchunked directory and a lone file keep bare labels (byte-identical)', () => {
+  const files: FileManifestEntry[] = [
+    { path: 'src/auth/login.ts', kind: 'create', purpose: 'login' },
+    { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout' },
+    { path: 'README.md', kind: 'modify', purpose: 'docs' },
+  ];
+  const leaves = labelEditorGroups(groupManifestByDir(files, MAX_FILES_PER_EDITOR));
+  assert.deepEqual(
+    leaves.map((l) => ({ label: l.label, count: l.files.length })),
+    [
+      { label: 'src/auth/', count: 2 },
+      { label: 'README.md', count: 1 },
+    ],
+    'a base label owned by a single leaf stays bare',
+  );
+});
+
+test('labelEditorGroups: same-basename files in sibling directories get distinct labels (issue #131)', () => {
+  const files: FileManifestEntry[] = [
+    { path: 'a/f.ts', kind: 'create', purpose: 'a' },
+    { path: 'b/f.ts', kind: 'create', purpose: 'b' },
+  ];
+  const leaves = labelEditorGroups(groupManifestByDir(files, MAX_FILES_PER_EDITOR));
+  assert.deepEqual(
+    leaves.map((l) => l.label),
+    ['f.ts #1', 'f.ts #2'],
+    'two single-file leaves sharing a basename no longer collide on the onEditorStepFinish tag',
+  );
+});
+
+test('buildTeamBrief: carries the task, the full manifest, and the rolling context', () => {
+  const files: FileManifestEntry[] = [
+    { path: 'src/a.ts', kind: 'create', purpose: 'add module a' },
+    { path: 'lib/b.ts', kind: 'modify', purpose: 'wire b to a' },
+  ];
+  const task: Task = { id: 't', text: 'ship feature X', complexity: 'complex', done: false };
+  const brief = buildTeamBrief({ ...baseInput(), task, rollingContext: 'prior-PR-summary' }, files);
+  assert.match(brief, /<team-brief>[\s\S]*<\/team-brief>/);
+  assert.match(brief, /ship feature X/);
+  assert.match(brief, /src\/a\.ts.*add module a/, 'each manifest file is listed with its purpose');
+  assert.match(brief, /lib\/b\.ts.*wire b to a/);
+  assert.match(brief, /prior-PR-summary/);
+});
+
+test('buildTeamBrief: caps an oversized rolling context', () => {
+  const files: FileManifestEntry[] = [{ path: 'src/a.ts', kind: 'create', purpose: 'a' }];
+  const oversized = 'x'.repeat(10_000);
+  const brief = buildTeamBrief({ ...baseInput(), rollingContext: oversized }, files);
+  assert.ok(
+    !brief.includes(oversized),
+    'the raw oversized rolling context never reaches the brief',
+  );
+  assert.match(brief, /truncated/);
+});
+
+test('runWorker: a multi-leaf fanout injects the shared team brief into every editor system prompt', async () => {
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
+      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b' },
+    ],
+    draftCommitMessage: 'feat: a + b',
+  };
+  const editorSystems: string[] = [];
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorSystems.push(JSON.stringify(opts.prompt));
+      return {
+        content: [{ type: 'text', text: 'edited' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, { ...baseInput(), rollingContext: 'ROLL-CTX' });
+  assert.equal(result.kind, 'ok');
+  assert.equal(editorSystems.length, 2, 'two directories → two leaves');
+  for (const sys of editorSystems) {
+    assert.match(sys, /<team-brief>/, 'each editor sees the shared brief');
+    assert.match(sys, /src\/a\.ts/, 'the brief lists the whole manifest, not just the leaf file');
+    assert.match(sys, /lib\/b\.ts/);
+    assert.match(sys, /task A/, 'the brief carries the task text');
+    assert.match(sys, /ROLL-CTX/, 'the brief carries the rolling context');
+  }
+});
+
+test('runWorker: a single-file manifest injects no team brief (single-leaf path byte-identical)', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  let editorPromptSeen = '';
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorPromptSeen = JSON.stringify(opts.prompt);
+      return {
+        content: [{ type: 'text', text: 'created a' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, { ...baseInput(), rollingContext: 'ROLL-CTX' });
+  assert.equal(result.kind, 'ok');
+  assert.doesNotMatch(editorPromptSeen, /team-brief/, 'a lone leaf gets no team brief');
+  assert.doesNotMatch(
+    editorPromptSeen,
+    /ROLL-CTX/,
+    'the rolling context does not leak into a lone leaf',
+  );
+  assert.match(
+    editorPromptSeen,
+    /Make the change\. Reply with a one-line summary\./,
+    'the per-file editor prompt is unchanged',
+  );
+});
+
+test('runWorker: same-directory files collapse onto one leaf with no team brief', async () => {
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/a.ts', kind: 'create', purpose: 'a' },
+      { path: 'src/b.ts', kind: 'create', purpose: 'b' },
+      { path: 'src/c.ts', kind: 'create', purpose: 'c' },
+    ],
+    draftCommitMessage: 'feat: abc',
+  };
+  const editorSystems: string[] = [];
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorSystems.push(JSON.stringify(opts.prompt));
+      return {
+        content: [{ type: 'text', text: 'did abc' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools, calls } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.equal(
+    editorSystems.length,
+    1,
+    'one directory (≤ cap) → a single leaf owns all three files',
+  );
+  assert.doesNotMatch(editorSystems[0] ?? '', /team-brief/, 'a lone leaf gets no brief');
+  assert.match(editorSystems[0] ?? '', /You own these 3 files/, 'the leaf owns the whole group');
+  assert.equal(calls.statuses.length, 3, 'each file in the group is verified on disk');
+  if (result.kind === 'ok') {
+    assert.deepEqual(
+      result.delivery.changes.map((c) => c.path),
+      ['src/a.ts', 'src/b.ts', 'src/c.ts'],
+    );
+  }
+});
+
+test("runWorker: onEditorStepFinish is a per-leaf factory, called with each leaf's file/dir tag (issue #131)", async () => {
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/auth/login.ts', kind: 'create', purpose: 'login' },
+      { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout' },
+      { path: 'README.md', kind: 'modify', purpose: 'docs' },
+    ],
+    draftCommitMessage: 'feat: auth + docs',
+  };
+  const model = makeWorkerModel(manifest, ['did auth', 'did readme']);
+  const { tools } = makeTools();
+  const tagsRequested: string[] = [];
+  const tagsAtStepFinish: string[] = [];
+  const agent = createWorkerAgent({
+    model,
+    tools,
+    systemPrompt: WORKER_SYSTEM_PREFIX,
+    onEditorStepFinish: (editorTag: string) => {
+      tagsRequested.push(editorTag);
+      return () => {
+        tagsAtStepFinish.push(editorTag);
+      };
+    },
+  });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.deepEqual(
+    [...tagsRequested].sort(),
+    ['README.md', 'src/auth/'],
+    'one leaf per directory: the two src/auth/ files collapse onto one leaf, README.md stands alone',
+  );
+  assert.deepEqual(
+    [...tagsAtStepFinish].sort(),
+    [...tagsRequested].sort(),
+    'each leaf actually ran the handler this call built for it',
+  );
+});
+
+test('runWorker: a multi-leaf fanout prints a roster + per-editor outcome line; a lone leaf stays silent (issue #131)', async () => {
+  const realStderrWrite = process.stderr.write.bind(process.stderr);
+  const lines: string[] = [];
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const manifest: FileManifest = {
+      files: [
+        { path: 'src/auth/login.ts', kind: 'create', purpose: 'login' },
+        { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout' },
+        { path: 'README.md', kind: 'modify', purpose: 'docs' },
+      ],
+      draftCommitMessage: 'feat: auth + docs',
+    };
+    const model = makeWorkerModel(manifest, ['did auth', 'did readme']);
+    const { tools } = makeTools();
+    const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+    const result = await runWorker(agent, baseInput());
+    assert.equal(result.kind, 'ok');
+    const roster = lines.find((l) => l.includes('fanning out 2 editors'));
+    assert.ok(roster, 'roster line printed for a multi-leaf fanout');
+    assert.match(
+      roster ?? '',
+      /src\/auth\/ \(2\), README\.md \(1\)|README\.md \(1\), src\/auth\/ \(2\)/,
+    );
+    assert.ok(
+      lines.some((l) => l.includes('editor src/auth/ done — 2 changed')),
+      'per-editor outcome line for the src/auth/ leaf',
+    );
+    assert.ok(
+      lines.some((l) => l.includes('editor README.md done — 1 changed')),
+      'per-editor outcome line for the README.md leaf',
+    );
+  } finally {
+    process.stderr.write = realStderrWrite;
+  }
+
+  lines.length = 0;
+  const lone: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  const realStderrWrite2 = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const model = makeWorkerModel(lone);
+    const { tools } = makeTools();
+    const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+    const result = await runWorker(agent, baseInput());
+    assert.equal(result.kind, 'ok');
+    assert.ok(
+      lines.every((l) => !l.includes('fanning out') && !l.includes('editor')),
+      'a lone leaf stays silent — byte-identical to the pre-team fanout',
+    );
+  } finally {
+    process.stderr.write = realStderrWrite2;
+  }
+});
+
+test('runWorker: the editor fanout honors the concurrency cap (never more than the limit in flight)', async () => {
+  // Four distinct directories → four leaves; cap the pool at 2 and prove no third leaf runs concurrently.
+  const manifest: FileManifest = {
+    files: [
+      { path: 'a/f.ts', kind: 'create', purpose: 'a' },
+      { path: 'b/f.ts', kind: 'create', purpose: 'b' },
+      { path: 'c/f.ts', kind: 'create', purpose: 'c' },
+      { path: 'd/f.ts', kind: 'create', purpose: 'd' },
+    ],
+    draftCommitMessage: 'feat: four dirs',
+  };
+  const { tools } = makeTools();
+  let resolveBarrier!: () => void;
+  const barrier = new Promise<void>((r) => {
+    resolveBarrier = r;
+  });
+  let active = 0;
+  let peak = 0;
+  let editorCalls = 0;
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorCalls++;
+      active++;
+      peak = Math.max(peak, active);
+      await barrier;
+      active--;
+      return {
+        content: [{ type: 'text', text: `edited #${idx}` }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const run = runWorker(agent, { ...baseInput(), editorConcurrency: 2 });
+  // Wait for the first batch to launch; the barrier holds those leaves so no more than the cap can be
+  // in flight at once. A broken (unbounded) pool would launch all four before any settle.
+  for (let i = 0; i < 50 && editorCalls < 2; i++) {
+    await new Promise<void>((r) => setImmediate(r));
+  }
+  assert.ok(editorCalls >= 2, 'the fanout launched its first batch');
+  await new Promise<void>((r) => setImmediate(r));
+  assert.equal(peak, 2, 'never more than editorConcurrency=2 leaves in flight');
+  resolveBarrier();
+  const result = await run;
+  assert.equal(result.kind, 'ok');
+  assert.equal(editorCalls, 4, 'all four leaves ran');
+  assert.equal(peak, 2, 'the cap held across the whole fanout');
 });
 
 // ---- verifyCommand gate (issue #122) ----

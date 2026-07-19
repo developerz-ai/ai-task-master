@@ -57,11 +57,14 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
   // Agent-wide per-step callback forwarded to createSubagent (issue #108). aitm appends each step to
   // a persisted transcript here. Unset → not registered, behavior unchanged.
   onStepFinish?: ToolLoopAgentSettings<never, TTools>['onStepFinish'];
-  // Per-step callback for the Worker's parallel editor fanout ONLY (silent-run fix). Editors can't
-  // share `onStepFinish`: the transcript recorder slices cumulative response messages (#175), which
-  // interleaved parallel editor conversations would corrupt. Handlers here must read only per-step
-  // fields (e.g. the progress stream). Consumed by worker.ts runEditor; unset → editors stay silent.
-  onEditorStepFinish?: ToolLoopAgentSettings<never, TTools>['onStepFinish'];
+  // Per-step callback FACTORY for the Worker's parallel editor fanout ONLY (silent-run fix; per-editor
+  // labels, issue #131). Editors can't share one `onStepFinish` instance: the transcript recorder
+  // slices cumulative response messages (#175), which interleaved parallel editor conversations would
+  // corrupt. `editorTag` is the basename-or-directory label runEditor derives for its leaf (e.g.
+  // `login.ts` or `auth`), so the caller's stream label names WHICH editor is working, not just that
+  // an editor is. Handlers built here must read only per-step fields (e.g. the progress stream).
+  // Consumed by worker.ts runEditor; unset → editors stay silent.
+  onEditorStepFinish?: (editorTag: string) => ToolLoopAgentSettings<never, TTools>['onStepFinish'];
   // Forwarded to createSubagent (slice 01b) so a caller can surface each LLM-call retry (rate limit,
   // transient 5xx) instead of the run going silent through a whole backoff window. Unset → no sink.
   onRetry?: RetryOptions['onRetry'];

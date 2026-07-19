@@ -89,6 +89,7 @@ export {
   removeMemory,
   upsertMemory,
 } from './memory-loader.ts';
+export { type PoolOptions, type PoolWorker, runPool } from './pool.ts';
 export {
   AUTONOMY_CONTRACT_TEXT,
   autonomyBlock,

@@ -59,6 +59,7 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     assert.equal(resolved.resolveConflicts, true, 'AI conflict resolution is default-on');
     assert.equal(resolved.logLevel, 'info');
     assert.equal(resolved.concurrency, 1);
+    assert.equal(resolved.editorConcurrency, 4);
     assert.equal(resolved.allowForcePush, true);
     assert.equal(resolved.mcpDeferToolsOver, 20);
     assert.deepEqual(resolved.models, DEFAULT_MODELS);
@@ -119,6 +120,28 @@ test('resolve: resolveConflicts defaults true and is project over global', async
 
     await writeProjectConfig(cwd.path, { resolveConflicts: true });
     assert.equal((await loader.resolve({})).resolveConflicts, true, 'project wins over global');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: editorConcurrency defaults 4 and is project over global', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    assert.equal(
+      (await loader.resolve({})).editorConcurrency,
+      4,
+      'default 4 when nothing configured',
+    );
+
+    await writeGlobalConfig(home.path, { editorConcurrency: 2 });
+    assert.equal((await loader.resolve({})).editorConcurrency, 2, 'global value applies');
+
+    await writeProjectConfig(cwd.path, { editorConcurrency: 8 });
+    assert.equal((await loader.resolve({})).editorConcurrency, 8, 'project wins over global');
   } finally {
     await home.cleanup();
     await cwd.cleanup();

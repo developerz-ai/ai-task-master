@@ -148,3 +148,27 @@ test('render(editor-prompt): an empty style omits the style block, still renders
   assert.match(out, /ROLE_MARK/);
   assert.match(out, /<env>/);
 });
+
+test('render(editor-prompt): a team brief rides after the role guidance, before the style block', () => {
+  const out = render('editor-prompt', {
+    roleGuidance: 'ROLE_MARK',
+    maxSteps: 12,
+    style: 'STYLE_MARK',
+    env: '<env>\n</env>',
+    teamBrief: '<team-brief>\nBRIEF_MARK\n</team-brief>',
+  });
+  assert.match(out, /BRIEF_MARK/);
+  assert.ok(
+    out.indexOf('ROLE_MARK') < out.indexOf('BRIEF_MARK'),
+    'the brief follows the role guidance',
+  );
+  assert.ok(
+    out.indexOf('BRIEF_MARK') < out.indexOf('STYLE_MARK'),
+    'the brief precedes the style block',
+  );
+});
+
+test('render(editor-prompt): an empty team brief renders byte-identically to omitting it', () => {
+  const base = { roleGuidance: 'R', maxSteps: 12, style: 'S', env: '<env>\n</env>' };
+  assert.equal(render('editor-prompt', { ...base, teamBrief: '' }), render('editor-prompt', base));
+});

@@ -10,6 +10,7 @@ import {
   composeSpecialistGuidance,
   discoverSpecialists,
   selectSpecialist,
+  selectSpecialistWithScore,
 } from './specialist-registry.ts';
 
 function agent(
@@ -78,6 +79,31 @@ test('selectSpecialist: ties break deterministically toward the earlier (name-so
     agent('bravo', 'shared payments domain'),
   ];
   assert.equal(selectSpecialist(tied, 'work on the payments domain')?.name, 'alpha');
+});
+
+test('selectSpecialistWithScore: routes to the same agent as selectSpecialist, plus its winning score', () => {
+  const signal = 'Add a new backend endpoint for user profiles';
+  const scored = selectSpecialistWithScore(roster, signal);
+  assert.equal(scored?.agent.name, 'backend');
+  // Two name-token hits ("backend", "endpoint" is not a name token, but "profiles"/"user" aren't
+  // either) — assert only that it matches the unweighted picker's agent and is a positive int.
+  assert.equal(scored?.agent.name, selectSpecialist(roster, signal)?.name);
+  assert.ok(Number.isInteger(scored?.score) && (scored?.score ?? 0) > 0);
+});
+
+test('selectSpecialistWithScore: a name-token match scores higher than the same agent scored on description alone', () => {
+  const nameHit = selectSpecialistWithScore(roster, 'backend database migrations');
+  const descOnly = selectSpecialistWithScore(roster, 'database migrations only');
+  assert.equal(nameHit?.agent.name, 'backend');
+  assert.ok((nameHit?.score ?? 0) > (descOnly?.score ?? 0));
+});
+
+test('selectSpecialistWithScore: no meaningful overlap → null', () => {
+  assert.equal(selectSpecialistWithScore(roster, 'Update the project changelog wording'), null);
+});
+
+test('selectSpecialistWithScore: empty roster → null', () => {
+  assert.equal(selectSpecialistWithScore([], 'anything at all here'), null);
 });
 
 test('buildSpecialistSignal: focused task includes title, task text and subtasks', () => {

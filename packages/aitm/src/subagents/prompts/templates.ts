@@ -109,13 +109,17 @@ export type EditorPromptSlots = {
   readonly style: string;
   // The pre-rendered `<env>` block.
   readonly env: string;
+  // Shared team brief injected after the role guidance when the fanout splits across leaves. Empty/
+  // absent → omitted, so a lone editor's prompt is byte-identical to the pre-team fanout.
+  readonly teamBrief?: string;
 };
 
 function editorPrompt(slots: EditorPromptSlots): string {
+  const guidance = `${slots.roleGuidance}\n\n${stepBudgetLine(slots.maxSteps)}`;
   return renderPromptBlocks([
     {
       kind: 'sessionGuidance',
-      text: `${slots.roleGuidance}\n\n${stepBudgetLine(slots.maxSteps)}`,
+      text: slots.teamBrief ? `${guidance}\n\n${slots.teamBrief}` : guidance,
     },
     { kind: 'style', text: slots.style },
     { kind: 'env', text: slots.env },

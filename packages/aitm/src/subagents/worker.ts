@@ -211,6 +211,8 @@ export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent 
       ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
       ...(init.onStepFinish ? { onStepFinish: init.onStepFinish } : {}),
       ...(init.onRetry ? { onRetry: init.onRetry } : {}),
+      ...(init.onStream ? { onStream: init.onStream } : {}),
+      ...(init.streamWatchdog ? { streamWatchdog: init.streamWatchdog } : {}),
     },
     WORKER_MAX_STEPS,
   );

@@ -7,7 +7,11 @@
 // (`composeSystemPrompt`) now live in @developerz.ai/ai-claude-compat; the concrete factories
 // (planner.ts/worker.ts/reviewer.ts) call createSubagent with their own tools + output type.
 
-import type { RetryOptions } from '@developerz.ai/ai-claude-compat';
+import type {
+  RetryOptions,
+  StreamWatchdogConfig,
+  SubagentStreamSink,
+} from '@developerz.ai/ai-claude-compat';
 import type {
   LanguageModel,
   LanguageModelUsage,
@@ -68,6 +72,14 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
   // Forwarded to createSubagent (slice 01b) so a caller can surface each LLM-call retry (rate limit,
   // transient 5xx) instead of the run going silent through a whole backoff window. Unset → no sink.
   onRetry?: RetryOptions['onRetry'];
+  // Live-streaming sink (slice 07), forwarded to createSubagent. Set only when config `streaming` is
+  // true — the adapter wires a line-buffered renderer (step-progress.ts createLiveStreamRenderer) so
+  // text and tool-call lines print as the model streams them instead of after the step finishes.
+  // Unset → generate stays on the non-streaming path, byte-identical to today.
+  onStream?: SubagentStreamSink;
+  // Overrides for the streaming stall watchdog, forwarded to createSubagent. Unset → production
+  // defaults (120s inactivity / 30s grace). Only consulted when onStream is set.
+  streamWatchdog?: StreamWatchdogConfig;
 };
 
 // Concrete factory implementations live next to each subagent: planner.ts, worker.ts, reviewer.ts.

@@ -159,6 +159,12 @@ test('ConfigFileSchema rejects a baseURL that is not a URL', () => {
   assert.throws(() => ConfigFileSchema.parse({ baseURL: 'not a url' }));
 });
 
+test('ConfigFileSchema accepts a boolean streaming flag and rejects a non-boolean', () => {
+  assert.equal(ConfigFileSchema.parse({ streaming: true }).streaming, true);
+  assert.equal(ConfigFileSchema.parse({ streaming: false }).streaming, false);
+  assert.throws(() => ConfigFileSchema.parse({ streaming: 'yes' }));
+});
+
 test('CONFIG_KEYS: is the schema shape verbatim → writer + loader share one table', () => {
   // Derived from ConfigFileSchema so writer (set-time) and loader (read-time) can never drift.
   assert.deepEqual([...CONFIG_KEYS].sort(), Object.keys(ConfigFileSchema.shape).sort());
@@ -173,6 +179,7 @@ test('CONFIG_KEYS: is the schema shape verbatim → writer + loader share one ta
     'prBodySections',
     'hooks',
     'mcpRoleAllowlist',
+    'streaming',
   ]) {
     assert.ok(CONFIG_KEYS.has(key), `CONFIG_KEYS must include "${key}"`);
   }

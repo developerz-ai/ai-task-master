@@ -148,6 +148,28 @@ test('resolve: editorConcurrency defaults 4 and is project over global', async (
   }
 });
 
+test('resolve: streaming defaults false and is project over global', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    assert.equal(
+      (await loader.resolve({})).streaming,
+      false,
+      'default false when nothing configured',
+    );
+
+    await writeGlobalConfig(home.path, { streaming: true });
+    assert.equal((await loader.resolve({})).streaming, true, 'global value applies');
+
+    await writeProjectConfig(cwd.path, { streaming: false });
+    assert.equal((await loader.resolve({})).streaming, false, 'project wins over global');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: formatCommand is honored only from global config; project formatCommand is ignored + warned (issue #214)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

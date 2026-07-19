@@ -62,6 +62,7 @@ import {
   agentLabel,
   agentStepProgress,
   composeStepFinish,
+  createLiveStreamRenderer,
   defaultProgressSink,
   harnessProgress,
   type RunStep,
@@ -796,9 +797,13 @@ async function defaultPlanGroups(
   // makes (steps + retries) to tell silence from activity, so it must be the SAME sink instance
   // agentStepProgress/onRetry write through — not each's own default.
   const plannerHeartbeatSink = createHeartbeatSink(defaultProgressSink());
+  // Streaming (slice 07): when on, live text/tool lines print via onStream below, so the step-finish
+  // renderer here is told to skip them (textAndTools: false) — it still renders reasoning, which has
+  // no live equivalent.
+  const streaming = input.resolved.streaming;
   const plannerStep = composeStepFinish<StepEvent<PlannerTools>>(
     plannerRecorder ? recordStepDeltas(plannerRecorder) : undefined,
-    agentStepProgress(plannerLabel, plannerTag, plannerHeartbeatSink),
+    agentStepProgress(plannerLabel, plannerTag, plannerHeartbeatSink, { textAndTools: !streaming }),
   );
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
@@ -824,6 +829,9 @@ async function defaultPlanGroups(
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
     ...(plannerStep ? { onStepFinish: plannerStep } : {}),
     onRetry: onRetryProgress(plannerTag, plannerHeartbeatSink),
+    ...(streaming
+      ? { onStream: createLiveStreamRenderer(plannerLabel, plannerTag, plannerHeartbeatSink) }
+      : {}),
   });
   const stopPlannerHeartbeat = startHeartbeat(plannerLabel, plannerHeartbeatSink);
   let result: PlannerResult;
@@ -1007,9 +1015,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       ctx: checkout.groupId,
     });
     const reviewerHeartbeatSink = createHeartbeatSink(defaultProgressSink());
+    const reviewerStreaming = input.resolved.streaming;
     const reviewerStep = composeStepFinish<StepEvent<ReviewerTools>>(
       recorder ? recordStepDeltas(recorder) : undefined,
-      agentStepProgress(reviewerLabel, reviewerTag, reviewerHeartbeatSink),
+      agentStepProgress(reviewerLabel, reviewerTag, reviewerHeartbeatSink, {
+        textAndTools: !reviewerStreaming,
+      }),
     );
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
@@ -1037,6 +1048,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       ...(reviewerUsage ? { onUsage: reviewerUsage } : {}),
       ...(reviewerStep ? { onStepFinish: reviewerStep } : {}),
       onRetry: onRetryProgress(reviewerTag, reviewerHeartbeatSink),
+      ...(reviewerStreaming
+        ? { onStream: createLiveStreamRenderer(reviewerLabel, reviewerTag, reviewerHeartbeatSink) }
+        : {}),
     });
     const stopReviewerHeartbeat = startHeartbeat(reviewerLabel, reviewerHeartbeatSink);
     let result: Awaited<ReturnType<typeof runReviewerSubagent>>;
@@ -1126,9 +1140,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         ctx: group.id,
       });
       const workerHeartbeatSink = createHeartbeatSink(defaultProgressSink());
+      const workerStreaming = input.resolved.streaming;
       const workerStep = composeStepFinish<StepEvent<WorkerTools>>(
         recorder ? recordStepDeltas(recorder) : undefined,
-        agentStepProgress(workerAgentLabel, workerStepTag, workerHeartbeatSink),
+        agentStepProgress(workerAgentLabel, workerStepTag, workerHeartbeatSink, {
+          textAndTools: !workerStreaming,
+        }),
       );
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
@@ -1165,6 +1182,15 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             workerStepTag,
           ),
         onRetry: onRetryProgress(workerStepTag, workerHeartbeatSink),
+        ...(workerStreaming
+          ? {
+              onStream: createLiveStreamRenderer(
+                workerAgentLabel,
+                workerStepTag,
+                workerHeartbeatSink,
+              ),
+            }
+          : {}),
       });
       const stopWorkerHeartbeat = startHeartbeat(workerAgentLabel, workerHeartbeatSink);
       let result: Awaited<ReturnType<typeof runWorkerSubagent>>;
@@ -1239,8 +1265,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         ctx: group.id,
       });
       const selfReviewHeartbeatSink = createHeartbeatSink(defaultProgressSink());
+      const selfReviewStreaming = input.resolved.streaming;
       const selfReviewStep = composeStepFinish<StepEvent<WorkerTools>>(
-        agentStepProgress(selfReviewLabel, selfReviewTag, selfReviewHeartbeatSink),
+        agentStepProgress(selfReviewLabel, selfReviewTag, selfReviewHeartbeatSink, {
+          textAndTools: !selfReviewStreaming,
+        }),
       );
       const stopSelfReviewHeartbeat = startHeartbeat(selfReviewLabel, selfReviewHeartbeatSink);
       try {
@@ -1286,6 +1315,15 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
                 selfReviewTag,
               ),
             onRetry: onRetryProgress(selfReviewTag, selfReviewHeartbeatSink),
+            ...(selfReviewStreaming
+              ? {
+                  onStream: createLiveStreamRenderer(
+                    selfReviewLabel,
+                    selfReviewTag,
+                    selfReviewHeartbeatSink,
+                  ),
+                }
+              : {}),
           },
           group,
           baseBranch,
@@ -1323,9 +1361,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       );
       const ciFixLabel = agentLabel({ model: ciFixModel, role: 'ci-fix', ctx: group.id });
       const ciFixHeartbeatSink = createHeartbeatSink(defaultProgressSink());
+      const ciFixStreaming = input.resolved.streaming;
       const ciFixStep = composeStepFinish<StepEvent<WorkerTools>>(
         ciRecorder ? recordStepDeltas(ciRecorder) : undefined,
-        agentStepProgress(ciFixLabel, ciFixTag, ciFixHeartbeatSink),
+        agentStepProgress(ciFixLabel, ciFixTag, ciFixHeartbeatSink, {
+          textAndTools: !ciFixStreaming,
+        }),
       );
       const ciFixWorkerTools = applyHooks(
         resolveWorkerTools(
@@ -1395,6 +1436,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
                 ciFixTag,
               ),
             onRetry: onRetryProgress(ciFixTag, ciFixHeartbeatSink),
+            ...(ciFixStreaming
+              ? { onStream: createLiveStreamRenderer(ciFixLabel, ciFixTag, ciFixHeartbeatSink) }
+              : {}),
             ...(ciResume ? { resumeMessages: ciResume } : {}),
             ...(ciFixResolveConflicts ? { resolveConflicts: ciFixResolveConflicts } : {}),
           },

@@ -67,7 +67,7 @@ function stubCompactor(opts: {
   decision: CompactionDecision;
   summary?: string;
   compactReturnsUndefined?: boolean;
-  onCompact?: (older: readonly unknown[]) => void;
+  onCompact?: (older: readonly unknown[], priorSummary?: string) => void;
   shouldThrows?: boolean;
   compactThrows?: boolean;
 }): CompactorLike {
@@ -76,8 +76,8 @@ function stubCompactor(opts: {
       if (opts.shouldThrows) throw new Error('lookup boom');
       return opts.decision;
     },
-    compact: async (older) => {
-      opts.onCompact?.(older);
+    compact: async (older, priorSummary) => {
+      opts.onCompact?.(older, priorSummary);
       if (opts.compactThrows) throw new Error('summarizer boom');
       if (opts.compactReturnsUndefined) return undefined;
       return opts.summary ?? 'SUMMARY';
@@ -129,6 +129,28 @@ test('buildCompactionStep: above threshold → [summary user msg, ...keepLastSte
   assert.deepEqual(result.messages.slice(1), messages.slice(messages.length - 4));
   // Older (summarized) = the first 5 messages (9 - 4).
   assert.equal(compactedOlder.length, 5);
+});
+
+test('buildCompactionStep: threads the prior summary into the next compaction (anchored update, not fresh)', async () => {
+  // Two compactions in one run (one build closure). The first has no prior summary; the second must
+  // receive the first's output as `priorSummary` so Compactor takes the anchored-update path instead
+  // of re-summarizing from scratch and letting the note drift each round (PR #232 review).
+  const priorSummaries: Array<string | undefined> = [];
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 2, contextLength: 100_000 },
+    summary: 'ANCHOR',
+    onCompact: (_older, priorSummary) => {
+      priorSummaries.push(priorSummary);
+    },
+  });
+  const build = buildCompactionStep({ compactor, modelId: 'm' });
+  // String-content messages are un-prunable → 0 freed → the LLM summarize path runs both times.
+  const steps = [step(2), step(4), step(6), step(8)];
+  const messages = [{ role: 'user', content: 'goal' }, ...msgs(8)];
+  const first = await build(prepInput(steps, messages));
+  const second = await build(prepInput(steps, messages));
+  assert.ok(first && second);
+  assert.deepEqual(priorSummaries, [undefined, 'ANCHOR']);
 });
 
 test('buildCompactionStep sizes off the live messages via a real Compactor: large context compacts, small does not (issue #102)', async () => {

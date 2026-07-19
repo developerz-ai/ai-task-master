@@ -63,6 +63,12 @@ type ToolResultOutput = Extract<
 export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
   init: CompactionStepInit,
 ): CompactionPrepareStep<TOOLS> {
+  // The summary produced by the previous compaction in this run, threaded back into compact() so a
+  // repeat compaction UPDATES that anchor in place (Compactor's anchored-update path) instead of
+  // re-summarizing from scratch and letting the note drift. A closure var, not a scan of `older`: the
+  // prepareStep `messages` override does not persist across steps (see the sizing note below), so the
+  // earlier SUMMARY_HEADER block never reappears in the live history to recover.
+  let priorSummary: string | undefined;
   return async ({ steps, messages }) => {
     // Nothing to send yet → nothing to compact.
     if (messages.length === 0) return undefined;
@@ -148,8 +154,9 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
     let summary: string | undefined;
     try {
       // Summarize the PRUNED older prefix: results the prune pass cleared are already gone, so the
-      // summarizer neither re-reads their bulk nor re-describes soon-to-be-cleared output.
-      summary = await init.compactor.compact(pruned.messages.slice(0, splitAt));
+      // summarizer neither re-reads their bulk nor re-describes soon-to-be-cleared output. Thread the
+      // prior summary so a repeat compaction updates that anchor in place rather than drifting.
+      summary = await init.compactor.compact(pruned.messages.slice(0, splitAt), priorSummary);
     } catch (err) {
       init.logger?.warn('compaction: summarizer failed; passing through', {
         modelId: init.modelId,
@@ -167,6 +174,9 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
       });
       return undefined;
     }
+
+    // Anchor the next compaction in this run to this summary so it updates in place, not from scratch.
+    priorSummary = summary;
 
     init.logger?.info('compaction: compacted context', {
       modelId: init.modelId,

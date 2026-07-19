@@ -42,6 +42,18 @@ export type RunStep = {
   total?: number;
 };
 
+// Human-scale elapsed time for task/group timing lines (claudetm console parity): sub-minute spans
+// read as seconds (`42.3s`), everything else as minutes (`7.2m`) — one significant decimal, no
+// hour bucket (a run this long is already an outlier worth a raw number, not a new unit). Negative
+// or non-finite input (a clock rollback, a stubbed `now()`) clamps to `0.0s` rather than printing
+// garbage.
+export function formatDuration(ms: number): string {
+  const clamped = Number.isFinite(ms) && ms > 0 ? ms : 0;
+  const totalSeconds = clamped / 1000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+  return `${(totalSeconds / 60).toFixed(1)}m`;
+}
+
 // Render a RunStep as the in-bracket tag: `<unit N/M> <phase>`, e.g. `group 2/5 working`,
 // `task 3/38 ci-fix`, or just `planning` when there is no counter yet. Empty string when nothing is
 // known, so the prefix falls back to the plain `[label HH:MM:SS]` form.

@@ -394,6 +394,17 @@ function makeDeps(
       ? { initialSessionCount: overrides.initialSessionCount }
       : {}),
     ...(overrides.signal !== undefined ? { signal: overrides.signal } : {}),
+    ...(overrides.now !== undefined ? { now: overrides.now } : {}),
+  };
+}
+
+// Fake clock that advances by `stepMs` on every read — deterministic, monotonic, and independent
+// of wall-clock speed, so timing-line assertions never flake.
+function steppedClock(stepMs: number): () => number {
+  let t = 0;
+  return () => {
+    t += stepMs;
+    return t;
   };
 }
 
@@ -1000,6 +1011,28 @@ test('prPerTask: each task PR runs CI then merges under autoMerge', async () => 
   assert.equal(ghCalls.mergePr.length, 2, 'each task PR merged');
 });
 
+test('prPerTask: each completed task prints a "done in" timing line', async () => {
+  const progress: string[] = [];
+  const { orchestrator } = makeOrchestrator({ prNumber: 7 });
+  const { github } = makeGithub({ checks: [ciSuccess, ciSuccess], threads: [] });
+  const loop = new WorkLoop(
+    makeDeps({
+      orchestrator,
+      github,
+      autoMerge: true,
+      prPerTask: true,
+      progress: (m) => progress.push(m),
+      now: steppedClock(1000),
+    }),
+  );
+  await loop.runGroup(twoTaskGroup());
+
+  const taskLines = progress.filter((p) => /^group multi task \w+: done in \d+\.\ds$/.test(p));
+  assert.equal(taskLines.length, 2, 'one timing line per task');
+  const groupLine = progress.find((p) => /^group multi: merged — done in \d+\.\d[sm]$/.test(p));
+  assert.ok(groupLine, "group total prints once, on the final task's merge");
+});
+
 test('prPerTask: resume skips done tasks and opens a PR only for the remaining one', async () => {
   const resumed = group('multi', {
     tasks: [
@@ -1258,6 +1291,27 @@ test('autoMerge: success path runs waitForChecks → mergePr and marks merged', 
   assert.equal(orchCalls.addressReviews.length, 0, 'reviewer not invoked when no threads');
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((p) => p.id === 'gamma')?.status, 'merged');
+});
+
+test('group mode (default): merging prints a group total "done in" timing line', async () => {
+  const progress: string[] = [];
+  const { orchestrator } = makeOrchestrator({ prNumber: 11 });
+  const { github } = makeGithub({ checks: [ciSuccess], threads: [] });
+  const loop = new WorkLoop(
+    makeDeps({
+      orchestrator,
+      github,
+      autoMerge: true,
+      progress: (m) => progress.push(m),
+      now: steppedClock(1000),
+    }),
+  );
+  await loop.runGroup(group('gamma'));
+
+  assert.ok(
+    progress.some((p) => /^group gamma: ready-to-merge → merged — done in \d+\.\d[sm]$/.test(p)),
+    'the ready-to-merge → merged transition line carries the group total',
+  );
 });
 
 test('autoMerge: a thread already carrying our reply is skipped → merges without re-running the Reviewer', async () => {

@@ -5,6 +5,7 @@ import {
   agentLabel,
   agentStepProgress,
   composeStepFinish,
+  formatDuration,
   formatStepTag,
   harnessProgress,
   type ProgressSink,
@@ -310,4 +311,22 @@ test('composeStepFinish invokes every handler and isolates a throwing one', () =
   assert.ok(composed);
   composed('evt');
   assert.deepEqual(calls, ['a', 'b:evt']);
+});
+
+test('formatDuration renders sub-minute spans in seconds with one decimal', () => {
+  assert.equal(formatDuration(0), '0.0s');
+  assert.equal(formatDuration(423), '0.4s');
+  assert.equal(formatDuration(42_300), '42.3s');
+  assert.equal(formatDuration(59_999), '60.0s');
+});
+
+test('formatDuration renders minute-scale spans in minutes with one decimal', () => {
+  assert.equal(formatDuration(60_000), '1.0m');
+  assert.equal(formatDuration(7 * 60_000 + 12_000), '7.2m');
+});
+
+test('formatDuration clamps negative or non-finite input to zero', () => {
+  assert.equal(formatDuration(-500), '0.0s');
+  assert.equal(formatDuration(Number.NaN), '0.0s');
+  assert.equal(formatDuration(Number.POSITIVE_INFINITY), '0.0s');
 });

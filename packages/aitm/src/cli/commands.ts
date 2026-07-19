@@ -197,16 +197,34 @@ export function autoMergeNotice(autoMerge: boolean): string | null {
   ].join('\n');
 }
 
+// Cache-hit % of input tokens served from cache (issue #114 amendment, slice 04b). 0 input tokens →
+// `0%` rather than NaN/Infinity. Rounded to the nearest percent — this is a glance metric, not a
+// billing figure (costUsd already carries the precise cache-aware math).
+function cacheHitPct(usage: RoleUsage): string {
+  if (usage.inputTokens === 0) return '0%';
+  return `${Math.round((usage.cachedInputTokens / usage.inputTokens) * 100)}%`;
+}
+
 // One end-of-run token/cost summary line (issue #114): overall tokens + per-role breakdown, with the
-// estimated total USD or `cost unknown` when any model's pricing was unavailable. Exported for tests.
+// estimated total USD or `cost unknown` when any model's pricing was unavailable. Adds cache-hit %
+// (slice 04b) and, when the endpoint echoed one (`usage: { include: true }`, credentials.ts
+// chatSettings), the provider-reported `cache_discount` savings — omitted, not `$0`, when no call
+// ever reported one. Exported for tests.
 export function usageSummaryLine(totals: UsageTotals): string {
   const { overall } = totals;
   const cost = overall.costUsd === null ? 'cost unknown' : `$${overall.costUsd.toFixed(4)}`;
+  const discount =
+    overall.cacheDiscountUsd !== null
+      ? `, $${overall.cacheDiscountUsd.toFixed(4)} cache discount`
+      : '';
   const perRole = Object.entries(totals.perRole)
     .filter((entry): entry is [string, RoleUsage] => entry[1] !== undefined)
-    .map(([role, u]) => `${role} ${u.inputTokens}in/${u.outputTokens}out`)
+    .map(
+      ([role, u]) =>
+        `${role} ${u.inputTokens}in/${u.outputTokens}out (${cacheHitPct(u)} cache hit)`,
+    )
     .join(', ');
-  return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached), ${cost}${perRole ? ` — ${perRole}` : ''}\n`;
+  return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached, ${cacheHitPct(overall)} cache hit), ${cost}${discount}${perRole ? ` — ${perRole}` : ''}\n`;
 }
 
 // AgentConfigDetector options from the CLI's stylePath sources + the homeDir seam (issue #117):

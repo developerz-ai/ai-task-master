@@ -11,15 +11,22 @@ import type { RetryOptions } from '@developerz.ai/ai-claude-compat';
 import type {
   LanguageModel,
   LanguageModelUsage,
+  ProviderMetadata,
   TimeoutConfiguration,
   ToolLoopAgentSettings,
   ToolSet,
 } from 'ai';
 
 // A subagent-usage sink (issue #114). Fired once per generate call with the result's `totalUsage`
-// (all steps) and `response.modelId`. Fire-and-forget: a recording error must never break the run,
-// so the accumulation side (UsageTracker.record) swallows and this stays a plain void callback.
-export type OnUsage = (usage: LanguageModelUsage, modelId: string | undefined) => void;
+// (all steps), `response.modelId`, and the result's `providerMetadata` (issue #114 amendment, slice
+// 04b) — the channel a provider-reported `cache_discount`/cache-write rides beyond what
+// `LanguageModelUsage` carries. Fire-and-forget: a recording error must never break the run, so the
+// accumulation side (UsageTracker.record) swallows and this stays a plain void callback.
+export type OnUsage = (
+  usage: LanguageModelUsage,
+  modelId: string | undefined,
+  providerMetadata?: ProviderMetadata,
+) => void;
 
 // Default per-step LLM request deadline (issue #129). The bound covers one provider HTTP call plus
 // that step's tool executions, and a single legitimate Worker step may run a bash call at the tool's
@@ -79,16 +86,21 @@ export function appendReminderBlock(prompt: string, trailingBlock: string | unde
   return trailingBlock ? `${prompt}\n\n${trailingBlock}` : prompt;
 }
 
-// Feed a generate result's total usage + resolved model id to an optional sink (issue #114). For the
-// direct generateText / agent.generate call sites (worker editor + manifest, orchestrator, style
-// distiller); the schema-retry path meters inside compat. Fire-and-forget — never breaks the run.
+// Feed a generate result's total usage + resolved model id + provider metadata to an optional sink
+// (issue #114, slice 04b). For the direct generateText / agent.generate call sites (worker editor +
+// manifest, orchestrator, style distiller); the schema-retry path meters inside compat.
+// Fire-and-forget — never breaks the run.
 export function reportUsage(
   onUsage: OnUsage | undefined,
-  result: { totalUsage: LanguageModelUsage; response: { modelId: string } },
+  result: {
+    totalUsage: LanguageModelUsage;
+    response: { modelId: string };
+    providerMetadata?: ProviderMetadata | undefined;
+  },
 ): void {
   if (!onUsage) return;
   try {
-    onUsage(result.totalUsage, result.response.modelId);
+    onUsage(result.totalUsage, result.response.modelId, result.providerMetadata);
   } catch {
     // observability must never break the run
   }

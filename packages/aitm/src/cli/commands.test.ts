@@ -159,43 +159,79 @@ test('autoMergeNotice: full warning when on, null when off', () => {
   assert.equal(autoMergeNotice(false), null);
 });
 
-test('usageSummaryLine: renders overall tokens + per-role breakdown + cost, or "cost unknown" (issue #114)', () => {
+test('usageSummaryLine: renders overall tokens + per-role breakdown + cost + cache-hit %, or "cost unknown" (issue #114, slice 04b)', () => {
   const line = usageSummaryLine({
     perRole: {
       planner: {
         inputTokens: 100,
         outputTokens: 20,
         cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
         calls: 1,
         costUsd: 0.001,
+        cacheDiscountUsd: null,
       },
       worker: {
         inputTokens: 500,
         outputTokens: 80,
         cachedInputTokens: 50,
+        cacheWriteInputTokens: 0,
         calls: 4,
         costUsd: 0.009,
+        cacheDiscountUsd: null,
       },
     },
     overall: {
       inputTokens: 600,
       outputTokens: 100,
       cachedInputTokens: 50,
+      cacheWriteInputTokens: 0,
       calls: 5,
       costUsd: 0.01,
+      cacheDiscountUsd: null,
     },
   });
-  assert.match(line, /^Usage: 5 calls, 600 in \/ 100 out tokens \(50 cached\), \$0\.0100/);
-  assert.match(line, /planner 100in\/20out/);
-  assert.match(line, /worker 500in\/80out/);
+  assert.match(
+    line,
+    /^Usage: 5 calls, 600 in \/ 100 out tokens \(50 cached, 8% cache hit\), \$0\.0100/,
+  );
+  assert.match(line, /planner 100in\/20out \(0% cache hit\)/);
+  assert.match(line, /worker 500in\/80out \(10% cache hit\)/);
   assert.ok(line.endsWith('\n'), 'exactly one line');
+  assert.ok(!line.includes('cache discount'), 'no discount line when never reported');
 
-  // Null overall cost (any pricing unavailable) renders "cost unknown".
+  // Null overall cost (any pricing unavailable) renders "cost unknown"; 0 input tokens → 0% not NaN.
   const unknown = usageSummaryLine({
     perRole: {},
-    overall: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, calls: 1, costUsd: null },
+    overall: {
+      inputTokens: 10,
+      outputTokens: 5,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      calls: 1,
+      costUsd: null,
+      cacheDiscountUsd: null,
+    },
   });
   assert.match(unknown, /cost unknown/);
+  assert.match(unknown, /0% cache hit/);
+});
+
+test('usageSummaryLine: renders provider-reported cache_discount savings when present (slice 04b)', () => {
+  const line = usageSummaryLine({
+    perRole: {},
+    overall: {
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedInputTokens: 80,
+      cacheWriteInputTokens: 0,
+      calls: 1,
+      costUsd: 0.001,
+      cacheDiscountUsd: 0.0025,
+    },
+  });
+  assert.match(line, /80% cache hit/);
+  assert.match(line, /\$0\.0025 cache discount/);
 });
 
 test('runStart: prints the auto-merge banner to stdout when auto-merge is on (default)', async () => {

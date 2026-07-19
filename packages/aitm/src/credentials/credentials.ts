@@ -79,6 +79,11 @@ export function chatSettings(
     ...(effort !== undefined ? { reasoning: { effort } } : {}),
     ...(cacheable ? { cache_control: { type: 'ephemeral' as const } } : {}),
     ...(sessionBody ? { extraBody: sessionBody } : {}),
+    // OpenRouter usage accounting (plan slice 04b): asks the endpoint to echo per-call token/cost
+    // detail (cache reads, cache discount) in the response so usage-tracker can report a cache-hit %
+    // beyond what LanguageModelUsage alone carries. OpenRouter-only — suppressed on a custom baseURL
+    // (#109 spec bullet 3) so those requests stay byte-identical.
+    ...(onOpenRouter ? { usage: { include: true } } : {}),
   };
 }
 

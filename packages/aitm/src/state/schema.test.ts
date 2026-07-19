@@ -156,16 +156,20 @@ test('RunStateSchema: usage is optional (legacy state parses) and round-trips wh
         inputTokens: 100,
         outputTokens: 20,
         cachedInputTokens: 10,
+        cacheWriteInputTokens: 5,
         calls: 2,
         costUsd: 0.001,
+        cacheDiscountUsd: 0.0002,
       },
     },
     overall: {
       inputTokens: 100,
       outputTokens: 20,
       cachedInputTokens: 10,
+      cacheWriteInputTokens: 5,
       calls: 2,
       costUsd: 0.001,
+      cacheDiscountUsd: 0.0002,
     },
   };
   const parsed = RunStateSchema.parse({ ...base, usage });
@@ -176,6 +180,17 @@ test('RunStateSchema: usage is optional (legacy state parses) and round-trips wh
     usage: { perRole: {}, overall: { ...usage.overall, costUsd: null } },
   });
   assert.equal(nullCost.usage?.overall.costUsd, null);
+
+  // Pre-slice-04b usage (no cacheWriteInputTokens/cacheDiscountUsd) still parses, defaulting to 0/null.
+  const legacyUsage = RunStateSchema.parse({
+    ...base,
+    usage: {
+      perRole: {},
+      overall: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, calls: 1, costUsd: null },
+    },
+  });
+  assert.equal(legacyUsage.usage?.overall.cacheWriteInputTokens, 0);
+  assert.equal(legacyUsage.usage?.overall.cacheDiscountUsd, null);
 });
 
 test('RunStateSchema defaults options.prPerTask to false', () => {

@@ -169,3 +169,4 @@ export {
   type WithHooksInit,
   withHooks,
 } from './tool-hooks.ts';
+export { type SpilledOutput, ToolOutputStore } from './tool-output-store.ts';

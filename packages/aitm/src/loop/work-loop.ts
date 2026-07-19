@@ -16,7 +16,7 @@ import { CiFailed } from '../github/errors.ts';
 import type { CiResult, MergeMethod, Sleep } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import { phaseForStage, type StepCounterFn } from '../observability/run-step.ts';
-import type { RunStep } from '../observability/step-progress.ts';
+import { formatDuration, type RunStep } from '../observability/step-progress.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../state/schema.ts';
 import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
@@ -189,6 +189,10 @@ export type WorkLoopDeps = {
   // `runGroup`'s catch produced as `blocked` (exit 1). Optional — omitted → no cancellation check,
   // byte-identical to pre-signal behavior. See docs/plans/.../02-signal-cancellation-cleanup.md.
   signal?: AbortSignal;
+  // Clock for task/group timing lines (`task done in 7.2m`, group totals at merge). Optional —
+  // defaults to the wall clock; tests inject a stepped fake so duration assertions are
+  // deterministic instead of racing the real clock.
+  now?: () => number;
 };
 
 export type GroupOutcome =
@@ -337,6 +341,11 @@ export class WorkLoop {
   // time even when run() dispatches a batch of ready() groups. Non-git phases (CI waits, PR polling)
   // stay outside it and still overlap. A no-op at concurrency 1. See docs/plans/.../02-*.md (DECISION 1).
   private readonly checkoutMutex = new Mutex();
+  // Group start times for the `group … merged in Ns` total (claudetm parity), keyed by group id —
+  // set once at runGroup entry, read wherever a group reaches its merged terminal (driveStages'
+  // stage transition, or openAndMaybeMerge's per-task merge under prPerTask). Concurrent groups
+  // never collide: PrGroup ids are unique within a run (see StateStore).
+  private readonly groupStartedAt = new Map<string, number>();
 
   constructor(private readonly deps: WorkLoopDeps) {
     this.sessionCount = deps.initialSessionCount ?? 0;
@@ -397,6 +406,7 @@ export class WorkLoop {
   // (processGroup). Both acquire a checkout, persist an in-progress entry, and release on exit.
   async runGroup(group: PrGroup): Promise<void> {
     const branch = group.branch ?? `aitm/${group.id}`;
+    this.groupStartedAt.set(group.id, this.now());
     let acquired = false;
     try {
       const baseBranch = await this.deps.github.defaultBranch();
@@ -605,8 +615,10 @@ export class WorkLoop {
       }
       if (next !== stage) {
         const reason = next === 'blocked' && ctx.blockedReason ? ` (${ctx.blockedReason})` : '';
+        const timing =
+          next === 'merged' ? ` — done in ${this.groupElapsedLabel(ctx.group.id)}` : '';
         this.deps.progress?.(
-          `group ${ctx.group.id}: ${stage} → ${next}${reason}`,
+          `group ${ctx.group.id}: ${stage} → ${next}${reason}${timing}`,
           this.stepFor(ctx.group.id, phaseForStage(next)),
         );
       }
@@ -767,6 +779,7 @@ export class WorkLoop {
       const next = await this.completeTask(group, task.id);
       return { kind: 'ok', group: next, delivery: alreadyCommittedDelivery(group, task) };
     }
+    const startedAt = this.now();
     const result = await this.checkoutMutex.runExclusive(async () => {
       const worked = await this.deps.orchestrator.runWorker({ group, task, checkout, baseBranch });
       if (worked.kind === 'ok') {
@@ -778,6 +791,10 @@ export class WorkLoop {
       return { kind: 'blocked', reason: result.kind === 'blocked' ? result.reason : result.error };
     }
     const next = await this.completeTask(group, task.id);
+    this.deps.progress?.(
+      `group ${group.id} task ${task.id}: done in ${formatDuration(this.now() - startedAt)}`,
+      this.stepFor(group.id, 'working', task),
+    );
     return { kind: 'ok', group: next, delivery: result.delivery };
   }
 
@@ -880,6 +897,12 @@ export class WorkLoop {
       this.markStatus(group.id, final ? 'merged' : 'in-progress'),
     );
     this.outcomes.push({ groupId: group.id, status: 'merged', pr: pr.number });
+    if (final) {
+      this.deps.progress?.(
+        `group ${group.id}: merged — done in ${this.groupElapsedLabel(group.id)}`,
+        this.stepFor(group.id, 'merged'),
+      );
+    }
   }
 
   // Mark one task complete: flip its `done` flag in persisted state (preserving the group's
@@ -986,6 +1009,18 @@ export class WorkLoop {
   private stepFor(groupId: string, phase: string, task?: Task): RunStep {
     const counter = this.deps.stepCounter?.(groupId, task);
     return counter ? { phase, ...counter } : { phase };
+  }
+
+  private now(): number {
+    return this.deps.now?.() ?? Date.now();
+  }
+
+  // Elapsed time since `runGroup` started this group, formatted for a `merged` progress line.
+  // Missing start (unreachable in normal flow — runGroup always seeds it before any merge point)
+  // falls back to `0.0s` rather than throwing, so a timing line can never break the run.
+  private groupElapsedLabel(groupId: string): string {
+    const startedAt = this.groupStartedAt.get(groupId);
+    return formatDuration(startedAt === undefined ? 0 : this.now() - startedAt);
   }
 
   private async markStatus(

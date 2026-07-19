@@ -81,6 +81,29 @@ test('reconstructTranscript: a step message failing the ModelMessage shape is sk
   assert.equal(warns.length, 1, 'exactly the mistyped message warned');
 });
 
+test('reconstructTranscript: N invalid messages across records aggregate into one warning', () => {
+  const warns: string[] = [];
+  const raw = [
+    JSON.stringify({
+      kind: 'step',
+      ts: 't1',
+      messages: [msg('assistant', 'a'), { role: 'user', content: 5 }, { role: 'nope', content: 1 }],
+    }),
+    JSON.stringify({
+      kind: 'compaction',
+      ts: 't2',
+      messages: [{ role: 'nope', content: 'x' }, msg('user', 'SUMMARY')],
+    }),
+  ].join('\n');
+  const out = reconstructTranscript(raw, (m) => warns.push(m));
+  assert.deepEqual(out.messages, [msg('user', 'SUMMARY')]);
+  assert.deepEqual(
+    warns,
+    ['skipped 3 invalid transcript messages'],
+    'one aggregated warning for all 3 skips',
+  );
+});
+
 test('reconstructTranscript: a mistyped message inside a compaction record is skipped, valid ones kept', () => {
   const warns: string[] = [];
   const raw = [

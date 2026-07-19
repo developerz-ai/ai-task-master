@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { execa } from 'execa';
 import { ProcessManager, type SpawnFn } from './background-process.ts';
 import { type BashOutput, bashTool, MAX_BASH_OUTPUT_CHARS, multiBashTool } from './bash-tool.ts';
+import { ToolOutputStore } from './tool-output-store.ts';
 
 function textOf(t: { toModelOutput?: unknown }, input: unknown, output: unknown): string {
   const fn = t.toModelOutput;
@@ -362,6 +363,79 @@ test('multiBashTool: each command output is truncated per command (issue #103)',
     const first = out.results[0]?.stdout ?? '';
     assert.ok(first.length <= MAX_BASH_OUTPUT_CHARS + 200);
     assert.match(first, /\[output truncated/);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+// --- tool-output spill: overflow routes through the store instead of destructive head/tail ---
+
+test('bashTool: overflow spills the FULL stream to the store; model output carries the path + paging hint', async () => {
+  const dir = await tempDir();
+  try {
+    const store = new ToolOutputStore(join(dir.path, 'tool-output'));
+    const out = await run<{ command: string; description: string }, { stdout: string }>(
+      bashTool({ cwd: dir.path, outputStore: store }),
+      { command: 'seq 1 20000', description: 'many lines' },
+    );
+    // The in-context view stays within the cap and carries the spill notice: line count + path + hint.
+    assert.ok(out.stdout.length <= MAX_BASH_OUTPUT_CHARS, 'in-context view stays within the cap');
+    const m = out.stdout.match(
+      /\[output truncated: (\d+) lines omitted\. Full output: (\S+) — page with readFile\(offset\/limit\) or grep\]/,
+    );
+    assert.ok(m, `spill notice with path + hint present; tail was: ${out.stdout.slice(-200)}`);
+    assert.ok(Number(m[1] ?? '') > 0, 'reports a positive omitted-line count');
+    // Head + tail are still shown in-context (a trailing summary survives).
+    assert.match(out.stdout, /^1\n/, 'head shown in-context');
+    assert.match(out.stdout, /20000/, 'tail shown in-context');
+    // The spilled file holds the FULL, untruncated stream — including the omitted middle line.
+    const full = await readFile(m[2] ?? '', 'utf8');
+    assert.ok(full.length > MAX_BASH_OUTPUT_CHARS, 'spill file is the full stream, past the cap');
+    assert.ok(full.startsWith('1\n'), 'head preserved in the spill file');
+    assert.match(full, /\n10000\n/, 'omitted middle preserved in the spill file');
+    assert.match(full, /\n20000\n$/, 'tail preserved in the spill file');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('multiBashTool: overflow spills each command output to the store with a paging notice', async () => {
+  const dir = await tempDir();
+  try {
+    const store = new ToolOutputStore(join(dir.path, 'tool-output'));
+    const out = await run<{ commands: string[] }, MultiOut>(
+      multiBashTool({ cwd: dir.path, outputStore: store }),
+      { commands: ['seq 1 20000'] },
+    );
+    const stdout = out.results[0]?.stdout ?? '';
+    const m = stdout.match(/Full output: (\S+) — page with readFile\(offset\/limit\) or grep\]/);
+    assert.ok(m, 'multiBash spill notice with path + hint present');
+    const full = await readFile(m[1] ?? '', 'utf8');
+    assert.ok(full.length > MAX_BASH_OUTPUT_CHARS, 'spill file is the full stream');
+    assert.match(full, /\n10000\n/, 'full content spilled, nothing lost');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('bashTool: a spill write failure degrades to legacy head/tail truncation, never throws', async () => {
+  const dir = await tempDir();
+  try {
+    class FailingStore extends ToolOutputStore {
+      override save(): Promise<never> {
+        return Promise.reject(new Error('spill failed'));
+      }
+    }
+    const out = await run<
+      { command: string; description: string },
+      { stdout: string; exitCode: number }
+    >(bashTool({ cwd: dir.path, outputStore: new FailingStore(join(dir.path, 'to')) }), {
+      command: `head -c 40000 /dev/zero | tr '\\0' a; echo END_OF_OUTPUT`,
+      description: 'big',
+    });
+    assert.equal(out.exitCode, 0);
+    assert.match(out.stdout, /\[output truncated: \d+ chars total/, 'fell back to legacy notice');
+    assert.match(out.stdout, /END_OF_OUTPUT/, 'tail preserved by the fallback');
   } finally {
     await dir.cleanup();
   }

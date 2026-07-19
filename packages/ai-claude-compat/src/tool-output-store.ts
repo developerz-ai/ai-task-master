@@ -78,7 +78,7 @@ function slugifyTool(tool: string): string {
   return slug === '' ? 'tool' : slug;
 }
 
-function countLines(content: string): number {
+export function countLines(content: string): number {
   if (content.length === 0) return 0;
   let newlines = 0;
   for (let i = content.indexOf('\n'); i !== -1; i = content.indexOf('\n', i + 1)) {

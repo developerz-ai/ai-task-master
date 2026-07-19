@@ -6,7 +6,7 @@ import {
   type ModelLimitsLookup,
   ModelNotFound,
 } from '../openrouter/model-limits.ts';
-import { roleUsageSink, UsageTracker } from './usage-tracker.ts';
+import { reportedInputTokens, roleUsageSink, UsageTracker } from './usage-tracker.ts';
 
 // A ModelLimitsLookup over a fixed catalog; an id not in the map throws ModelNotFound like the real one.
 function stubLimits(catalog: Record<string, Omit<ModelLimits, 'modelId'>>): ModelLimitsLookup {
@@ -199,4 +199,17 @@ test('roleUsageSink forwards providerMetadata through to record', async () => {
   sink?.(usage(50, 5), 'm', openrouterMetadata({ cacheDiscount: 0.01 }));
   const { perRole } = await t.totals();
   assert.equal(perRole.reviewer?.cacheDiscountUsd, 0.01);
+});
+
+test('reportedInputTokens returns the provider prompt-token count when finite and non-negative', () => {
+  assert.equal(reportedInputTokens(usage(4200, 10)), 4200);
+  assert.equal(reportedInputTokens(usage(0, 0)), 0, '0 is a valid count');
+});
+
+test('reportedInputTokens returns undefined for no usage, undefined tokens, or a non-finite/negative count', () => {
+  assert.equal(reportedInputTokens(undefined), undefined);
+  assert.equal(reportedInputTokens({ ...usage(0, 0), inputTokens: undefined }), undefined);
+  for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.equal(reportedInputTokens({ ...usage(0, 0), inputTokens: bad }), undefined, `${bad}`);
+  }
 });

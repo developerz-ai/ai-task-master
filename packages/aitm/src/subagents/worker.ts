@@ -185,6 +185,7 @@ export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent 
       ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
       ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
       ...(init.onStepFinish ? { onStepFinish: init.onStepFinish } : {}),
+      ...(init.onRetry ? { onRetry: init.onRetry } : {}),
     },
     WORKER_MAX_STEPS,
   );

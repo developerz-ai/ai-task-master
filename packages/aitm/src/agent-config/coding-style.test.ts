@@ -182,3 +182,55 @@ test('StyleDistiller: gathers config files + package.json scripts even with no s
     await repo.cleanup();
   }
 });
+
+test('StyleDistiller: onProgress fires once, naming every gathered signal (slice 01b)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    await writeFile(join(repo.path, 'CONTRIBUTING.md'), '# Contributing\n');
+    const { model } = modelReturning('# Coding Style\n\n- ok\nCODING_STYLE_COMPLETE');
+    const config = claudeConfig(join(repo.path, 'CLAUDE.md'), '# x\n');
+    const messages: string[] = [];
+    await new StyleDistiller({ model, onProgress: (m) => messages.push(m) }).distill({
+      config,
+      repoRoot: repo.path,
+    });
+
+    assert.equal(messages.length, 1, 'one coarse line, no per-signal-file steps');
+    assert.match(messages[0] ?? '', /^coding style: distilling from /);
+    assert.match(messages[0] ?? '', /CLAUDE\.md/);
+    assert.match(messages[0] ?? '', /CONTRIBUTING\.md/);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: no signals → onProgress never fires', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const messages: string[] = [];
+    await new StyleDistiller({
+      model: throwingModel(),
+      onProgress: (m) => messages.push(m),
+    }).distill({ config: null, repoRoot: repo.path });
+    assert.deepEqual(messages, []);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: a throwing onProgress never breaks distillation', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    const { model } = modelReturning('# Coding Style\n\n- ok\nCODING_STYLE_COMPLETE');
+    const config = claudeConfig(join(repo.path, 'CLAUDE.md'), '# x\n');
+    const digest = await new StyleDistiller({
+      model,
+      onProgress: () => {
+        throw new Error('sink boom');
+      },
+    }).distill({ config, repoRoot: repo.path });
+    assert.equal(digest, '# Coding Style\n\n- ok');
+  } finally {
+    await repo.cleanup();
+  }
+});

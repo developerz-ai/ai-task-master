@@ -92,6 +92,10 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   // to append each completed step to a persisted transcript (issue #108). Omitted → not registered,
   // behavior byte-identical.
   onStepFinish?: ToolLoopAgentSettings<never, TOOLS>['onStepFinish'];
+  // Forwarded to callWithStepTimeout's RetryOptions (slice 01b) so a caller can surface each retry
+  // attempt (e.g. to the console) instead of a whole backoff window going silent. Omitted → no sink,
+  // byte-identical retry behavior.
+  onRetry?: RetryOptions['onRetry'];
 };
 
 // Wrap a ToolLoopAgent: register the caller's tools plus the `submit` tool, and stop when the step
@@ -114,26 +118,35 @@ export function createSubagent<TOOLS extends ToolSet>(
     // Agent-wide per-step callback (issue #108). Omitted when unset → not registered.
     ...(config.onStepFinish ? { onStepFinish: config.onStepFinish } : {}),
   });
-  if (config.timeout !== undefined) armStepTimeout(agent, config.timeout);
+  if (config.timeout !== undefined || config.onRetry !== undefined) {
+    armStepTimeout(agent, config.timeout, config.onRetry);
+  }
   return agent;
 }
 
-// Arm the per-step deadline at generate time. The pinned AI SDK (ai@6.0.182) drops a
-// constructor-level `timeout`: `ToolLoopAgent.generate` destructures the per-call `timeout` and
-// forwards it to `generateText`, so the prepared constructor settings are overwritten with
+// Arm the per-step deadline (and retry reporting) at generate time. The pinned AI SDK (ai@6.0.182)
+// drops a constructor-level `timeout`: `ToolLoopAgent.generate` destructures the per-call `timeout`
+// and forwards it to `generateText`, so the prepared constructor settings are overwritten with
 // `undefined` on every call that omits it — which is every aitm call site. We therefore wrap
 // `generate` to inject the configured timeout when the caller supplied neither a `timeout` nor an
 // `abortSignal` (either means the caller owns the deadline, so we leave it untouched), and translate
-// the SDK's generic abort into a deadline-named error via callWithStepTimeout.
+// the SDK's generic abort into a deadline-named error via callWithStepTimeout. `onRetry` rides along
+// unconditionally — it is armed even with no configured `timeout`, so a caller that only wants retry
+// visibility doesn't have to opt into a deadline to get it.
 function armStepTimeout<TOOLS extends ToolSet>(
   agent: ToolLoopAgent<never, TOOLS>,
-  timeout: TimeoutConfiguration,
+  timeout: TimeoutConfiguration | undefined,
+  onRetry: RetryOptions['onRetry'],
 ): void {
   type Generate = ToolLoopAgent<never, TOOLS>['generate'];
   const original = agent.generate.bind(agent) as Generate;
   const wrapped: Generate = (params) => {
     if (params.timeout !== undefined || params.abortSignal !== undefined) return original(params);
-    return callWithStepTimeout(() => original({ ...params, timeout }), timeout);
+    return callWithStepTimeout(
+      () => original(timeout === undefined ? params : { ...params, timeout }),
+      timeout,
+      onRetry === undefined ? {} : { onRetry },
+    );
   };
   agent.generate = wrapped;
 }
@@ -167,10 +180,12 @@ function isAbortError(err: unknown): boolean {
 // rate-limit dressed as a 404). Without a retry a single hiccup permanently blocks a whole PR group.
 // The deadline translation stays inside the retried call so a StepTimeoutError is raised per attempt;
 // it is deliberately NOT retryable (see isRetryableProviderError) — a timeout re-run risks doubling
-// wall-clock, so it propagates and blocks.
+// wall-clock, so it propagates and blocks. The optional `retry` argument forwards RetryOptions
+// (notably `onRetry`) into the kernel so a caller can surface each retry attempt to the console.
 export async function callWithStepTimeout<T>(
   call: () => Promise<T>,
   timeout: TimeoutConfiguration | undefined,
+  retry: RetryOptions = {},
 ): Promise<T> {
   return callWithRetry(async () => {
     try {
@@ -181,7 +196,7 @@ export async function callWithStepTimeout<T>(
       }
       throw err;
     }
-  });
+  }, retry);
 }
 
 // Retry an LLM call on transient provider failures with an escalating backoff. Up to 10 retries at
@@ -195,11 +210,25 @@ export function defaultRetryDelayMs(attemptIndex: number): number {
   return attemptIndex === 0 ? 1_000 : 5_000 * attemptIndex;
 }
 
+// Fired just before each backoff sleep so a caller can surface the retry (slice 01b). `attempt` is
+// the 1-based retry ordinal, `maxAttempts` mirrors maxRetries, `delayMs` is the wait actually taken
+// (a parsed Retry-After when the provider sent one, else the backoff), `reason` a non-empty cause
+// label. Enables `Rate limited (HTTP 429), retrying in 15s (3/10)` — never an empty cause line.
+export type RetryInfo = {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  reason: string;
+};
+
 export type RetryOptions = {
   maxRetries?: number;
   delayMs?: (attemptIndex: number) => number;
   sleep?: (ms: number) => Promise<void>;
   isRetryable?: (err: unknown) => boolean;
+  // Observability sink for each retry; a throw here is swallowed so it can never turn a recoverable
+  // transient failure into a hard error.
+  onRetry?: (info: RetryInfo) => void;
 };
 
 export async function callWithRetry<T>(
@@ -216,7 +245,14 @@ export async function callWithRetry<T>(
       return await call();
     } catch (err) {
       if (attempt >= maxRetries || !isRetryable(err)) throw err;
-      await sleep(delayMs(attempt));
+      const delay = resolveRetryDelay(err, delayMs(attempt));
+      reportRetry(opts.onRetry, {
+        attempt: attempt + 1,
+        maxAttempts: maxRetries,
+        delayMs: delay,
+        reason: describeRetryReason(err),
+      });
+      await sleep(delay);
       attempt += 1;
     }
   }
@@ -254,6 +290,119 @@ export function isRetryableProviderError(err: unknown): boolean {
   if (status !== undefined && RETRYABLE_STATUS.has(status)) return true;
   const message = err instanceof Error ? err.message : String(err);
   return RETRYABLE_MESSAGE.test(message);
+}
+
+// A provider Retry-After is honored up to this bound; beyond it we cap so one call can never stall a
+// whole PR group for more than five minutes on a malformed or hostile header.
+const MAX_RETRY_AFTER_MS = 300_000;
+
+// The wait before the next attempt: honor a provider Retry-After when present (capped), else the
+// caller's escalating backoff. Kept separate from parsing so parseRetryAfterMs returns the true value.
+function resolveRetryDelay(err: unknown, backoffMs: number): number {
+  const after = parseRetryAfterMs(err);
+  return after === undefined ? backoffMs : Math.min(after, MAX_RETRY_AFTER_MS);
+}
+
+// Fire the observability sink, swallowing a throw — a broken progress line must never abort a retry.
+function reportRetry(onRetry: RetryOptions['onRetry'], info: RetryInfo): void {
+  if (!onRetry) return;
+  try {
+    onRetry(info);
+  } catch {
+    // observability must never break the retry loop
+  }
+}
+
+// A short, non-empty label for why we are retrying, so a progress line never renders an empty cause.
+// Prefers the HTTP status (`HTTP 429`); falls back to the error's clipped first line.
+function describeRetryReason(err: unknown): string {
+  const status = readStatusCode(err);
+  if (status !== undefined) return `HTTP ${status}`;
+  const message = err instanceof Error ? err.message : String(err);
+  const firstLine = message.split('\n', 1)[0]?.trim() ?? '';
+  if (firstLine.length === 0) return 'transient error';
+  return firstLine.length > 120 ? `${firstLine.slice(0, 117)}...` : firstLine;
+}
+
+// Parse a provider's requested retry delay (ms) from a thrown error: the `Retry-After` /
+// `retry-after-ms` headers first (assorted SDK header shapes), then a `try again in Ns` hint in the
+// message or raw body. Undefined when absent or unparseable → the caller uses its backoff. Exported
+// for direct unit testing. Reference: opencode session/retry.ts.
+export function parseRetryAfterMs(err: unknown): number | undefined {
+  return retryAfterFromHeaders(err) ?? retryAfterFromBody(err);
+}
+
+function retryAfterFromHeaders(err: unknown): number | undefined {
+  const explicitMs = readHeader(err, 'retry-after-ms');
+  if (explicitMs !== undefined) {
+    const ms = Number.parseInt(explicitMs, 10);
+    if (Number.isFinite(ms) && ms >= 0) return ms;
+  }
+  const retryAfter = readHeader(err, 'retry-after');
+  return retryAfter === undefined ? undefined : retryAfterHeaderToMs(retryAfter);
+}
+
+// `Retry-After` is either an integer number of seconds or an HTTP-date (RFC 7231). The date form
+// needs the wall clock; clamp to >= 0 so an already-past date retries immediately.
+function retryAfterHeaderToMs(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return undefined;
+  if (/^\d+(?:\.\d+)?$/.test(trimmed)) return Math.round(Number.parseFloat(trimmed) * 1000);
+  const at = Date.parse(trimmed);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - Date.now());
+}
+
+// Header bags arrive as a fetch Headers instance (`.get`) or a plain, possibly mixed-case record.
+function readHeader(err: unknown, name: string): string | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const e = err as {
+    responseHeaders?: unknown;
+    headers?: unknown;
+    response?: { headers?: unknown };
+  };
+  for (const container of [e.responseHeaders, e.headers, e.response?.headers]) {
+    const value = headerValue(container, name);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function headerValue(container: unknown, name: string): string | undefined {
+  if (typeof container !== 'object' || container === null) return undefined;
+  if (typeof (container as { get?: unknown }).get === 'function') {
+    const value = (container as { get(header: string): unknown }).get(name);
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+  }
+  const lower = name.toLowerCase();
+  for (const [key, value] of Object.entries(container as Record<string, unknown>)) {
+    if (key.toLowerCase() === lower && typeof value === 'string' && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+// Some providers put the delay only in prose ("...please try again in 12s"), in the message or the
+// raw response body. Read the first number + time unit; nothing matched → undefined.
+function retryAfterFromBody(err: unknown): number | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const e = err as { message?: unknown; responseBody?: unknown };
+  for (const text of [e.message, e.responseBody]) {
+    if (typeof text === 'string') {
+      const ms = hintTextToMs(text);
+      if (ms !== undefined) return ms;
+    }
+  }
+  return undefined;
+}
+
+function hintTextToMs(text: string): number | undefined {
+  const match =
+    /(?:try again|retry)[^0-9]{0,20}?(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|seconds?)\b/i.exec(text);
+  if (!match) return undefined;
+  const value = Number.parseFloat(match[1] ?? '');
+  if (!Number.isFinite(value)) return undefined;
+  return (match[2] ?? '').toLowerCase().startsWith('m')
+    ? Math.round(value)
+    : Math.round(value * 1000);
 }
 
 // Structural shape of the agent.generate() result fields submittedOutput reads — kept minimal so

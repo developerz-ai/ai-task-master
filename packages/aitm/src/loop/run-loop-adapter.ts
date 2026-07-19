@@ -29,6 +29,7 @@ import {
   multiBashTool,
   multiEditTool,
   type ReminderProvider,
+  type RetryInfo,
   readFileTool,
   SUBMIT_TOOL_NAME,
   type SubagentHandle,
@@ -47,11 +48,17 @@ import { Compactor } from '../compaction/compactor.ts';
 import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager, type ToolSurface } from '../mcp/mcp-client.ts';
 import { guardDeferred, TOOL_SEARCH_TOOL_NAME, toolSearch } from '../mcp/tool-search.ts';
+import {
+  createHeartbeatSink,
+  type HeartbeatSink,
+  startHeartbeat,
+} from '../observability/heartbeat.ts';
 import { makeStepCounter, type StepCounterFn } from '../observability/run-step.ts';
 import {
   agentLabel,
   agentStepProgress,
   composeStepFinish,
+  defaultProgressSink,
   harnessProgress,
   type RunStep,
   shortModelName,
@@ -79,6 +86,7 @@ import {
   createPlannerAgent,
   PLANNER_MAX_STEPS,
   PLANNER_SYSTEM_PREFIX,
+  type PlannerResult,
   type PlannerTools,
   runPlanner,
 } from '../subagents/planner.ts';
@@ -222,6 +230,24 @@ function runEndOutcome(kind: string): RunEndOutcome {
 // `.message`, whatever `.cause` it already carried. Exported for the cause-preservation unit test.
 export function describeError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err), { cause: err });
+}
+
+// The console line for one LLM-call retry (slice 01b): RetryInfo.reason is always non-empty (compat's
+// describeRetryReason), so this can never render an empty `Rate limited:` line. Exported for the unit
+// test that pins the exact wording.
+export function retryProgressMessage(info: RetryInfo): string {
+  const seconds = Math.max(0, Math.round(info.delayMs / 1000));
+  return `Rate limited (${info.reason}), retrying in ${seconds}s (${info.attempt}/${info.maxAttempts})`;
+}
+
+// Build an onRetry callback that reports a retry through harnessProgress under the given RunStep tag,
+// via the SAME HeartbeatSink the caller's onStepFinish writes through — so a retry line counts as
+// progress too and pushes back the heartbeat's next tick instead of racing it.
+function onRetryProgress(
+  step: RunStep | undefined,
+  sink: HeartbeatSink,
+): (info: RetryInfo) => void {
+  return (info) => harnessProgress(retryProgressMessage(info), step, sink);
 }
 
 // Begin a transcript recorder, best-effort (issue #108 CR): a mkdir/readdir failure in begin() falls
@@ -715,11 +741,15 @@ async function defaultPlanGroups(
   const plannerRecorder = await beginTranscript(input.state.transcripts?.(), { planner: true });
   const plannerModelId = input.credentials.modelIdFor('planner');
   harnessProgress(`planning with ${plannerModelId}: ${input.goal}`, { phase: 'planning' });
+  const plannerTag: RunStep = { phase: 'planning' };
+  const plannerLabel = agentLabel({ model: shortModelName(plannerModelId), role: 'planner' });
+  // Shared sink (issue #01b liveliness): the heartbeat needs to see every progress write this call
+  // makes (steps + retries) to tell silence from activity, so it must be the SAME sink instance
+  // agentStepProgress/onRetry write through — not each's own default.
+  const plannerHeartbeatSink = createHeartbeatSink(defaultProgressSink());
   const plannerStep = composeStepFinish<StepEvent<PlannerTools>>(
     plannerRecorder ? recordStepDeltas(plannerRecorder) : undefined,
-    agentStepProgress(agentLabel({ model: shortModelName(plannerModelId), role: 'planner' }), {
-      phase: 'planning',
-    }),
+    agentStepProgress(plannerLabel, plannerTag, plannerHeartbeatSink),
   );
   const agent = createPlannerAgent({
     model: input.credentials.modelFor('planner'),
@@ -744,16 +774,23 @@ async function defaultPlanGroups(
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
     ...(plannerStep ? { onStepFinish: plannerStep } : {}),
+    onRetry: onRetryProgress(plannerTag, plannerHeartbeatSink),
   });
-  const result = await runPlanner(agent, {
-    goal: input.goal,
-    styleContents: style,
-    maxPrs: input.resolved.maxPrs,
-    // No group counter yet — the Planner is what produces the groups — so the block carries the
-    // phase only (`Phase: planning`).
-    contextBlock: harnessContextBlock({ phase: 'planning' }),
-    ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
-  });
+  const stopPlannerHeartbeat = startHeartbeat(plannerLabel, plannerHeartbeatSink);
+  let result: PlannerResult;
+  try {
+    result = await runPlanner(agent, {
+      goal: input.goal,
+      styleContents: style,
+      maxPrs: input.resolved.maxPrs,
+      // No group counter yet — the Planner is what produces the groups — so the block carries the
+      // phase only (`Phase: planning`).
+      contextBlock: harnessContextBlock({ phase: 'planning' }),
+      ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
+    });
+  } finally {
+    stopPlannerHeartbeat();
+  }
   await plannerRecorder?.end(runEndOutcome(result.kind));
   if (result.kind === 'ok') {
     const groups = planToPrGroups(result.plan, input.branch);
@@ -911,16 +948,16 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       `group ${checkout.groupId}: addressing ${threads.length} review thread(s) on PR #${pr} with ${reviewerModelId}`,
       { phase: 'reviewing', ...reviewerCounter },
     );
+    const reviewerTag: RunStep = { phase: 'reviewing', ...reviewerCounter };
+    const reviewerLabel = agentLabel({
+      model: shortModelName(reviewerModelId),
+      role: 'reviewer',
+      ctx: checkout.groupId,
+    });
+    const reviewerHeartbeatSink = createHeartbeatSink(defaultProgressSink());
     const reviewerStep = composeStepFinish<StepEvent<ReviewerTools>>(
       recorder ? recordStepDeltas(recorder) : undefined,
-      agentStepProgress(
-        agentLabel({
-          model: shortModelName(reviewerModelId),
-          role: 'reviewer',
-          ctx: checkout.groupId,
-        }),
-        { phase: 'reviewing', ...reviewerCounter },
-      ),
+      agentStepProgress(reviewerLabel, reviewerTag, reviewerHeartbeatSink),
     );
     const agent = createReviewerAgent({
       model: input.credentials.modelFor('reviewer'),
@@ -947,17 +984,24 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       timeout: stepTimeout,
       ...(reviewerUsage ? { onUsage: reviewerUsage } : {}),
       ...(reviewerStep ? { onStepFinish: reviewerStep } : {}),
+      onRetry: onRetryProgress(reviewerTag, reviewerHeartbeatSink),
     });
-    const result = await runReviewerSubagent(agent, {
-      pr,
-      threads,
-      checkoutPath: checkout.path,
-      // The single checkout is on the PR head branch (the PR was opened from it); pin it so a
-      // review fix commit can never land on the wrong branch (audit 02, DECISION 1).
-      headBranch: checkout.branch,
-      styleContents: style,
-      contextBlock: harnessContextBlock({ phase: 'reviewing', ...reviewerCounter }),
-    });
+    const stopReviewerHeartbeat = startHeartbeat(reviewerLabel, reviewerHeartbeatSink);
+    let result: Awaited<ReturnType<typeof runReviewerSubagent>>;
+    try {
+      result = await runReviewerSubagent(agent, {
+        pr,
+        threads,
+        checkoutPath: checkout.path,
+        // The single checkout is on the PR head branch (the PR was opened from it); pin it so a
+        // review fix commit can never land on the wrong branch (audit 02, DECISION 1).
+        headBranch: checkout.branch,
+        styleContents: style,
+        contextBlock: harnessContextBlock(reviewerTag),
+      });
+    } finally {
+      stopReviewerHeartbeat();
+    }
     await recorder?.end(runEndOutcome(result.kind));
     return result;
   };
@@ -1026,9 +1070,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         ...(specialist ? { specialist: specialist.name } : {}),
         ctx: group.id,
       });
+      const workerHeartbeatSink = createHeartbeatSink(defaultProgressSink());
       const workerStep = composeStepFinish<StepEvent<WorkerTools>>(
         recorder ? recordStepDeltas(recorder) : undefined,
-        agentStepProgress(workerAgentLabel, workerStepTag),
+        agentStepProgress(workerAgentLabel, workerStepTag, workerHeartbeatSink),
       );
       const agent = createWorkerAgent({
         model: input.credentials.modelFor('worker'),
@@ -1062,22 +1107,29 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           agentLabel({ model: workerModel, role: 'editor', ctx: group.id }),
           workerStepTag,
         ),
+        onRetry: onRetryProgress(workerStepTag, workerHeartbeatSink),
       });
-      const result = await runWorkerSubagent(agent, {
-        group,
-        ...(task ? { task } : {}),
-        checkoutPath: checkout.path,
-        baseBranch,
-        styleContents: style,
-        // Live read (issue #123): the second group's manifest prompt carries the first group's digest.
-        rollingContext: rollingCtx.current(),
-        contextBlock: harnessContextBlock(workerStepTag),
-        ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
-        ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
-        // Resume (issue #108): continue the interrupted conversation from its retained messages
-        // instead of cold-starting, reusing the #107 priorHandle continuation seam.
-        ...(resumeMessages ? { priorHandle: { agent, messages: resumeMessages } } : {}),
-      });
+      const stopWorkerHeartbeat = startHeartbeat(workerAgentLabel, workerHeartbeatSink);
+      let result: Awaited<ReturnType<typeof runWorkerSubagent>>;
+      try {
+        result = await runWorkerSubagent(agent, {
+          group,
+          ...(task ? { task } : {}),
+          checkoutPath: checkout.path,
+          baseBranch,
+          styleContents: style,
+          // Live read (issue #123): the second group's manifest prompt carries the first group's digest.
+          rollingContext: rollingCtx.current(),
+          contextBlock: harnessContextBlock(workerStepTag),
+          ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
+          ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
+          // Resume (issue #108): continue the interrupted conversation from its retained messages
+          // instead of cold-starting, reusing the #107 priorHandle continuation seam.
+          ...(resumeMessages ? { priorHandle: { agent, messages: resumeMessages } } : {}),
+        });
+      } finally {
+        stopWorkerHeartbeat();
+      }
       await recorder?.end(runEndOutcome(result.kind));
       return result;
     },
@@ -1123,49 +1175,60 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         `group ${group.id}: self-reviewing the diff with ${selfReviewModelId} before opening the PR`,
         selfReviewTag,
       );
-      const selfReviewStep = composeStepFinish<StepEvent<WorkerTools>>(
-        agentStepProgress(
-          agentLabel({ model: selfReviewModel, role: 'self-review', ctx: group.id }),
-          selfReviewTag,
-        ),
-      );
-      return runSelfReviewSession({
-        subagents: {
-          credentials: input.credentials,
-          workerTools: applyHooks(
-            resolveWorkerTools(
-              mcp.toolsForRole('worker'),
-              checkout.path,
-              input.resolved.bashRules,
-              fetchHtmlAvailable,
-              buildExploreFor(input, checkout.path),
-              memoryToolFor(state),
-            ),
-            input,
-            checkout.path,
-          ),
-          styleContents: style,
-          compactor,
-          timeout: stepTimeout,
-          contextBlock: harnessContextBlock(selfReviewTag),
-          ...(selfReviewMemoryIndex.length > 0 ? { memoryIndex: selfReviewMemoryIndex } : {}),
-          ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),
-          ...(selfReviewProviderOptions !== undefined
-            ? { providerOptions: selfReviewProviderOptions }
-            : {}),
-          ...(selfReviewUsage ? { onUsage: selfReviewUsage } : {}),
-          ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
-          ...(selfReviewStep ? { onStepFinish: selfReviewStep } : {}),
-          onEditorStepFinish: agentStepProgress(
-            agentLabel({ model: selfReviewModel, role: 'editor', ctx: group.id }),
-            selfReviewTag,
-          ),
-        },
-        group,
-        baseBranch,
-        checkoutPath: checkout.path,
-        ...(verifyCommand ? { verifyCommand } : {}),
+      const selfReviewLabel = agentLabel({
+        model: selfReviewModel,
+        role: 'self-review',
+        ctx: group.id,
       });
+      const selfReviewHeartbeatSink = createHeartbeatSink(defaultProgressSink());
+      const selfReviewStep = composeStepFinish<StepEvent<WorkerTools>>(
+        agentStepProgress(selfReviewLabel, selfReviewTag, selfReviewHeartbeatSink),
+      );
+      const stopSelfReviewHeartbeat = startHeartbeat(selfReviewLabel, selfReviewHeartbeatSink);
+      try {
+        return await runSelfReviewSession({
+          subagents: {
+            credentials: input.credentials,
+            workerTools: applyHooks(
+              resolveWorkerTools(
+                mcp.toolsForRole('worker'),
+                checkout.path,
+                input.resolved.bashRules,
+                fetchHtmlAvailable,
+                buildExploreFor(input, checkout.path),
+                memoryToolFor(state),
+              ),
+              input,
+              checkout.path,
+            ),
+            styleContents: style,
+            compactor,
+            timeout: stepTimeout,
+            contextBlock: harnessContextBlock(selfReviewTag),
+            ...(selfReviewMemoryIndex.length > 0 ? { memoryIndex: selfReviewMemoryIndex } : {}),
+            ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),
+            ...(selfReviewProviderOptions !== undefined
+              ? { providerOptions: selfReviewProviderOptions }
+              : {}),
+            ...(selfReviewUsage ? { onUsage: selfReviewUsage } : {}),
+            ...(input.resolved.formatCommand
+              ? { formatCommand: input.resolved.formatCommand }
+              : {}),
+            ...(selfReviewStep ? { onStepFinish: selfReviewStep } : {}),
+            onEditorStepFinish: agentStepProgress(
+              agentLabel({ model: selfReviewModel, role: 'editor', ctx: group.id }),
+              selfReviewTag,
+            ),
+            onRetry: onRetryProgress(selfReviewTag, selfReviewHeartbeatSink),
+          },
+          group,
+          baseBranch,
+          checkoutPath: checkout.path,
+          ...(verifyCommand ? { verifyCommand } : {}),
+        });
+      } finally {
+        stopSelfReviewHeartbeat();
+      }
     },
     // ci-failed stage → shared fix session: download failed logs + comments to the state dir, run
     // the coding-capability Worker pointed at them, rebase onto origin/<base>, force-with-lease push.
@@ -1192,12 +1255,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         `group ${group.id}: CI failed on PR #${pr} — running fix session with ${ciFixModelId}`,
         ciFixTag,
       );
+      const ciFixLabel = agentLabel({ model: ciFixModel, role: 'ci-fix', ctx: group.id });
+      const ciFixHeartbeatSink = createHeartbeatSink(defaultProgressSink());
       const ciFixStep = composeStepFinish<StepEvent<WorkerTools>>(
         ciRecorder ? recordStepDeltas(ciRecorder) : undefined,
-        agentStepProgress(
-          agentLabel({ model: ciFixModel, role: 'ci-fix', ctx: group.id }),
-          ciFixTag,
-        ),
+        agentStepProgress(ciFixLabel, ciFixTag, ciFixHeartbeatSink),
       );
       const ciFixWorkerTools = applyHooks(
         resolveWorkerTools(
@@ -1229,42 +1291,55 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             ),
           })
         : undefined;
-      const result = await runFixSession({
-        github: input.github,
-        prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
-        subagents: {
-          credentials: input.credentials,
-          workerTools: ciFixWorkerTools,
-          styleContents: style,
-          compactor,
-          timeout: stepTimeout,
-          // Memory index for the fix session's Worker (issue #118); it also records CI facts it learns.
-          ...(ciFixMemoryIndex.length > 0 ? { memoryIndex: ciFixMemoryIndex } : {}),
-          // Live rolling context (issue #123): the fix session's Worker sees what its group shipped
-          // instead of the old hardcoded ''. Omitted when empty so the render guard stays a no-op.
-          ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),
-          // CI-fix Worker: web_search on by default (undefined) — a fix pass looking up an error or
-          // changelog is the highest-value place for it; only an explicit `false` disables it.
-          ...(ciFixProviderOptions !== undefined ? { providerOptions: ciFixProviderOptions } : {}),
-          // CI-fix Worker usage recorded under `worker`; it runs on the coding-tier model (#114).
-          ...(ciFixUsage ? { onUsage: ciFixUsage } : {}),
-          ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
-          ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
-          ...(ciFixStep ? { onStepFinish: ciFixStep } : {}),
-          onEditorStepFinish: agentStepProgress(
-            agentLabel({ model: ciFixModel, role: 'editor', ctx: group.id }),
-            ciFixTag,
-          ),
-          ...(ciResume ? { resumeMessages: ciResume } : {}),
-          ...(ciFixResolveConflicts ? { resolveConflicts: ciFixResolveConflicts } : {}),
-        },
-        group,
-        pr,
-        baseBranch,
-        checkoutPath: checkout.path,
-        allowForcePush: input.resolved.allowForcePush,
-        ...(priorHandle ? { priorHandle } : {}),
-      });
+      const stopCiFixHeartbeat = startHeartbeat(ciFixLabel, ciFixHeartbeatSink);
+      let result: Awaited<ReturnType<typeof runFixSession>>;
+      try {
+        result = await runFixSession({
+          github: input.github,
+          prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
+          subagents: {
+            credentials: input.credentials,
+            workerTools: ciFixWorkerTools,
+            styleContents: style,
+            compactor,
+            timeout: stepTimeout,
+            // Memory index for the fix session's Worker (issue #118); it also records CI facts it learns.
+            ...(ciFixMemoryIndex.length > 0 ? { memoryIndex: ciFixMemoryIndex } : {}),
+            // Live rolling context (issue #123): the fix session's Worker sees what its group shipped
+            // instead of the old hardcoded ''. Omitted when empty so the render guard stays a no-op.
+            ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),
+            // CI-fix Worker: web_search on by default (undefined) — a fix pass looking up an error or
+            // changelog is the highest-value place for it; only an explicit `false` disables it.
+            ...(ciFixProviderOptions !== undefined
+              ? { providerOptions: ciFixProviderOptions }
+              : {}),
+            // CI-fix Worker usage recorded under `worker`; it runs on the coding-tier model (#114).
+            ...(ciFixUsage ? { onUsage: ciFixUsage } : {}),
+            ...(input.resolved.formatCommand
+              ? { formatCommand: input.resolved.formatCommand }
+              : {}),
+            ...(input.resolved.verifyCommand
+              ? { verifyCommand: input.resolved.verifyCommand }
+              : {}),
+            ...(ciFixStep ? { onStepFinish: ciFixStep } : {}),
+            onEditorStepFinish: agentStepProgress(
+              agentLabel({ model: ciFixModel, role: 'editor', ctx: group.id }),
+              ciFixTag,
+            ),
+            onRetry: onRetryProgress(ciFixTag, ciFixHeartbeatSink),
+            ...(ciResume ? { resumeMessages: ciResume } : {}),
+            ...(ciFixResolveConflicts ? { resolveConflicts: ciFixResolveConflicts } : {}),
+          },
+          group,
+          pr,
+          baseBranch,
+          checkoutPath: checkout.path,
+          allowForcePush: input.resolved.allowForcePush,
+          ...(priorHandle ? { priorHandle } : {}),
+        });
+      } finally {
+        stopCiFixHeartbeat();
+      }
       await ciRecorder?.end(result.kind === 'fixed' ? 'submitted' : 'no-submission');
       if (result.kind === 'fixed') {
         // Retain this pass's conversation so the next fix pass for the group continues it (#107).

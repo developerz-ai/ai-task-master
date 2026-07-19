@@ -14,9 +14,12 @@ import {
   composeSystemPrompt,
   continueSubagent,
   createSubagent,
+  DEFAULT_LLM_MAX_RETRIES,
   defaultRetryDelayMs,
   formatSubmitIssues,
   isRetryableProviderError,
+  parseRetryAfterMs,
+  type RetryInfo,
   runSubagent,
   runWithSchemaRetry,
   StepTimeoutError,
@@ -301,6 +304,62 @@ test('createSubagent: with timeout omitted no deadline is armed — a stalled st
   await gen;
 });
 
+// A model whose first doGenerate call throws a transient (retryable) provider error, then submits
+// on the next call — drives the onRetry-wiring tests below through a real generate() round trip.
+function retryOnceThenSubmitModel(): MockLanguageModelV3 {
+  let calls = 0;
+  return new MockLanguageModelV3({
+    doGenerate: async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('rate limited'), { statusCode: 429 });
+      return {
+        content: [
+          { type: 'tool-call', toolCallId: 'submit-1', toolName: 'submit', input: '{"n":1}' },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+}
+
+test('createSubagent: forwards onRetry to the retry kernel alongside a configured timeout (issue #01b)', async () => {
+  const infos: RetryInfo[] = [];
+  const agent = createSubagent(
+    {
+      model: retryOnceThenSubmitModel(),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      timeout: { stepMs: 5_000 },
+      onRetry: (info) => void infos.push(info),
+    },
+    12,
+  );
+  const result = await agent.generate({ prompt: 'go' });
+  assert.equal(result.finishReason, 'tool-calls');
+  assert.equal(infos.length, 1, 'the transient 429 was retried once, reported via onRetry');
+  assert.equal(infos[0]?.reason, 'HTTP 429');
+});
+
+test('createSubagent: onRetry fires even with no configured timeout — retry visibility does not require a deadline (issue #01b)', async () => {
+  const infos: RetryInfo[] = [];
+  const agent = createSubagent(
+    {
+      model: retryOnceThenSubmitModel(),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onRetry: (info) => void infos.push(info),
+    },
+    12,
+  );
+  const result = await agent.generate({ prompt: 'go' });
+  assert.equal(result.finishReason, 'tool-calls');
+  assert.equal(infos.length, 1, 'onRetry armed generate() even though no timeout was configured');
+});
+
 // --- callWithStepTimeout (translate abort → named timeout) ---
 
 test('callWithStepTimeout: returns the value when the call resolves', async () => {
@@ -409,6 +468,162 @@ test('defaultRetryDelayMs: 1s then +5s per attempt', () => {
     [0, 1, 2, 3, 4].map(defaultRetryDelayMs),
     [1_000, 5_000, 10_000, 15_000, 20_000],
   );
+});
+
+// --- Retry-After parsing + onRetry visibility (slice 01b) ---
+
+// An Error carrying provider-SDK error fields (statusCode, headers, body) — the shape callWithRetry
+// classifies and parses. A real Error avoids throw-literal lint while still carrying the fields.
+function providerError(props: Record<string, unknown>): Error {
+  return Object.assign(new Error('provider error'), props);
+}
+
+test('parseRetryAfterMs: a Retry-After header in seconds → milliseconds', () => {
+  assert.equal(
+    parseRetryAfterMs(providerError({ responseHeaders: { 'retry-after': '15' } })),
+    15_000,
+  );
+});
+
+test('parseRetryAfterMs: a retry-after-ms header is taken as-is', () => {
+  assert.equal(
+    parseRetryAfterMs(providerError({ responseHeaders: { 'retry-after-ms': '2500' } })),
+    2_500,
+  );
+});
+
+test('parseRetryAfterMs: an HTTP-date Retry-After → the delay until that instant', () => {
+  const ms = parseRetryAfterMs(
+    providerError({
+      responseHeaders: { 'retry-after': new Date(Date.now() + 90_000).toUTCString() },
+    }),
+  );
+  assert.ok(ms !== undefined && ms > 85_000 && ms <= 90_000, `expected ~90s, got ${ms}`);
+});
+
+test('parseRetryAfterMs: reads a fetch Headers instance via .get, case-insensitively', () => {
+  const err = providerError({ response: { headers: new Headers({ 'Retry-After': '3' }) } });
+  assert.equal(parseRetryAfterMs(err), 3_000);
+});
+
+test('parseRetryAfterMs: parses a "try again in Ns" hint from the message or raw body', () => {
+  assert.equal(
+    parseRetryAfterMs(providerError({ message: 'Rate limited. Please try again in 12s.' })),
+    12_000,
+  );
+  assert.equal(
+    parseRetryAfterMs(providerError({ message: 'slow down', responseBody: 'retry in 250 ms' })),
+    250,
+  );
+});
+
+test('parseRetryAfterMs: undefined when no Retry-After is present or the value is junk', () => {
+  assert.equal(parseRetryAfterMs(new Error('overloaded')), undefined);
+  assert.equal(
+    parseRetryAfterMs(providerError({ responseHeaders: { 'retry-after': 'soon' } })),
+    undefined,
+  );
+  assert.equal(parseRetryAfterMs({}), undefined);
+  assert.equal(parseRetryAfterMs(null), undefined);
+  assert.equal(parseRetryAfterMs('boom'), undefined);
+});
+
+test('callWithRetry: honors a parsed Retry-After for the delay and reports it via onRetry', async () => {
+  const delays: number[] = [];
+  const infos: RetryInfo[] = [];
+  let calls = 0;
+  const out = await callWithRetry(
+    async () => {
+      calls += 1;
+      if (calls === 1)
+        throw providerError({ statusCode: 429, responseHeaders: { 'retry-after': '7' } });
+      return 'ok';
+    },
+    { sleep: async (ms) => void delays.push(ms), onRetry: (info) => void infos.push(info) },
+  );
+  assert.equal(out, 'ok');
+  assert.deepEqual(delays, [7_000], 'honored Retry-After (7s), not the 1s backoff');
+  assert.deepEqual(infos, [
+    { attempt: 1, maxAttempts: DEFAULT_LLM_MAX_RETRIES, delayMs: 7_000, reason: 'HTTP 429' },
+  ]);
+});
+
+test('callWithRetry: onRetry reports the escalating backoff and cause when no Retry-After is present', async () => {
+  const infos: RetryInfo[] = [];
+  let calls = 0;
+  await callWithRetry(
+    async () => {
+      calls += 1;
+      if (calls < 3) throw new Error('overloaded');
+      return 'ok';
+    },
+    { sleep: async () => {}, onRetry: (info) => void infos.push(info) },
+  );
+  assert.deepEqual(
+    infos.map((i) => i.delayMs),
+    [1_000, 5_000],
+    'onRetry saw the backoff schedule',
+  );
+  assert.deepEqual(
+    infos.map((i) => i.attempt),
+    [1, 2],
+  );
+  assert.equal(infos[0]?.reason, 'overloaded');
+  assert.equal(infos[0]?.maxAttempts, DEFAULT_LLM_MAX_RETRIES);
+});
+
+test('callWithRetry: caps an oversized Retry-After at the five-minute bound', async () => {
+  const delays: number[] = [];
+  let calls = 0;
+  await callWithRetry(
+    async () => {
+      calls += 1;
+      if (calls === 1)
+        throw providerError({ statusCode: 429, responseHeaders: { 'retry-after': '99999' } });
+      return 'ok';
+    },
+    { sleep: async (ms) => void delays.push(ms) },
+  );
+  assert.deepEqual(delays, [300_000], 'honored but capped at 5 minutes');
+});
+
+test('callWithRetry: a throwing onRetry never breaks the retry loop', async () => {
+  let calls = 0;
+  const out = await callWithRetry(
+    async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('rate limit hit');
+      return 'ok';
+    },
+    {
+      sleep: async () => {},
+      onRetry: () => {
+        throw new Error('sink boom');
+      },
+    },
+  );
+  assert.equal(out, 'ok');
+  assert.equal(calls, 2, 'retry proceeded despite the throwing sink');
+});
+
+test('callWithStepTimeout: threads retry options (onRetry + sleep) through to the kernel', async () => {
+  const infos: RetryInfo[] = [];
+  const delays: number[] = [];
+  let calls = 0;
+  const out = await callWithStepTimeout(
+    async () => {
+      calls += 1;
+      if (calls === 1)
+        throw providerError({ statusCode: 503, responseHeaders: { 'retry-after': '4' } });
+      return 42;
+    },
+    { stepMs: 1_000 },
+    { sleep: async (ms) => void delays.push(ms), onRetry: (info) => void infos.push(info) },
+  );
+  assert.equal(out, 42);
+  assert.deepEqual(delays, [4_000], 'the parsed Retry-After reached the kernel sleep');
+  assert.equal(infos[0]?.reason, 'HTTP 503');
+  assert.equal(infos[0]?.delayMs, 4_000);
 });
 
 test('callWithStepTimeout: timeout undefined is a pass-through — a raw abort is NOT translated', async () => {

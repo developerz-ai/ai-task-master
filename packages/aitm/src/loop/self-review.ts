@@ -95,6 +95,8 @@ export type SelfReviewSubagents = {
   onStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
   // Progress-only per-step callback for the review Worker's parallel editor fanout. Unset → silent.
   onEditorStepFinish?: SubagentInit<WorkerTools>['onEditorStepFinish'];
+  // Retry-visibility sink forwarded to the review Worker agent (slice 01b). Unset → no sink.
+  onRetry?: SubagentInit<WorkerTools>['onRetry'];
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
@@ -215,6 +217,7 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     ...(subagents.onUsage !== undefined ? { onUsage: subagents.onUsage } : {}),
     ...(subagents.onStepFinish ? { onStepFinish: subagents.onStepFinish } : {}),
     ...(subagents.onEditorStepFinish ? { onEditorStepFinish: subagents.onEditorStepFinish } : {}),
+    ...(subagents.onRetry ? { onRetry: subagents.onRetry } : {}),
   });
   return runWorker(agent, baseInput);
 }

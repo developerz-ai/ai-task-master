@@ -20,6 +20,12 @@ export type StyleDistillerInit = {
   // Usage sink for the style-digest call, recorded under the planner role (#114). It runs on the
   // planner's model. Unset → no accounting.
   onUsage?: OnUsage;
+  // Progress sink fired ONCE per distill call, right before the LLM call (slice 01b): names the
+  // signals feeding the digest so a silent pre-planning pause reads as `coding style: distilling
+  // from <labels>` instead of nothing. Never per-signal — a repo with many config files must not
+  // spam the stream. Provider-agnostic module: an injected callback, not a direct console import,
+  // keeps this module decoupled from any particular output format.
+  onProgress?: (message: string) => void;
 };
 
 export type DistillInput = {
@@ -54,6 +60,20 @@ const OUTPUT_FORMAT = [
 
 type Signal = { label: string; body: string };
 
+// Fire the coarse `distilling from <labels>` line once per distill call. Swallows a throwing sink —
+// observability must never break the distill pass.
+function reportProgress(
+  onProgress: StyleDistillerInit['onProgress'],
+  signals: readonly Signal[],
+): void {
+  if (!onProgress) return;
+  try {
+    onProgress(`coding style: distilling from ${signals.map((s) => s.label).join(', ')}`);
+  } catch {
+    // observability must never break distillation
+  }
+}
+
 export class StyleDistiller {
   constructor(private readonly init: StyleDistillerInit) {}
 
@@ -63,6 +83,7 @@ export class StyleDistiller {
     const fallback = input.config?.contents ?? '';
     const signals = await gatherSignals(input);
     if (signals.length === 0) return fallback;
+    reportProgress(this.init.onProgress, signals);
     try {
       const result = await generateText({
         model: this.init.model,

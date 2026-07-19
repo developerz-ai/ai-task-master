@@ -7,6 +7,7 @@
 // (`composeSystemPrompt`) now live in @developerz.ai/ai-claude-compat; the concrete factories
 // (planner.ts/worker.ts/reviewer.ts) call createSubagent with their own tools + output type.
 
+import type { RetryOptions } from '@developerz.ai/ai-claude-compat';
 import type {
   LanguageModel,
   LanguageModelUsage,
@@ -54,6 +55,9 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
   // interleaved parallel editor conversations would corrupt. Handlers here must read only per-step
   // fields (e.g. the progress stream). Consumed by worker.ts runEditor; unset → editors stay silent.
   onEditorStepFinish?: ToolLoopAgentSettings<never, TTools>['onStepFinish'];
+  // Forwarded to createSubagent (slice 01b) so a caller can surface each LLM-call retry (rate limit,
+  // transient 5xx) instead of the run going silent through a whole backoff window. Unset → no sink.
+  onRetry?: RetryOptions['onRetry'];
 };
 
 // Concrete factory implementations live next to each subagent: planner.ts, worker.ts, reviewer.ts.

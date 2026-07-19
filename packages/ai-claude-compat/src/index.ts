@@ -136,6 +136,8 @@ export {
   defaultRetryDelayMs,
   formatSubmitIssues,
   isRetryableProviderError,
+  parseRetryAfterMs,
+  type RetryInfo,
   type RetryOptions,
   runSubagent,
   runWithSchemaRetry,

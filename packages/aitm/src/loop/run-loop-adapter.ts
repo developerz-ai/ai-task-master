@@ -946,6 +946,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       : {}),
     timeout: stepTimeout,
     ...(orchUsage ? { onUsage: orchUsage } : {}),
+    onProgress: (message) => harnessProgress(message),
   });
 
   // Build + run the Reviewer over a thread set in the given checkout. Wrapped by addressReviews

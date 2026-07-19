@@ -24,6 +24,7 @@ import {
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
   assertPrBodySections,
+  buildFallbackComposition,
   COMPOSE_PR_MAX_RETRIES,
   compositionOutcome,
   DEFAULT_MAX_STEPS,
@@ -37,6 +38,7 @@ import {
   type RunCmd,
   resolveMaxSteps,
   resolvePrBodySections,
+  truncateAtWord,
 } from './orchestrator.ts';
 import type { ModelProvider } from './subagent-tools.ts';
 
@@ -720,9 +722,10 @@ test('openPr prompt instructs the standard PR body template', async () => {
   assert.match(capturedPrompt, /## Testing/);
 });
 
-test('composePr throws a schema-validation error when the submitted composition is invalid (issue #101)', async () => {
-  // submit called with a composition missing `body` → PrCompositionSchema.safeParse fails on every
-  // attempt → after the in-conversation retries exhaust, the typed failure surfaces as an error.
+test('composePr falls back to a deterministic composition when every submission stays schema-invalid (#101)', async () => {
+  // submit is called with a composition missing `body` on every attempt → PrCompositionSchema fails
+  // each time → after the in-conversation retries exhaust, composePr yields a generated fallback
+  // instead of throwing, so the group opens a PR rather than blocking at pr-open.
   const model = new MockLanguageModelV3({
     doGenerate: async () => ({
       content: [
@@ -739,17 +742,37 @@ test('composePr throws a schema-validation error when the submitted composition 
     }),
   });
   const { provider } = recordingProvider(model);
+  const progress: string[] = [];
+  const createCalls: CreatePrInput[] = [];
   const o = new Orchestrator({
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
     maxSteps: null,
-    github: { createPr: async (input) => basePr(input.head) },
+    github: {
+      createPr: async (input) => {
+        createCalls.push(input);
+        return basePr(input.head);
+      },
+    },
+    onProgress: (m) => progress.push(m),
   });
-  await assert.rejects(o.openPr(baseGroup(), baseDelivery(), 'main'), /schema validation/i);
+  const pr = await o.openPr(baseGroup(), baseDelivery(), 'main');
+  assert.equal(pr.number, 42);
+  assert.equal(createCalls.length, 1);
+  assert.equal(createCalls[0]?.title, 'feat: Core');
+  assert.doesNotThrow(() => assertPrBodySections(createCalls[0]?.body ?? ''));
+  assert.ok(
+    progress.some((m) => m.includes('PR composition fell back to generated title/body')),
+    'the fallback is announced via the progress sink',
+  );
+  assert.ok(
+    progress.some((m) => m.includes('feat: Core')),
+    'the final generated title is logged',
+  );
 });
 
-test('composePr throws a no-submission error when the model never submits a composition (issue #101)', async () => {
+test('composePr falls back when the model never submits a composition (#101)', async () => {
   const model = new MockLanguageModelV3({
     doGenerate: async () => ({
       content: [{ type: 'text', text: 'no submission here' }],
@@ -759,17 +782,26 @@ test('composePr throws a no-submission error when the model never submits a comp
     }),
   });
   const { provider } = recordingProvider(model);
+  const progress: string[] = [];
+  const createCalls: CreatePrInput[] = [];
   const o = new Orchestrator({
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
     maxSteps: null,
-    github: { createPr: async (input) => basePr(input.head) },
+    github: {
+      createPr: async (input) => {
+        createCalls.push(input);
+        return basePr(input.head);
+      },
+    },
+    onProgress: (m) => progress.push(m),
   });
-  await assert.rejects(
-    o.openPr(baseGroup(), baseDelivery(), 'main'),
-    /did not submit a PR composition/i,
-  );
+  const pr = await o.openPr(baseGroup(), baseDelivery(), 'main');
+  assert.equal(pr.number, 42);
+  assert.equal(createCalls[0]?.title, 'feat: Core');
+  assert.doesNotThrow(() => assertPrBodySections(createCalls[0]?.body ?? ''));
+  assert.ok(progress.some((m) => m.includes('PR composition fell back to generated title/body')));
 });
 
 test('composePr retries over an over-long title, then accepts the corrected resubmit', async () => {
@@ -862,33 +894,54 @@ test('composePr feeds the schema failure back as a corrective user turn, keeping
   assert.match(retryPrompt, /PR group goal/, 'the original composition prompt is retained');
 });
 
-test('composePr bounds correction to COMPOSE_PR_MAX_RETRIES generations, then throws', async () => {
-  // Every attempt exceeds the title cap — the loop must stop after 1 + COMPOSE_PR_MAX_RETRIES tries.
+test('composePr bounds correction to COMPOSE_PR_MAX_RETRIES generations, then falls back to a valid ≤72 title', async () => {
+  // Every attempt exceeds the title cap — the loop must stop after 1 + COMPOSE_PR_MAX_RETRIES tries,
+  // then open the PR with the deterministic fallback (title ≤ 72), never throwing.
   const { model, count } = sequenceModel([{ title: 'x'.repeat(80), body: COMPLIANT_BODY }]);
   const { provider } = recordingProvider(model);
+  const createCalls: CreatePrInput[] = [];
   const o = new Orchestrator({
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
     maxSteps: null,
-    github: { createPr: async (input) => basePr(input.head) },
+    github: {
+      createPr: async (input) => {
+        createCalls.push(input);
+        return basePr(input.head);
+      },
+    },
   });
-  await assert.rejects(o.openPr(baseGroup(), baseDelivery(), 'main'), /schema validation/i);
+  const pr = await o.openPr(baseGroup(), baseDelivery(), 'main');
+  assert.equal(pr.number, 42);
   assert.equal(count(), COMPOSE_PR_MAX_RETRIES + 1);
+  assert.equal(createCalls[0]?.title, 'feat: Core');
+  assert.ok(
+    (createCalls[0]?.title.length ?? 99) <= 72,
+    'the fallback title respects the 72-char cap',
+  );
+  assert.doesNotThrow(() => assertPrBodySections(createCalls[0]?.body ?? ''));
 });
 
-test('composePr rethrows the section-contract failure when every retry omits a section', async () => {
+test('composePr falls back when every retry omits a required section', async () => {
   const { model, count } = sequenceModel([{ title: 'feat: core', body: '## Summary\nonly this' }]);
   const { provider } = recordingProvider(model);
+  const createCalls: CreatePrInput[] = [];
   const o = new Orchestrator({
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
     maxSteps: null,
-    github: { createPr: async (input) => basePr(input.head) },
+    github: {
+      createPr: async (input) => {
+        createCalls.push(input);
+        return basePr(input.head);
+      },
+    },
   });
-  await assert.rejects(o.openPr(baseGroup(), baseDelivery(), 'main'), /heading lines/);
+  await o.openPr(baseGroup(), baseDelivery(), 'main');
   assert.equal(count(), COMPOSE_PR_MAX_RETRIES + 1);
+  assert.doesNotThrow(() => assertPrBodySections(createCalls[0]?.body ?? ''));
 });
 
 test('compositionOutcome: valid submission with a compliant body → ok', () => {
@@ -929,6 +982,76 @@ test('compositionOutcome: valid submission with a non-compliant body → section
   if (outcome.ok) throw new Error('unreachable');
   assert.match(outcome.reason, /heading lines/);
   assert.match(outcome.correction, /submit/i);
+});
+
+test('truncateAtWord: input at or under max is returned unchanged', () => {
+  assert.equal(truncateAtWord('feat: core', 72), 'feat: core');
+  assert.equal(truncateAtWord('x'.repeat(72), 72), 'x'.repeat(72));
+});
+
+test('truncateAtWord: retreats to the last word boundary, never mid-word, result ≤ max', () => {
+  const out = truncateAtWord('feat: add the observability and caching subsystems today', 30);
+  assert.ok(out.length <= 30, 'result respects max');
+  assert.ok(!out.endsWith(' '), 'no trailing space');
+  assert.equal(out, 'feat: add the observability');
+});
+
+test('truncateAtWord: a single word longer than max is hard-sliced to max', () => {
+  const out = truncateAtWord('x'.repeat(100), 72);
+  assert.equal(out.length, 72);
+  assert.equal(out, 'x'.repeat(72));
+});
+
+test('buildFallbackComposition: title is feat:<group.title>, capped ≤72 on a word boundary', () => {
+  const { title } = buildFallbackComposition(baseGroup(), baseDelivery(), PR_BODY_SECTIONS);
+  assert.equal(title, 'feat: Core');
+  const longTitleGroup = { ...baseGroup(), title: 'add '.repeat(40).trim() };
+  const long = buildFallbackComposition(longTitleGroup, baseDelivery(), PR_BODY_SECTIONS);
+  assert.ok(long.title.length <= 72, 'a long group title is capped to 72');
+  assert.ok(long.title.startsWith('feat: add'), 'the title keeps the feat: prefix and subject');
+});
+
+test('buildFallbackComposition: empty group.title falls back to the group id', () => {
+  const { title } = buildFallbackComposition(
+    { ...baseGroup(), title: '   ' },
+    baseDelivery(),
+    PR_BODY_SECTIONS,
+  );
+  assert.equal(title, 'feat: core');
+});
+
+test('buildFallbackComposition: body passes assertPrBodySections for the default section set', () => {
+  const { body } = buildFallbackComposition(baseGroup(), baseDelivery(), PR_BODY_SECTIONS);
+  assert.doesNotThrow(() => assertPrBodySections(body, PR_BODY_SECTIONS));
+  // The Changes section lists the delivery's file changes verbatim.
+  assert.match(body, /- create src\/a\.ts: created a/);
+  assert.match(body, /- modify src\/b\.ts: fixed b/);
+});
+
+test('buildFallbackComposition: body passes assertPrBodySections for a custom section set', () => {
+  const custom = ['## What', '## Why', '## Verification'];
+  const { body } = buildFallbackComposition(baseGroup(), baseDelivery(), custom);
+  assert.doesNotThrow(() => assertPrBodySections(body, custom));
+});
+
+test('buildFallbackComposition: an empty change set still yields a valid, non-empty Changes section', () => {
+  const delivery = { ...baseDelivery(), changes: [] };
+  const { body } = buildFallbackComposition(baseGroup(), delivery, PR_BODY_SECTIONS);
+  assert.doesNotThrow(() => assertPrBodySections(body, PR_BODY_SECTIONS));
+});
+
+test('buildFallbackComposition: a newline-laden change summary cannot inject a section heading', () => {
+  const delivery = {
+    ...baseDelivery(),
+    changes: [{ path: 'src/a.ts', kind: 'modify' as const, summary: 'line1\n## Testing\nline2' }],
+  };
+  const { body } = buildFallbackComposition(baseGroup(), delivery, PR_BODY_SECTIONS);
+  assert.doesNotThrow(() => assertPrBodySections(body, PR_BODY_SECTIONS));
+  const testingHeadings = body
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l === '## Testing');
+  assert.equal(testingHeadings.length, 1, 'the smuggled heading is flattened, not emitted as one');
 });
 
 test('openPr prompt anchors the title on the group goal, not the worker draft message', async () => {

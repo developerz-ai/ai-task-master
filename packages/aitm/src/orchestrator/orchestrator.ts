@@ -129,6 +129,10 @@ export type OrchestratorInit = {
   timeout?: TimeoutConfiguration;
   // Usage sink for the two direct generateText sites, recorded under the orchestrator role (#114).
   onUsage?: OnUsage;
+  // Harness-level notice sink for the direct generateText sites — currently only composePr's
+  // deterministic fallback (`PR composition fell back …`). Injected so the Orchestrator stays free of
+  // the observability rendering details; the adapter wires it to harnessProgress. Mirrors `onUsage`.
+  onProgress?: (message: string) => void;
 };
 
 // Per-group state needed to wire the subagent tools. Built fresh for each Orchestrator
@@ -231,6 +235,60 @@ export function compositionOutcome(
     };
   }
   return { ok: true, value: submitted.value };
+}
+
+// Truncate to `max` chars on a word boundary: hard-slice, then retreat to the last space so a word
+// is never cut mid-token. A single word longer than `max` has no space to retreat to and is
+// hard-sliced. Result is always ≤ max. Exported for unit testing.
+export function truncateAtWord(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const hard = text.slice(0, max);
+  const lastSpace = hard.lastIndexOf(' ');
+  return (lastSpace > 0 ? hard.slice(0, lastSpace) : hard).trimEnd();
+}
+
+// Collapse interior newlines so an interpolated (model-authored) field can neither span multiple
+// body lines nor smuggle a `## …` line that assertPrBodySections would read as a section heading.
+function oneLine(text: string): string {
+  return text.replace(/\s*\n\s*/g, ' ').trim();
+}
+
+// Deterministic per-section body content for the fallback. Keyed off the heading's leading word so
+// the default Summary/Changes/Testing set gets tailored prose; any other configured heading gets a
+// generic non-empty line. Never emits a line starting with `## `, so it can't inject a heading.
+function fallbackSectionContent(heading: string, group: PrGroup, delivery: WorkerDelivery): string {
+  const name = heading.replace(/^#+\s*/, '').toLowerCase();
+  if (name.startsWith('change')) {
+    const lines = delivery.changes.map(
+      (c) => `- ${c.kind} ${oneLine(c.path)}: ${oneLine(c.summary)}`,
+    );
+    return lines.length > 0 ? lines.join('\n') : '- No file changes were recorded.';
+  }
+  if (name.startsWith('test')) {
+    return 'Automated verification output was not captured for this fallback; confirm via CI on this pull request.';
+  }
+  if (name.startsWith('summar')) {
+    return `Auto-generated composition for PR group ${oneLine(group.id)} — ${oneLine(group.title.trim() || group.id)}.`;
+  }
+  return `Auto-generated fallback content for PR group ${oneLine(group.id)}.`;
+}
+
+// Deterministic PR composition used when the model's composePr attempts are exhausted (invalid
+// schema, a missing section, or no submission at all). Built purely from in-memory group + delivery
+// data, so it is total (never throws) and does no I/O. The body emits every configured section
+// heading verbatim and in order with non-heading content beneath each, so assertPrBodySections
+// passes by construction for any section set. Exported for unit testing.
+export function buildFallbackComposition(
+  group: PrGroup,
+  delivery: WorkerDelivery,
+  sections: readonly string[],
+): PrComposition {
+  const subject = group.title.trim() || group.id;
+  const title = truncateAtWord(`feat: ${oneLine(subject)}`, 72);
+  const body = sections
+    .map((heading) => `${heading}\n${fallbackSectionContent(heading, group, delivery)}`)
+    .join('\n\n');
+  return { title, body };
 }
 
 // Standard PR body every aitm-opened PR follows, so reviewers get a consistent shape. The
@@ -407,8 +465,12 @@ export class Orchestrator {
     // submit), so schema/section recovery is driven inline here: on a botched submit —
     // PrCompositionSchema or assertPrBodySections — append the model's own bad turn plus one
     // corrective user message and re-generate over the growing message array, up to
-    // COMPOSE_PR_MAX_RETRIES. Mirrors the subagents' in-conversation #101 retry. Exhausted retries
-    // re-throw the last reason (making composePr total is a separate concern).
+    // COMPOSE_PR_MAX_RETRIES. Mirrors the subagents' in-conversation #101 retry. Exhausting the
+    // retries (or a model that never submits) falls back to a deterministic composition rather than
+    // throwing, so composePr is total over composition-quality failures and a whole PR group never
+    // blocks at pr-open on prose alone. A genuine transport error (StepTimeoutError from
+    // callWithStepTimeout, network) still propagates — the fallback is for bad compositions, not
+    // stalled requests.
     const model = this.init.credentials.modelFor('orchestrator');
     const sections = this.prBodySections();
     let messages: ModelMessage[] = [{ role: 'user', content: this.buildPrPrompt(group, delivery) }];
@@ -444,7 +506,11 @@ export class Orchestrator {
         { role: 'user', content: outcome.correction },
       ];
     }
-    throw new Error(lastReason);
+    const fallback = buildFallbackComposition(group, delivery, sections);
+    this.init.onProgress?.(
+      `PR composition fell back to generated title/body: ${fallback.title} (${lastReason})`,
+    );
+    return fallback;
   }
 
   // Task-specific ask only — the shared system prompt is sent once via `system` (see composePr).

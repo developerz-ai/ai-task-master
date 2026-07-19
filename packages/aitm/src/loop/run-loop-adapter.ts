@@ -40,6 +40,7 @@ import {
   type ToolHooks,
   withHooks,
   withReminders,
+  wrapReminder,
   writeFileTool,
 } from '@developerz.ai/ai-claude-compat';
 import { type ModelMessage, type Tool, type ToolLoopAgentSettings, type ToolSet, tool } from 'ai';
@@ -412,25 +413,35 @@ function capRawStyle(contents: string): string {
   return contents.slice(0, budget) + STYLE_TRUNCATION_MARKER;
 }
 
-// First-message context block for the subagents: today's date, framed as advisory
-// <system-reminder> context (issue #106). When a `step` is supplied, the run's phase + N/M position
-// rides along as a `runProgress` section so the model knows where it is in the run (prompt-design.md
-// §3 — previously logging-only). Prepended to each subagent's first user message.
+// The BYTE-STABLE leading context block prepended to every subagent's first user message: today's
+// date, framed as advisory <system-reminder> context (issue #106). It carries no per-step content, so
+// the leading prompt prefix is identical across every call in a conversation (and across a run's calls
+// within a day) — the provider's prompt cache holds instead of being invalidated by a moving prefix
+// (slice 04 §4). The date stays day-granular for the same reason (stable within a day).
 //
-// The target-repo style digest is NOT re-sent here: it already sits in the subagent's system prompt
-// (buildRolePrompt's `style` slot, via reminderAgentSystemPrompt) — a cacheable block built once per
-// subagent call. Repeating it in this per-message context block paid for the same tokens twice on
-// every step. Keep it single-sourced in the system prompt.
-export function harnessContextBlock(step?: RunStep): string {
-  const sections = [{ label: 'currentDate', body: new Date().toISOString().slice(0, 10) }];
-  const progress = step ? runStepContextLine(step) : '';
-  if (progress) sections.push({ label: 'runProgress', body: progress });
-  return contextReminder(sections);
+// Two things stay OUT of this block on purpose:
+//   - the run's Step N/M position — a per-call mutation that, sitting right after the cached prefix,
+//     would bust the cache every step. It rides a TRAILING reminder (runProgressReminder) appended to
+//     the END of the first message instead, where it can never reach the prefix.
+//   - the target-repo style digest — already single-sourced in the subagent's system prompt
+//     (buildRolePrompt's `style` slot, via reminderAgentSystemPrompt), a cacheable block built once per
+//     call. Repeating it here paid for the same tokens twice on every step.
+export function harnessContextBlock(): string {
+  return contextReminder([{ label: 'currentDate', body: new Date().toISOString().slice(0, 10) }]);
 }
 
-// Render a RunStep as a first-message progress line: `Step N of M — <phase>` when the counter is
-// known, `Phase: <phase>` when only the phase is (planning, before groups exist), '' when nothing is.
-// Mirrors the observability tag (step-progress.formatStepTag) but in prose for the model, not the log.
+// The run's phase + N/M position as a standalone TRAILING `<system-reminder>`, appended to the END of a
+// subagent's first user message (slice 04 §4) so the model still knows where it is in the run without
+// the position sitting in — and re-invalidating every step — the cacheable prompt prefix. '' when the
+// step reports no position (a bare `{}`), so appendReminderBlock leaves the prompt untouched.
+export function runProgressReminder(step: RunStep): string {
+  const line = runStepContextLine(step);
+  return line ? wrapReminder(`# runProgress\n${line}`) : '';
+}
+
+// Render a RunStep as a progress line: `Step N of M — <phase>` when the counter is known, `Phase:
+// <phase>` when only the phase is (planning, before groups exist), '' when nothing is. Mirrors the
+// observability tag (step-progress.formatStepTag) but in prose for the model, not the log.
 export function runStepContextLine(step: RunStep): string {
   const hasCounter = step.index !== undefined && step.total !== undefined && step.total > 0;
   if (hasCounter) {
@@ -821,9 +832,10 @@ async function defaultPlanGroups(
       goal: input.goal,
       styleContents: style,
       maxPrs: input.resolved.maxPrs,
-      // No group counter yet — the Planner is what produces the groups — so the block carries the
-      // phase only (`Phase: planning`).
-      contextBlock: harnessContextBlock({ phase: 'planning' }),
+      contextBlock: harnessContextBlock(),
+      // No group counter yet — the Planner is what produces the groups — so the trailing progress
+      // reminder carries the phase only (`Phase: planning`).
+      progressBlock: runProgressReminder({ phase: 'planning' }),
       ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
     });
   } finally {
@@ -1037,7 +1049,8 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         // review fix commit can never land on the wrong branch (audit 02, DECISION 1).
         headBranch: checkout.branch,
         styleContents: style,
-        contextBlock: harnessContextBlock(reviewerTag),
+        contextBlock: harnessContextBlock(),
+        progressBlock: runProgressReminder(reviewerTag),
       });
     } finally {
       stopReviewerHeartbeat();
@@ -1161,7 +1174,8 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           styleContents: style,
           // Live read (issue #123): the second group's manifest prompt carries the first group's digest.
           rollingContext: rollingCtx.current(),
-          contextBlock: harnessContextBlock(workerStepTag),
+          contextBlock: harnessContextBlock(),
+          progressBlock: runProgressReminder(workerStepTag),
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
           // Resume (issue #108): continue the interrupted conversation from its retained messages
@@ -1246,7 +1260,8 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             styleContents: style,
             compactor,
             timeout: stepTimeout,
-            contextBlock: harnessContextBlock(selfReviewTag),
+            contextBlock: harnessContextBlock(),
+            progressBlock: runProgressReminder(selfReviewTag),
             ...(selfReviewMemoryIndex.length > 0 ? { memoryIndex: selfReviewMemoryIndex } : {}),
             ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),
             ...(selfReviewProviderOptions !== undefined

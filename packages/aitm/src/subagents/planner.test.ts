@@ -261,6 +261,47 @@ test('runPlanner: prepends the contextBlock to the first user message, ahead of 
   );
 });
 
+test('runPlanner: appends the progressBlock to the END of the first user message, after the task text (slice 04 §4)', async () => {
+  let sent = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      sent = JSON.stringify(opts.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-prog',
+            toolName: 'submit',
+            input: JSON.stringify(basicPlan(1)),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const result = await runPlanner(agent, {
+    goal: 'ship it',
+    styleContents: '',
+    maxPrs: 5,
+    contextBlock: '<system-reminder>\nCTX-LEAD\n</system-reminder>',
+    progressBlock: '<system-reminder>\nPROG-TAIL\n</system-reminder>',
+  });
+  assert.equal(result.kind, 'ok');
+  assert.match(sent, /PROG-TAIL/, 'the progress block reached the first user message');
+  // Lead first, task text in the middle, progress last — the volatile bit trails the cacheable prefix.
+  assert.ok(
+    sent.indexOf('CTX-LEAD') < sent.indexOf('ship it'),
+    'the leading context block precedes the task text',
+  );
+  assert.ok(
+    sent.indexOf('ship it') < sent.indexOf('PROG-TAIL'),
+    'the progress block trails the task text (out of the cacheable prefix)',
+  );
+});
+
 test('createPlannerAgent forwards timeout → a stalled step surfaces as a deadline-named error (issue #129)', async () => {
   const stalling = new MockLanguageModelV3({
     doGenerate: (opts) =>

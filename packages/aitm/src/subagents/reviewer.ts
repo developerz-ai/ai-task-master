@@ -24,7 +24,7 @@ import {
 import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
-import { prependContextBlock, type SubagentInit } from './factory.ts';
+import { appendReminderBlock, prependContextBlock, type SubagentInit } from './factory.ts';
 import { render } from './prompts/templates.ts';
 import type { WorkerTools } from './worker.ts';
 
@@ -72,6 +72,9 @@ export type ReviewerInput = {
   headBranch?: string;
   // Optional harness context block prepended to each thread's first user message (issue #106).
   contextBlock?: string;
+  // Optional trailing `<system-reminder>` (the run's Step N/M position) appended to the END of each
+  // thread's first user message, kept out of the cacheable leading prefix (slice 04 §4).
+  progressBlock?: string;
 };
 
 export type ThreadResolution =
@@ -240,7 +243,7 @@ function buildThreadPrompt(input: ReviewerInput, thread: ReviewThread): string {
   );
   const comment = thread.comments.map((c) => `@${c.author}: ${c.body}`).join('\n');
   const prompt = render('review-thread', { context: context.join('\n'), comment });
-  return prependContextBlock(input.contextBlock, prompt);
+  return appendReminderBlock(prependContextBlock(input.contextBlock, prompt), input.progressBlock);
 }
 
 // Returns the commit sha, or `null` when the staged index is empty (a no-op "fixed"). Genuine git

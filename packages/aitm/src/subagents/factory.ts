@@ -70,6 +70,15 @@ export function prependContextBlock(contextBlock: string | undefined, prompt: st
   return contextBlock ? `${contextBlock}\n\n${prompt}` : prompt;
 }
 
+// Append an optional TRAILING `<system-reminder>` block (e.g. the run's Step N/M position) to the END
+// of a subagent's first user message, separated by a blank line. Unset/empty → the prompt is returned
+// unchanged. The companion to prependContextBlock: the LEADING block stays byte-stable so the provider's
+// prompt-cache prefix holds; this trailing block carries the per-call volatile bits so they sit AFTER
+// the cached prefix (slice 04 §4). Shared by the planner/worker/reviewer prompt builders.
+export function appendReminderBlock(prompt: string, trailingBlock: string | undefined): string {
+  return trailingBlock ? `${prompt}\n\n${trailingBlock}` : prompt;
+}
+
 // Feed a generate result's total usage + resolved model id to an optional sink (issue #114). For the
 // direct generateText / agent.generate call sites (worker editor + manifest, orchestrator, style
 // distiller); the schema-retry path meters inside compat. Fire-and-forget — never breaks the run.

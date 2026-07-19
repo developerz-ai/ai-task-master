@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { LanguageModelUsage } from 'ai';
+import type { LanguageModelUsage, ProviderMetadata } from 'ai';
 import {
   type ModelLimits,
   type ModelLimitsLookup,
@@ -133,4 +133,70 @@ test('roleUsageSink binds a role and falls back to the configured model id when 
   assert.equal(perRole.planner?.calls, 2);
   // No tracker → no sink (callers omit the seam entirely).
   assert.equal(roleUsageSink(undefined, 'planner', 'x'), undefined);
+});
+
+// --- cache-write tokens + provider-reported cache_discount (issue #114 amendment, slice 04b) ---
+
+function openrouterMetadata(usageFields: Record<string, unknown>): ProviderMetadata {
+  return { openrouter: { usage: usageFields } };
+}
+
+test('cache-write tokens accumulate from inputTokenDetails.cacheWriteTokens', async () => {
+  const t = new UsageTracker(noLimits);
+  t.record('worker', 'm', {
+    inputTokens: 100,
+    inputTokenDetails: { noCacheTokens: 70, cacheReadTokens: 0, cacheWriteTokens: 30 },
+    outputTokens: 10,
+    outputTokenDetails: { textTokens: 10, reasoningTokens: undefined },
+    totalTokens: 110,
+  } as LanguageModelUsage);
+  const { perRole, overall } = await t.totals();
+  assert.equal(perRole.worker?.cacheWriteInputTokens, 30);
+  assert.equal(overall.cacheWriteInputTokens, 30);
+});
+
+test('record with no providerMetadata → cacheDiscountUsd stays null (no throw, cost untouched)', async () => {
+  const t = new UsageTracker(noLimits);
+  t.record('worker', 'unknown/model', usage(100, 20));
+  const { perRole, overall } = await t.totals();
+  assert.equal(perRole.worker?.cacheDiscountUsd, null);
+  assert.equal(overall.cacheDiscountUsd, null);
+  assert.equal(perRole.worker?.costUsd, null, 'unknown model → cost still null');
+});
+
+test('record captures providerMetadata.openrouter.usage.cacheDiscount and accumulates across calls', async () => {
+  const t = new UsageTracker(noLimits);
+  t.record('worker', 'm', usage(100, 10), openrouterMetadata({ cacheDiscount: 0.001 }));
+  t.record('worker', 'm', usage(100, 10), openrouterMetadata({ cacheDiscount: 0.0005 }));
+  const { perRole, overall } = await t.totals();
+  assert.ok(Math.abs((perRole.worker?.cacheDiscountUsd ?? 0) - 0.0015) < 1e-12);
+  assert.ok(Math.abs((overall.cacheDiscountUsd ?? 0) - 0.0015) < 1e-12);
+});
+
+test('record accepts the raw snake_case cache_discount field too', async () => {
+  const t = new UsageTracker(noLimits);
+  t.record('worker', 'm', usage(100, 10), openrouterMetadata({ cache_discount: 0.002 }));
+  const { overall } = await t.totals();
+  assert.equal(overall.cacheDiscountUsd, 0.002);
+});
+
+test('record ignores a malformed providerMetadata (non-numeric/missing discount) without throwing', async () => {
+  const t = new UsageTracker(noLimits);
+  assert.doesNotThrow(() => {
+    t.record('worker', 'm', usage(10, 5), {});
+    t.record('worker', 'm', usage(10, 5), { openrouter: 'not-an-object' } as ProviderMetadata);
+    t.record('worker', 'm', usage(10, 5), openrouterMetadata({ cacheDiscount: 'oops' }));
+    t.record('worker', 'm', usage(10, 5), undefined);
+  });
+  const { overall } = await t.totals();
+  assert.equal(overall.cacheDiscountUsd, null);
+  assert.equal(overall.calls, 4);
+});
+
+test('roleUsageSink forwards providerMetadata through to record', async () => {
+  const t = new UsageTracker(noLimits);
+  const sink = roleUsageSink(t, 'reviewer', 'fallback/model');
+  sink?.(usage(50, 5), 'm', openrouterMetadata({ cacheDiscount: 0.01 }));
+  const { perRole } = await t.totals();
+  assert.equal(perRole.reviewer?.cacheDiscountUsd, 0.01);
 });

@@ -20,6 +20,7 @@ import { type AddProfileInput, ProfileManager } from '../config/profiles.ts';
 import type { CliOverrides, ConfigFile, Profile, ResolvedConfig } from '../config/schema.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
+import { createLlmFetch } from '../credentials/llm-fetch.ts';
 import { GitHubClient } from '../github/github-client.ts';
 import { mergeFlowAdapter } from '../loop/merge-flow-adapter.ts';
 import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
@@ -196,16 +197,34 @@ export function autoMergeNotice(autoMerge: boolean): string | null {
   ].join('\n');
 }
 
+// Cache-hit % of input tokens served from cache (issue #114 amendment, slice 04b). 0 input tokens →
+// `0%` rather than NaN/Infinity. Rounded to the nearest percent — this is a glance metric, not a
+// billing figure (costUsd already carries the precise cache-aware math).
+function cacheHitPct(usage: RoleUsage): string {
+  if (usage.inputTokens === 0) return '0%';
+  return `${Math.round((usage.cachedInputTokens / usage.inputTokens) * 100)}%`;
+}
+
 // One end-of-run token/cost summary line (issue #114): overall tokens + per-role breakdown, with the
-// estimated total USD or `cost unknown` when any model's pricing was unavailable. Exported for tests.
+// estimated total USD or `cost unknown` when any model's pricing was unavailable. Adds cache-hit %
+// (slice 04b) and, when the endpoint echoed one (`usage: { include: true }`, credentials.ts
+// chatSettings), the provider-reported `cache_discount` savings — omitted, not `$0`, when no call
+// ever reported one. Exported for tests.
 export function usageSummaryLine(totals: UsageTotals): string {
   const { overall } = totals;
   const cost = overall.costUsd === null ? 'cost unknown' : `$${overall.costUsd.toFixed(4)}`;
+  const discount =
+    overall.cacheDiscountUsd !== null
+      ? `, $${overall.cacheDiscountUsd.toFixed(4)} cache discount`
+      : '';
   const perRole = Object.entries(totals.perRole)
     .filter((entry): entry is [string, RoleUsage] => entry[1] !== undefined)
-    .map(([role, u]) => `${role} ${u.inputTokens}in/${u.outputTokens}out`)
+    .map(
+      ([role, u]) =>
+        `${role} ${u.inputTokens}in/${u.outputTokens}out (${cacheHitPct(u)} cache hit)`,
+    )
     .join(', ');
-  return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached), ${cost}${perRole ? ` — ${perRole}` : ''}\n`;
+  return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached, ${cacheHitPct(overall)} cache hit), ${cost}${discount}${perRole ? ` — ${perRole}` : ''}\n`;
 }
 
 // AgentConfigDetector options from the CLI's stylePath sources + the homeDir seam (issue #117):
@@ -327,7 +346,10 @@ export async function runStart(
 
   // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Sourced from the
   // persisted state.runId (fresh or resumed), so a resumed run reuses the same id and keeps warm.
-  const credentials = new Credentials(resolved, sessionId);
+  // Keep-alive transport (plan slice 04b): a tuned undici dispatcher on Node, undefined elsewhere
+  // (Bun/Deno pool natively, or undici unavailable) → provider keeps its default fetch.
+  const llmFetch = await createLlmFetch();
+  const credentials = new Credentials(resolved, sessionId, llmFetch);
 
   // Planning phase (issue #17): a one-shot step that runs the Planner once, before the loop,
   // so `prGroups` is populated and the loop has something to iterate. Gated on whether a plan
@@ -507,7 +529,9 @@ export async function runMergePr(
 
   // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Take-over reuses the
   // resolved (or freshly synthesized) state.runId so repeat merge-pr calls share one cache session.
-  const credentials = new Credentials(resolved, runState.runId);
+  // Keep-alive transport (plan slice 04b) — see the start path; undefined off-Node keeps the default.
+  const llmFetch = await createLlmFetch();
+  const credentials = new Credentials(resolved, runState.runId, llmFetch);
 
   const pr = args.pr ?? runState.currentPr ?? undefined;
   if (pr === undefined) {

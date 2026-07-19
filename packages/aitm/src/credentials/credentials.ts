@@ -79,6 +79,11 @@ export function chatSettings(
     ...(effort !== undefined ? { reasoning: { effort } } : {}),
     ...(cacheable ? { cache_control: { type: 'ephemeral' as const } } : {}),
     ...(sessionBody ? { extraBody: sessionBody } : {}),
+    // OpenRouter usage accounting (plan slice 04b): asks the endpoint to echo per-call token/cost
+    // detail (cache reads, cache discount) in the response so usage-tracker can report a cache-hit %
+    // beyond what LanguageModelUsage alone carries. OpenRouter-only — suppressed on a custom baseURL
+    // (#109 spec bullet 3) so those requests stay byte-identical.
+    ...(onOpenRouter ? { usage: { include: true } } : {}),
   };
 }
 
@@ -100,11 +105,17 @@ export type ModelHandles = Record<Role, LanguageModel>;
 // guarantee by sourcing baseURL from project/repo input. Exported so the passthrough is
 // unit-testable without reaching into provider internals. `baseURL` is omitted (not set to
 // undefined) when unset so the provider keeps its default — an explicit undefined trips
-// exactOptionalPropertyTypes.
-export function providerSettings(resolved: ResolvedConfig): { apiKey: string; baseURL?: string } {
+// exactOptionalPropertyTypes. `fetchImpl` is the keep-alive transport (createLlmFetch); it is
+// likewise omitted when absent (off-Node / undici unavailable) so the provider keeps its default
+// fetch and the request path stays byte-identical.
+export function providerSettings(
+  resolved: ResolvedConfig,
+  fetchImpl?: typeof fetch,
+): { apiKey: string; baseURL?: string; fetch?: typeof fetch } {
   return {
     apiKey: resolved.openrouterApiKey,
     ...(resolved.baseURL ? { baseURL: resolved.baseURL } : {}),
+    ...(fetchImpl ? { fetch: fetchImpl } : {}),
   };
 }
 
@@ -115,9 +126,12 @@ export class Credentials {
 
   // `sessionId` is the run-scoped id (state.runId): reused across every role/stage in a run and
   // preserved on resume, so session stickiness + prompt-cache keys stay stable per conversation.
+  // `fetchImpl` is the keep-alive transport (createLlmFetch), injected once at the CLI boundary
+  // where an async factory can run; undefined keeps the provider's default fetch.
   constructor(
     private readonly resolved: ResolvedConfig,
     private readonly sessionId?: string,
+    private readonly fetchImpl?: typeof fetch,
   ) {}
 
   // Build a handle per role using ROLE_CAPABILITY. Capability fallback chain:
@@ -170,7 +184,7 @@ export class Credentials {
   private provider(): OpenRouterProvider {
     if (!this.providerInstance) {
       Credentials.assertApiKeyPresent(this.resolved);
-      this.providerInstance = createOpenRouter(providerSettings(this.resolved));
+      this.providerInstance = createOpenRouter(providerSettings(this.resolved, this.fetchImpl));
     }
     return this.providerInstance;
   }

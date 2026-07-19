@@ -39,11 +39,12 @@ function extraBodyOf(handle: LanguageModel): unknown {
 
 // --- chatSettings (issue #124) ---
 
-test('chatSettings: nothing configured + non-Anthropic id → byte-identical to the historical default', () => {
-  // Post-#109 the byte-identical guarantee holds for non-Anthropic routes; an anthropic/* id adds
+test('chatSettings: nothing configured + non-Anthropic id → byte-identical to the historical default plus usage accounting (slice 04b)', () => {
+  // Post-#109 the byte-identical guarantee holds for non-Anthropic routes (bar `usage: { include:
+  // true }`, unconditional on any OpenRouter route since slice 04b); an anthropic/* id adds
   // cache_control (covered below).
   const s = chatSettings('openai/gpt-5', 'coding', baseResolved());
-  assert.deepEqual(s, { provider: { ignore: ['amazon-bedrock'] } });
+  assert.deepEqual(s, { provider: { ignore: ['amazon-bedrock'] }, usage: { include: true } });
   // Explicit key-absence: only `ignore` under provider, no `models`, no `cache_control`.
   assert.ok(!('models' in s), 'no fallback models key');
   assert.ok(!('cache_control' in s), 'no caching for non-Anthropic id');
@@ -128,9 +129,11 @@ test('chatSettings: an unconfigured capability has no reasoning key at all', () 
   const cfg = baseResolved({ reasoningEffort: { smart: 'high' } });
   const other = chatSettings('x/y', 'coding', cfg);
   assert.equal('reasoning' in other, false, 'key absence, not undefined');
-  // With nothing configured the whole object is still byte-identical to the historical default.
+  // With nothing configured the whole object is still byte-identical to the historical default
+  // (plus usage accounting, slice 04b).
   assert.deepEqual(chatSettings('x/y', 'coding', baseResolved()), {
     provider: { ignore: ['amazon-bedrock'] },
+    usage: { include: true },
   });
 });
 
@@ -200,6 +203,7 @@ test('chatSettings: a custom baseURL suppresses caching even for an anthropic/* 
     { provider: { ignore: ['amazon-bedrock'] } },
     'byte-identical on custom baseURL',
   );
+  assert.equal('usage' in s, false, 'usage accounting is OpenRouter-only');
 });
 
 test('chatSettings: caching composes with routing/fallback/reasoning in one object (issues #124/#125/#109)', () => {
@@ -225,6 +229,7 @@ test('chatSettings: no sessionId → no extraBody (byte-identical guarantee pres
   // An explicit undefined behaves the same as omitting the argument.
   assert.deepEqual(chatSettings('openai/gpt-5', 'coding', baseResolved(), undefined), {
     provider: { ignore: ['amazon-bedrock'] },
+    usage: { include: true },
   });
 });
 
@@ -246,6 +251,7 @@ test('chatSettings: a direct baseURL (z.ai) carries prompt_cache_key only — no
   );
   assert.deepEqual(s.extraBody, { prompt_cache_key: 'run-abc' });
   assert.equal('session_id' in (s.extraBody ?? {}), false, 'session_id is an OpenRouter-only hint');
+  assert.equal('usage' in s, false, 'usage accounting is OpenRouter-only');
 });
 
 test('chatSettings: a direct baseURL (moonshot) carries prompt_cache_key only', () => {
@@ -477,6 +483,27 @@ test('providerSettings forwards baseURL when set', () => {
     baseResolved({ baseURL: 'https://api.z.ai/api/coding/paas/v4' }),
   );
   assert.equal(settings.baseURL, 'https://api.z.ai/api/coding/paas/v4');
+});
+
+test('providerSettings omits fetch when no keep-alive transport is supplied (byte-identical)', () => {
+  const settings = providerSettings(baseResolved());
+  assert.equal('fetch' in settings, false, 'absence, not undefined — provider keeps its default');
+});
+
+test('providerSettings forwards the keep-alive fetch (plan slice 04b) when supplied', () => {
+  const keepAlive: typeof fetch = () => Promise.resolve(new Response('ok'));
+  const settings = providerSettings(baseResolved(), keepAlive);
+  assert.equal(settings.fetch, keepAlive);
+});
+
+test('providerSettings carries both baseURL and the keep-alive fetch when set', () => {
+  const keepAlive: typeof fetch = () => Promise.resolve(new Response('ok'));
+  const settings = providerSettings(
+    baseResolved({ baseURL: 'https://api.moonshot.ai/v1' }),
+    keepAlive,
+  );
+  assert.equal(settings.baseURL, 'https://api.moonshot.ai/v1');
+  assert.equal(settings.fetch, keepAlive);
 });
 
 test('modelFor still resolves the tier when a baseURL override is set', () => {

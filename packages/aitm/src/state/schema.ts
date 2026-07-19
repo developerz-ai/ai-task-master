@@ -78,13 +78,16 @@ export type RunStatus = z.infer<typeof RunStatusSchema>;
 
 // Per-run token/cost accounting persisted at flush (issue #114). Additive + optional so a legacy
 // state.json without it still parses. Mirrors UsageTracker.totals(): tokens per role + overall, with
-// costUsd null when any pricing was unknown.
+// costUsd null when any pricing was unknown. cacheWriteInputTokens/cacheDiscountUsd (slice 04b)
+// default so a pre-slice-04b state.json still parses.
 const RoleUsageSchema = z.object({
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
   cachedInputTokens: z.number().int().nonnegative(),
+  cacheWriteInputTokens: z.number().int().nonnegative().default(0),
   calls: z.number().int().nonnegative(),
   costUsd: z.number().nullable(),
+  cacheDiscountUsd: z.number().nullable().default(null),
 });
 export const UsageTotalsSchema = z.object({
   // partialRecord (not record): only roles that actually ran are present, matching UsageTracker.totals.

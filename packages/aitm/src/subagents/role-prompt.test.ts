@@ -151,3 +151,19 @@ test('buildEditorRolePrompt omits an empty style block (no blank-line artifact)'
   assert.ok(!prompt.includes('\n\n\n'), 'no triple newline from the omitted style block');
   assert.match(prompt, /You are a leaf editor\./, 'role guidance still present');
 });
+
+test('buildEditorRolePrompt: injects a team brief when given one, omits it otherwise', () => {
+  const base = {
+    style: '# style',
+    roleGuidance: EDITOR_SYSTEM_PREFIX,
+    cwd: '/tmp/does-not-exist-checkout',
+    maxSteps: 15,
+  };
+  const withBrief = buildEditorRolePrompt({
+    ...base,
+    teamBrief: '<team-brief>\nTEAM_MARK\n</team-brief>',
+  });
+  const without = buildEditorRolePrompt(base);
+  assert.match(withBrief, /TEAM_MARK/, 'the brief rides in the leaf system prompt');
+  assert.doesNotMatch(without, /team-brief/, 'no brief when none is supplied');
+});

@@ -57,6 +57,9 @@ export type EditorRolePromptInput = {
   cwd: string;
   // The editor's step budget (EDITOR_MAX_STEPS).
   maxSteps: number;
+  // Optional shared team brief (task + full manifest + rolling context) injected when the fanout splits
+  // across multiple leaves. Empty/absent → no brief, so a lone editor's prompt stays byte-identical.
+  teamBrief?: string;
 };
 
 // Lean-leaf variant of buildRolePrompt for the per-file editor (worker.ts's Layer B fanout): drops
@@ -71,5 +74,6 @@ export function buildEditorRolePrompt(input: EditorRolePromptInput): string {
     maxSteps: input.maxSteps,
     style: input.style,
     env,
+    ...(input.teamBrief ? { teamBrief: input.teamBrief } : {}),
   });
 }

@@ -43,6 +43,7 @@ import {
   correctiveMessage,
   createSubagent,
   formatSubmitIssues,
+  runPool,
   runSubagent,
   type SubagentHandle,
   type SubmittedOutput,
@@ -138,6 +139,10 @@ export type WorkerInput = {
   // controller aborts too, so sibling editor LLM calls stop rather than burning tokens after the
   // run is already cancelled (cleanup #2, plan 02-signal-cancellation-cleanup).
   signal?: AbortSignal;
+  // Optional cap on how many editor leaves run concurrently in the fanout pool. Unset →
+  // EDITOR_CONCURRENCY_DEFAULT. The config/CLI wiring that populates it lands with the
+  // `editorConcurrency` setting; until then the default holds (slice 05, editor team fanout).
+  editorConcurrency?: number;
 };
 
 // Per-file outcome from the parallel editor fanout. Useful to the Orchestrator
@@ -173,6 +178,15 @@ export { WORKER_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 // cap. The manifest pass gets 30; each per-file editor fan-out gets 12.
 export const WORKER_MAX_STEPS = 30;
 export const EDITOR_MAX_STEPS = 12;
+
+// Editor fanout shape (slice 05, editor team fanout). The manifest is grouped by directory so one leaf
+// owns a handful of cohesive files instead of the fanout opening one provider call per file, and the
+// groups run through a bounded pool. MAX_FILES_PER_EDITOR caps how many files a leaf owns (a large
+// directory still spreads across several leaves); EDITOR_CONCURRENCY_DEFAULT caps how many leaves run
+// at once so a big manifest can't open dozens of concurrent LLM requests. The per-run config that
+// overrides the concurrency is wired separately; unset falls back to this default.
+export const MAX_FILES_PER_EDITOR = 3;
+export const EDITOR_CONCURRENCY_DEFAULT = 4;
 
 // Module-private link from a Worker agent back to its init, so runWorker can spawn editor
 // sub-agents with the same model + tool handles without exposing them on the public surface.
@@ -492,10 +506,87 @@ export function editorToolSet(tools: WorkerTools): WorkerTools {
 // the committed diff can't back.
 type EditorOutcome = { changed: true; change: FileChange } | { changed: false; path: string };
 
-// Fan out one editor per manifest file, sharing a single AbortController: any editor rejecting
-// (or the outer WorkerInput.signal aborting, e.g. SIGINT) aborts every sibling's in-flight
-// `generateText` call so a doomed fanout stops burning tokens instead of running to completion
-// (cleanup #2, plan 02-signal-cancellation-cleanup).
+// A manifest entry's grouping key: its immediate parent directory (POSIX manifest paths), or '.' for a
+// repo-root file. Files under the same directory are cohesive, so they land on one leaf rather than
+// fragmenting the fanout one-per-file.
+function dirOf(path: string): string {
+  const slash = path.lastIndexOf('/');
+  return slash === -1 ? '.' : path.slice(0, slash);
+}
+
+// Group manifest entries into per-leaf assignments: entries sharing a parent directory go to the same
+// leaf, and a directory with more than `maxPerGroup` entries is chunked to that size so no single leaf
+// owns an unbounded brief while a large directory still spreads across the pool. Manifest order is
+// preserved within and across groups so the fanout — and its tests — stay deterministic. A single-entry
+// manifest yields one single-entry group, keeping that path byte-identical to the pre-team fanout.
+export function groupManifestByDir(
+  files: readonly FileManifestEntry[],
+  maxPerGroup: number,
+): FileManifestEntry[][] {
+  const byDir = new Map<string, FileManifestEntry[]>();
+  for (const file of files) {
+    const dir = dirOf(file.path);
+    const bucket = byDir.get(dir);
+    if (bucket) bucket.push(file);
+    else byDir.set(dir, [file]);
+  }
+  const size = Math.max(1, Math.floor(maxPerGroup) || 1);
+  const groups: FileManifestEntry[][] = [];
+  for (const bucket of byDir.values()) {
+    for (let i = 0; i < bucket.length; i += size) {
+      groups.push(bucket.slice(i, i + size));
+    }
+  }
+  return groups;
+}
+
+// The shared "team brief" injected into every editor's system prompt when a manifest fans out to more
+// than one leaf: the task in play, the whole file manifest (so each teammate sees what its siblings
+// own, not just its own path), and the rolling cross-PR context. Built once per fanout. Values are
+// slice-capped exactly as the manifest prompt caps them so a runaway plan can't blow the brief ×N. The
+// caller injects it only for a real team (more than one group); a lone leaf sees no brief, keeping the
+// single-leaf path byte-identical to the pre-team fanout.
+export function buildTeamBrief(input: WorkerInput, files: readonly FileManifestEntry[]): string {
+  const lines = [
+    '<team-brief>',
+    'You are one editor on a team realizing this change together; each leaf owns a different set of files.',
+    '',
+  ];
+  if (input.task) {
+    lines.push(`Task [${input.task.complexity}]: ${capText(input.task.text, MANIFEST_FIELD_MAX)}`);
+  } else {
+    lines.push(
+      'Tasks in this change:',
+      ...input.group.tasks.map((t) => `  - ${capText(t.text, MANIFEST_FIELD_MAX)}`),
+    );
+  }
+  lines.push('', 'Full file manifest (each file is owned by exactly one leaf):');
+  for (const file of files) {
+    lines.push(`  - ${file.path} (${file.kind}) — ${capText(file.purpose, MANIFEST_FIELD_MAX)}`);
+  }
+  if (input.rollingContext.trim()) {
+    lines.push(
+      '',
+      'Rolling context from prior PRs:',
+      capText(input.rollingContext, ROLLING_CONTEXT_MAX),
+    );
+  }
+  lines.push(
+    '',
+    'Edit only the file(s) named in your own brief below; treat the rest of the manifest as your',
+    "teammates' contract, not files for you to touch.",
+    '</team-brief>',
+  );
+  return lines.join('\n');
+}
+
+// Fan the manifest out over a bounded pool of editor leaves, sharing a single AbortController: any leaf
+// rejecting (or the outer WorkerInput.signal aborting, e.g. SIGINT) aborts every sibling's in-flight
+// `generateText` call so a doomed fanout stops burning tokens instead of running to completion (cleanup
+// #2, plan 02-signal-cancellation-cleanup). The manifest is grouped by directory first so one leaf owns
+// cohesive files, then at most `editorConcurrency` leaves run at once — a big manifest no longer opens
+// one concurrent LLM request per file (slice 05). Each leaf yields one outcome per file it owns; the
+// per-group results are flattened back to one outcome per manifest entry for planAndEdit.
 async function runEditorFanout(
   init: SubagentInit<WorkerTools>,
   files: FileManifestEntry[],
@@ -508,15 +599,19 @@ async function runEditorFanout(
     if (outer.aborted) controller.abort(outer.reason);
     else outer.addEventListener('abort', onOuterAbort, { once: true });
   }
+  const groups = groupManifestByDir(files, MAX_FILES_PER_EDITOR);
+  // A team brief only makes sense once the work is actually split across leaves; a lone leaf already
+  // sees its whole assignment in its own prompt, and injecting nothing keeps that path byte-identical.
+  const teamBrief = groups.length > 1 ? buildTeamBrief(input, files) : '';
+  const concurrency = input.editorConcurrency ?? EDITOR_CONCURRENCY_DEFAULT;
   try {
-    return await Promise.all(
-      files.map((file) =>
-        runEditor(init, file, input, controller.signal).catch((err: unknown) => {
-          controller.abort();
-          throw err;
-        }),
-      ),
+    const perGroup = await runPool(groups, concurrency, (group) =>
+      runEditor(init, group, input, controller.signal, teamBrief).catch((err: unknown) => {
+        controller.abort();
+        throw err;
+      }),
     );
+    return perGroup.flat();
   } finally {
     outer?.removeEventListener('abort', onOuterAbort);
   }
@@ -524,10 +619,11 @@ async function runEditorFanout(
 
 async function runEditor(
   init: SubagentInit<WorkerTools>,
-  file: FileManifestEntry,
+  group: readonly FileManifestEntry[],
   input: WorkerInput,
   signal: AbortSignal,
-): Promise<EditorOutcome> {
+  teamBrief: string,
+): Promise<EditorOutcome[]> {
   const result = await callWithStepTimeout(
     () =>
       generateText({
@@ -538,8 +634,10 @@ async function runEditor(
           roleGuidance: EDITOR_SYSTEM_PREFIX,
           cwd: input.checkoutPath,
           maxSteps: EDITOR_MAX_STEPS,
+          // Empty for a lone leaf → the slot is omitted and the system prompt is byte-identical to today.
+          ...(teamBrief ? { teamBrief } : {}),
         }),
-        prompt: buildEditorPrompt(file, input),
+        prompt: buildEditorPrompt(group, input),
         stopWhen: stepCountIs(EDITOR_MAX_STEPS),
         abortSignal: signal,
         // web_search (issue #112) rides providerOptions.openrouter when the adapter enabled it for
@@ -554,16 +652,27 @@ async function runEditor(
       }),
     init.timeout,
   );
-  reportUsage(init.onUsage, result); // per-file editor pass, recorded under the worker role (#114)
+  reportUsage(init.onUsage, result); // per-leaf editor pass, recorded under the worker role (#114)
   const firstLine = result.text.trim().split('\n')[0];
-  const summary = firstLine && firstLine.length > 0 ? firstLine : `${file.kind} ${file.path}`;
-  // Confirm the working tree actually diverged at this path before recording the change: a weak model
-  // can narrate an edit ("edited x") without ever calling writeFile/editFile, and an unverified
-  // FileChange becomes a phantom entry in the PR body and commit message (audit 05).
-  if (!(await editorTouchedPath(init.tools.bash, input.checkoutPath, file.path))) {
-    return { changed: false, path: file.path };
+  const summary = firstLine && firstLine.length > 0 ? firstLine : '';
+  // One leaf now owns a directory-cohesive group, so confirm EACH planned file diverged on disk before
+  // recording its change: a weak model can narrate an edit ("edited x") — or write two of its three
+  // files and narrate the third — without calling writeFile/editFile, and every unwritten path must
+  // surface as a phantom rather than a FileChange the committed diff can't back (audit 05).
+  const outcomes: EditorOutcome[] = [];
+  for (const file of group) {
+    if (await editorTouchedPath(init.tools.bash, input.checkoutPath, file.path)) {
+      const change: FileChange = {
+        path: file.path,
+        kind: file.kind,
+        summary: summary || `${file.kind} ${file.path}`,
+      };
+      outcomes.push({ changed: true, change });
+    } else {
+      outcomes.push({ changed: false, path: file.path });
+    }
   }
-  return { changed: true, change: { path: file.path, kind: file.kind, summary } };
+  return outcomes;
 }
 
 // Did the editor actually change this path on disk? `git status --porcelain` reports create (`??`),
@@ -591,15 +700,30 @@ async function editorTouchedPath(
   return out.stdout.trim().length > 0;
 }
 
-function buildEditorPrompt(file: FileManifestEntry, input: WorkerInput): string {
-  return [
-    `Checkout: ${input.checkoutPath}`,
-    `File: ${file.path}`,
-    `Change kind: ${file.kind}`,
-    `Purpose: ${capText(file.purpose, MANIFEST_FIELD_MAX)}`,
-    '',
-    'Make the change. Reply with a one-line summary.',
-  ].join('\n');
+function buildEditorPrompt(group: readonly FileManifestEntry[], input: WorkerInput): string {
+  const [first, ...rest] = group;
+  // A single-file group is byte-identical to the pre-team per-file prompt (the common case).
+  if (first && rest.length === 0) {
+    return [
+      `Checkout: ${input.checkoutPath}`,
+      `File: ${first.path}`,
+      `Change kind: ${first.kind}`,
+      `Purpose: ${capText(first.purpose, MANIFEST_FIELD_MAX)}`,
+      '',
+      'Make the change. Reply with a one-line summary.',
+    ].join('\n');
+  }
+  const lines = [`Checkout: ${input.checkoutPath}`, `You own these ${group.length} files:`, ''];
+  for (const file of group) {
+    lines.push(
+      `File: ${file.path}`,
+      `Change kind: ${file.kind}`,
+      `Purpose: ${capText(file.purpose, MANIFEST_FIELD_MAX)}`,
+      '',
+    );
+  }
+  lines.push('Make each change. Reply with a one-line summary.');
+  return lines.join('\n');
 }
 
 async function commitOnBranch(

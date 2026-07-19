@@ -116,3 +116,35 @@ test('render(role-prompt): omits the self-id block when no modelId is supplied',
   assert.ok(!/running as the model/.test(out), 'no self-id block without a modelId');
   assert.match(out, /Harness contract:/, 'contracts still baked in');
 });
+
+test('render(editor-prompt): role guidance + step-budget, style, and env only — no contract blocks, no self-id, no memory (lean leaf)', () => {
+  const out = render('editor-prompt', {
+    roleGuidance: 'You are the Editor.',
+    maxSteps: 15,
+    style: '# style digest',
+    env: '<env>\nWorking directory: /repo\n</env>',
+  });
+  assert.match(out, /You are the Editor\./, 'role guidance present');
+  assert.match(out, /hard budget of 15 tool steps/, 'step-budget reminder interpolates the cap');
+  assert.match(out, /# style digest/, 'style slot present');
+  assert.match(
+    out,
+    /<env>[\s\S]*Working directory: \/repo[\s\S]*<\/env>/,
+    'env slot rendered verbatim',
+  );
+  assert.doesNotMatch(out, /Harness contract:/, 'no harness contract — a leaf cannot spawn');
+  assert.doesNotMatch(out, /Communication contract:/, 'no communication contract');
+  assert.doesNotMatch(out, /Autonomy:/, 'no autonomy contract');
+  assert.doesNotMatch(out, /running as the model/, 'no self-id block — editor never gets one');
+});
+
+test('render(editor-prompt): an empty style omits the style block, still renders role guidance and env', () => {
+  const out = render('editor-prompt', {
+    roleGuidance: 'ROLE_MARK',
+    maxSteps: 10,
+    style: '',
+    env: '<env>\n</env>',
+  });
+  assert.match(out, /ROLE_MARK/);
+  assert.match(out, /<env>/);
+});

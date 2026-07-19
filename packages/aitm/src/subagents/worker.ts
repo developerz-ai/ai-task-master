@@ -19,6 +19,7 @@
 //   chunk-04.md §"ToolLoopAgent" (agent class)
 //   chunk-02.md §"Tool Calling" (parallelToolCalls)
 
+import { basename } from 'node:path';
 import type {
   BashInput,
   BashOutput,
@@ -52,6 +53,7 @@ import {
 import { generateText, stepCountIs, type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
 import type { LoggerLike } from '../logger/logger.ts';
+import { harnessProgress } from '../observability/step-progress.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
@@ -514,6 +516,31 @@ function dirOf(path: string): string {
   return slash === -1 ? '.' : path.slice(0, slash);
 }
 
+// The stream label naming one editor leaf: the lone file's basename for a single-file group
+// (`login.ts`), or the shared parent directory for a multi-file leaf (`auth/`) — issue #131. Feeds
+// both the per-editor `onStepFinish` label (SubagentInit.onEditorStepFinish) and the fanout
+// roster/outcome lines below, so all three name the same leaf the same way.
+function editorGroupLabel(group: readonly FileManifestEntry[]): string {
+  const [first, ...rest] = group;
+  if (!first) return '.';
+  return rest.length === 0 ? basename(first.path) : `${dirOf(first.path)}/`;
+}
+
+// The fanout roster line (issue #131): `auth/ (2), login.ts (1)` — one entry per leaf, in fanout
+// order, so an operator sees the team shape before any editor reports back.
+function rosterSummary(groups: readonly FileManifestEntry[][]): string {
+  return groups.map((group) => `${editorGroupLabel(group)} (${group.length})`).join(', ');
+}
+
+// One editor leaf's outcome, summarized for the roster's per-editor completion line (issue #131):
+// how many of its files actually changed on disk vs. came back as a phantom (editorNoChangeReason
+// reports the phantom paths separately once the whole fanout settles).
+function outcomeSummary(outcomes: readonly EditorOutcome[]): string {
+  const changed = outcomes.filter((o) => o.changed).length;
+  const unchanged = outcomes.length - changed;
+  return unchanged > 0 ? `${changed} changed, ${unchanged} unchanged` : `${changed} changed`;
+}
+
 // Group manifest entries into per-leaf assignments: entries sharing a parent directory go to the same
 // leaf, and a directory with more than `maxPerGroup` entries is chunked to that size so no single leaf
 // owns an unbounded brief while a large directory still spreads across the pool. Manifest order is
@@ -602,14 +629,31 @@ async function runEditorFanout(
   const groups = groupManifestByDir(files, MAX_FILES_PER_EDITOR);
   // A team brief only makes sense once the work is actually split across leaves; a lone leaf already
   // sees its whole assignment in its own prompt, and injecting nothing keeps that path byte-identical.
-  const teamBrief = groups.length > 1 ? buildTeamBrief(input, files) : '';
+  // The roster/per-editor-outcome lines gate on the same condition (issue #131) — a lone leaf stays
+  // byte-identical to the pre-team fanout, silence included.
+  const isTeam = groups.length > 1;
+  const teamBrief = isTeam ? buildTeamBrief(input, files) : '';
   const concurrency = input.editorConcurrency ?? EDITOR_CONCURRENCY_DEFAULT;
+  if (isTeam) {
+    harnessProgress(
+      `group ${input.group.id}: fanning out ${groups.length} editors — ${rosterSummary(groups)}`,
+    );
+  }
   try {
     const perGroup = await runPool(groups, concurrency, (group) =>
-      runEditor(init, group, input, controller.signal, teamBrief).catch((err: unknown) => {
-        controller.abort();
-        throw err;
-      }),
+      runEditor(init, group, input, controller.signal, teamBrief)
+        .then((outcomes) => {
+          if (isTeam) {
+            harnessProgress(
+              `group ${input.group.id}: editor ${editorGroupLabel(group)} done — ${outcomeSummary(outcomes)}`,
+            );
+          }
+          return outcomes;
+        })
+        .catch((err: unknown) => {
+          controller.abort();
+          throw err;
+        }),
     );
     return perGroup.flat();
   } finally {
@@ -624,6 +668,9 @@ async function runEditor(
   signal: AbortSignal,
   teamBrief: string,
 ): Promise<EditorOutcome[]> {
+  // Per-editor label (issue #131): each leaf gets its own onStepFinish instance, tagged with the
+  // file/directory it owns, rather than every leaf sharing one anonymous "editor" stream line.
+  const editorStepFinish = init.onEditorStepFinish?.(editorGroupLabel(group));
   const result = await callWithStepTimeout(
     () =>
       generateText({
@@ -648,7 +695,7 @@ async function runEditor(
         ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
         // Editor-fanout progress (silent-run fix): per-step-field-only handlers, safe under the
         // parallel fanout — see SubagentInit.onEditorStepFinish.
-        ...(init.onEditorStepFinish ? { onStepFinish: init.onEditorStepFinish } : {}),
+        ...(editorStepFinish ? { onStepFinish: editorStepFinish } : {}),
       }),
     init.timeout,
   );

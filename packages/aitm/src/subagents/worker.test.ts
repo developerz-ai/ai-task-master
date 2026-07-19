@@ -1069,6 +1069,108 @@ test('runWorker: same-directory files collapse onto one leaf with no team brief'
   }
 });
 
+test("runWorker: onEditorStepFinish is a per-leaf factory, called with each leaf's file/dir tag (issue #131)", async () => {
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/auth/login.ts', kind: 'create', purpose: 'login' },
+      { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout' },
+      { path: 'README.md', kind: 'modify', purpose: 'docs' },
+    ],
+    draftCommitMessage: 'feat: auth + docs',
+  };
+  const model = makeWorkerModel(manifest, ['did auth', 'did readme']);
+  const { tools } = makeTools();
+  const tagsRequested: string[] = [];
+  const tagsAtStepFinish: string[] = [];
+  const agent = createWorkerAgent({
+    model,
+    tools,
+    systemPrompt: WORKER_SYSTEM_PREFIX,
+    onEditorStepFinish: (editorTag: string) => {
+      tagsRequested.push(editorTag);
+      return () => {
+        tagsAtStepFinish.push(editorTag);
+      };
+    },
+  });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.deepEqual(
+    [...tagsRequested].sort(),
+    ['README.md', 'src/auth/'],
+    'one leaf per directory: the two src/auth/ files collapse onto one leaf, README.md stands alone',
+  );
+  assert.deepEqual(
+    [...tagsAtStepFinish].sort(),
+    [...tagsRequested].sort(),
+    'each leaf actually ran the handler this call built for it',
+  );
+});
+
+test('runWorker: a multi-leaf fanout prints a roster + per-editor outcome line; a lone leaf stays silent (issue #131)', async () => {
+  const realStderrWrite = process.stderr.write.bind(process.stderr);
+  const lines: string[] = [];
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const manifest: FileManifest = {
+      files: [
+        { path: 'src/auth/login.ts', kind: 'create', purpose: 'login' },
+        { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout' },
+        { path: 'README.md', kind: 'modify', purpose: 'docs' },
+      ],
+      draftCommitMessage: 'feat: auth + docs',
+    };
+    const model = makeWorkerModel(manifest, ['did auth', 'did readme']);
+    const { tools } = makeTools();
+    const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+    const result = await runWorker(agent, baseInput());
+    assert.equal(result.kind, 'ok');
+    const roster = lines.find((l) => l.includes('fanning out 2 editors'));
+    assert.ok(roster, 'roster line printed for a multi-leaf fanout');
+    assert.match(
+      roster ?? '',
+      /src\/auth\/ \(2\), README\.md \(1\)|README\.md \(1\), src\/auth\/ \(2\)/,
+    );
+    assert.ok(
+      lines.some((l) => l.includes('editor src/auth/ done — 2 changed')),
+      'per-editor outcome line for the src/auth/ leaf',
+    );
+    assert.ok(
+      lines.some((l) => l.includes('editor README.md done — 1 changed')),
+      'per-editor outcome line for the README.md leaf',
+    );
+  } finally {
+    process.stderr.write = realStderrWrite;
+  }
+
+  lines.length = 0;
+  const lone: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  const realStderrWrite2 = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const model = makeWorkerModel(lone);
+    const { tools } = makeTools();
+    const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+    const result = await runWorker(agent, baseInput());
+    assert.equal(result.kind, 'ok');
+    assert.ok(
+      lines.every((l) => !l.includes('fanning out') && !l.includes('editor')),
+      'a lone leaf stays silent — byte-identical to the pre-team fanout',
+    );
+  } finally {
+    process.stderr.write = realStderrWrite2;
+  }
+});
+
 test('runWorker: the editor fanout honors the concurrency cap (never more than the limit in flight)', async () => {
   // Four distinct directories → four leaves; cap the pool at 2 and prove no third leaf runs concurrently.
   const manifest: FileManifest = {

@@ -108,7 +108,7 @@ import {
   buildSpecialistSignal,
   composeSpecialistGuidance,
   discoverSpecialists,
-  selectSpecialist,
+  selectSpecialistWithScore,
 } from '../subagents/specialist-registry.ts';
 import {
   createWorkerAgent,
@@ -1101,13 +1101,14 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const workerStepTag: RunStep = { phase: 'working', ...stepCounter(group.id, task) };
       // Route this group/task to the target repo's best-matching domain specialist, if any. Its
       // guidance layers onto the Worker's base role prefix; no match → the base prefix, unchanged.
-      const specialist = selectSpecialist(
+      const routed = selectSpecialistWithScore(
         await specialistRoster(),
         buildSpecialistSignal(group, task),
       );
-      if (specialist) {
+      const specialist = routed?.agent ?? null;
+      if (routed) {
         harnessProgress(
-          `group ${group.id}: routing to '${specialist.name}' specialist`,
+          `group ${group.id}: routing to '${routed.agent.name}' specialist (score ${routed.score})`,
           workerStepTag,
         );
       }
@@ -1157,10 +1158,12 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         ...(workerUsage ? { onUsage: workerUsage } : {}),
         ...(workerStep ? { onStepFinish: workerStep } : {}),
         // Editor fanout runs on the worker model; per-step-field-only progress is parallel-safe.
-        onEditorStepFinish: agentStepProgress(
-          agentLabel({ model: workerModel, role: 'editor', ctx: group.id }),
-          workerStepTag,
-        ),
+        // Each leaf's `editorTag` (file/dir basename, issue #131) names the leaf in its own label.
+        onEditorStepFinish: (editorTag) =>
+          agentStepProgress(
+            agentLabel({ model: workerModel, role: 'editor', ctx: group.id, file: editorTag }),
+            workerStepTag,
+          ),
         onRetry: onRetryProgress(workerStepTag, workerHeartbeatSink),
       });
       const stopWorkerHeartbeat = startHeartbeat(workerAgentLabel, workerHeartbeatSink);
@@ -1272,10 +1275,16 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
               ? { formatCommand: input.resolved.formatCommand }
               : {}),
             ...(selfReviewStep ? { onStepFinish: selfReviewStep } : {}),
-            onEditorStepFinish: agentStepProgress(
-              agentLabel({ model: selfReviewModel, role: 'editor', ctx: group.id }),
-              selfReviewTag,
-            ),
+            onEditorStepFinish: (editorTag) =>
+              agentStepProgress(
+                agentLabel({
+                  model: selfReviewModel,
+                  role: 'editor',
+                  ctx: group.id,
+                  file: editorTag,
+                }),
+                selfReviewTag,
+              ),
             onRetry: onRetryProgress(selfReviewTag, selfReviewHeartbeatSink),
           },
           group,
@@ -1380,10 +1389,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
               ? { verifyCommand: input.resolved.verifyCommand }
               : {}),
             ...(ciFixStep ? { onStepFinish: ciFixStep } : {}),
-            onEditorStepFinish: agentStepProgress(
-              agentLabel({ model: ciFixModel, role: 'editor', ctx: group.id }),
-              ciFixTag,
-            ),
+            onEditorStepFinish: (editorTag) =>
+              agentStepProgress(
+                agentLabel({ model: ciFixModel, role: 'editor', ctx: group.id, file: editorTag }),
+                ciFixTag,
+              ),
             onRetry: onRetryProgress(ciFixTag, ciFixHeartbeatSink),
             ...(ciResume ? { resumeMessages: ciResume } : {}),
             ...(ciFixResolveConflicts ? { resolveConflicts: ciFixResolveConflicts } : {}),

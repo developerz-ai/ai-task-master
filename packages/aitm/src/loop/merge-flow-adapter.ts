@@ -57,9 +57,11 @@ export async function mergeFlowAdapter(input: RunMergeFlowInput): Promise<WorkLo
       onWorkerStepFinish: agentStepProgress(
         `${shortModelName(input.credentials.modelIdFor('worker'))} ci-fix pr-${input.pr}`,
       ),
-      onEditorStepFinish: agentStepProgress(
-        `${shortModelName(input.credentials.modelIdFor('worker'))} editor pr-${input.pr}`,
-      ),
+      // Each leaf's `editorTag` (file/dir basename, issue #131) names the leaf in its own label.
+      onEditorStepFinish: (editorTag) =>
+        agentStepProgress(
+          `${shortModelName(input.credentials.modelIdFor('worker'))} editor:${editorTag} pr-${input.pr}`,
+        ),
       ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
       ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
       // AI conflict resolution (default-on): resolve a base-moved rebase conflict with the Worker

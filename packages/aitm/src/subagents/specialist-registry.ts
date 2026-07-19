@@ -107,18 +107,25 @@ export function buildSpecialistSignal(group: PrGroup, task?: Task): string {
   return parts.join(' ');
 }
 
-// Pick the best-matching specialist for a task signal, or null when none matches. Score = weighted
-// count of an agent's name/description tokens present in the signal; a name token already counted is
-// not double-counted from the description. Strictly-greater comparison means ties go to the earlier
-// agent, and `loadAgents` returns them name-sorted, so selection is deterministic. Zero score → null,
-// which is the graceful-degradation path (fall back to the generic Worker).
-export function selectSpecialist(
+// A specialist selection paired with the weighted score that won it — the evidence strength behind
+// the route, surfaced by callers that announce the pick (issue #131). Kept out of `selectSpecialist`'s
+// own return type so that function's signature/behavior stays exactly what every existing caller and
+// test already depends on; this is an additive sibling over the same scoring pass.
+export type ScoredSpecialist = { agent: AgentDefinition; score: number };
+
+// Score every specialist against a signal and return the winner (agent + its weighted score), or null
+// when no specialist scores above zero. Score = weighted count of an agent's name/description tokens
+// present in the signal; a name token already counted is not double-counted from the description.
+// Strictly-greater comparison means ties go to the earlier agent, and `loadAgents` returns them
+// name-sorted, so selection is deterministic. Pure — no repo access. Shared by `selectSpecialist` and
+// `selectSpecialistWithScore` so the two never drift.
+function bestScoredSpecialist(
   specialists: readonly AgentDefinition[],
   signal: string,
-): AgentDefinition | null {
+): ScoredSpecialist | null {
   const signalTokens = new Set(tokenize(signal));
   if (signalTokens.size === 0) return null;
-  let best: { agent: AgentDefinition; score: number } | null = null;
+  let best: ScoredSpecialist | null = null;
   for (const agent of specialists) {
     const nameTokens = new Set(tokenize(agent.name));
     const descTokens = new Set(tokenize(agent.description));
@@ -127,7 +134,27 @@ export function selectSpecialist(
     for (const t of descTokens) if (signalTokens.has(t) && !nameTokens.has(t)) score += DESC_WEIGHT;
     if (score > (best?.score ?? 0)) best = { agent, score };
   }
-  return best !== null && best.score > 0 ? best.agent : null;
+  return best !== null && best.score > 0 ? best : null;
+}
+
+// Pick the best-matching specialist for a task signal, or null when none matches. See
+// `bestScoredSpecialist` for the scoring rule; this drops the score for callers that only need the
+// route (graceful-degradation path: zero score → fall back to the generic Worker).
+export function selectSpecialist(
+  specialists: readonly AgentDefinition[],
+  signal: string,
+): AgentDefinition | null {
+  return bestScoredSpecialist(specialists, signal)?.agent ?? null;
+}
+
+// Same route as `selectSpecialist`, but keeps the winning score alongside the agent — for callers that
+// announce the pick (`routing to 'backend' specialist (score 6)`) and want to show how strong the match
+// was, without re-deriving it via a second scoring pass.
+export function selectSpecialistWithScore(
+  specialists: readonly AgentDefinition[],
+  signal: string,
+): ScoredSpecialist | null {
+  return bestScoredSpecialist(specialists, signal);
 }
 
 // Layer a chosen specialist's guidance on top of the Worker's base role guidance. The specialist

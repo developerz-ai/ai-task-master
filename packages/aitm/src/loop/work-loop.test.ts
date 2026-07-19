@@ -1658,6 +1658,47 @@ test('Worker error → group marked blocked', async () => {
   assert.equal(last.prGroups.find((p) => p.id === 'theta')?.status, 'blocked');
 });
 
+// composePr (orchestrator.ts) is total: schema-invalid or section-incomplete compositions are
+// retried in-conversation and, failing that, replaced by a deterministic fallback — never thrown.
+// So openPr (the WorkLoopOrchestrator port WorkLoop actually calls) never rejects for a
+// composition-shaped reason; only a genuine external failure (push/gh) reaches runGroup's catch.
+test('openPr resolving (composition issues absorbed by composePr fallback) never blocks the group', async () => {
+  const { state, updates } = makeState([group('mu')]);
+  const orchestrator: WorkLoopOrchestrator = {
+    runWorker: async () => ({ kind: 'ok', delivery: delivery() }),
+    finalizeCommit: async () => 'sha',
+    // Stands in for composePr's fallback path: whatever went wrong composing the title/body,
+    // openPr is total and still resolves with a valid PR.
+    openPr: async () => pullRequest(42),
+    runCiFix: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok' }),
+  };
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(group('mu'));
+
+  const last = updates[updates.length - 1] as RunState;
+  assert.notEqual(last.prGroups.find((p) => p.id === 'mu')?.status, 'blocked');
+  assert.equal(last.prGroups.find((p) => p.id === 'mu')?.status, 'awaiting-pr');
+});
+
+test('openPr rejecting with a genuine push/gh failure still blocks the group', async () => {
+  const { state, updates } = makeState([group('nu')]);
+  const orchestrator: WorkLoopOrchestrator = {
+    runWorker: async () => ({ kind: 'ok', delivery: delivery() }),
+    finalizeCommit: async () => 'sha',
+    openPr: async () => {
+      throw new Error('failed to push branch aitm/nu: remote rejected');
+    },
+    runCiFix: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok' }),
+  };
+  const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
+  await loop.runGroup(group('nu'));
+
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'nu')?.status, 'blocked');
+});
+
 test('home.release fires even when orchestrator throws', async () => {
   const orchestrator: WorkLoopOrchestrator = {
     runWorker: async () => {

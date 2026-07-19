@@ -10,7 +10,7 @@ import {
   PLANNER_SYSTEM_PREFIX,
   WORKER_SYSTEM_PREFIX,
 } from './prompts/role-guidance.ts';
-import { buildRolePrompt } from './role-prompt.ts';
+import { buildEditorRolePrompt, buildRolePrompt } from './role-prompt.ts';
 
 test('buildRolePrompt weaves the always-on contracts, role guidance, step budget, style and env', () => {
   const prompt = buildRolePrompt({
@@ -80,11 +80,13 @@ test('buildRolePrompt injects the memory index (with staleness framing) when mem
   assert.ok(!/point-in-time/i.test(withoutMemory), 'no memory block when the index is empty');
 });
 
-test('buildRolePrompt: every built-in role prompt carries the contract/<env>/step-budget frame (baked into the template, not the prose)', () => {
+test('buildRolePrompt: every non-leaf built-in role prompt carries the contract/<env>/step-budget frame (baked into the template, not the prose)', () => {
+  // The editor is deliberately excluded: it is a leaf (worker.ts's Layer B fanout) and renders
+  // through buildEditorRolePrompt instead, which drops this frame — see the buildEditorRolePrompt
+  // tests below.
   const roles = [
     { name: 'planner', roleGuidance: PLANNER_SYSTEM_PREFIX, marker: /You are the Planner\./ },
     { name: 'worker', roleGuidance: WORKER_SYSTEM_PREFIX, marker: /You are the Coordinator/ },
-    { name: 'editor', roleGuidance: EDITOR_SYSTEM_PREFIX, marker: /You are a leaf editor\./ },
   ] as const;
   for (const { name, roleGuidance, marker } of roles) {
     const prompt = buildRolePrompt({
@@ -117,4 +119,35 @@ test('buildRolePrompt omits an empty style block (no blank-line artifact)', () =
     maxSteps: 12,
   });
   assert.ok(!prompt.includes('\n\n\n'), 'no triple newline from the omitted style block');
+});
+
+test('buildEditorRolePrompt: lean leaf frame — role guidance, step budget, style, computed <env>; no contracts, no self-id (issue #221)', () => {
+  const prompt = buildEditorRolePrompt({
+    style: '# coding style digest',
+    roleGuidance: EDITOR_SYSTEM_PREFIX,
+    cwd: '/tmp/does-not-exist-checkout',
+    maxSteps: 15,
+  });
+  assert.match(prompt, /You are a leaf editor\./, 'role guidance present');
+  assert.match(prompt, /budget of 15 tool steps/, 'step-budget reminder interpolates the cap');
+  assert.match(prompt, /# coding style digest/, 'style digest present');
+  assert.match(prompt, /<env>/, 'env block computed and present');
+  assert.ok(!prompt.includes(HARNESS_CONTRACT_TEXT), 'no harness contract — a leaf cannot spawn');
+  assert.ok(!prompt.includes(COMMUNICATION_CONTRACT_TEXT), 'no communication contract');
+  assert.ok(!prompt.includes(AUTONOMY_CONTRACT_TEXT), 'no autonomy contract');
+  assert.ok(
+    !/running as the model/.test(prompt),
+    'no self-id block — buildEditorRolePrompt takes no modelId',
+  );
+});
+
+test('buildEditorRolePrompt omits an empty style block (no blank-line artifact)', () => {
+  const prompt = buildEditorRolePrompt({
+    style: '',
+    roleGuidance: EDITOR_SYSTEM_PREFIX,
+    cwd: '/tmp/does-not-exist-checkout',
+    maxSteps: 15,
+  });
+  assert.ok(!prompt.includes('\n\n\n'), 'no triple newline from the omitted style block');
+  assert.match(prompt, /You are a leaf editor\./, 'role guidance still present');
 });

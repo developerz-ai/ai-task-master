@@ -28,7 +28,7 @@ import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
-import type { TranscriptRecorder } from '../state/transcript-store.ts';
+import { type TranscriptRecorder, TranscriptStore } from '../state/transcript-store.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import {
   type AdapterStatePort,
@@ -811,6 +811,72 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
     rolesSeen.includes('worker'),
     'buildCompactionStep queried the worker-tier model id → the worker received compaction wiring',
   );
+});
+
+test('defaultMakeOrchestrator.runWorker: resuming a recordingFailed transcript still resumes, but warns (issue #220)', async () => {
+  // resumeMessagesFor (run-loop-adapter.ts) is looked up before the transcript for this run begins,
+  // so seed an interrupted 'working' transcript for group 'core' carrying the same on-disk marker
+  // TranscriptStore.findResumable checks (transcript-store.test.ts proves how the marker gets there
+  // — a recorder that hit 3 consecutive append failures); here we assert the adapter's reaction.
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-transcript-'));
+  const store = new TranscriptStore(dir);
+  const rec = await store.begin({ group: 'core', stage: 'working' });
+  await rec.step([{ role: 'assistant', content: 'partial answer before the recorder died' }]);
+  await writeFile(join(dir, 'transcripts', 'core', 'working-1.jsonl.recording-failed'), '');
+
+  const realStderrWrite = process.stderr.write.bind(process.stderr);
+  const warnings: string[] = [];
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    warnings.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  const model = emptyManifestModel();
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: () => 'openai/gpt-5',
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const mcp = {
+    toolsForRole: () => ({}),
+    toolSurfaceForRole: () => ({ direct: {}, deferred: {} }),
+  };
+  const input = {
+    cwd: '/tmp/adapter-compaction',
+    resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
+    credentials,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    github: {},
+    goal: 'g',
+    criteria: undefined,
+    branch: undefined,
+    state: {},
+  };
+
+  try {
+    const orch = defaultMakeOrchestrator({
+      input,
+      mcp,
+      rollingContext: '',
+      state: { transcripts: () => store },
+      stepCounter: () => undefined,
+    } as never);
+
+    const res = await orch.runWorker({
+      group: group('core'),
+      checkout: { path: '/tmp/wt' },
+      baseBranch: 'main',
+    } as never);
+    assert.equal(res.kind, 'blocked'); // empty manifest → blocked, but resume already happened first
+    assert.ok(
+      warnings.some((w) => /recorder had persistent write failures/.test(w)),
+      'the recordingFailed transcript surfaced its resume warning',
+    );
+  } finally {
+    process.stderr.write = realStderrWrite;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 // Note (issue #129): the adapter threads `{ stepMs: resolved.llmStepTimeoutMs }` into every agent

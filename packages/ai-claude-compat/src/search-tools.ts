@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type { ToolInit } from './fs-tools.ts';
 import { type GitignoreRule, isIgnored, parseGitignore } from './gitignore.ts';
 import { resolveInside } from './safe-path.ts';
+import type { ToolOutputStore } from './tool-output-store.ts';
 
 const DEFAULT_MAX_RESULTS = 200;
 const GLOB_MAX_FILES = 2000;
@@ -60,12 +61,20 @@ export const globInputSchema = z.object({
 export type GrepInput = z.infer<typeof grepInputSchema>;
 // Content mode: `relPath:line:text` (match) and `relPath-line-text` (context), `--` between blocks.
 // filesWithMatches: one `relPath` per file. count: one `relPath:count` per file.
-export type GrepOutput = { matches: string[]; truncated: boolean };
+// `spillPath` is set only when the result was truncated AND an outputStore was wired: the full
+// (capped) result set is also written there so the model can page it instead of re-running the query.
+export type GrepOutput = { matches: string[]; truncated: boolean; spillPath?: string };
 
 export type GlobInput = z.infer<typeof globInputSchema>;
-export type GlobOutput = { files: string[]; truncated: boolean };
+export type GlobOutput = { files: string[]; truncated: boolean; spillPath?: string };
 
-export function grepTool(init: ToolInit): Tool<GrepInput, GrepOutput> {
+// ToolInit plus an optional spill service (issue #127 follow-up): when a grep/glob result is
+// truncated, the full (capped) result set is written here and the truncation notice names the
+// path, so the model can page it with readFile instead of guessing at a narrower query. Omitted →
+// the notice falls back to a plain refine-or-raise-the-limit hint, matching bashTool's degrade path.
+export type SearchToolInit = ToolInit & { outputStore?: ToolOutputStore };
+
+export function grepTool(init: SearchToolInit): Tool<GrepInput, GrepOutput> {
   return tool({
     description:
       'Search file contents under the worktree for a JavaScript regular expression. Always use this tool for content search; never invoke `grep` or `rg` through the bash tool. Returns `path:line:text` lines; use `contextBefore`/`contextAfter` for surrounding lines (rendered `path-line-text`), `filesWithMatches` for just paths, or `count` for per-file match counts. Optionally restrict to files matching a glob (supports `{a,b}` alternation), ignore case, include hidden directories, and cap results. Skips `.git`, `node_modules`, and `.gitignore`d paths.',
@@ -148,24 +157,51 @@ export function grepTool(init: ToolInit): Tool<GrepInput, GrepOutput> {
         }
         if (stop) break;
       }
-      return { matches, truncated };
+      const spillPath = truncated
+        ? await spillResults(init.outputStore, 'grep', matches)
+        : undefined;
+      return spillPath === undefined ? { matches, truncated } : { matches, truncated, spillPath };
     },
     // Newline-joined matches as plain text, not a JSON array (issue #127).
     toModelOutput: ({ output }) => ({
       type: 'text',
-      value: renderSearchOutput(output.matches, output.truncated),
+      value: renderSearchOutput(output.matches, output.truncated, output.spillPath),
     }),
   });
 }
 
-// Shared plain-text rendering for grep/glob (issue #127): the entries newline-joined, with an
-// explicit truncation notice line only when the result was capped.
-function renderSearchOutput(items: readonly string[], truncated: boolean): string {
-  const body = items.length > 0 ? items.join('\n') : '(no matches)';
-  return truncated ? `${body}\n[results truncated — refine the query or raise the limit]` : body;
+// Best-effort spill of a truncated result set to the shared output store (mirrors bashTool's
+// capStream degrade path): no store wired, or the write fails, both fall back to `undefined` so the
+// caller's notice degrades to the plain refine-or-raise-the-limit hint rather than throwing.
+async function spillResults(
+  store: ToolOutputStore | undefined,
+  tool: string,
+  items: readonly string[],
+): Promise<string | undefined> {
+  if (store === undefined || items.length === 0) return undefined;
+  const spilled = await store.save(tool, items.join('\n')).catch(() => null);
+  return spilled?.path;
 }
 
-export function globTool(init: ToolInit): Tool<GlobInput, GlobOutput> {
+// Shared plain-text rendering for grep/glob (issue #127): the entries newline-joined, with an
+// explicit truncation notice line only when the result was capped. When a spill path is available
+// the notice names it so the model can page the full (capped) result set with readFile instead of
+// re-running the query.
+function renderSearchOutput(
+  items: readonly string[],
+  truncated: boolean,
+  spillPath?: string,
+): string {
+  const body = items.length > 0 ? items.join('\n') : '(no matches)';
+  if (!truncated) return body;
+  const suffix =
+    spillPath !== undefined
+      ? ` Full output: ${spillPath} — page with readFile(offset/limit) or grep.`
+      : '';
+  return `${body}\n[results truncated — refine the query or raise the limit.${suffix}]`;
+}
+
+export function globTool(init: SearchToolInit): Tool<GlobInput, GlobOutput> {
   return tool({
     description:
       'List files under the worktree whose path matches a glob (supports `*`, `**`, `?`, and `{a,b}` alternation). Paths are returned relative to the worktree, sorted newest-first by modification time (ties broken by path). Skips `.git`, `node_modules`, and `.gitignore`d paths; pass `includeHidden` to walk hidden directories.',
@@ -192,11 +228,13 @@ export function globTool(init: ToolInit): Tool<GlobInput, GlobOutput> {
       withMtime.sort(
         (a, b) => b.mtimeMs - a.mtimeMs || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0),
       );
-      return { files: withMtime.map((f) => f.rel), truncated };
+      const files = withMtime.map((f) => f.rel);
+      const spillPath = truncated ? await spillResults(init.outputStore, 'glob', files) : undefined;
+      return spillPath === undefined ? { files, truncated } : { files, truncated, spillPath };
     },
     toModelOutput: ({ output }) => ({
       type: 'text',
-      value: renderSearchOutput(output.files, output.truncated),
+      value: renderSearchOutput(output.files, output.truncated, output.spillPath),
     }),
   });
 }

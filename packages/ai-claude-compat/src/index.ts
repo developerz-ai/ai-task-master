@@ -116,6 +116,7 @@ export {
   globTool,
   globToRegExp,
   grepTool,
+  type SearchToolInit,
 } from './search-tools.ts';
 export {
   SKILL_INVOCATION_CONTRACT,
@@ -125,6 +126,12 @@ export {
   skillTool,
 } from './skill-tool.ts';
 export { loadSkills, type SkillDefinition } from './skills-loader.ts';
+export {
+  DEFAULT_STEP_OUTPUT_BUDGET_CHARS,
+  type StepBudgetedTools,
+  type StepOutputBudgetInit,
+  withStepOutputBudget,
+} from './step-output-budget.ts';
 export {
   callWithRetry,
   callWithStepTimeout,
@@ -169,3 +176,4 @@ export {
   type WithHooksInit,
   withHooks,
 } from './tool-hooks.ts';
+export { type SpilledOutput, ToolOutputStore } from './tool-output-store.ts';

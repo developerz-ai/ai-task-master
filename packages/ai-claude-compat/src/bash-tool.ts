@@ -15,6 +15,7 @@ import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
 import type { ProcessManager } from './background-process.ts';
 import { type CommandRule, evaluateCommand } from './command-rules.ts';
+import { countLines, type ToolOutputStore } from './tool-output-store.ts';
 
 const bashInputSchema = z.object({
   command: z.string().min(1),
@@ -67,6 +68,11 @@ export type BashToolInit = {
   // back as a typed denial (exitCode 126). Omitted/empty → no governance, behavior unchanged. This
   // is a guardrail on the model's shell, not a sandbox — see command-rules.ts for the evasion limits.
   rules?: CommandRule[];
+  // Spill service for oversized output. When provided, a stream over MAX_BASH_OUTPUT_CHARS is written
+  // IN FULL to a file and the in-context view keeps the head+tail plus a notice naming the file, so
+  // nothing is lost and the model pages the rest with readFile/grep. Omitted → the legacy destructive
+  // head/tail truncation (aitm wires the store in a later slice).
+  outputStore?: ToolOutputStore;
 };
 
 // The result for a command a deny rule blocked before it ran: no spawn, exit 126, the pattern named,
@@ -118,15 +124,45 @@ const BASH_DESCRIPTION = [
   '`description` is a short human-readable summary of what the command does.',
 ].join(' ');
 
-// Truncate one stream to MAX_BASH_OUTPUT_CHARS, keeping the original HEAD and TAIL (so an error
-// summary at the end survives) joined by a notice carrying the original size.
+// Headroom reserved for the spill notice when sizing the head/tail budget in capStream, so the
+// in-context view plus notice stays within MAX_BASH_OUTPUT_CHARS. Generous vs a realistic spill path.
+const SPILL_NOTICE_BUDGET = 512;
+
+// Split an over-cap stream into its original HEAD and TAIL slices, sized to fit around a middle notice
+// of `noticeLen` chars within MAX_BASH_OUTPUT_CHARS. Head keeps 35% of the budget; the tail keeps the
+// rest so an error summary at the end survives. Shared by truncateStream and capStream.
+function headTailSlices(s: string, noticeLen: number): { head: string; tail: string } {
+  const budget = MAX_BASH_OUTPUT_CHARS - noticeLen;
+  const headLen = Math.floor(budget * 0.35);
+  return { head: s.slice(0, headLen), tail: s.slice(s.length - (budget - headLen)) };
+}
+
+// Legacy destructive truncation: keep the head and tail joined by a notice carrying the original size,
+// dropping the middle for good. Used only as the fallback when no spill store is wired.
 function truncateStream(s: string): string {
   if (s.length <= MAX_BASH_OUTPUT_CHARS) return s;
   const notice = `\n\n[output truncated: ${s.length} chars total; showing the head and tail]\n\n`;
-  const budget = MAX_BASH_OUTPUT_CHARS - notice.length;
-  const head = Math.floor(budget * 0.35);
-  const tail = budget - head;
-  return s.slice(0, head) + notice + s.slice(s.length - tail);
+  const { head, tail } = headTailSlices(s, notice.length);
+  return head + notice + tail;
+}
+
+// Cap one stream for the model. Within the cap: verbatim. Over the cap WITH a store: the FULL stream
+// is spilled to a file and the in-context view keeps the head+tail with the omitted middle replaced by
+// a notice naming the file — nothing is destroyed, the model pages the rest with readFile/grep. Over
+// the cap WITHOUT a store, or if the spill write fails, it degrades to legacy head/tail truncation.
+async function capStream(
+  stream: string,
+  tool: string,
+  store: ToolOutputStore | undefined,
+): Promise<string> {
+  if (stream.length <= MAX_BASH_OUTPUT_CHARS) return stream;
+  if (store === undefined) return truncateStream(stream);
+  const spilled = await store.save(tool, stream).catch(() => null);
+  if (spilled === null) return truncateStream(stream);
+  const { head, tail } = headTailSlices(stream, SPILL_NOTICE_BUDGET);
+  const omitted = Math.max(spilled.lines - countLines(head) - countLines(tail), 0);
+  const notice = `\n\n[output truncated: ${omitted} lines omitted. Full output: ${spilled.path} — page with readFile(offset/limit) or grep]\n\n`;
+  return head + notice + tail;
 }
 
 // Split the cwd marker off the end of stdout. Returns the real stdout and the captured cwd, or
@@ -227,8 +263,8 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
           ? `${stripped}\n[run_in_background was requested but no background process manager is configured; the command ran in the foreground]`
           : stripped;
       return {
-        stdout: truncateStream(withNotice),
-        stderr: truncateStream(raw.stderr),
+        stdout: await capStream(withNotice, 'bash', init.outputStore),
+        stderr: await capStream(raw.stderr, 'bash', init.outputStore),
         exitCode: raw.exitCode,
       };
     },
@@ -286,8 +322,8 @@ export function multiBashTool(init: BashToolInit): Tool<MultiBashInput, MultiBas
         const out = await execBash(exec, init.cwd, command, timeout);
         results.push({
           command,
-          stdout: truncateStream(out.stdout),
-          stderr: truncateStream(out.stderr),
+          stdout: await capStream(out.stdout, 'multiBash', init.outputStore),
+          stderr: await capStream(out.stderr, 'multiBash', init.outputStore),
           exitCode: out.exitCode,
         });
         if (out.exitCode !== 0) {

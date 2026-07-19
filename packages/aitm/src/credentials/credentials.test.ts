@@ -479,6 +479,27 @@ test('providerSettings forwards baseURL when set', () => {
   assert.equal(settings.baseURL, 'https://api.z.ai/api/coding/paas/v4');
 });
 
+test('providerSettings omits fetch when no keep-alive transport is supplied (byte-identical)', () => {
+  const settings = providerSettings(baseResolved());
+  assert.equal('fetch' in settings, false, 'absence, not undefined — provider keeps its default');
+});
+
+test('providerSettings forwards the keep-alive fetch (plan slice 04b) when supplied', () => {
+  const keepAlive: typeof fetch = () => Promise.resolve(new Response('ok'));
+  const settings = providerSettings(baseResolved(), keepAlive);
+  assert.equal(settings.fetch, keepAlive);
+});
+
+test('providerSettings carries both baseURL and the keep-alive fetch when set', () => {
+  const keepAlive: typeof fetch = () => Promise.resolve(new Response('ok'));
+  const settings = providerSettings(
+    baseResolved({ baseURL: 'https://api.moonshot.ai/v1' }),
+    keepAlive,
+  );
+  assert.equal(settings.baseURL, 'https://api.moonshot.ai/v1');
+  assert.equal(settings.fetch, keepAlive);
+});
+
 test('modelFor still resolves the tier when a baseURL override is set', () => {
   const creds = new Credentials(baseResolved({ baseURL: 'https://api.z.ai/api/coding/paas/v4' }));
   assert.equal(modelIdOf(creds.modelFor('worker')), DEFAULT_MODELS.coding);

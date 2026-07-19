@@ -20,6 +20,7 @@ import { type AddProfileInput, ProfileManager } from '../config/profiles.ts';
 import type { CliOverrides, ConfigFile, Profile, ResolvedConfig } from '../config/schema.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
+import { createLlmFetch } from '../credentials/llm-fetch.ts';
 import { GitHubClient } from '../github/github-client.ts';
 import { mergeFlowAdapter } from '../loop/merge-flow-adapter.ts';
 import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
@@ -327,7 +328,10 @@ export async function runStart(
 
   // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Sourced from the
   // persisted state.runId (fresh or resumed), so a resumed run reuses the same id and keeps warm.
-  const credentials = new Credentials(resolved, sessionId);
+  // Keep-alive transport (plan slice 04b): a tuned undici dispatcher on Node, undefined elsewhere
+  // (Bun/Deno pool natively, or undici unavailable) → provider keeps its default fetch.
+  const llmFetch = await createLlmFetch();
+  const credentials = new Credentials(resolved, sessionId, llmFetch);
 
   // Planning phase (issue #17): a one-shot step that runs the Planner once, before the loop,
   // so `prGroups` is populated and the loop has something to iterate. Gated on whether a plan
@@ -507,7 +511,9 @@ export async function runMergePr(
 
   // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Take-over reuses the
   // resolved (or freshly synthesized) state.runId so repeat merge-pr calls share one cache session.
-  const credentials = new Credentials(resolved, runState.runId);
+  // Keep-alive transport (plan slice 04b) — see the start path; undefined off-Node keeps the default.
+  const llmFetch = await createLlmFetch();
+  const credentials = new Credentials(resolved, runState.runId, llmFetch);
 
   const pr = args.pr ?? runState.currentPr ?? undefined;
   if (pr === undefined) {

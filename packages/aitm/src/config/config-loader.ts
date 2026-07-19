@@ -97,6 +97,8 @@ const DEFAULTS = {
   editorConcurrency: 4,
   allowForcePush: true,
   mcpDeferToolsOver: DEFAULT_MCP_DEFER_TOOLS_OVER,
+  // Streaming is default-OFF (slice 07): gated behind config until burn-in.
+  streaming: false,
 };
 
 type WarnFn = (msg: string) => void;
@@ -291,6 +293,8 @@ export class ConfigLoader {
       // per-repo project config, which an untrusted repo could ship (CR: arbitrary code execution). A
       // project that sets `hooks` is warned + stripped (see stripUntrustedProjectFields).
       ...(global?.hooks ? { hooks: global.hooks } : {}),
+      // streaming is not exposed via CliOverrides — project/global only (slice 07).
+      streaming: pick(undefined, project?.streaming, global?.streaming, DEFAULTS.streaming),
       mcpServers,
       mcpServerSources,
     };

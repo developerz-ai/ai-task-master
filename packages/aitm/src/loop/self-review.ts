@@ -100,6 +100,10 @@ export type SelfReviewSubagents = {
   onEditorStepFinish?: SubagentInit<WorkerTools>['onEditorStepFinish'];
   // Retry-visibility sink forwarded to the review Worker agent (slice 01b). Unset → no sink.
   onRetry?: SubagentInit<WorkerTools>['onRetry'];
+  // Live-streaming sink + watchdog overrides forwarded to the review Worker agent (slice 07). Set
+  // only when config `streaming` is true. Unset → non-streaming path, byte-identical to today.
+  onStream?: SubagentInit<WorkerTools>['onStream'];
+  streamWatchdog?: SubagentInit<WorkerTools>['streamWatchdog'];
   // Injection seam — bypass the real Worker agent in tests.
   runWorkerOverride?: (input: WorkerInput) => Promise<WorkerResult>;
 };
@@ -222,6 +226,8 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     ...(subagents.onStepFinish ? { onStepFinish: subagents.onStepFinish } : {}),
     ...(subagents.onEditorStepFinish ? { onEditorStepFinish: subagents.onEditorStepFinish } : {}),
     ...(subagents.onRetry ? { onRetry: subagents.onRetry } : {}),
+    ...(subagents.onStream ? { onStream: subagents.onStream } : {}),
+    ...(subagents.streamWatchdog ? { streamWatchdog: subagents.streamWatchdog } : {}),
   });
   return runWorker(agent, baseInput);
 }

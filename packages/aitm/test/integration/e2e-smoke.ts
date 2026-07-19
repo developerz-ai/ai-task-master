@@ -29,7 +29,19 @@ export type SmokeConfig = {
   // GitHub owner (org or user) under which a fresh throwaway repo is created.
   owner: string;
   model: string;
+  // Streaming funnel (slice 07). Omitted/false → the `.aitm.json` fixture carries no `streaming`
+  // key at all, keeping the flag-off run byte-identical to the pre-streaming smoke fixture.
+  streaming?: boolean;
 };
+
+// The `.aitm.json` fixture content. Pulled out so the flag-off shape can be asserted
+// byte-identical to the pre-streaming fixture without spinning up the gated sandbox flow.
+export function buildFixtureConfig(model: string, streaming?: boolean): Record<string, unknown> {
+  return {
+    models: { generic: model, smart: model, coding: model, fast: model },
+    ...(streaming ? { streaming: true } : {}),
+  };
+}
 
 // Returns null when the smoke is not configured — callers use this to skip cleanly.
 export function readSmokeConfig(env: Record<string, string | undefined>): SmokeConfig | null {
@@ -46,7 +58,7 @@ export function readSmokeConfig(env: Record<string, string | undefined>): SmokeC
 const GOAL = 'add file FOO with content BAR';
 
 export async function runE2ESmoke(cfg: SmokeConfig, log: (s: string) => void): Promise<void> {
-  const slug = `${cfg.owner}/aitm-smoke-${Date.now().toString(36)}`;
+  const slug = `${cfg.owner}/aitm-smoke-${cfg.streaming ? 'stream-' : ''}${Date.now().toString(36)}`;
   const dir = await mkdtemp(join(tmpdir(), 'aitm-smoke-'));
   const env = { ...process.env, OPENROUTER_API_KEY: cfg.apiKey };
   let created = false;
@@ -62,7 +74,7 @@ export async function runE2ESmoke(cfg: SmokeConfig, log: (s: string) => void): P
     );
     await writeFile(
       join(dir, '.aitm.json'),
-      `${JSON.stringify({ models: { generic: cfg.model, smart: cfg.model, coding: cfg.model, fast: cfg.model } }, null, 2)}\n`,
+      `${JSON.stringify(buildFixtureConfig(cfg.model, cfg.streaming), null, 2)}\n`,
     );
     await execa('git', ['add', '-A'], { cwd: dir });
     await execa('git', ['commit', '-q', '-m', 'init: smoke fixture'], { cwd: dir });

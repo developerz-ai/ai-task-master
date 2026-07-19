@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { ToolLoopAgent, tool } from 'ai';
+import { simulateReadableStream, ToolLoopAgent, tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import { envBlock } from './env-block.ts';
@@ -12,18 +12,23 @@ import {
   callWithRetry,
   callWithStepTimeout,
   composeSystemPrompt,
+  consumeStreamWithWatchdog,
   continueSubagent,
   createSubagent,
   DEFAULT_LLM_MAX_RETRIES,
   defaultRetryDelayMs,
   formatSubmitIssues,
   isRetryableProviderError,
+  MAX_STREAM_STALL_RETRIES,
   parseRetryAfterMs,
   type RetryInfo,
   runSubagent,
   runWithSchemaRetry,
   StepTimeoutError,
+  StreamStallError,
+  type StreamTimerFactory,
   SUBMIT_TOOL_NAME,
+  type SubagentStreamEvent,
   submittedOutput,
 } from './subagent.ts';
 
@@ -88,6 +93,30 @@ function agentFor(model: MockLanguageModelV3): ToolLoopAgent<never, Record<strin
     { model, tools: {}, systemPrompt: 'sys', submit: submitTool(OutSchema) },
     12,
   );
+}
+
+// A model that STREAMS a submit: emits `deltas` as assistant text, then a `submit` tool-call carrying
+// the stringified `input`, then a tool-calls finish. The streaming analogue of scriptedModel, driving
+// the funnel through streamText end-to-end (fullStream → parity result). doStreamCalls tracks calls.
+function streamingSubmitModel(deltas: readonly string[], input: string): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: simulateReadableStream({
+        chunks: [
+          { type: 'stream-start', warnings: [] },
+          { type: 'text-start', id: 't1' },
+          ...deltas.map((delta) => ({ type: 'text-delta' as const, id: 't1', delta })),
+          { type: 'text-end', id: 't1' },
+          { type: 'tool-call', toolCallId: 'c1', toolName: 'submit', input },
+          {
+            type: 'finish',
+            finishReason: { unified: 'tool-calls', raw: undefined },
+            usage: emptyUsage(),
+          },
+        ],
+      }),
+    }),
+  });
 }
 
 // --- composeSystemPrompt ---
@@ -358,6 +387,481 @@ test('createSubagent: onRetry fires even with no configured timeout — retry vi
   const result = await agent.generate({ prompt: 'go' });
   assert.equal(result.finishReason, 'tool-calls');
   assert.equal(infos.length, 1, 'onRetry armed generate() even though no timeout was configured');
+});
+
+// --- streaming funnel parity (slice 07) ---
+
+test('streaming funnel: a streamed submit resolves to the same result shape as generateText (slice 07)', async () => {
+  const agent = createSubagent(
+    {
+      model: streamingSubmitModel(['Hel', 'lo'], JSON.stringify({ n: 7 })),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: () => {},
+    },
+    12,
+  );
+  const { result } = await runSubagent(agent, 'go');
+  // The terminal shape every downstream reader depends on is identical to the non-streaming funnel.
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 7 } });
+  assert.equal(result.finishReason, 'tool-calls');
+  assert.ok(
+    Array.isArray(result.response.messages) && result.response.messages.length >= 1,
+    'response.messages is populated for continuation',
+  );
+  assert.ok(result.totalUsage !== undefined, 'usage resolves for metering');
+});
+
+test('streaming funnel: forwards text-delta then tool-call events to onStream, in order (slice 07)', async () => {
+  const events: SubagentStreamEvent[] = [];
+  const agent = createSubagent(
+    {
+      model: streamingSubmitModel(['Hel', 'lo'], JSON.stringify({ n: 1 })),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: (event) => events.push(event),
+    },
+    12,
+  );
+  await runSubagent(agent, 'go');
+  const streamedText = events
+    .filter((event) => event.type === 'text-delta')
+    .map((event) => event.text)
+    .join('');
+  assert.equal(
+    streamedText,
+    'Hello',
+    'text deltas arrive in order and concatenate to the full text',
+  );
+  const toolCall = events.find((event) => event.type === 'tool-call');
+  assert.ok(toolCall && toolCall.type === 'tool-call', 'a tool-call event was forwarded');
+  assert.equal(toolCall.toolName, 'submit');
+  assert.deepEqual(toolCall.input, { n: 1 }, 'the parsed submit input rides the event');
+  assert.equal(
+    events.findIndex((event) => event.type === 'tool-call'),
+    events.length - 1,
+    'the tool-call event follows every text delta',
+  );
+});
+
+test('streaming funnel: onStream gates the path — off uses doGenerate, on uses doStream (slice 07)', async () => {
+  // A model wired for BOTH paths; the funnel must pick exactly one per the onStream opt-in, so the
+  // default (no onStream) stays byte-identical to the existing generateText path.
+  const bothModel = () =>
+    new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'g',
+            toolName: 'submit',
+            input: JSON.stringify({ n: 1 }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      }),
+      doStream: async () => ({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            {
+              type: 'tool-call',
+              toolCallId: 's',
+              toolName: 'submit',
+              input: JSON.stringify({ n: 2 }),
+            },
+            {
+              type: 'finish',
+              finishReason: { unified: 'tool-calls', raw: undefined },
+              usage: emptyUsage(),
+            },
+          ],
+        }),
+      }),
+    });
+
+  const offModel = bothModel();
+  await runSubagent(
+    createSubagent(
+      { model: offModel, tools: {}, systemPrompt: 'sys', submit: submitTool(OutSchema) },
+      12,
+    ),
+    'go',
+  );
+  assert.equal(offModel.doGenerateCalls.length, 1, 'no onStream → generateText');
+  assert.equal(offModel.doStreamCalls.length, 0, 'no onStream → never streams');
+
+  const onModel = bothModel();
+  await runSubagent(
+    createSubagent(
+      {
+        model: onModel,
+        tools: {},
+        systemPrompt: 'sys',
+        submit: submitTool(OutSchema),
+        onStream: () => {},
+      },
+      12,
+    ),
+    'go',
+  );
+  assert.equal(onModel.doStreamCalls.length, 1, 'onStream → streamText');
+  assert.equal(onModel.doGenerateCalls.length, 0, 'onStream → never falls back to generate');
+});
+
+test('streaming funnel: the retry kernel still wraps the whole stream — a transient failure re-invokes it (slice 07)', async () => {
+  // The first doStream throws a transient 429; the second streams a submit. Because the stream runs
+  // INSIDE the retry/timeout kernel, the whole stream is retried and onRetry fires — wrappers unchanged.
+  let calls = 0;
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('rate limited'), { statusCode: 429 });
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            {
+              type: 'tool-call',
+              toolCallId: 'c1',
+              toolName: 'submit',
+              input: JSON.stringify({ n: 9 }),
+            },
+            {
+              type: 'finish',
+              finishReason: { unified: 'tool-calls', raw: undefined },
+              usage: emptyUsage(),
+            },
+          ],
+        }),
+      };
+    },
+  });
+  const infos: RetryInfo[] = [];
+  const agent = createSubagent(
+    {
+      model,
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      timeout: { stepMs: 5_000 },
+      onStream: () => {},
+      onRetry: (info) => void infos.push(info),
+    },
+    12,
+  );
+  const { result } = await runSubagent(agent, 'go');
+  assert.equal(calls, 2, 'the stream was re-invoked after the transient failure');
+  assert.equal(infos.length, 1, 'the transient 429 was reported once via onRetry');
+  assert.equal(infos[0]?.reason, 'HTTP 429');
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 9 } });
+});
+
+test('streaming funnel: a throwing onStream never breaks the generation (slice 07)', async () => {
+  const agent = createSubagent(
+    {
+      model: streamingSubmitModel(['x'], JSON.stringify({ n: 3 })),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: () => {
+        throw new Error('sink boom');
+      },
+    },
+    12,
+  );
+  const { result } = await runSubagent(agent, 'go');
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 3 } });
+});
+
+// --- streaming stall watchdog (slice 07) ---
+
+// Feed consumeStreamWithWatchdog by hand: each part resolves on a microtask (which always beats the
+// recordingTimer's setTimeout(0) macrotask, so a fed part never loses the race), then the tail either
+// ends the stream or hangs forever — the two ways a real fullStream terminates.
+function scriptedParts<PART>(parts: readonly PART[], tail: 'end' | 'hang'): AsyncIterable<PART> {
+  let i = 0;
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        next(): Promise<IteratorResult<PART>> {
+          if (i < parts.length) {
+            const value = parts[i];
+            i += 1;
+            if (value === undefined) return Promise.resolve({ done: true, value: undefined });
+            return Promise.resolve({ done: false, value });
+          }
+          if (tail === 'hang') return new Promise<IteratorResult<PART>>(() => {});
+          return Promise.resolve({ done: true, value: undefined });
+        },
+      };
+    },
+  };
+}
+
+// A timer factory that records each armed window and fires on a macrotask, so the two-regime switch is
+// asserted by the recorded windows rather than by racing real wall-clock.
+function recordingTimer(): { factory: StreamTimerFactory; windows: readonly number[] } {
+  const windows: number[] = [];
+  const factory: StreamTimerFactory = (ms) => {
+    windows.push(ms);
+    let handle: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<void>((resolve) => {
+      handle = setTimeout(resolve, 0);
+    });
+    return {
+      expired,
+      cancel: () => {
+        if (handle !== undefined) clearTimeout(handle);
+      },
+    };
+  };
+  return { factory, windows };
+}
+
+const isFinishPart = (part: { type: string }) => part.type === 'finish';
+
+test('watchdog: a clean stream drains, never aborts, and re-arms the inactivity window each read', async () => {
+  const timer = recordingTimer();
+  const seen: string[] = [];
+  let aborts = 0;
+  const outcome = await consumeStreamWithWatchdog(
+    scriptedParts([{ type: 'text-delta' }, { type: 'tool-call' }], 'end'),
+    { onPart: (part) => seen.push(part.type), isFinish: isFinishPart, abort: () => (aborts += 1) },
+    { inactivityMs: 111, graceMs: 22, timer: timer.factory },
+  );
+  assert.equal(outcome, 'drained');
+  assert.deepEqual(seen, ['text-delta', 'tool-call'], 'every part is forwarded in order');
+  assert.equal(aborts, 0, 'a clean drain never aborts');
+  assert.deepEqual(
+    timer.windows,
+    [111, 111, 111],
+    'the inactivity window is re-armed for each read incl. the closing one — no finish, so never grace',
+  );
+});
+
+test('watchdog: a stall before finish aborts and reports stalled-active (→ caller retries)', async () => {
+  const timer = recordingTimer();
+  let aborts = 0;
+  const outcome = await consumeStreamWithWatchdog(
+    scriptedParts([{ type: 'text-delta' }], 'hang'),
+    { onPart: () => {}, isFinish: isFinishPart, abort: () => (aborts += 1) },
+    { inactivityMs: 50, graceMs: 10, timer: timer.factory },
+  );
+  assert.equal(outcome, 'stalled-active', 'a mid-stream stall signals a retry');
+  assert.equal(aborts, 1, 'the stalled stream was aborted exactly once');
+  assert.deepEqual(
+    timer.windows,
+    [50, 50],
+    'both reads used the inactivity window (no finish yet)',
+  );
+});
+
+test('watchdog: a stall after finish reports stalled-grace (→ caller settles, never retries)', async () => {
+  const timer = recordingTimer();
+  let aborts = 0;
+  const outcome = await consumeStreamWithWatchdog(
+    scriptedParts([{ type: 'finish' }], 'hang'),
+    { onPart: () => {}, isFinish: isFinishPart, abort: () => (aborts += 1) },
+    { inactivityMs: 999, graceMs: 30, timer: timer.factory },
+  );
+  assert.equal(outcome, 'stalled-grace', 'a post-finish stall settles — it never signals a retry');
+  assert.equal(
+    aborts,
+    1,
+    'the lingering stream is still aborted to unstick a held-open connection',
+  );
+  assert.deepEqual(
+    timer.windows,
+    [999, 30],
+    'the window switches from inactivity to grace the moment finish is seen',
+  );
+});
+
+test('watchdog: a mid-read throw propagates so the retry kernel classifies it', async () => {
+  const boom = Object.assign(new Error('mid-stream boom'), { statusCode: 429 });
+  const stream: AsyncIterable<{ type: string }> = {
+    [Symbol.asyncIterator]() {
+      return { next: () => Promise.reject(boom) };
+    },
+  };
+  await assert.rejects(
+    consumeStreamWithWatchdog(
+      stream,
+      { onPart: () => {}, isFinish: isFinishPart, abort: () => {} },
+      { inactivityMs: 500, graceMs: 500, timer: recordingTimer().factory },
+    ),
+    (err: unknown) => err === boom,
+  );
+});
+
+// A raw stream that replays `chunks` then never closes — a provider that goes silent. The generic T is
+// pinned to LanguageModelV3StreamPart by MockLanguageModelV3's contextual doStream type, so the inline
+// chunk literals are checked exactly as simulateReadableStream's are.
+function neverClosingStream<T>(chunks: readonly T[]): ReadableStream<T> {
+  return new ReadableStream<T>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+    },
+  });
+}
+
+// Streams a couple of assistant deltas then goes silent on the first call; streams a full submit on the
+// next — proves the watchdog aborts the stall and re-runs the stream once to recover.
+function stallThenRecoverModel(input: string): MockLanguageModelV3 {
+  let calls = 0;
+  return new MockLanguageModelV3({
+    doStream: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          stream: neverClosingStream([
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: 't1' },
+            { type: 'text-delta', id: 't1', delta: 'working' },
+          ]),
+        };
+      }
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            { type: 'tool-call', toolCallId: 'c1', toolName: 'submit', input },
+            {
+              type: 'finish',
+              finishReason: { unified: 'tool-calls', raw: undefined },
+              usage: emptyUsage(),
+            },
+          ],
+        }),
+      };
+    },
+  });
+}
+
+test('streaming watchdog: a mid-stream stall aborts and re-runs the stream once, then recovers (slice 07)', async () => {
+  const model = stallThenRecoverModel(JSON.stringify({ n: 4 }));
+  const agent = createSubagent(
+    {
+      model,
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: () => {},
+      // Small inactivity fires on the first stream's silence; a large grace lets the recovery stream
+      // (which reaches submit) drain normally rather than tripping the post-submit window.
+      streamWatchdog: { inactivityMs: 50, graceMs: 5_000 },
+    },
+    12,
+  );
+  const { result } = await runSubagent(agent, 'go');
+  assert.equal(model.doStreamCalls.length, 2, 'the stalled stream was re-invoked exactly once');
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 4 } });
+});
+
+// Goes silent mid-stream on every call — the stall never recovers.
+function alwaysStallModel(): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: neverClosingStream([
+        { type: 'stream-start', warnings: [] },
+        { type: 'text-start', id: 't1' },
+        { type: 'text-delta', id: 't1', delta: 'thinking' },
+      ]),
+    }),
+  });
+}
+
+test('streaming watchdog: a persistent stall gives up after one retry with a StreamStallError (slice 07)', async () => {
+  const model = alwaysStallModel();
+  const agent = createSubagent(
+    {
+      model,
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: () => {},
+      streamWatchdog: { inactivityMs: 40, graceMs: 40 },
+    },
+    12,
+  );
+  await assert.rejects(runSubagent(agent, 'go'), (err: unknown) => err instanceof StreamStallError);
+  assert.equal(
+    model.doStreamCalls.length,
+    MAX_STREAM_STALL_RETRIES + 1,
+    'one original + one retry, then a hard stop — not an unbounded loop',
+  );
+});
+
+test('isRetryableProviderError: a StreamStallError is never retried by the provider kernel (slice 07)', () => {
+  // The watchdog already spent its one retry, and past submit a re-run would duplicate a completed
+  // coding step — so the kernel must not multiply a StreamStallError.
+  assert.equal(isRetryableProviderError(new StreamStallError('stalled')), false);
+});
+
+test('streaming watchdog: a clean finish drains without a retry (slice 07)', async () => {
+  const model = streamingSubmitModel(['Hi'], JSON.stringify({ n: 5 }));
+  const agent = createSubagent(
+    {
+      model,
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: () => {},
+      streamWatchdog: { inactivityMs: 5_000, graceMs: 5_000 },
+    },
+    12,
+  );
+  const { result } = await runSubagent(agent, 'go');
+  assert.equal(model.doStreamCalls.length, 1, 'a clean finish is never retried');
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 5 } });
+});
+
+// Emits a full submit + finish, then holds the connection open (never closes) — a provider that lingers
+// after the coding step is already complete.
+function finishThenLingerModel(input: string): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: neverClosingStream([
+        { type: 'stream-start', warnings: [] },
+        { type: 'text-start', id: 't1' },
+        { type: 'text-delta', id: 't1', delta: 'done' },
+        { type: 'text-end', id: 't1' },
+        { type: 'tool-call', toolCallId: 'c1', toolName: 'submit', input },
+        {
+          type: 'finish',
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+        },
+      ]),
+    }),
+  });
+}
+
+test('streaming watchdog: a stream that lingers past submit fails hard on the grace window — never a re-run (slice 07)', async () => {
+  const model = finishThenLingerModel(JSON.stringify({ n: 8 }));
+  const agent = createSubagent(
+    {
+      model,
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: () => {},
+      // Huge inactivity window so only the grace window can fire; a completed step must never re-run.
+      streamWatchdog: { inactivityMs: 10_000, graceMs: 40 },
+    },
+    12,
+  );
+  await assert.rejects(runSubagent(agent, 'go'), (err: unknown) => err instanceof StreamStallError);
+  assert.equal(
+    model.doStreamCalls.length,
+    1,
+    'a finished coding step is never re-run — no duplicate PR, even when the stream will not close',
+  );
 });
 
 // --- callWithStepTimeout (translate abort → named timeout) ---

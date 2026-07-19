@@ -206,6 +206,12 @@ export const ConfigFileSchema = z
     // (~/.aitm.json); the same key in a repo-shippable project config is parsed but ignored + warned.
     // See config-loader.ts, src/loop/run-loop-adapter.ts, and ai-claude-compat withHooks.
     hooks: ToolHooksSchema.optional(),
+    // Route subagent generate calls through the AI SDK's streamText funnel instead of generateText
+    // (slice 07), so text and tool-call lines render live as the model streams instead of after each
+    // step finishes. Higher risk (a two-regime stall watchdog covers it) — default false until
+    // burn-in; config-only, no CLI flag. See src/observability/step-progress.ts
+    // createLiveStreamRenderer and @developerz.ai/ai-claude-compat's SubagentConfig.onStream.
+    streaming: z.boolean().optional(),
   })
   .passthrough();
 
@@ -301,6 +307,9 @@ export type ResolvedConfig = {
   // as a code-execution trust boundary. Undefined → no hooks; behavior unchanged. Applied over the
   // resolved tool records in run-loop-adapter via withHooks.
   hooks?: z.infer<typeof ToolHooksSchema> | undefined;
+  // Whether subagent generate calls stream live (slice 07). Default false until burn-in;
+  // config-only, no CLI flag. See run-loop-adapter's onStream/createLiveStreamRenderer wiring.
+  streaming: boolean;
   // One label per server name explaining where the entry came from. Useful for the
   // snapshot, `aitm config list`, and "duplicate name shadowed by X" warnings.
   mcpServerSources: Record<string, McpServerSource>;

@@ -13,6 +13,7 @@ import {
   type FileManifest,
   type FileManifestEntry,
   groupManifestByDir,
+  labelEditorGroups,
   MAX_FILES_PER_EDITOR,
   type ReadFileInput,
   type ReadFileOutput,
@@ -882,6 +883,50 @@ test('groupManifestByDir: a single-file manifest yields one single-file group (b
   assert.deepEqual(groupManifestByDir(files, MAX_FILES_PER_EDITOR), [
     [{ path: 'src/a.ts', kind: 'create', purpose: 'a' }],
   ]);
+});
+
+test('labelEditorGroups: chunked same-directory leaves get distinct #n labels (issue #131)', () => {
+  const files: FileManifestEntry[] = ['1', '2', '3', '4', '5'].map((n) => ({
+    path: `src/f${n}.ts`,
+    kind: 'create',
+    purpose: n,
+  }));
+  const leaves = labelEditorGroups(groupManifestByDir(files, 3));
+  assert.deepEqual(
+    leaves.map((l) => l.label),
+    ['src/ #1', 'src/ #2'],
+    'two chunks of one oversized directory no longer collide on the bare `src/` label',
+  );
+});
+
+test('labelEditorGroups: an unchunked directory and a lone file keep bare labels (byte-identical)', () => {
+  const files: FileManifestEntry[] = [
+    { path: 'src/auth/login.ts', kind: 'create', purpose: 'login' },
+    { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout' },
+    { path: 'README.md', kind: 'modify', purpose: 'docs' },
+  ];
+  const leaves = labelEditorGroups(groupManifestByDir(files, MAX_FILES_PER_EDITOR));
+  assert.deepEqual(
+    leaves.map((l) => ({ label: l.label, count: l.files.length })),
+    [
+      { label: 'src/auth/', count: 2 },
+      { label: 'README.md', count: 1 },
+    ],
+    'a base label owned by a single leaf stays bare',
+  );
+});
+
+test('labelEditorGroups: same-basename files in sibling directories get distinct labels (issue #131)', () => {
+  const files: FileManifestEntry[] = [
+    { path: 'a/f.ts', kind: 'create', purpose: 'a' },
+    { path: 'b/f.ts', kind: 'create', purpose: 'b' },
+  ];
+  const leaves = labelEditorGroups(groupManifestByDir(files, MAX_FILES_PER_EDITOR));
+  assert.deepEqual(
+    leaves.map((l) => l.label),
+    ['f.ts #1', 'f.ts #2'],
+    'two single-file leaves sharing a basename no longer collide on the onEditorStepFinish tag',
+  );
 });
 
 test('buildTeamBrief: carries the task, the full manifest, and the rolling context', () => {

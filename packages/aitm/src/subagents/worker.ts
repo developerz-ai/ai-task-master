@@ -516,20 +516,48 @@ function dirOf(path: string): string {
   return slash === -1 ? '.' : path.slice(0, slash);
 }
 
-// The stream label naming one editor leaf: the lone file's basename for a single-file group
-// (`login.ts`), or the shared parent directory for a multi-file leaf (`auth/`) — issue #131. Feeds
-// both the per-editor `onStepFinish` label (SubagentInit.onEditorStepFinish) and the fanout
-// roster/outcome lines below, so all three name the same leaf the same way.
+// The base stream label naming one editor leaf: the lone file's basename for a single-file group
+// (`login.ts`), or the shared parent directory for a multi-file leaf (`auth/`) — issue #131. Two
+// leaves can still share a base (a chunked oversized directory, or same-basename files in sibling
+// dirs); labelEditorGroups disambiguates those before the label reaches an operator.
 function editorGroupLabel(group: readonly FileManifestEntry[]): string {
   const [first, ...rest] = group;
   if (!first) return '.';
   return rest.length === 0 ? basename(first.path) : `${dirOf(first.path)}/`;
 }
 
+// One editor leaf: the files it owns plus the distinct stream label naming it. Bundling the label with
+// the files means the roster line, the per-editor completion line, and the onEditorStepFinish tag all
+// read one already-disambiguated label instead of each re-deriving (and colliding on) it — issue #131.
+type EditorLeaf = { label: string; files: FileManifestEntry[] };
+
+// Turn directory groups into labeled leaves, disambiguating any shared base label (issue #131).
+// editorGroupLabel is a pure function of a single group, so when groupManifestByDir chunks an oversized
+// directory into several leaves they all resolve to the same `src/` — which makes the roster ambiguous
+// (`src/ (3), src/ (2)`) and, worse, tags separate editors with an identical onEditorStepFinish stream
+// line, defeating the per-editor labels. Any base shared by more than one leaf gets a ` #n` suffix in
+// fanout order; a base owned by a single leaf stays bare, so the common one-leaf-per-directory case is
+// byte-identical to before.
+export function labelEditorGroups(groups: readonly FileManifestEntry[][]): EditorLeaf[] {
+  const totals = new Map<string, number>();
+  for (const group of groups) {
+    const base = editorGroupLabel(group);
+    totals.set(base, (totals.get(base) ?? 0) + 1);
+  }
+  const seen = new Map<string, number>();
+  return groups.map((files) => {
+    const base = editorGroupLabel(files);
+    if ((totals.get(base) ?? 0) <= 1) return { label: base, files };
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return { label: `${base} #${n}`, files };
+  });
+}
+
 // The fanout roster line (issue #131): `auth/ (2), login.ts (1)` — one entry per leaf, in fanout
 // order, so an operator sees the team shape before any editor reports back.
-function rosterSummary(groups: readonly FileManifestEntry[][]): string {
-  return groups.map((group) => `${editorGroupLabel(group)} (${group.length})`).join(', ');
+function rosterSummary(leaves: readonly EditorLeaf[]): string {
+  return leaves.map((leaf) => `${leaf.label} (${leaf.files.length})`).join(', ');
 }
 
 // One editor leaf's outcome, summarized for the roster's per-editor completion line (issue #131):
@@ -626,26 +654,26 @@ async function runEditorFanout(
     if (outer.aborted) controller.abort(outer.reason);
     else outer.addEventListener('abort', onOuterAbort, { once: true });
   }
-  const groups = groupManifestByDir(files, MAX_FILES_PER_EDITOR);
+  const leaves = labelEditorGroups(groupManifestByDir(files, MAX_FILES_PER_EDITOR));
   // A team brief only makes sense once the work is actually split across leaves; a lone leaf already
   // sees its whole assignment in its own prompt, and injecting nothing keeps that path byte-identical.
   // The roster/per-editor-outcome lines gate on the same condition (issue #131) — a lone leaf stays
   // byte-identical to the pre-team fanout, silence included.
-  const isTeam = groups.length > 1;
+  const isTeam = leaves.length > 1;
   const teamBrief = isTeam ? buildTeamBrief(input, files) : '';
   const concurrency = input.editorConcurrency ?? EDITOR_CONCURRENCY_DEFAULT;
   if (isTeam) {
     harnessProgress(
-      `group ${input.group.id}: fanning out ${groups.length} editors — ${rosterSummary(groups)}`,
+      `group ${input.group.id}: fanning out ${leaves.length} editors — ${rosterSummary(leaves)}`,
     );
   }
   try {
-    const perGroup = await runPool(groups, concurrency, (group) =>
-      runEditor(init, group, input, controller.signal, teamBrief)
+    const perLeaf = await runPool(leaves, concurrency, (leaf) =>
+      runEditor(init, leaf, input, controller.signal, teamBrief)
         .then((outcomes) => {
           if (isTeam) {
             harnessProgress(
-              `group ${input.group.id}: editor ${editorGroupLabel(group)} done — ${outcomeSummary(outcomes)}`,
+              `group ${input.group.id}: editor ${leaf.label} done — ${outcomeSummary(outcomes)}`,
             );
           }
           return outcomes;
@@ -655,7 +683,7 @@ async function runEditorFanout(
           throw err;
         }),
     );
-    return perGroup.flat();
+    return perLeaf.flat();
   } finally {
     outer?.removeEventListener('abort', onOuterAbort);
   }
@@ -663,14 +691,16 @@ async function runEditorFanout(
 
 async function runEditor(
   init: SubagentInit<WorkerTools>,
-  group: readonly FileManifestEntry[],
+  leaf: EditorLeaf,
   input: WorkerInput,
   signal: AbortSignal,
   teamBrief: string,
 ): Promise<EditorOutcome[]> {
+  const group = leaf.files;
   // Per-editor label (issue #131): each leaf gets its own onStepFinish instance, tagged with the
-  // file/directory it owns, rather than every leaf sharing one anonymous "editor" stream line.
-  const editorStepFinish = init.onEditorStepFinish?.(editorGroupLabel(group));
+  // already-disambiguated label naming what it owns, rather than every leaf sharing one anonymous
+  // "editor" stream line — chunked-directory leaves no longer collide on that tag.
+  const editorStepFinish = init.onEditorStepFinish?.(leaf.label);
   const result = await callWithStepTimeout(
     () =>
       generateText({

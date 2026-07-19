@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { ModelMessage } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
-import { buildCompactionStep, type CompactorLike } from './compaction-step.ts';
+import { buildCompactionStep, type CompactorLike, pruneOldToolResults } from './compaction-step.ts';
 import { type CompactionDecision, Compactor } from './compactor.ts';
 
 // A prepareStep `steps` entry. `ai@6` exposes `response.messages` as the CUMULATIVE response list up
@@ -29,6 +30,26 @@ function msgs(n: number): Array<{ role: string; content: string }> {
     content: `m${i}`,
   }));
 }
+
+// Realistic tool-call / tool-result message pair (content is a parts array, matching the SDK shape
+// the prune pass walks — the string-content `msgs` above are deliberately un-prunable).
+function toolCallMsg(id: string): ModelMessage {
+  return {
+    role: 'assistant',
+    content: [{ type: 'tool-call', toolCallId: id, toolName: 'bash', input: {} }],
+  };
+}
+
+function toolResultMsg(id: string, value: string): ModelMessage {
+  return {
+    role: 'tool',
+    content: [
+      { type: 'tool-result', toolCallId: id, toolName: 'bash', output: { type: 'text', value } },
+    ],
+  };
+}
+
+const CLEARED = /rerun the tool if needed/;
 
 // prepareStep input — only the small structural slice the builder reads. The builder's returned
 // function accepts the full SDK options object; we pass this partial (unchecked in tests).
@@ -257,4 +278,155 @@ test('buildCompactionStep: logs one structured event per compaction (model id, t
   assert.ok((log?.liveInputTokens as number) > 0);
   assert.equal(log?.contextLength, 100_000);
   assert.equal(log?.keptSteps, 2);
+});
+
+// 7 messages, steps cumulative [2,4,6] with keepLastSteps=1 → tail = last 2 (indices 5,6), so the
+// two big older results (indices 2 and 4) are prunable. Walking newest→oldest: index 4 fills the 40k
+// shield and is kept; index 2 is beyond the shield and gets cleared. Shared layout for the tests
+// below.
+function bigToolConversation(tailResult: string): ModelMessage[] {
+  return [
+    { role: 'user', content: 'goal' },
+    toolCallMsg('a'),
+    toolResultMsg('a', `AAA_OLD${'x'.repeat(50_000)}`),
+    toolCallMsg('b'),
+    toolResultMsg('b', `BBB_SHIELD${'x'.repeat(50_000)}`),
+    toolCallMsg('c'),
+    toolResultMsg('c', tailResult),
+  ];
+}
+
+test('buildCompactionStep: prune clears old large tool results, respects the 40k recency shield, and skips the summarizer when ≥20k freed', async () => {
+  let compactCalls = 0;
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    onCompact: () => {
+      compactCalls++;
+    },
+  });
+  const messages = bigToolConversation('CCC_TAIL small');
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4), step(6)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  // Full history returned (same length), not a summary replacement.
+  assert.equal(result.messages.length, 7);
+  // Oldest big result (index 2) is beyond the shield → payload cleared, original content gone.
+  assert.match(JSON.stringify(result.messages[2]), CLEARED);
+  assert.doesNotMatch(JSON.stringify(result.messages[2]), /AAA_OLD/);
+  // Most-recent older result (index 4) sits inside the 40k shield → kept verbatim.
+  assert.match(JSON.stringify(result.messages[4]), /BBB_SHIELD/);
+  assert.doesNotMatch(JSON.stringify(result.messages[4]), CLEARED);
+  // Pruning alone freed ≥20k → the LLM summarizer never ran.
+  assert.equal(compactCalls, 0);
+});
+
+test('buildCompactionStep: the kept-steps tail is never pruned, even when large', async () => {
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+  });
+  // Tail result (index 6) is huge and the shield is already full from older output — still verbatim.
+  const messages = bigToolConversation(`CCC_TAIL${'x'.repeat(50_000)}`);
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4), step(6)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  assert.match(JSON.stringify(result.messages[6]), /CCC_TAIL/);
+  assert.doesNotMatch(JSON.stringify(result.messages[6]), CLEARED);
+  // Older result still cleared — the tail exemption is positional, not size-based.
+  assert.match(JSON.stringify(result.messages[2]), CLEARED);
+});
+
+test('buildCompactionStep: tool results ≤1k are never cleared → nothing freed → summarizer still runs', async () => {
+  let compactedOlder: readonly unknown[] = [];
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    summary: 'SUMOUT',
+    onCompact: (older) => {
+      compactedOlder = older;
+    },
+  });
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'goal' },
+    toolCallMsg('a'),
+    toolResultMsg('a', `small-a${'x'.repeat(500)}`),
+    toolCallMsg('b'),
+    toolResultMsg('b', 'small-b'),
+    toolCallMsg('c'),
+    toolResultMsg('c', 'small-c'),
+  ];
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4), step(6)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  // Nothing was large enough to clear → falls through to the LLM summarize path (summary message).
+  assert.match(String(result.messages[0]?.content), /SUMOUT/);
+  assert.ok(compactedOlder.length > 0);
+  assert.doesNotMatch(JSON.stringify(compactedOlder), CLEARED);
+});
+
+test('buildCompactionStep: <20k freed → summarizes the pruned older prefix (cleared payload carried in)', async () => {
+  let compactedOlder: readonly unknown[] = [];
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    summary: 'SUMOUT',
+    onCompact: (older) => {
+      compactedOlder = older;
+    },
+  });
+  // index 4 (42k) fills the 40k shield; index 2 (12k) is cleared → ~12k freed, under the 20k skip cut.
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'goal' },
+    toolCallMsg('a'),
+    toolResultMsg('a', `AAA_OLD${'x'.repeat(12_000)}`),
+    toolCallMsg('b'),
+    toolResultMsg('b', `BBB_SHIELD${'x'.repeat(42_000)}`),
+    toolCallMsg('c'),
+    toolResultMsg('c', 'small-c'),
+  ];
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4), step(6)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  assert.match(String(result.messages[0]?.content), /SUMOUT/);
+  // The summarizer received the pruned older prefix: the cleared placeholder is present, AAA_OLD gone.
+  assert.match(JSON.stringify(compactedOlder), CLEARED);
+  assert.doesNotMatch(JSON.stringify(compactedOlder), /AAA_OLD/);
+});
+
+test('pruneOldToolResults: clears shield-exceeding results, keeps recent + tail, never mutates input', () => {
+  const messages: ModelMessage[] = [
+    toolResultMsg('r0', `CLEARME${'x'.repeat(200)}`), // 0: older, beyond shield → cleared
+    toolResultMsg('r1', `KEEPME${'x'.repeat(200)}`), // 1: older, within shield → kept
+    toolResultMsg('r2', `TAILME${'x'.repeat(200)}`), // 2: at/after splitAt → never walked
+  ];
+  const before = messages.map((m) => JSON.stringify(m));
+  const {
+    messages: out,
+    freedChars,
+    clearedResults,
+  } = pruneOldToolResults(messages, 2, {
+    shieldChars: 150, // the recent result (~206 chars) alone fills the shield
+    minResultChars: 50, // both older results exceed this → prunable-eligible
+  });
+  assert.match(JSON.stringify(out[1]), /KEEPME/); // shield protected the most recent
+  assert.match(JSON.stringify(out[0]), CLEARED); // oldest cleared
+  assert.doesNotMatch(JSON.stringify(out[0]), /CLEARME/); // original payload gone
+  assert.match(JSON.stringify(out[2]), /TAILME/); // tail region untouched
+  assert.equal(clearedResults, 1);
+  assert.ok(freedChars > 0);
+  // Input array is untouched (fresh objects only for changed entries).
+  assert.deepEqual(
+    messages.map((m) => JSON.stringify(m)),
+    before,
+  );
+});
+
+test('pruneOldToolResults: no prunable region (splitAt 0) → returns input copy, frees nothing', () => {
+  const messages: ModelMessage[] = [toolResultMsg('a', `A${'x'.repeat(50_000)}`)];
+  const { messages: out, freedChars, clearedResults } = pruneOldToolResults(messages, 0);
+  assert.equal(freedChars, 0);
+  assert.equal(clearedResults, 0);
+  assert.match(JSON.stringify(out[0]), /A/);
+  assert.doesNotMatch(JSON.stringify(out[0]), CLEARED);
 });

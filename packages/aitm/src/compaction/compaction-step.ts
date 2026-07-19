@@ -1,8 +1,11 @@
 // Turns a Compactor into an AI SDK `prepareStep` hook (issue #102): between steps, when the live
-// input-token count crosses the model's context-window threshold, replace the message array with a
-// summary of the older prefix + the most recent steps verbatim, so a long Worker/Reviewer pass
-// survives instead of dying on a context-window overflow. The Compactor holds the policy; this is
-// the thin loop-wiring around it.
+// input-token count crosses the model's context-window threshold, first run a cheap prune stage
+// (no model call) that clears the payloads of large, older tool results — keeping a recency shield
+// of recent tool output and the kept-steps tail verbatim. Clearing stale, re-runnable output is
+// often enough to fit the window; only when it isn't does the Compactor's LLM summarizer run,
+// replacing the older prefix with a summary + the most recent steps verbatim, so a long
+// Worker/Reviewer pass survives instead of dying on a context-window overflow. The Compactor holds
+// the summarize policy; this module is the loop-wiring around it plus the prune pass.
 //
 // SDK reference: docs/vendor/ai-sdk/chunk-09.md §"Loop Control" §"Prepare Step".
 
@@ -34,6 +37,24 @@ export type CompactionStepInit = {
 // the continuation contract in its system prompt (WORKER_SYSTEM_PREFIX / REVIEWER_SYSTEM_PREFIX).
 const SUMMARY_HEADER =
   'Earlier conversation was summarized to fit the context window. Continue the task from this summary — do not wrap up early or re-plan from scratch.';
+
+// Prune policy for the cheap pre-summarize pass. Values are conservative on purpose: rewriting the
+// prefix costs a one-time prompt-cache miss (slice 04's stable-prefix work), so we only clear output
+// that is both large and well past the working set, and compaction stays rare.
+// - MIN_RESULT: results at/under this many chars aren't worth clearing (the placeholder has a cost).
+// - SHIELD: keep this many chars of the most-recent tool output in the prunable region untouched.
+// - FREED_THRESHOLD: if a prune frees at least this many chars, skip the LLM summarize entirely.
+const PRUNE_PLACEHOLDER = '[old tool result cleared — rerun the tool if needed]';
+const PRUNE_MIN_RESULT_CHARS = 1_000;
+const PRUNE_SHIELD_CHARS = 40_000;
+const PRUNE_FREED_THRESHOLD = 20_000;
+
+// `ai` does not re-export `ToolResultOutput`; derive it from the public `ModelMessage` surface (same
+// approach as ai-claude-compat/src/tool-guards.ts) so this keeps compiling if the SDK adds variants.
+type ToolResultOutput = Extract<
+  Extract<ModelMessage, { role: 'tool' }>['content'][number],
+  { type: 'tool-result' }
+>['output'];
 
 // Build a `prepareStep` that compacts context when it crosses the threshold. Never throws: a lookup
 // miss (ModelNotFound) or a summarizer error logs a warning and passes the messages through
@@ -90,9 +111,27 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
     // Nothing older than the kept tail → summarizing would drop nothing; pass through.
     if (older.length === 0) return undefined;
 
+    // Cheap prune stage first (no model call): clear the payloads of large, older tool results,
+    // keeping a recency shield of recent tool output and the kept-steps tail verbatim. Stale results
+    // (a `git status` from 40 steps ago, a file re-read since) are the bulk of a bloated window and
+    // are re-runnable, so clearing them often reclaims enough context that the LLM summarize never
+    // has to run. Only when it frees too little do we fall through to the summarizer below.
+    const pruned = pruneOldToolResults(messages, splitAt);
+    if (pruned.freedChars >= PRUNE_FREED_THRESHOLD) {
+      init.logger?.info('compaction: pruned stale tool results (no summarize)', {
+        modelId: init.modelId,
+        liveInputTokens,
+        freedChars: pruned.freedChars,
+        clearedResults: pruned.clearedResults,
+      });
+      return { messages: pruned.messages };
+    }
+
     let summary: string | undefined;
     try {
-      summary = await init.compactor.compact(older);
+      // Summarize the PRUNED older prefix: results the prune pass cleared are already gone, so the
+      // summarizer neither re-reads their bulk nor re-describes soon-to-be-cleared output.
+      summary = await init.compactor.compact(pruned.messages.slice(0, splitAt));
     } catch (err) {
       init.logger?.warn('compaction: summarizer failed; passing through', {
         modelId: init.modelId,
@@ -116,6 +155,7 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
       liveInputTokens,
       contextLength: decision.contextLength,
       keptSteps: decision.keepLastSteps,
+      prunedChars: pruned.freedChars,
     });
 
     const summaryMessage: ModelMessage = {
@@ -142,4 +182,74 @@ function estimateTokens(messages: readonly ModelMessage[]): number {
         : JSON.stringify(message.content).length;
   }
   return Math.ceil(chars / 4);
+}
+
+// Cheap, model-free prune pass over the prunable prefix (`messages[0, splitAt)` — everything older
+// than the kept-steps tail). Walks newest → oldest so a recency shield preserves the most-recent
+// `shieldChars` of tool output; older tool results larger than `minResultChars` have their payload
+// replaced with a short placeholder, keeping the tool-call/result pairing (and thus a message array
+// the API still accepts) intact. Returns a fresh array — the input is never mutated. `freedChars` is
+// the net chars reclaimed, which the caller compares against its skip-summarize threshold.
+export function pruneOldToolResults(
+  messages: readonly ModelMessage[],
+  splitAt: number,
+  opts: { shieldChars?: number; minResultChars?: number } = {},
+): { messages: ModelMessage[]; freedChars: number; clearedResults: number } {
+  const shieldChars = opts.shieldChars ?? PRUNE_SHIELD_CHARS;
+  const minResultChars = opts.minResultChars ?? PRUNE_MIN_RESULT_CHARS;
+  const out: ModelMessage[] = [...messages];
+  let shieldUsed = 0;
+  let freedChars = 0;
+  let clearedResults = 0;
+
+  for (let i = Math.min(splitAt, messages.length) - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message === undefined || message.role !== 'tool' || !Array.isArray(message.content)) {
+      continue;
+    }
+    let changed = false;
+    const content = message.content.map((part) => {
+      if (part.type !== 'tool-result') return part;
+      const size = outputCharSize(part.output);
+      // Keep small results (not worth clearing) and anything still inside the recency shield; both
+      // consume the shield budget so it fills from the most-recent output first.
+      if (size <= minResultChars || shieldUsed < shieldChars) {
+        shieldUsed += size;
+        return part;
+      }
+      changed = true;
+      freedChars += size - PRUNE_PLACEHOLDER.length;
+      clearedResults += 1;
+      const cleared: ToolResultOutput = { type: 'text', value: PRUNE_PLACEHOLDER };
+      return { ...part, output: cleared };
+    });
+    if (changed) out[i] = { ...message, content };
+  }
+
+  return { messages: out, freedChars, clearedResults };
+}
+
+// Char size of a tool result's payload — the text the model actually reads, so the prune thresholds
+// compare against real context cost. Falls back to a JSON length for shapes without a plain string
+// value (and for any output variant a future `ai` adds), never throwing.
+function outputCharSize(output: ToolResultOutput): number {
+  switch (output.type) {
+    case 'text':
+    case 'error-text':
+      return output.value.length;
+    case 'json':
+    case 'error-json':
+    case 'content':
+      return jsonLength(output.value);
+    default:
+      return jsonLength(output);
+  }
+}
+
+function jsonLength(value: unknown): number {
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 0;
+  }
 }

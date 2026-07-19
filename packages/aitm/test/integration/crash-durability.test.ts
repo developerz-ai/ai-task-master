@@ -33,9 +33,12 @@ import type { ModelMessage } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
 import { runStart } from '../../src/cli/commands.ts';
+import type { ReviewThread } from '../../src/github/schema.ts';
 import { normalizeResumeStatus } from '../../src/loop/resume-normalize.ts';
 import {
+  handleAddressingReviews,
   handlePrOpen,
+  handleWaitingReviews,
   type StageDeps,
   type StageGithub,
   type StageOrchestrator,
@@ -50,6 +53,7 @@ import {
 } from '../../src/loop/work-loop.ts';
 import { Orchestrator } from '../../src/orchestrator/orchestrator.ts';
 import { PlanGraph } from '../../src/plan/plan-graph.ts';
+import { PrContextStore } from '../../src/state/pr-context-store.ts';
 import { type PrGroup, type RunState, RunStateSchema } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
 import { TranscriptStore } from '../../src/state/transcript-store.ts';
@@ -743,6 +747,128 @@ test('crash-durability: kill after a task commit lands but before completeTask p
     );
   } finally {
     await repo.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Reviewer-reply crash boundary: kill after the reply lands on GitHub, before recordAddressedThreads
+// persists
+// ---------------------------------------------------------------------------
+//
+// docs/plans/2026/07/18/101-parallel-agent-bug-hunt/03-review-loop-idempotency.md, durability #5.
+// The crash this models is a `kill -9` that lands after the Reviewer's reply is posted (an external
+// side effect on GitHub, which survives the crash, exactly like `gh pr create` in the PR-open
+// boundary above) but before handleAddressingReviews's own PrContextStore.recordAddressedThreads
+// write lands. Before the fix, a resume in this window re-read the same unresolved thread — still
+// unresolved, and now missing from the addressed-thread record — and fed it back to the Reviewer,
+// producing a duplicate reply. The fix (stage-handlers.ts freshThreads) filters out any thread that
+// already carries a reply from our own login, straight off GitHub's live state, so the missing record
+// self-heals instead of duplicating. This test drives the real handleAddressingReviews /
+// handleWaitingReviews stage handlers against a real PrContextStore (real atomicWrite, same
+// fault-injection technique as the rest of this file) and a fake GitHub remote whose thread state
+// outlives the crash, then resumes with fresh instances and counts real Reviewer invocations to prove
+// no duplicate reply and no wrongly-blocked group.
+
+function makeFakeReviewRemote(botLogin: string): {
+  github: StageGithub;
+  orchestrator: Pick<StageOrchestrator, 'addressReviews'>;
+  addressReviewsCalls: () => number;
+} {
+  const thread: ReviewThread = {
+    id: 'T1',
+    isResolved: false,
+    path: 'src/hello.ts',
+    comments: [{ id: 'c1', author: 'coderabbitai', body: 'nit: add a doc comment' }],
+  };
+  let addressReviewsCalls = 0;
+  return {
+    github: {
+      waitForChecks: async () => ({ state: 'success', failedChecks: [] }),
+      listUnresolvedThreads: async () => [thread],
+      mergePr: async () => {},
+      authenticatedLogin: async () => botLogin,
+    },
+    orchestrator: {
+      // The reply is the real, crash-surviving side effect: it lands on the fake "remote" thread
+      // state BEFORE this resolves, exactly like the reviewer's real `gh pr comment` call would.
+      addressReviews: async (_group, threads) => {
+        addressReviewsCalls += 1;
+        for (const t of threads) {
+          thread.comments.push({ id: `reply-${t.id}`, author: botLogin, body: 'fixed' });
+        }
+        return { kind: 'ok' };
+      },
+    },
+    addressReviewsCalls: () => addressReviewsCalls,
+  };
+}
+
+test('crash-durability: kill after the Reviewer reply lands but before recordAddressedThreads persists — resume self-heals via the bot-reply skip, no duplicate reply, no wrongly-blocked group', async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'aitm-crash-review-'));
+  try {
+    const botLogin = 'aitm-bot';
+    const remote = makeFakeReviewRemote(botLogin);
+    const prContext = new PrContextStore(stateDir);
+    const group = crashGroup({ pr: 777, stage: 'addressing-reviews' });
+
+    const deps1: StageDeps = {
+      github: remote.github,
+      orchestrator: {
+        work: async () => {
+          assert.fail('work() must not run in this scenario');
+        },
+        openPr: async () => {
+          assert.fail('openPr() must not run in this scenario');
+        },
+        fixCi: async () => {
+          assert.fail('fixCi() must not run in this scenario');
+        },
+        addressReviews: remote.orchestrator.addressReviews,
+      },
+      state: { update: async (mutator) => mutator(baseState()) },
+      prContext,
+    };
+
+    // ── Crash: the reply lands on the fake remote (addressReviewsCalls 0 → 1), then
+    // recordAddressedThreads's own atomicWrite dies mid-fsync — the exact instant a `kill -9`
+    // between the reply and persisting the addressed-thread record would land.
+    const crashErr = Object.assign(new Error('power loss mid-fsync'), { code: 'EIO' });
+    await withArmedSyncFault(crashErr, async () => {
+      await assert.rejects(handleAddressingReviews(deps1, group), /power loss mid-fsync/);
+    });
+    assert.equal(remote.addressReviewsCalls(), 1, 'the reply side effect landed exactly once');
+    assert.deepEqual(
+      await tmpArtifacts(prContext.prDir(777)),
+      [],
+      'a failed write must not leave a .tmp file behind',
+    );
+
+    // The crashed write never renamed — no addressed-thread record exists on disk.
+    assert.deepEqual(await prContext.readAddressedThreads(777), new Set());
+
+    // ── Resume: a fresh PrContextStore (new process) still shows the thread unaddressed by our
+    // bookkeeping, but the fake remote (GitHub) now carries the bot's reply from the pre-crash pass.
+    // handleAddressingReviews must recognize the reply and skip re-running the Reviewer.
+    const resumedPrContext = new PrContextStore(stateDir);
+    const deps2: StageDeps = { ...deps1, prContext: resumedPrContext };
+    const nextStage = await handleAddressingReviews(deps2, group);
+    assert.equal(nextStage, 'waiting-reviews');
+    assert.equal(
+      remote.addressReviewsCalls(),
+      1,
+      'resume must self-heal via the bot-reply skip, not post a duplicate reply',
+    );
+
+    // waiting-reviews must see nothing fresh either (same skip) and advance straight to merge — the
+    // group must never land on a permanently-blocked resume loop.
+    const afterWaitingReviews = await handleWaitingReviews(deps2, group);
+    assert.equal(
+      afterWaitingReviews,
+      'ready-to-merge',
+      'no recoverable state may get stuck re-polling an already-addressed thread',
+    );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
   }
 });
 

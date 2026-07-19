@@ -116,6 +116,7 @@ export {
   globTool,
   globToRegExp,
   grepTool,
+  type SearchToolInit,
 } from './search-tools.ts';
 export {
   SKILL_INVOCATION_CONTRACT,

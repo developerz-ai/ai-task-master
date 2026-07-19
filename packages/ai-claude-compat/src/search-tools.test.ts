@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -10,6 +10,7 @@ import {
   grepInputSchema,
   grepTool,
 } from './search-tools.ts';
+import { ToolOutputStore } from './tool-output-store.ts';
 
 function textOf(t: { toModelOutput?: unknown }, input: unknown, output: unknown): string {
   const fn = t.toModelOutput;
@@ -40,6 +41,20 @@ test('toModelOutput: grep/glob render newline-joined, with a truncation notice o
     'a.ts\nb.ts',
   );
   assert.equal(textOf(glob, { pattern: '*' }, { files: [], truncated: false }), '(no matches)');
+});
+
+test('toModelOutput: a truncation notice with a spillPath names the file for paging', () => {
+  const grep = grepTool({ cwd: '/tmp/x' });
+  const text = textOf(
+    grep,
+    { pattern: 'x' },
+    { matches: ['a.ts:1:x'], truncated: true, spillPath: '/tmp/spill/grep-1.txt' },
+  );
+  assert.match(text, /\[results truncated — refine the query or raise the limit\./);
+  assert.match(
+    text,
+    /Full output: \/tmp\/spill\/grep-1\.txt — page with readFile\(offset\/limit\) or grep\.\]/,
+  );
 });
 
 async function tempDir(
@@ -222,6 +237,67 @@ test('grepTool: maxResults caps and flags truncation', async () => {
     >(grepTool({ cwd: dir.path }), { pattern: 'const', maxResults: 1 });
     assert.equal(out.matches.length, 1);
     assert.equal(out.truncated, true);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+// ---- truncation spill (issue #127 follow-up): the notice gains the saved-file path ----
+
+test('grepTool: a truncated result spills the capped matches to the store and names the path', async () => {
+  const dir = await tempDir();
+  try {
+    await fixture(dir.path);
+    const store = new ToolOutputStore(join(dir.path, 'tool-output'));
+    const out = await run<
+      { pattern: string; maxResults: number },
+      { matches: string[]; truncated: boolean; spillPath?: string }
+    >(grepTool({ cwd: dir.path, outputStore: store }), {
+      pattern: 'const',
+      maxResults: 1,
+    });
+    assert.equal(out.truncated, true);
+    assert.ok(out.spillPath, 'spillPath present when truncated with a store wired');
+    const spilled = await readFile(out.spillPath ?? '', 'utf8');
+    assert.equal(spilled, out.matches.join('\n'), 'spill file holds the capped result set');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('grepTool: no outputStore wired → truncated result has no spillPath, notice still degrades', async () => {
+  const dir = await tempDir();
+  try {
+    await fixture(dir.path);
+    const out = await run<
+      { pattern: string; maxResults: number },
+      { matches: string[]; truncated: boolean; spillPath?: string }
+    >(grepTool({ cwd: dir.path }), { pattern: 'const', maxResults: 1 });
+    assert.equal(out.truncated, true);
+    assert.equal(out.spillPath, undefined);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('grepTool: a spill write failure degrades to the plain notice, never throws', async () => {
+  const dir = await tempDir();
+  try {
+    await fixture(dir.path);
+    class FailingStore extends ToolOutputStore {
+      override save(): Promise<never> {
+        return Promise.reject(new Error('spill failed'));
+      }
+    }
+    const out = await run<
+      { pattern: string; maxResults: number },
+      { matches: string[]; truncated: boolean; spillPath?: string }
+    >(grepTool({ cwd: dir.path, outputStore: new FailingStore(join(dir.path, 'to')) }), {
+      pattern: 'const',
+      maxResults: 1,
+    });
+    assert.equal(out.truncated, true);
+    assert.equal(out.spillPath, undefined);
   } finally {
     await dir.cleanup();
   }

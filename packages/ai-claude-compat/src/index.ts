@@ -155,6 +155,8 @@ export {
   type SubagentConfig,
   type SubagentHandle,
   type SubagentRun,
+  type SubagentStreamEvent,
+  type SubagentStreamSink,
   type SubmittedOutput,
   submittedOutput,
 } from './subagent.ts';

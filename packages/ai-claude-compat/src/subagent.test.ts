@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { ToolLoopAgent, tool } from 'ai';
+import { simulateReadableStream, ToolLoopAgent, tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import { envBlock } from './env-block.ts';
@@ -24,6 +24,7 @@ import {
   runWithSchemaRetry,
   StepTimeoutError,
   SUBMIT_TOOL_NAME,
+  type SubagentStreamEvent,
   submittedOutput,
 } from './subagent.ts';
 
@@ -88,6 +89,30 @@ function agentFor(model: MockLanguageModelV3): ToolLoopAgent<never, Record<strin
     { model, tools: {}, systemPrompt: 'sys', submit: submitTool(OutSchema) },
     12,
   );
+}
+
+// A model that STREAMS a submit: emits `deltas` as assistant text, then a `submit` tool-call carrying
+// the stringified `input`, then a tool-calls finish. The streaming analogue of scriptedModel, driving
+// the funnel through streamText end-to-end (fullStream → parity result). doStreamCalls tracks calls.
+function streamingSubmitModel(deltas: readonly string[], input: string): MockLanguageModelV3 {
+  return new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: simulateReadableStream({
+        chunks: [
+          { type: 'stream-start', warnings: [] },
+          { type: 'text-start', id: 't1' },
+          ...deltas.map((delta) => ({ type: 'text-delta' as const, id: 't1', delta })),
+          { type: 'text-end', id: 't1' },
+          { type: 'tool-call', toolCallId: 'c1', toolName: 'submit', input },
+          {
+            type: 'finish',
+            finishReason: { unified: 'tool-calls', raw: undefined },
+            usage: emptyUsage(),
+          },
+        ],
+      }),
+    }),
+  });
 }
 
 // --- composeSystemPrompt ---
@@ -358,6 +383,195 @@ test('createSubagent: onRetry fires even with no configured timeout — retry vi
   const result = await agent.generate({ prompt: 'go' });
   assert.equal(result.finishReason, 'tool-calls');
   assert.equal(infos.length, 1, 'onRetry armed generate() even though no timeout was configured');
+});
+
+// --- streaming funnel parity (slice 07) ---
+
+test('streaming funnel: a streamed submit resolves to the same result shape as generateText (slice 07)', async () => {
+  const agent = createSubagent(
+    {
+      model: streamingSubmitModel(['Hel', 'lo'], JSON.stringify({ n: 7 })),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: () => {},
+    },
+    12,
+  );
+  const { result } = await runSubagent(agent, 'go');
+  // The terminal shape every downstream reader depends on is identical to the non-streaming funnel.
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 7 } });
+  assert.equal(result.finishReason, 'tool-calls');
+  assert.ok(
+    Array.isArray(result.response.messages) && result.response.messages.length >= 1,
+    'response.messages is populated for continuation',
+  );
+  assert.ok(result.totalUsage !== undefined, 'usage resolves for metering');
+});
+
+test('streaming funnel: forwards text-delta then tool-call events to onStream, in order (slice 07)', async () => {
+  const events: SubagentStreamEvent[] = [];
+  const agent = createSubagent(
+    {
+      model: streamingSubmitModel(['Hel', 'lo'], JSON.stringify({ n: 1 })),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: (event) => events.push(event),
+    },
+    12,
+  );
+  await runSubagent(agent, 'go');
+  const streamedText = events
+    .filter((event) => event.type === 'text-delta')
+    .map((event) => event.text)
+    .join('');
+  assert.equal(
+    streamedText,
+    'Hello',
+    'text deltas arrive in order and concatenate to the full text',
+  );
+  const toolCall = events.find((event) => event.type === 'tool-call');
+  assert.ok(toolCall && toolCall.type === 'tool-call', 'a tool-call event was forwarded');
+  assert.equal(toolCall.toolName, 'submit');
+  assert.deepEqual(toolCall.input, { n: 1 }, 'the parsed submit input rides the event');
+  assert.equal(
+    events.findIndex((event) => event.type === 'tool-call'),
+    events.length - 1,
+    'the tool-call event follows every text delta',
+  );
+});
+
+test('streaming funnel: onStream gates the path — off uses doGenerate, on uses doStream (slice 07)', async () => {
+  // A model wired for BOTH paths; the funnel must pick exactly one per the onStream opt-in, so the
+  // default (no onStream) stays byte-identical to the existing generateText path.
+  const bothModel = () =>
+    new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'g',
+            toolName: 'submit',
+            input: JSON.stringify({ n: 1 }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      }),
+      doStream: async () => ({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            {
+              type: 'tool-call',
+              toolCallId: 's',
+              toolName: 'submit',
+              input: JSON.stringify({ n: 2 }),
+            },
+            {
+              type: 'finish',
+              finishReason: { unified: 'tool-calls', raw: undefined },
+              usage: emptyUsage(),
+            },
+          ],
+        }),
+      }),
+    });
+
+  const offModel = bothModel();
+  await runSubagent(
+    createSubagent(
+      { model: offModel, tools: {}, systemPrompt: 'sys', submit: submitTool(OutSchema) },
+      12,
+    ),
+    'go',
+  );
+  assert.equal(offModel.doGenerateCalls.length, 1, 'no onStream → generateText');
+  assert.equal(offModel.doStreamCalls.length, 0, 'no onStream → never streams');
+
+  const onModel = bothModel();
+  await runSubagent(
+    createSubagent(
+      {
+        model: onModel,
+        tools: {},
+        systemPrompt: 'sys',
+        submit: submitTool(OutSchema),
+        onStream: () => {},
+      },
+      12,
+    ),
+    'go',
+  );
+  assert.equal(onModel.doStreamCalls.length, 1, 'onStream → streamText');
+  assert.equal(onModel.doGenerateCalls.length, 0, 'onStream → never falls back to generate');
+});
+
+test('streaming funnel: the retry kernel still wraps the whole stream — a transient failure re-invokes it (slice 07)', async () => {
+  // The first doStream throws a transient 429; the second streams a submit. Because the stream runs
+  // INSIDE the retry/timeout kernel, the whole stream is retried and onRetry fires — wrappers unchanged.
+  let calls = 0;
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('rate limited'), { statusCode: 429 });
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            {
+              type: 'tool-call',
+              toolCallId: 'c1',
+              toolName: 'submit',
+              input: JSON.stringify({ n: 9 }),
+            },
+            {
+              type: 'finish',
+              finishReason: { unified: 'tool-calls', raw: undefined },
+              usage: emptyUsage(),
+            },
+          ],
+        }),
+      };
+    },
+  });
+  const infos: RetryInfo[] = [];
+  const agent = createSubagent(
+    {
+      model,
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      timeout: { stepMs: 5_000 },
+      onStream: () => {},
+      onRetry: (info) => void infos.push(info),
+    },
+    12,
+  );
+  const { result } = await runSubagent(agent, 'go');
+  assert.equal(calls, 2, 'the stream was re-invoked after the transient failure');
+  assert.equal(infos.length, 1, 'the transient 429 was reported once via onRetry');
+  assert.equal(infos[0]?.reason, 'HTTP 429');
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 9 } });
+});
+
+test('streaming funnel: a throwing onStream never breaks the generation (slice 07)', async () => {
+  const agent = createSubagent(
+    {
+      model: streamingSubmitModel(['x'], JSON.stringify({ n: 3 })),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: () => {
+        throw new Error('sink boom');
+      },
+    },
+    12,
+  );
+  const { result } = await runSubagent(agent, 'go');
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 3 } });
 });
 
 // --- callWithStepTimeout (translate abort → named timeout) ---

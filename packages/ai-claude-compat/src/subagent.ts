@@ -13,6 +13,8 @@ import {
   type LanguageModel,
   type LanguageModelUsage,
   type ModelMessage,
+  NoOutputGeneratedError,
+  type StreamTextResult,
   stepCountIs,
   type TimeoutConfiguration,
   type Tool,
@@ -57,6 +59,18 @@ export function composeSystemPrompt(
   return `${styleOrBlocks}${rolePrefix}\n${envBlock(resolved)}`;
 }
 
+// A live event forwarded from a streamed generation (slice 07). Two kinds mirror what a live renderer
+// consumes: incremental assistant text, and each tool call as it is issued (before its result). Kept
+// deliberately minimal and provider-agnostic — reasoning and tool-input deltas are intentionally not
+// forwarded yet; a downstream renderer buffers text to whole lines.
+export type SubagentStreamEvent =
+  | { type: 'text-delta'; text: string }
+  | { type: 'tool-call'; toolName: string; input: unknown };
+
+// Sink for streamed events. Invoked in-loop as chunks arrive; a throw is swallowed at the call site so
+// a broken sink can never abort — or, through the retry kernel, re-run — a generation.
+export type SubagentStreamSink = (event: SubagentStreamEvent) => void;
+
 export type SubagentConfig<TOOLS extends ToolSet> = {
   model: LanguageModel;
   tools: TOOLS;
@@ -96,6 +110,13 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   // attempt (e.g. to the console) instead of a whole backoff window going silent. Omitted → no sink,
   // byte-identical retry behavior.
   onRetry?: RetryOptions['onRetry'];
+  // Optional live-streaming sink (slice 07). When set, the subagent's generate funnel runs via
+  // streamText instead of generateText and forwards text + tool-call events here as they arrive; the
+  // resolved result is byte-identical in shape either way, so no downstream reader changes. Policy-free
+  // passthrough — aitm wires a live renderer; compat sets no default. Omitted → generate untouched,
+  // behavior byte-identical. A throw from the sink is swallowed, so a broken renderer can never abort
+  // or (via the retry kernel) re-run a generation.
+  onStream?: SubagentStreamSink;
 };
 
 // Wrap a ToolLoopAgent: register the caller's tools plus the `submit` tool, and stop when the step
@@ -118,6 +139,11 @@ export function createSubagent<TOOLS extends ToolSet>(
     // Agent-wide per-step callback (issue #108). Omitted when unset → not registered.
     ...(config.onStepFinish ? { onStepFinish: config.onStepFinish } : {}),
   });
+  // Streaming is armed BEFORE the timeout/retry wrapper so the kernel wraps the whole stream (see
+  // armStreaming). Omitted onStream → generate untouched, byte-identical to the non-streaming path.
+  if (config.onStream !== undefined) {
+    armStreaming(agent, config.onStream);
+  }
   if (config.timeout !== undefined || config.onRetry !== undefined) {
     armStepTimeout(agent, config.timeout, config.onRetry);
   }
@@ -149,6 +175,93 @@ function armStepTimeout<TOOLS extends ToolSet>(
     );
   };
   agent.generate = wrapped;
+}
+
+// Route the agent's generate funnel through streamText so a live sink observes text and tool-call
+// events as they arrive, then resolve to the SAME GenerateTextResult shape agent.generate returns —
+// every downstream reader (submittedOutput, generateOverMessages, reportUsage) is byte-identical
+// whether the funnel streamed or not. Armed BEFORE armStepTimeout (see createSubagent) so the
+// retry/timeout kernel wraps the whole stream unchanged: a transient failure re-invokes streamText
+// fresh, a configured deadline aborts it. Only armed when a caller opts in via `onStream`; otherwise
+// generate is untouched and behavior is identical (slice 07).
+function armStreaming<TOOLS extends ToolSet>(
+  agent: ToolLoopAgent<never, TOOLS>,
+  onStream: SubagentStreamSink,
+): void {
+  type Generate = ToolLoopAgent<never, TOOLS>['generate'];
+  const stream = agent.stream.bind(agent);
+  const streamed: Generate = async (params) => {
+    const result = await stream(params);
+    for await (const part of result.fullStream) {
+      if (part.type === 'text-delta') {
+        emitStreamEvent(onStream, { type: 'text-delta', text: part.text });
+      } else if (part.type === 'tool-call') {
+        emitStreamEvent(onStream, {
+          type: 'tool-call',
+          toolName: part.toolName,
+          input: part.input,
+        });
+      } else if (part.type === 'error') {
+        // streamText surfaces a provider failure as an `error` part (the fullStream then ends without
+        // throwing and the result promises reject with a generic NoOutputGeneratedError). Re-throw the
+        // underlying error here so the retry/timeout kernel classifies it exactly as it would a
+        // generateText throw — a transient 429 stays retryable, a deadline abort stays a timeout.
+        throw part.error;
+      }
+    }
+    return streamResultToGenerate(result);
+  };
+  agent.generate = streamed;
+}
+
+// Fire the streaming sink, swallowing a throw — a broken live renderer must never abort a generation,
+// nor (since this runs inside the retry kernel) trigger a re-run of an in-flight coding step.
+function emitStreamEvent(onStream: SubagentStreamSink, event: SubagentStreamEvent): void {
+  try {
+    onStream(event);
+  } catch {
+    // observability must never break the run
+  }
+}
+
+// Parity core of the stream funnel: drain the fully-consumed stream's resolved fields into the exact
+// GenerateTextResult shape agent.generate produces. `output`/`experimental_output` throw
+// NoOutputGeneratedError precisely as a non-streamed result does when no Output spec is set — compat
+// never sets one (structured output rides the submit tool), so a caller that ignores them stays
+// identical and a stray read fails identically. Every other field is already settled once fullStream
+// drains, so awaiting them is immediate.
+async function streamResultToGenerate<TOOLS extends ToolSet>(
+  result: StreamTextResult<TOOLS, never>,
+): Promise<GenerateResult<TOOLS>> {
+  return {
+    content: await result.content,
+    text: await result.text,
+    reasoning: await result.reasoning,
+    reasoningText: await result.reasoningText,
+    files: await result.files,
+    sources: await result.sources,
+    toolCalls: await result.toolCalls,
+    staticToolCalls: await result.staticToolCalls,
+    dynamicToolCalls: await result.dynamicToolCalls,
+    toolResults: await result.toolResults,
+    staticToolResults: await result.staticToolResults,
+    dynamicToolResults: await result.dynamicToolResults,
+    finishReason: await result.finishReason,
+    rawFinishReason: await result.rawFinishReason,
+    usage: await result.usage,
+    totalUsage: await result.totalUsage,
+    warnings: await result.warnings,
+    request: await result.request,
+    response: await result.response,
+    providerMetadata: await result.providerMetadata,
+    steps: await result.steps,
+    get output(): never {
+      throw new NoOutputGeneratedError();
+    },
+    get experimental_output(): never {
+      throw new NoOutputGeneratedError();
+    },
+  };
 }
 
 // A per-step LLM deadline expired. Names the configured bound so a run leg's reason is actionable —

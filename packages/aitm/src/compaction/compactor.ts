@@ -51,6 +51,23 @@ const SUMMARY_INSTRUCTIONS = [
   'Conversation (JSON):',
 ].join('\n');
 
+// Anchored update-in-place: when a prior summary exists we hand it back verbatim and ask the model to
+// fold newer work into fixed sections rather than re-summarizing from scratch. Fixed sections keep the
+// summary stable across successive compactions (opencode's anchored-update template) instead of
+// letting its shape and emphasis drift each round.
+const ANCHORED_UPDATE_INSTRUCTIONS = [
+  'You are a context-compaction summarizer for an autonomous coding agent.',
+  'A prior summary of this task exists in <previous-summary>. UPDATE it in place with what the newer',
+  'conversation below adds — do not restart from scratch and do not drop still-relevant facts. Move',
+  'finished work into Done, refresh In progress, and accumulate Files touched. Keep it a tight',
+  'bulleted note under these exact sections, no prose:',
+  '- Objective: the goal and acceptance criteria (carry forward unless newly clarified)',
+  '- Done: completed decisions, edits, and commands',
+  '- In progress: what is being worked on right now',
+  '- Files: files created or modified',
+  '- Next: open questions, blockers, and what to try next',
+].join('\n');
+
 export class Compactor {
   constructor(private readonly init: CompactionInit) {}
 
@@ -76,16 +93,36 @@ export class Compactor {
     return { kind: 'skip' };
   }
 
-  // Produce a compact summary suitable for replacing the older conversation prefix.
+  // Produce a compact summary suitable for replacing the older conversation prefix. Pass
+  // `priorSummary` (the text of an earlier compaction's SUMMARY_HEADER block) to UPDATE that anchor
+  // in place — folding newer work into fixed sections (objective/done/in-progress/files/next) rather
+  // than re-summarizing from scratch — so the note stays stable across successive compactions instead
+  // of drifting each round. A blank/whitespace prior summary is treated as none (fresh summary).
   // Returns `undefined` when the summarizer produced empty/whitespace-only text — a blank
   // summary would otherwise replace real history with nothing, so the caller must treat this
   // as "leave the messages uncompacted" rather than substitute an empty note.
-  async compact(olderMessages: ReadonlyArray<unknown>): Promise<string | undefined> {
+  async compact(
+    olderMessages: ReadonlyArray<unknown>,
+    priorSummary?: string,
+  ): Promise<string | undefined> {
+    const anchor = priorSummary?.trim() ?? '';
+    const serialized = safeStringify(olderMessages);
+    const prompt =
+      anchor.length > 0
+        ? [
+            ANCHORED_UPDATE_INSTRUCTIONS,
+            '<previous-summary>',
+            anchor,
+            '</previous-summary>',
+            'Newer conversation to fold in (JSON):',
+            serialized,
+          ].join('\n')
+        : `${SUMMARY_INSTRUCTIONS}\n${serialized}`;
     const { text } = await callWithStepTimeout(
       () =>
         generateText({
           model: this.init.summarizer,
-          prompt: `${SUMMARY_INSTRUCTIONS}\n${safeStringify(olderMessages)}`,
+          prompt,
           ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
         }),
       this.init.timeout,

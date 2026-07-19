@@ -141,6 +141,38 @@ test('compact returns the summarizer text and embeds the JSON of older messages'
   const sent = prompts[0] ?? '';
   assert.match(sent, /bulleted note/);
   assert.ok(sent.includes(JSON.stringify(older)), 'prompt must embed JSON of older messages');
+  assert.ok(!sent.includes('<previous-summary>'), 'fresh summary carries no anchor block');
+});
+
+test('compact updates in place when given a prior summary — anchors it and prompts for the sections', async () => {
+  const { model, callPrompts } = summarizerReturning('- Objective: ship parser\n- Done: lexer');
+  const c = new Compactor({ summarizer: model, limits: stubLimits(100_000) });
+  const newer = [
+    { role: 'assistant', content: 'Finished the lexer; wrote lexer.test.ts' },
+    { role: 'user', content: 'now do the parser' },
+  ];
+  const prior = '- Objective: ship parser\n- In progress: lexer';
+  const summary = await c.compact(newer, prior);
+  assert.equal(summary, '- Objective: ship parser\n- Done: lexer');
+
+  const prompts = callPrompts();
+  assert.equal(prompts.length, 1);
+  const sent = prompts[0] ?? '';
+  assert.ok(sent.includes('<previous-summary>'), 'wraps the prior summary in an anchor block');
+  assert.ok(sent.includes(prior), 'passes the previous summary verbatim');
+  assert.ok(sent.includes(JSON.stringify(newer)), 'embeds JSON of the newer messages to fold in');
+  for (const section of ['objective', 'done', 'in progress', 'files', 'next']) {
+    assert.match(sent, new RegExp(section, 'i'), `prompt requests the ${section} section`);
+  }
+});
+
+test('compact treats a blank prior summary as none — falls back to the fresh prompt', async () => {
+  const { model, callPrompts } = summarizerReturning('- did X');
+  const c = new Compactor({ summarizer: model, limits: stubLimits(100_000) });
+  await c.compact([{ role: 'user', content: 'Goal: refactor parser' }], '   \n\t  ');
+  const sent = callPrompts()[0] ?? '';
+  assert.ok(!sent.includes('<previous-summary>'), 'blank anchor is ignored');
+  assert.match(sent, /bulleted note/);
 });
 
 test('compact arms the per-step deadline and surfaces a StepTimeoutError on a stalled summarizer (issue #129)', async () => {

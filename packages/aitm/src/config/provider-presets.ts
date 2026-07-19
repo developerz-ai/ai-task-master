@@ -6,7 +6,7 @@
 
 import type { Profile } from './schema.ts';
 
-export type PresetName = 'openrouter' | 'zai';
+export type PresetName = 'openrouter' | 'zai' | 'moonshot';
 
 export const PROVIDER_PRESETS: Readonly<Record<PresetName, Profile>> = {
   // The provider default. Models left unset so the built-in capability defaults apply.
@@ -26,6 +26,25 @@ export const PROVIDER_PRESETS: Readonly<Record<PresetName, Profile>> = {
       fast: 'glm-5-turbo',
     },
   },
+  // Moonshot AI Kimi coding plan (OpenAI-compatible). Kimi-k2 for reasoning/coding, automatic
+  // prompt caching via prompt_cache_key. Override `models.*` for newer versions (e.g. kimi-k2.5).
+  moonshot: {
+    baseURL: 'https://api.moonshot.ai/v1',
+    models: {
+      generic: 'kimi-k2',
+      smart: 'kimi-k2',
+      coding: 'kimi-k2',
+      fast: 'kimi-k2',
+    },
+  },
+};
+
+// Caching strategy per preset: 'automatic' (upstream provider automatic caching, prompt_cache_key)
+// or 'cache_control' (explicit cache_control: ephemeral breakpoints for Anthropic models on OpenRouter).
+export const PRESET_CACHING: Readonly<Record<PresetName, 'automatic' | 'cache_control'>> = {
+  openrouter: 'automatic',
+  zai: 'automatic',
+  moonshot: 'automatic',
 };
 
 export const PRESET_NAMES: readonly PresetName[] = Object.keys(PROVIDER_PRESETS) as PresetName[];

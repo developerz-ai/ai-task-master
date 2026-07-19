@@ -1,0 +1,33 @@
+plan: 102-aitm-liveliness-tools-team-caching
+title: "aitm: liveliness, tool efficiency, team fanout, caching & transport"
+status: not_started
+created_by: sebi
+worked_by: ""
+owner: sebi
+percent: 0
+current_focus: ""
+slices:
+  - file: 01-observability-liveliness.md
+    status: not_started
+    percent: 0
+  - file: 02-tool-output-spill.md
+    status: not_started
+    percent: 0
+  - file: 03-pr-composition-robustness.md
+    status: not_started
+    percent: 0
+  - file: 04-caching-transport.md
+    status: not_started
+    percent: 0
+  - file: 05-editor-team-fanout.md
+    status: not_started
+    percent: 0
+  - file: 06-context-pruning-compaction.md
+    status: not_started
+    percent: 0
+  - file: 07-streaming-liveliness.md
+    status: not_started
+    percent: 0
+evidence: []
+notes: "Research inputs: parallel agent decompositions of Claude Code, Kimi CLI (tmp/kimi), claude-task-master, opencode (tmp/opencode) + web research on AI SDK agents, prompt caching (OpenRouter/Moonshot/z.ai/DeepSeek), undici keep-alive. tmp/ clones are untracked and not gitignored."
+last_updated: 2026-07-18

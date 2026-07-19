@@ -161,15 +161,23 @@ test('WORKER_SYSTEM_PREFIX carries the explore delegation guidance, gated on ava
   assert.match(WORKER_SYSTEM_PREFIX, /in parallel/);
 });
 
-test('editorToolSet strips the runtime explore + memory extras so editors never nest surveys or touch memory (issues #126/#118)', () => {
+test('editorToolSet strips the runtime explore + memory + background extras so editors never nest surveys, touch memory, or manage background processes (issues #126/#118/#103)', () => {
   const stub = (desc: string) =>
     tool({ description: desc, inputSchema: z.object({ x: z.string() }), execute: async () => 'a' });
   // Reuse the complete WorkerTools fixture and add the runtime-only extras, exactly as the adapter
   // mounts them — no `as unknown as` bypass of the contract.
-  const withExtras = { ...makeTools().tools, explore: stub('e'), memory: stub('m') };
+  const withExtras = {
+    ...makeTools().tools,
+    explore: stub('e'),
+    memory: stub('m'),
+    bashOutput: stub('o'),
+    killBash: stub('k'),
+  };
   const stripped = editorToolSet(withExtras);
   assert.equal('explore' in stripped, false, 'explore removed');
   assert.equal('memory' in stripped, false, 'memory removed');
+  assert.equal('bashOutput' in stripped, false, 'bashOutput removed');
+  assert.equal('killBash' in stripped, false, 'killBash removed');
   assert.equal('readFile' in stripped, true, 'other tools retained');
 });
 

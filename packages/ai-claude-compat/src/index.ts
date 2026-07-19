@@ -166,6 +166,20 @@ export {
   wrapReminder,
 } from './system-reminder.ts';
 export {
+  DEFAULT_LOOP_BLOCK_AT,
+  DEFAULT_LOOP_REMIND_AT,
+  type GuardedTools,
+  type LoopGuardInit,
+  type LoopGuardVerdict,
+  makeToolCallRepairer,
+  resolveToolName,
+  ToolCallLoopTracker,
+  type ToolCallRepairInit,
+  type ToolNameResolution,
+  unknownToolMessage,
+  withLoopGuard,
+} from './tool-guards.ts';
+export {
   DEFAULT_HOOK_TIMEOUT_MS,
   type HookBlockedResult,
   type HookExec,

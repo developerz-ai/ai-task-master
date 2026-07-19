@@ -17,6 +17,8 @@ import { existsSync } from 'node:fs';
 import { relative, resolve as resolvePath } from 'node:path';
 import {
   type AgentToolInput,
+  type BackgroundProcessTools,
+  backgroundProcessTools,
   bashTool,
   type CommandRule,
   contextReminder,
@@ -28,6 +30,7 @@ import {
   type MemoryIndexEntry,
   multiBashTool,
   multiEditTool,
+  type ProcessManager,
   type ReminderProvider,
   type RetryInfo,
   readFileTool,
@@ -161,6 +164,20 @@ type WithExplore<T> = T & { explore?: Tool<AgentToolInput, string> };
 // dir (state context compat's local builders don't have), and a static optional field would trip the
 // #112 TypedToolCall union. Present on the Worker set only when the state port hands out a memory dir.
 type WithMemory<T> = T & { memory?: Tool<MemoryToolInput, string> };
+
+// `bashOutput`/`killBash` (issue #103 background bash) are runtime-only extras for the same #112
+// reason — static optional tool fields would inject `undefined` into the TypedToolCall union. They
+// page and stop the background processes `bash({ run_in_background: true })` starts, mounted only when
+// the run wired a ProcessManager.
+type WithBackground<T> = T & {
+  bashOutput?: BackgroundProcessTools['bashOutput'];
+  killBash?: BackgroundProcessTools['killBash'];
+};
+
+// The run-scoped background-process handle threaded into the tool resolvers: the manager (routed into
+// bashInit so `run_in_background` actually backgrounds) plus the two tools mounted for polling/stopping.
+// One per run; runLoopAdapter kills leftovers at run end.
+type BackgroundTools = Pick<BackgroundProcessTools, 'manager' | 'bashOutput' | 'killBash'>;
 
 // The checkout-confined read-only trio the explore child surveys with — picked from localReadTools
 // so it inherits the same resolveInside confinement, minus the web/datetime tools (the child's
@@ -319,13 +336,20 @@ export function localEditTools(
   cwd: string,
   rules?: readonly CommandRule[],
   fetchHtmlAvailable = false,
+  processManager?: ProcessManager,
 ): WithFetchHtml<WorkerTools> {
   // One FileStateTracker per tool set (per subagent invocation) so read-before-edit enforcement is
   // scoped to a single run — the four file tools share it (issue #104).
   const fileState = new FileStateTracker();
   const staleReminders = makeStaleReminderProvider(fileState, cwd);
-  // Deny/allow governance on the model-facing shell (issue #113). Omitted → no governance.
-  const bashInit = rules ? { cwd, rules: [...rules] } : { cwd };
+  // Deny/allow governance on the model-facing shell (issue #113). Omitted → no governance. A
+  // ProcessManager (when the run wired one) routes `bash({ run_in_background: true })` to a spawned,
+  // pollable process instead of degrading to the foreground (issue #103).
+  const bashInit = {
+    cwd,
+    ...(rules ? { rules: [...rules] } : {}),
+    ...(processManager ? { processManager } : {}),
+  };
   return {
     readFile: withReminders(readFileTool({ cwd, fileState }), staleReminders),
     writeFile: withReminders(writeFileTool({ cwd, fileState }), staleReminders),
@@ -512,6 +536,9 @@ export type OrchestratorBridgeCtx = {
   // Resolve the N/M step counter for a group/task so every harness + agent line carries the run's
   // position (`group 2/5`, `task 3/38`). Built once per run in runLoopAdapter over the plan.
   stepCounter: StepCounterFn;
+  // The run's single background-process handle (issue #103). Threaded into the worker/reviewer tool
+  // resolvers so `bash({ run_in_background: true })` backgrounds and bashOutput/killBash are mounted.
+  background: BackgroundTools;
 };
 
 export type RunLoopAdapterSeams = {
@@ -526,6 +553,7 @@ export type RunLoopAdapterSeams = {
   makeCheckout?: (input: RunLoopInput) => CheckoutHome;
   makeGithub?: (input: RunLoopInput) => WorkLoopGithub;
   makeMcp?: (input: RunLoopInput) => McpClientManager;
+  makeBackground?: (input: RunLoopInput) => BackgroundProcessTools;
   state?: AdapterStatePort;
 };
 
@@ -549,16 +577,24 @@ export async function runLoopAdapter(
           : {}),
       });
 
-  // Reap the MCP stdio children (Experimental_StdioMCPTransport spawns them, mcp-client.ts) the
-  // instant the run is aborted. A second Ctrl-C force-exits the process (cli.ts installSignalHandlers)
-  // and Node's default signal termination skips the `finally` below, so relying on it alone orphans
-  // the servers — close eagerly on abort while we still can. close() is idempotent (it swaps out its
-  // server list before awaiting), so the finally's close is a harmless no-op once this has fired; the
-  // listener is detached in the finally so a normally-completing run never leaks it.
-  const reapMcpOnAbort = () => {
+  // One ProcessManager per run, bound to the repo root the single in-place checkout also uses, so a
+  // `bash({ run_in_background: true })` (dev server, log tailer) actually backgrounds instead of
+  // degrading to the foreground (issue #103). The adapter OWNS its lifecycle: killAll() on abort and
+  // in the finally reaps every process a worker/reviewer left running.
+  const background = seams.makeBackground?.(input) ?? backgroundProcessTools({ cwd: input.cwd });
+
+  // Reap the MCP stdio children (Experimental_StdioMCPTransport spawns them, mcp-client.ts) AND any
+  // leftover background processes the instant the run is aborted. A second Ctrl-C force-exits the
+  // process (cli.ts installSignalHandlers) and Node's default signal termination skips the `finally`
+  // below, so relying on it alone orphans them — reap eagerly on abort while we still can. Both are
+  // idempotent (close() swaps out its server list before awaiting; killAll() only signals still-running
+  // procs), so the finally repeats are harmless; the listener is detached in the finally so a
+  // normally-completing run never leaks it.
+  const reapOnAbort = () => {
     void mcp.close();
+    background.manager.killAll();
   };
-  input.signal?.addEventListener('abort', reapMcpOnAbort, { once: true });
+  input.signal?.addEventListener('abort', reapOnAbort, { once: true });
 
   let mcpConnected = false;
   try {
@@ -649,6 +685,7 @@ export async function runLoopAdapter(
       fetchHtmlAvailable,
       state,
       stepCounter,
+      background,
     });
 
     const loop = new WorkLoop({
@@ -674,7 +711,8 @@ export async function runLoopAdapter(
     });
     return await loop.run();
   } finally {
-    input.signal?.removeEventListener('abort', reapMcpOnAbort);
+    input.signal?.removeEventListener('abort', reapOnAbort);
+    background.manager.killAll();
     if (mcpConnected) {
       await mcp.close();
     }
@@ -831,7 +869,7 @@ export function selfReviewVerifyCommand(
 }
 
 export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
-  const { input, mcp, rollingContext, fetchHtmlAvailable, state, stepCounter } = ctx;
+  const { input, mcp, rollingContext, fetchHtmlAvailable, state, stepCounter, background } = ctx;
   // Rolling context accumulates across groups within a run (issue #123): seeded from what a resumed
   // run already persisted (ctx.rollingContext), grown by openPr after each PR, and read LIVE by the
   // worker + ci-fix bridges — so group N+1 plans against group N's digest. Appends are serialized so
@@ -928,6 +966,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           github,
           input.resolved.bashRules,
           fetchHtmlAvailable,
+          background,
         ),
         ...reviewerMount.extraTools,
       } as ReviewerTools,
@@ -1024,6 +1063,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             fetchHtmlAvailable,
             buildExploreFor(input, checkout.path),
             memoryToolFor(state),
+            background,
           ),
           ...workerMount.extraTools,
         } as WithExplore<WorkerTools> & WithMemory<WorkerTools>,
@@ -1197,6 +1237,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
                 fetchHtmlAvailable,
                 buildExploreFor(input, checkout.path),
                 memoryToolFor(state),
+                background,
               ),
               input,
               checkout.path,
@@ -1269,6 +1310,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           fetchHtmlAvailable,
           buildExploreFor(input, checkout.path),
           memoryToolFor(state),
+          background,
         ),
         input,
         checkout.path,
@@ -1528,8 +1570,9 @@ export function resolveWorkerTools(
   fetchHtmlAvailable = false,
   explore?: Tool<AgentToolInput, string>,
   memory?: Tool<MemoryToolInput, string>,
-): WithExplore<WorkerTools> & WithMemory<WorkerTools> {
-  const local = localEditTools(cwd, rules, fetchHtmlAvailable);
+  background?: BackgroundTools,
+): WithExplore<WorkerTools> & WithMemory<WorkerTools> & WithBackground<WorkerTools> {
+  const local = localEditTools(cwd, rules, fetchHtmlAvailable, background?.manager);
   // fetchHtml is optional: keep the key only when MCP supplies one or the local binary is available.
   const fetchHtml = mcpTool(set, 'fetchHtml') ?? local.fetchHtml;
   return {
@@ -1545,10 +1588,11 @@ export function resolveWorkerTools(
     datetime: mcpTool(set, 'datetime') ?? local.datetime,
     ...(fetchHtml ? { fetchHtml } : {}),
     // explore (#126) + memory (#118) are never MCP-filled — adapter-local glue, present only when
-    // the caller wired them.
+    // the caller wired them. bashOutput/killBash (#103) are the same: run-scoped background handles.
     ...(explore ? { explore } : {}),
     ...(memory ? { memory } : {}),
-  } as WithExplore<WorkerTools> & WithMemory<WorkerTools>;
+    ...(background ? { bashOutput: background.bashOutput, killBash: background.killBash } : {}),
+  } as WithExplore<WorkerTools> & WithMemory<WorkerTools> & WithBackground<WorkerTools>;
 }
 
 function resolveReviewerTools(
@@ -1557,8 +1601,12 @@ function resolveReviewerTools(
   github: Tool<GithubToolInput, GithubToolOutput>,
   rules?: readonly CommandRule[],
   fetchHtmlAvailable = false,
+  background?: BackgroundTools,
 ): ReviewerTools {
-  return { ...resolveWorkerTools(set, cwd, rules, fetchHtmlAvailable), github };
+  return {
+    ...resolveWorkerTools(set, cwd, rules, fetchHtmlAvailable, undefined, undefined, background),
+    github,
+  };
 }
 
 // The Planner gets only the read-only subset, partial-filled the same way. This is also the fix

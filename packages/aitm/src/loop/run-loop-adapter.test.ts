@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   AUTONOMY_CONTRACT_TEXT,
+  backgroundProcessTools,
   COMMUNICATION_CONTRACT_TEXT,
   SUBMIT_TOOL_NAME,
   SYSTEM_REMINDER_CONTRACT,
@@ -548,6 +549,36 @@ test('resume: an interrupted waiting-ci group is rescheduled through the real ad
   assert.equal(s.prGroups[0]?.stage, 'merged');
 });
 
+// ---- Background bash lifecycle (issue #103) --------------------------------
+
+// Poll until `predicate` holds or the budget runs out — avoids racing on async process-exit events.
+async function until(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('until: timed out');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+test('runLoopAdapter: reaps leftover background processes at run end (issue #103)', async () => {
+  // A dev server a worker/reviewer started and never stopped: still running when the run ends. The
+  // adapter owns the manager, so its finally must killAll() it — otherwise the process outlives aitm.
+  const bg = backgroundProcessTools({ cwd: process.cwd() });
+  const leftover = bg.manager.start('sleep 30');
+  assert.equal(leftover.running, true, 'leftover process started');
+  try {
+    await runLoopAdapter(makeInput(), seams({ makeBackground: () => bg }));
+    await until(() => bg.manager.list().every((p) => !p.running));
+    assert.equal(
+      bg.manager.list().every((p) => !p.running),
+      true,
+      'every leftover background process reaped at run end',
+    );
+  } finally {
+    bg.manager.killAll('SIGKILL');
+  }
+});
+
 // ---- Default orchestrator bridge: no MCP → local fs-tools fallback ----------
 
 test('mcpTool: partial-fill matches a namespaced MCP tool by canonical name, first in config order (issue #115)', () => {
@@ -589,6 +620,26 @@ test('localEditTools: threads bash deny/allow rules into the bash + multiBash to
   };
   assert.equal(multiOut.failedAt, 0);
   assert.equal(multiOut.exitCode, 126);
+});
+
+test('localEditTools: a wired ProcessManager routes bash({ run_in_background: true }) to a backgrounded process (issue #103)', async () => {
+  const bg = backgroundProcessTools({ cwd: process.cwd() });
+  try {
+    const tools = localEditTools(process.cwd(), undefined, false, bg.manager);
+    const out = (await tools.bash.execute?.(
+      { command: 'sleep 30', description: 'start a long-lived process', run_in_background: true },
+      { toolCallId: 't', messages: [] as never[] },
+    )) as { stdout: string };
+    // The manager path returns the background id/hint, not the no-manager foreground-degradation notice.
+    assert.match(out.stdout, /Started background process bg-1/);
+    assert.equal(
+      bg.manager.list().some((p) => p.running),
+      true,
+      'the command is tracked as a running background process',
+    );
+  } finally {
+    bg.manager.killAll('SIGKILL');
+  }
 });
 
 // Flatten a tool-result rendering to text for reminder assertions.
@@ -1156,6 +1207,16 @@ test('resolveWorkerTools mounts memory only when the caller wires it (never MCP-
   assert.equal('memory' in withMemory, true, 'memory present when wired');
   const withoutMemory = resolveWorkerTools({}, '/tmp/wt');
   assert.equal('memory' in withoutMemory, false, 'absent when not wired');
+});
+
+test('resolveWorkerTools mounts bashOutput/killBash only when a background manager is wired (issue #103)', () => {
+  const bg = backgroundProcessTools({ cwd: '/tmp/wt' });
+  const withBg = resolveWorkerTools({}, '/tmp/wt', undefined, false, undefined, undefined, bg);
+  assert.equal('bashOutput' in withBg, true, 'bashOutput present when wired');
+  assert.equal('killBash' in withBg, true, 'killBash present when wired');
+  const withoutBg = resolveWorkerTools({}, '/tmp/wt');
+  assert.equal('bashOutput' in withoutBg, false, 'absent when not wired');
+  assert.equal('killBash' in withoutBg, false, 'absent when not wired');
 });
 
 test('resolvePlannerTools mounts explore only when the caller wires it', () => {

@@ -456,16 +456,21 @@ function buildManifestPrompt(input: WorkerInput): string {
 }
 
 // Strip the runtime-only extras the adapter may have mounted on the Worker tool set before the
-// per-file fanout: editors never nest surveys (`explore`, issue #126) and never touch durable memory
-// (`memory`, issue #118) — those belong to the manifest/ci-fix level. Absent → returned unchanged.
+// per-file fanout: editors never nest surveys (`explore`, issue #126), never touch durable memory
+// (`memory`, issue #118), and never manage background processes (`bashOutput`/`killBash`, issue #103)
+// — those belong to the manifest/ci-fix level. Absent → returned unchanged.
 export function editorToolSet(tools: WorkerTools): WorkerTools {
   const {
     explore: _explore,
     memory: _memory,
+    bashOutput: _bashOutput,
+    killBash: _killBash,
     ...rest
   } = tools as WorkerTools & {
     explore?: Tool<unknown, unknown>;
     memory?: Tool<unknown, unknown>;
+    bashOutput?: Tool<unknown, unknown>;
+    killBash?: Tool<unknown, unknown>;
   };
   return rest as WorkerTools;
 }

@@ -15,12 +15,15 @@
 
 import {
   callWithStepTimeout,
+  correctiveMessage,
   formatSubmitIssues,
+  type SubmittedOutput,
   submittedOutput,
 } from '@developerz.ai/ai-claude-compat';
 import {
   generateText,
   hasToolCall,
+  type ModelMessage,
   stepCountIs,
   type TimeoutConfiguration,
   type Tool,
@@ -194,6 +197,42 @@ const PrCompositionSchema = z.object({
 });
 type PrComposition = z.infer<typeof PrCompositionSchema>;
 
+// Corrective re-generations after the first composePr attempt. ≤2 → up to 3 total generations, the
+// same bound as the subagents' in-conversation schema retry (#101). Exported for unit testing.
+export const COMPOSE_PR_MAX_RETRIES = 2;
+
+// One composePr attempt folded into a single outcome: the valid composition, or the reason it failed
+// plus the corrective user message to resend. Two validation layers collapse here — PrCompositionSchema
+// (via submittedOutput) and the section contract (assertPrBodySections) — so composePr's retry loop
+// stays a flat drive over a message array. Exported for unit testing.
+export type ComposeAttempt =
+  | { ok: true; value: PrComposition }
+  | { ok: false; reason: string; correction: string };
+
+export function compositionOutcome(
+  submitted: SubmittedOutput<PrComposition>,
+  sections: readonly string[],
+): ComposeAttempt {
+  if (!submitted.ok) {
+    const reason =
+      submitted.reason === 'invalid'
+        ? `orchestrator PR composition failed schema validation: ${formatSubmitIssues(submitted.issues)}`
+        : 'orchestrator did not submit a PR composition';
+    return { ok: false, reason, correction: correctiveMessage(submitted) };
+  }
+  try {
+    assertPrBodySections(submitted.value.body, sections);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      reason,
+      correction: `${reason}\nCall \`submit\` again with a corrected body that includes every required section heading, verbatim and in order.`,
+    };
+  }
+  return { ok: true, value: submitted.value };
+}
+
 // Standard PR body every aitm-opened PR follows, so reviewers get a consistent shape. The
 // Orchestrator model fills these sections from the worker delivery; exported so the format is
 // unit-testable and documented in one place.
@@ -362,39 +401,50 @@ export class Orchestrator {
     // "tool_choice 'specified'/'required' is incompatible with thinking enabled" and the group blocks
     // at pr-open. With `submit` the only tool and an explicit "call submit" instruction, every model
     // tested still emits exactly one submit call under 'auto' — the same pattern the Worker/Planner
-    // subagents already rely on. A model that ignores it surfaces as the no-submission error below.
-    const result = await callWithStepTimeout(
-      () =>
-        generateText({
-          model: this.init.credentials.modelFor('orchestrator'),
-          system: this.buildSystemPrompt(),
-          prompt: this.buildPrPrompt(group, delivery),
-          tools: {
-            submit: tool({
-              description:
-                'Submit the composed pull-request title and body (the PrComposition schema).',
-              inputSchema: PrCompositionSchema,
-              execute: async (composition) => composition,
-            }),
-          },
-          toolChoice: 'auto',
-          ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
-        }),
-      this.init.timeout,
-    );
-    reportUsage(this.init.onUsage, result);
-    // Forced single-step submit (toolChoice), so there's no agent loop to retry through here (that
-    // recovery is for the subagents, issue #101). Surface the typed extraction failure as an error.
-    const out = submittedOutput(result, PrCompositionSchema);
-    if (!out.ok) {
-      throw new Error(
-        out.reason === 'invalid'
-          ? `orchestrator PR composition failed schema validation: ${formatSubmitIssues(out.issues)}`
-          : 'orchestrator did not submit a PR composition',
+    // subagents already rely on.
+    //
+    // Single-shot generateText, not an agent loop (the thinking-model constraint rules out a forced
+    // submit), so schema/section recovery is driven inline here: on a botched submit —
+    // PrCompositionSchema or assertPrBodySections — append the model's own bad turn plus one
+    // corrective user message and re-generate over the growing message array, up to
+    // COMPOSE_PR_MAX_RETRIES. Mirrors the subagents' in-conversation #101 retry. Exhausted retries
+    // re-throw the last reason (making composePr total is a separate concern).
+    const model = this.init.credentials.modelFor('orchestrator');
+    const sections = this.prBodySections();
+    let messages: ModelMessage[] = [{ role: 'user', content: this.buildPrPrompt(group, delivery) }];
+    let lastReason = 'orchestrator did not submit a PR composition';
+    for (let attempt = 0; attempt <= COMPOSE_PR_MAX_RETRIES; attempt++) {
+      const result = await callWithStepTimeout(
+        () =>
+          generateText({
+            model,
+            system: this.buildSystemPrompt(),
+            messages,
+            tools: {
+              submit: tool({
+                description:
+                  'Submit the composed pull-request title and body (the PrComposition schema).',
+                inputSchema: PrCompositionSchema,
+                execute: async (composition) => composition,
+              }),
+            },
+            toolChoice: 'auto',
+            ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
+          }),
+        this.init.timeout,
       );
+      reportUsage(this.init.onUsage, result);
+      const outcome = compositionOutcome(submittedOutput(result, PrCompositionSchema), sections);
+      if (outcome.ok) return outcome.value;
+      lastReason = outcome.reason;
+      if (attempt === COMPOSE_PR_MAX_RETRIES) break;
+      messages = [
+        ...messages,
+        ...result.response.messages,
+        { role: 'user', content: outcome.correction },
+      ];
     }
-    assertPrBodySections(out.value.body, this.prBodySections());
-    return out.value;
+    throw new Error(lastReason);
   }
 
   // Task-specific ask only — the shared system prompt is sent once via `system` (see composePr).

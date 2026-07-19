@@ -24,6 +24,8 @@ import {
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
   assertPrBodySections,
+  COMPOSE_PR_MAX_RETRIES,
+  compositionOutcome,
   DEFAULT_MAX_STEPS,
   type GhClient,
   ORCHESTRATOR_ROLE_PREFIX,
@@ -94,6 +96,35 @@ function modelSubmitting(value: unknown): MockLanguageModelV3 {
       warnings: [],
     }),
   });
+}
+
+// A model that submits each composition in `values` on successive generations (the last repeats),
+// exposing a live call count — drives the composePr in-conversation retry loop across attempts.
+function sequenceModel(values: readonly unknown[]): {
+  model: MockLanguageModelV3;
+  count: () => number;
+} {
+  let calls = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      const value = values[Math.min(calls, values.length - 1)];
+      calls += 1;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify(value ?? {}),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  return { model, count: () => calls };
 }
 
 function recordingProvider(model: MockLanguageModelV3): {
@@ -690,8 +721,8 @@ test('openPr prompt instructs the standard PR body template', async () => {
 });
 
 test('composePr throws a schema-validation error when the submitted composition is invalid (issue #101)', async () => {
-  // submit called with a composition missing `body` → PrCompositionSchema.safeParse fails →
-  // the forced-submit path (no agent loop, no retry) surfaces the typed failure as an error.
+  // submit called with a composition missing `body` → PrCompositionSchema.safeParse fails on every
+  // attempt → after the in-conversation retries exhaust, the typed failure surfaces as an error.
   const model = new MockLanguageModelV3({
     doGenerate: async () => ({
       content: [
@@ -739,6 +770,165 @@ test('composePr throws a no-submission error when the model never submits a comp
     o.openPr(baseGroup(), baseDelivery(), 'main'),
     /did not submit a PR composition/i,
   );
+});
+
+test('composePr retries over an over-long title, then accepts the corrected resubmit', async () => {
+  // Attempt 0 exceeds the 72-char cap (PrCompositionSchema) → one corrective retry → attempt 1 valid.
+  const good = { title: 'feat: core — add a', body: COMPLIANT_BODY };
+  const { model, count } = sequenceModel([{ title: 'x'.repeat(80), body: COMPLIANT_BODY }, good]);
+  const { provider } = recordingProvider(model);
+  const createCalls: CreatePrInput[] = [];
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: {
+      createPr: async (input) => {
+        createCalls.push(input);
+        return basePr(input.head);
+      },
+    },
+  });
+  const pr = await o.openPr(baseGroup(), baseDelivery(), 'main');
+  assert.equal(pr.number, 42);
+  assert.equal(count(), 2, 'exactly one corrective retry');
+  assert.equal(createCalls[0]?.title, good.title, 'the PR opens with the corrected title');
+});
+
+test('composePr retries over a body missing a required section, then accepts the corrected resubmit', async () => {
+  // Attempt 0 is schema-valid but its body lacks Changes/Testing (assertPrBodySections) → retry.
+  const good = { title: 'feat: core', body: COMPLIANT_BODY };
+  const { model, count } = sequenceModel([
+    { title: 'feat: core', body: '## Summary\nonly this' },
+    good,
+  ]);
+  const { provider } = recordingProvider(model);
+  const createCalls: CreatePrInput[] = [];
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: {
+      createPr: async (input) => {
+        createCalls.push(input);
+        return basePr(input.head);
+      },
+    },
+  });
+  await o.openPr(baseGroup(), baseDelivery(), 'main');
+  assert.equal(count(), 2, 'exactly one corrective retry');
+  assert.equal(createCalls[0]?.body, good.body);
+});
+
+test('composePr feeds the schema failure back as a corrective user turn, keeping the original prompt', async () => {
+  const prompts: string[] = [];
+  let calls = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      prompts.push(JSON.stringify(options.prompt));
+      const value =
+        calls++ === 0
+          ? { title: 'x'.repeat(80), body: COMPLIANT_BODY }
+          : { title: 'feat: core', body: COMPLIANT_BODY };
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify(value),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await o.openPr(baseGroup(), baseDelivery(), 'main');
+  assert.equal(calls, 2);
+  const retryPrompt = prompts[1] ?? '';
+  assert.match(retryPrompt, /failed schema validation/i, 'the retry quotes the schema failure');
+  assert.match(retryPrompt, /PR group goal/, 'the original composition prompt is retained');
+});
+
+test('composePr bounds correction to COMPOSE_PR_MAX_RETRIES generations, then throws', async () => {
+  // Every attempt exceeds the title cap — the loop must stop after 1 + COMPOSE_PR_MAX_RETRIES tries.
+  const { model, count } = sequenceModel([{ title: 'x'.repeat(80), body: COMPLIANT_BODY }]);
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await assert.rejects(o.openPr(baseGroup(), baseDelivery(), 'main'), /schema validation/i);
+  assert.equal(count(), COMPOSE_PR_MAX_RETRIES + 1);
+});
+
+test('composePr rethrows the section-contract failure when every retry omits a section', async () => {
+  const { model, count } = sequenceModel([{ title: 'feat: core', body: '## Summary\nonly this' }]);
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await assert.rejects(o.openPr(baseGroup(), baseDelivery(), 'main'), /heading lines/);
+  assert.equal(count(), COMPOSE_PR_MAX_RETRIES + 1);
+});
+
+test('compositionOutcome: valid submission with a compliant body → ok', () => {
+  const outcome = compositionOutcome(
+    { ok: true, value: { title: 'feat: core', body: COMPLIANT_BODY } },
+    PR_BODY_SECTIONS,
+  );
+  assert.deepEqual(outcome, { ok: true, value: { title: 'feat: core', body: COMPLIANT_BODY } });
+});
+
+test('compositionOutcome: no-submission → reason + a submit corrective', () => {
+  const outcome = compositionOutcome({ ok: false, reason: 'no-submission' }, PR_BODY_SECTIONS);
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) throw new Error('unreachable');
+  assert.match(outcome.reason, /did not submit a PR composition/);
+  assert.match(outcome.correction, /submit/i);
+});
+
+test('compositionOutcome: schema-invalid → reason quotes issues, corrective asks for a resubmit', () => {
+  const issues = z.string().max(72).safeParse('x'.repeat(80));
+  if (issues.success) throw new Error('expected a validation failure');
+  const outcome = compositionOutcome(
+    { ok: false, reason: 'invalid', issues: issues.error.issues },
+    PR_BODY_SECTIONS,
+  );
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) throw new Error('unreachable');
+  assert.match(outcome.reason, /failed schema validation/);
+  assert.match(outcome.correction, /failed schema validation/);
+});
+
+test('compositionOutcome: valid submission with a non-compliant body → section corrective', () => {
+  const outcome = compositionOutcome(
+    { ok: true, value: { title: 'feat: core', body: '## Summary\nonly this' } },
+    PR_BODY_SECTIONS,
+  );
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) throw new Error('unreachable');
+  assert.match(outcome.reason, /heading lines/);
+  assert.match(outcome.correction, /submit/i);
 });
 
 test('openPr prompt anchors the title on the group goal, not the worker draft message', async () => {

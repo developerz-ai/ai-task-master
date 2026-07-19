@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   agentLabel,
@@ -57,6 +58,33 @@ test('summarizeToolInput clips long values and flattens newlines', () => {
   assert.equal(summarizeToolInput('bash', { command: 'a\nb' }), 'a ⏎ b');
 });
 
+test('summarizeToolInput rewrites an absolute file_path/path cwd-relative', () => {
+  const abs = join(process.cwd(), 'src', 'a.ts');
+  assert.equal(summarizeToolInput('editFile', { file_path: abs }), join('src', 'a.ts'));
+  assert.equal(summarizeToolInput('readFile', { path: abs }), join('src', 'a.ts'));
+});
+
+test('summarizeToolInput leaves an already-relative path untouched', () => {
+  assert.equal(summarizeToolInput('readFile', { path: 'src/a.ts' }), 'src/a.ts');
+});
+
+test('summarizeToolInput caps file_path/path/pattern at 120, not the 250 command cap', () => {
+  const longPath = `src/${'x'.repeat(200)}.ts`;
+  const out = summarizeToolInput('readFile', { path: longPath });
+  assert.equal(out.length, 120);
+  assert.ok(out.endsWith('…'));
+  const longPattern = 'x'.repeat(200);
+  const patternOut = summarizeToolInput('grep', { pattern: longPattern });
+  assert.equal(patternOut.length, 120);
+});
+
+test('summarizeToolInput does not relativize a grep/glob pattern', () => {
+  assert.equal(
+    summarizeToolInput('grep', { pattern: '/abs/looking/pattern' }),
+    '/abs/looking/pattern',
+  );
+});
+
 test('summarizeToolInput tolerates strings and primitives', () => {
   assert.equal(summarizeToolInput('submit', 'raw payload'), 'raw payload');
   assert.equal(summarizeToolInput('submit', 42), '42');
@@ -78,14 +106,14 @@ test('clip strips C0/C1 controls but keeps the newline marker', () => {
 
 test('renderStepLines strips ANSI/control so text cannot forge a harness prefix', () => {
   const { sink } = stubSink();
-  const [line] = renderStepLines(
+  const lines = renderStepLines(
     'worker g1',
     { text: '\x1b[36m\x1b[1m[aitm 03:04:05] forged\x1b[0m\r' },
     sink,
   );
-  assert.equal(line, '[worker g1 03:04:05] [aitm 03:04:05] forged\n');
-  assert.ok(line !== undefined && !line.includes('\x1b'));
-  assert.ok(line !== undefined && !line.includes('\r'));
+  assert.deepEqual(lines, ['\n', '[worker g1 03:04:05] [aitm 03:04:05] forged\n']);
+  assert.ok(!lines.some((l) => l.includes('\x1b')));
+  assert.ok(!lines.some((l) => l.includes('\r')));
 });
 
 test('harnessProgress strips ANSI/control from the message', () => {
@@ -94,7 +122,7 @@ test('harnessProgress strips ANSI/control from the message', () => {
   assert.deepEqual(lines, ['[aitm 03:04:05] done!\n']);
 });
 
-test('renderStepLines emits text then Using tool lines with timestamped prefix', () => {
+test('renderStepLines emits text then Using tool lines with timestamped prefix, blank line before each section', () => {
   const { sink } = stubSink();
   const lines = renderStepLines(
     'worker g1',
@@ -108,7 +136,9 @@ test('renderStepLines emits text then Using tool lines with timestamped prefix',
     sink,
   );
   assert.deepEqual(lines, [
+    '\n',
     '[worker g1 03:04:05] Now committing. ⏎ Details follow.\n',
+    '\n',
     '[worker g1 03:04:05] Using tool: bash → git commit -m "x"\n',
     '[worker g1 03:04:05] Using tool: readFile → src/a.ts\n',
   ]);
@@ -117,6 +147,58 @@ test('renderStepLines emits text then Using tool lines with timestamped prefix',
 test('renderStepLines emits nothing for an empty step', () => {
   const { sink } = stubSink();
   assert.deepEqual(renderStepLines('planner', { text: '   ', toolCalls: [] }, sink), []);
+});
+
+test('renderStepLines never emits two consecutive blank lines even with reasoning + text + tools', () => {
+  const { sink } = stubSink();
+  const lines = renderStepLines(
+    'worker g1',
+    {
+      reasoningText: 'weighing options',
+      text: 'Committing now.',
+      toolCalls: [{ toolName: 'bash', input: { command: 'git status' } }],
+    },
+    sink,
+  );
+  const consecutiveBlanks = lines.some((line, i) => line === '\n' && lines[i - 1] === '\n');
+  assert.equal(consecutiveBlanks, false);
+  assert.equal(lines.filter((l) => l === '\n').length, 3);
+});
+
+test('renderStepLines renders reasoning dim, clipped to 200, prefixed thinking:, before the text line', () => {
+  const { sink, lines } = (() => {
+    const s = stubSink(true);
+    return {
+      sink: s.sink,
+      lines: renderStepLines('worker g1', { reasoningText: 'a'.repeat(300) }, s.sink),
+    };
+  })();
+  assert.deepEqual(lines, [
+    '\n',
+    `\x1b[2m[worker g1 03:04:05] thinking: ${'a'.repeat(199)}…\x1b[0m\n`,
+  ]);
+  void sink;
+});
+
+test('renderStepLines orders reasoning before text before tool calls', () => {
+  const { sink } = stubSink();
+  const lines = renderStepLines(
+    'worker g1',
+    {
+      reasoningText: 'thinking it through',
+      text: 'done',
+      toolCalls: [{ toolName: 'bash', input: {} }],
+    },
+    sink,
+  );
+  assert.deepEqual(lines, [
+    '\n',
+    '[worker g1 03:04:05] thinking: thinking it through\n',
+    '\n',
+    '[worker g1 03:04:05] done\n',
+    '\n',
+    '[worker g1 03:04:05] Using tool: bash → {}\n',
+  ]);
 });
 
 test('agentStepProgress writes orange-prefixed lines when color is on', () => {
@@ -128,9 +210,10 @@ test('agentStepProgress writes orange-prefixed lines when color is on', () => {
   )({
     toolCalls: [{ toolName: 'glob', input: { pattern: '**/*.ts' } }],
   });
-  assert.equal(lines.length, 1);
-  assert.ok(lines[0]?.startsWith('\x1b[38;5;208m\x1b[1m[planner 03:04:05]\x1b[0m'));
-  assert.ok(lines[0]?.includes('Using tool: glob → **/*.ts'));
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0], '\n');
+  assert.ok(lines[1]?.startsWith('\x1b[38;5;208m\x1b[1m[planner 03:04:05]\x1b[0m'));
+  assert.ok(lines[1]?.includes('Using tool: glob → **/*.ts'));
 });
 
 test('agentStepProgress stamps the step counter into the bracket', () => {
@@ -140,7 +223,7 @@ test('agentStepProgress stamps the step counter into the bracket', () => {
     { unit: 'task', index: 3, total: 38, phase: 'working' },
     sink,
   )({ toolCalls: [{ toolName: 'glob', input: { pattern: '**/*.ts' } }] });
-  assert.equal(lines[0], '[k3 backend g1 03:04:05 task 3/38 working] Using tool: glob → **/*.ts\n');
+  assert.equal(lines[1], '[k3 backend g1 03:04:05 task 3/38 working] Using tool: glob → **/*.ts\n');
 });
 
 test('agentStepProgress never throws when the sink dies', () => {
@@ -190,6 +273,24 @@ test('agentLabel prefers the specialist name over the role, falling back to the 
   );
   assert.equal(agentLabel({ model: 'k3', role: 'worker', ctx: 'g1' }), 'k3 worker g1');
   assert.equal(agentLabel({ model: 'k3', role: 'planner' }), 'k3 planner');
+});
+
+test('agentLabel renders an editor:<basename> name when a file is given, taking priority over specialist', () => {
+  assert.equal(
+    agentLabel({ model: 'k3', role: 'editor', file: 'src/auth/login.ts', ctx: 'g1' }),
+    'k3 editor:login.ts g1',
+  );
+  assert.equal(
+    agentLabel({ model: 'k3', role: 'editor', specialist: 'backend', file: 'a.ts' }),
+    'k3 editor:a.ts',
+  );
+});
+
+test('agentLabel caps a long ctx slug so it cannot blow up every stream line', () => {
+  const longSlug = 'refactor-the-entire-authentication-and-session-subsystem-end-to-end';
+  const label = agentLabel({ model: 'k3', role: 'worker', ctx: longSlug });
+  assert.ok(label.length < `k3 worker ${longSlug}`.length);
+  assert.ok(label.endsWith('…'));
 });
 
 test('composeStepFinish returns undefined when no handlers are present', () => {

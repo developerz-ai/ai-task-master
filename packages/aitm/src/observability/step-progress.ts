@@ -10,10 +10,15 @@
 // across the Worker's parallel editor fanout, unlike the transcript recorder's delta slicing
 // (issue #175).
 
+import { basename, isAbsolute, relative } from 'node:path';
+
 const DETAIL_MAX = 250;
+const SHORT_DETAIL_MAX = 120;
+const REASONING_MAX = 200;
 
 const CYAN_BOLD = '\x1b[36m\x1b[1m';
 const ORANGE_BOLD = '\x1b[38;5;208m\x1b[1m';
+const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
 
 // Structural slice of the SDK's StepResult that progress rendering needs. Kept structural so the
@@ -21,6 +26,9 @@ const RESET = '\x1b[0m';
 export type StepProgressEvent = {
   text?: string;
   toolCalls?: ReadonlyArray<{ toolName: string; input: unknown }>;
+  // The model's chain-of-thought for this step, when the provider surfaces one. Optional: most
+  // steps and most models never set it.
+  reasoningText?: string | undefined;
 };
 
 // The STATE + STEP a line is reported under (claudetm parity): a phase word (`working`, `pr-open`,
@@ -47,18 +55,28 @@ export function formatStepTag(step: RunStep): string {
   return parts.join(' ');
 }
 
+// Every stream line repeats this label, so it stays short: the group/task context is capped
+// rather than spelled out — callers print the full group slug once via `harnessProgress` on
+// group start, then pass a short `g<N>`-style ctx (or whatever they have) for every line after.
+const CTX_MAX = 24;
+
 // Compose a per-agent stream-line label: model, then the subagent's name — a routed domain
-// specialist's name when one was picked, else the bare role — then optional context (the group id).
-// Single source of truth for the specialist-else-role choice so the worker/reviewer/ci-fix call
-// sites don't each hand-roll it. No specialist → `k3 worker g1` (today's label, unchanged).
+// specialist's name when one was picked, else the bare role, else `role:<basename>` for a
+// per-file editor fanout (05 spawns one editor per file and needs to tell them apart) — then
+// optional context (the group id), capped so a long slug can't blow up every line. No specialist,
+// no file → `k3 worker g1` (today's label, unchanged).
 export function agentLabel(input: {
   model: string;
   role: string;
   specialist?: string;
+  file?: string;
   ctx?: string;
 }): string {
-  const name = input.specialist ?? input.role;
-  return input.ctx ? `${input.model} ${name} ${input.ctx}` : `${input.model} ${name}`;
+  const name = input.file
+    ? `${input.role}:${basename(input.file)}`
+    : (input.specialist ?? input.role);
+  const ctx = input.ctx ? clip(input.ctx, CTX_MAX) : undefined;
+  return ctx ? `${input.model} ${name} ${ctx}` : `${input.model} ${name}`;
 }
 
 // Output seam: where lines go, whether ANSI color is applied, and the clock. Injectable for tests;
@@ -77,13 +95,24 @@ function defaultSink(): ProgressSink {
   };
 }
 
-function prefix(label: string, sink: ProgressSink, colorCode: string, tag = ''): string {
+function bracket(label: string, sink: ProgressSink, tag: string): string {
   const t = sink.now();
   const hh = String(t.getHours()).padStart(2, '0');
   const mm = String(t.getMinutes()).padStart(2, '0');
   const ss = String(t.getSeconds()).padStart(2, '0');
-  const body = tag ? `[${label} ${hh}:${mm}:${ss} ${tag}]` : `[${label} ${hh}:${mm}:${ss}]`;
+  return tag ? `[${label} ${hh}:${mm}:${ss} ${tag}]` : `[${label} ${hh}:${mm}:${ss}]`;
+}
+
+function prefix(label: string, sink: ProgressSink, colorCode: string, tag = ''): string {
+  const body = bracket(label, sink, tag);
   return sink.color ? `${colorCode}${body}${RESET}` : body;
+}
+
+// The reasoning line rides the same bracket as tool/text lines but dims the WHOLE line — bracket
+// included — so it reads as background chatter next to the orange work lines, not another one.
+function dimLine(label: string, sink: ProgressSink, tag: string, message: string): string {
+  const body = `${bracket(label, sink, tag)} ${message}`;
+  return sink.color ? `${DIM}${body}${RESET}\n` : `${body}\n`;
 }
 
 // Model text and tool inputs are attacker-influenced strings, and every one of them reaches stderr
@@ -129,6 +158,21 @@ export function shortModelName(modelId: string): string {
   return clip(noVariant === '' ? modelId : noVariant, 40);
 }
 
+// Keys that hold a filesystem path: rewritten cwd-relative (claudetm `_relative_path`) so a line
+// reads `src/a.ts`, not the checkout's full absolute path. `pattern` shares the short cap below
+// but isn't a path (grep/glob patterns aren't relative-izable), so it's excluded here.
+const PATH_KEYS = new Set(['file_path', 'path']);
+
+// Keys short enough that a long value is more noise than signal on a one-line stream — capped
+// tighter than `command`, which is the whole point of the line.
+const SHORT_DETAIL_KEYS = new Set(['file_path', 'path', 'pattern']);
+
+function relativizePath(value: string): string {
+  if (!isAbsolute(value)) return value;
+  const rel = relative(process.cwd(), value);
+  return rel === '' ? '.' : rel;
+}
+
 // One-line, length-capped rendering of a tool call's input.
 export function summarizeToolInput(toolName: string, input: unknown): string {
   if (typeof input === 'string') return clip(input);
@@ -140,7 +184,9 @@ export function summarizeToolInput(toolName: string, input: unknown): string {
   const parts: string[] = [];
   for (const key of DETAIL_KEYS) {
     const value = record[key];
-    if (typeof value === 'string' && value.trim() !== '') parts.push(value);
+    if (typeof value !== 'string' || value.trim() === '') continue;
+    const resolved = PATH_KEYS.has(key) ? relativizePath(value) : value;
+    parts.push(SHORT_DETAIL_KEYS.has(key) ? clip(resolved, SHORT_DETAIL_MAX) : resolved);
   }
   if (parts.length > 0) return clip(parts.join(' '));
   try {
@@ -150,7 +196,10 @@ export function summarizeToolInput(toolName: string, input: unknown): string {
   }
 }
 
-// Render one finished agent step: its text response, then one `Using tool:` line per call.
+// Render one finished agent step: reasoning, then its text response, then one `Using tool:` line
+// per call — each section (claudetm `agent_message.py:63-66` pattern) opens with a blank line so
+// a fast-moving stream still reads as distinct chunks. `blank` is idempotent: back-to-back
+// sections (e.g. reasoning immediately followed by text) never produce two blanks in a row.
 export function renderStepLines(
   label: string,
   event: StepProgressEvent,
@@ -159,9 +208,25 @@ export function renderStepLines(
 ): string[] {
   const tag = step ? formatStepTag(step) : '';
   const lines: string[] = [];
+  const blank = (): void => {
+    if (lines[lines.length - 1] !== '\n') lines.push('\n');
+  };
+
+  const reasoning = event.reasoningText?.trim();
+  if (reasoning) {
+    blank();
+    lines.push(dimLine(label, sink, tag, `thinking: ${clip(reasoning, REASONING_MAX)}`));
+  }
+
   const text = event.text?.trim();
-  if (text) lines.push(`${prefix(label, sink, ORANGE_BOLD, tag)} ${clip(text)}\n`);
-  for (const call of event.toolCalls ?? []) {
+  if (text) {
+    blank();
+    lines.push(`${prefix(label, sink, ORANGE_BOLD, tag)} ${clip(text)}\n`);
+  }
+
+  const toolCalls = event.toolCalls ?? [];
+  if (toolCalls.length > 0) blank();
+  for (const call of toolCalls) {
     const detail = summarizeToolInput(call.toolName, call.input);
     lines.push(
       `${prefix(label, sink, ORANGE_BOLD, tag)} Using tool: ${call.toolName}${detail ? ` → ${detail}` : ''}\n`,

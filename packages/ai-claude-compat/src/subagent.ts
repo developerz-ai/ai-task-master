@@ -92,6 +92,10 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   // to append each completed step to a persisted transcript (issue #108). Omitted → not registered,
   // behavior byte-identical.
   onStepFinish?: ToolLoopAgentSettings<never, TOOLS>['onStepFinish'];
+  // Forwarded to callWithStepTimeout's RetryOptions (slice 01b) so a caller can surface each retry
+  // attempt (e.g. to the console) instead of a whole backoff window going silent. Omitted → no sink,
+  // byte-identical retry behavior.
+  onRetry?: RetryOptions['onRetry'];
 };
 
 // Wrap a ToolLoopAgent: register the caller's tools plus the `submit` tool, and stop when the step
@@ -114,26 +118,35 @@ export function createSubagent<TOOLS extends ToolSet>(
     // Agent-wide per-step callback (issue #108). Omitted when unset → not registered.
     ...(config.onStepFinish ? { onStepFinish: config.onStepFinish } : {}),
   });
-  if (config.timeout !== undefined) armStepTimeout(agent, config.timeout);
+  if (config.timeout !== undefined || config.onRetry !== undefined) {
+    armStepTimeout(agent, config.timeout, config.onRetry);
+  }
   return agent;
 }
 
-// Arm the per-step deadline at generate time. The pinned AI SDK (ai@6.0.182) drops a
-// constructor-level `timeout`: `ToolLoopAgent.generate` destructures the per-call `timeout` and
-// forwards it to `generateText`, so the prepared constructor settings are overwritten with
+// Arm the per-step deadline (and retry reporting) at generate time. The pinned AI SDK (ai@6.0.182)
+// drops a constructor-level `timeout`: `ToolLoopAgent.generate` destructures the per-call `timeout`
+// and forwards it to `generateText`, so the prepared constructor settings are overwritten with
 // `undefined` on every call that omits it — which is every aitm call site. We therefore wrap
 // `generate` to inject the configured timeout when the caller supplied neither a `timeout` nor an
 // `abortSignal` (either means the caller owns the deadline, so we leave it untouched), and translate
-// the SDK's generic abort into a deadline-named error via callWithStepTimeout.
+// the SDK's generic abort into a deadline-named error via callWithStepTimeout. `onRetry` rides along
+// unconditionally — it is armed even with no configured `timeout`, so a caller that only wants retry
+// visibility doesn't have to opt into a deadline to get it.
 function armStepTimeout<TOOLS extends ToolSet>(
   agent: ToolLoopAgent<never, TOOLS>,
-  timeout: TimeoutConfiguration,
+  timeout: TimeoutConfiguration | undefined,
+  onRetry: RetryOptions['onRetry'],
 ): void {
   type Generate = ToolLoopAgent<never, TOOLS>['generate'];
   const original = agent.generate.bind(agent) as Generate;
   const wrapped: Generate = (params) => {
     if (params.timeout !== undefined || params.abortSignal !== undefined) return original(params);
-    return callWithStepTimeout(() => original({ ...params, timeout }), timeout);
+    return callWithStepTimeout(
+      () => original(timeout === undefined ? params : { ...params, timeout }),
+      timeout,
+      onRetry === undefined ? {} : { onRetry },
+    );
   };
   agent.generate = wrapped;
 }

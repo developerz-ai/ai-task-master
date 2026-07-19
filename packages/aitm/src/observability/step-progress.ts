@@ -99,12 +99,19 @@ export type ProgressSink = {
   now: () => Date;
 };
 
-function defaultSink(): ProgressSink {
+// Exported so callers that need to share ONE sink instance across several emitters (the heartbeat,
+// slice 01b — it must see every write those emitters make to tell silence from activity) can build
+// one with the exact same stderr/TTY/clock behavior as the module-internal default.
+export function defaultProgressSink(): ProgressSink {
   return {
     write: (line) => process.stderr.write(line),
     color: process.stderr.isTTY === true && process.env.NO_COLOR === undefined,
     now: () => new Date(),
   };
+}
+
+function defaultSink(): ProgressSink {
+  return defaultProgressSink();
 }
 
 function bracket(label: string, sink: ProgressSink, tag: string): string {

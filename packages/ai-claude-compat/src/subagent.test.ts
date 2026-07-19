@@ -304,6 +304,62 @@ test('createSubagent: with timeout omitted no deadline is armed — a stalled st
   await gen;
 });
 
+// A model whose first doGenerate call throws a transient (retryable) provider error, then submits
+// on the next call — drives the onRetry-wiring tests below through a real generate() round trip.
+function retryOnceThenSubmitModel(): MockLanguageModelV3 {
+  let calls = 0;
+  return new MockLanguageModelV3({
+    doGenerate: async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('rate limited'), { statusCode: 429 });
+      return {
+        content: [
+          { type: 'tool-call', toolCallId: 'submit-1', toolName: 'submit', input: '{"n":1}' },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+}
+
+test('createSubagent: forwards onRetry to the retry kernel alongside a configured timeout (issue #01b)', async () => {
+  const infos: RetryInfo[] = [];
+  const agent = createSubagent(
+    {
+      model: retryOnceThenSubmitModel(),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      timeout: { stepMs: 5_000 },
+      onRetry: (info) => void infos.push(info),
+    },
+    12,
+  );
+  const result = await agent.generate({ prompt: 'go' });
+  assert.equal(result.finishReason, 'tool-calls');
+  assert.equal(infos.length, 1, 'the transient 429 was retried once, reported via onRetry');
+  assert.equal(infos[0]?.reason, 'HTTP 429');
+});
+
+test('createSubagent: onRetry fires even with no configured timeout — retry visibility does not require a deadline (issue #01b)', async () => {
+  const infos: RetryInfo[] = [];
+  const agent = createSubagent(
+    {
+      model: retryOnceThenSubmitModel(),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onRetry: (info) => void infos.push(info),
+    },
+    12,
+  );
+  const result = await agent.generate({ prompt: 'go' });
+  assert.equal(result.finishReason, 'tool-calls');
+  assert.equal(infos.length, 1, 'onRetry armed generate() even though no timeout was configured');
+});
+
 // --- callWithStepTimeout (translate abort → named timeout) ---
 
 test('callWithStepTimeout: returns the value when the call resolves', async () => {

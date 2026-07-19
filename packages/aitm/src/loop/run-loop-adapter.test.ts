@@ -55,6 +55,7 @@ import {
   resolvePlannerTools,
   resolveStyleContents,
   resolveWorkerTools,
+  retryProgressMessage,
   runLoopAdapter,
   runStepContextLine,
   sanitizeBranchComponent,
@@ -1006,6 +1007,29 @@ test('describeError: a non-Error throw is wrapped, same message text, original v
   const described = describeError('disk full');
   assert.equal(described.message, 'disk full');
   assert.equal(described.cause, 'disk full');
+});
+
+// ---- retryProgressMessage (issue #01b liveliness) --------------------------
+
+test('retryProgressMessage: renders reason, seconds, and the attempt/max ratio — never an empty "Rate limited:" line', () => {
+  const line = retryProgressMessage({
+    attempt: 3,
+    maxAttempts: 10,
+    delayMs: 15_000,
+    reason: 'HTTP 429',
+  });
+  assert.equal(line, 'Rate limited (HTTP 429), retrying in 15s (3/10)');
+});
+
+test('retryProgressMessage: rounds a sub-second delay to whole seconds, never negative', () => {
+  assert.equal(
+    retryProgressMessage({ attempt: 1, maxAttempts: 10, delayMs: 600, reason: 'overloaded' }),
+    'Rate limited (overloaded), retrying in 1s (1/10)',
+  );
+  assert.equal(
+    retryProgressMessage({ attempt: 1, maxAttempts: 10, delayMs: -50, reason: 'overloaded' }),
+    'Rate limited (overloaded), retrying in 0s (1/10)',
+  );
 });
 
 test('createRollingContextAccumulator serializes concurrent appends without losing a digest', async () => {

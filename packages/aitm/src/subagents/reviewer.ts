@@ -128,6 +128,7 @@ export function createReviewerAgent(init: SubagentInit<ReviewerTools>): Reviewer
       ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
       ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
       ...(init.onStepFinish ? { onStepFinish: init.onStepFinish } : {}),
+      ...(init.onRetry ? { onRetry: init.onRetry } : {}),
     },
     REVIEWER_MAX_STEPS,
   );

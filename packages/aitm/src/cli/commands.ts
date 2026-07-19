@@ -847,12 +847,6 @@ const defaultAuthStatus: AuthStatusFn = (cwd) => new GitHubClient(cwd).authStatu
 // the surrounding cache IO so a flaky style step can't halt planning or merging.
 async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
   const { cwd, credentials, agentConfig, state } = input;
-  const styleFile =
-    agentConfig.flavor === 'claude'
-      ? 'CLAUDE.md'
-      : agentConfig.flavor === 'agents'
-        ? 'AGENTS.md'
-        : 'the style override';
   try {
     const cached = await state.readCodingStyle();
     if (cached !== null && cached.trim() !== '') {
@@ -862,18 +856,18 @@ async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
   } catch {
     // Unreadable cache (non-ENOENT) — distill fresh rather than block the run.
   }
-  // The distillation is an LLM call — announce it so the pre-planning pause isn't a silent gap.
-  harnessProgress(
-    `coding style: distilling from ${styleFile} with ${credentials.modelIdFor('planner')}...`,
-  );
   let digest: string;
   try {
     // Style distillation runs on the planner's model, so its usage is recorded under `planner`.
     const onUsage = roleUsageSink(input.usage, 'planner', credentials.modelIdFor('planner'));
+    const plannerModelId = credentials.modelIdFor('planner');
     const distiller = new StyleDistiller({
       model: credentials.modelFor('planner'),
       timeout: { stepMs: input.llmStepTimeoutMs },
       ...(onUsage ? { onUsage } : {}),
+      // Single coarse announcement (no per-signal-file steps) so the pre-planning pause isn't a
+      // silent gap — fired by StyleDistiller itself, once it knows what it actually gathered.
+      onProgress: (message) => harnessProgress(`${message} with ${plannerModelId}`),
     });
     digest = await distiller.distill({ config: agentConfig, repoRoot: cwd });
   } catch {

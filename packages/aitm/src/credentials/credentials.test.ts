@@ -25,6 +25,18 @@ function modelIdOf(handle: LanguageModel): string {
   return handle.modelId;
 }
 
+// Reads the `extraBody` the provider stored on a built handle (a public `readonly settings` on the
+// OpenRouter model). Narrows through `unknown` — no casts — so a regression that drops the sessionId
+// passthrough in modelForCapability is caught end-to-end, not just in the pure helper.
+function extraBodyOf(handle: LanguageModel): unknown {
+  if (typeof handle === 'string' || !('settings' in handle)) return undefined;
+  const settings: unknown = handle.settings;
+  if (typeof settings !== 'object' || settings === null || !('extraBody' in settings)) {
+    return undefined;
+  }
+  return settings.extraBody;
+}
+
 // --- chatSettings (issue #124) ---
 
 test('chatSettings: nothing configured + non-Anthropic id → byte-identical to the historical default', () => {
@@ -204,6 +216,111 @@ test('chatSettings: caching composes with routing/fallback/reasoning in one obje
   assert.deepEqual(s.models, ['anthropic/backup']);
   assert.deepEqual(s.reasoning, { effort: 'medium' });
   assert.equal(s.provider?.sort, 'throughput');
+});
+
+// --- chatSettings session stickiness + prompt-cache key per family (plan slice 04a) ---
+
+test('chatSettings: no sessionId → no extraBody (byte-identical guarantee preserved)', () => {
+  assert.equal('extraBody' in chatSettings('openai/gpt-5', 'coding', baseResolved()), false);
+  // An explicit undefined behaves the same as omitting the argument.
+  assert.deepEqual(chatSettings('openai/gpt-5', 'coding', baseResolved(), undefined), {
+    provider: { ignore: ['amazon-bedrock'] },
+  });
+});
+
+test('chatSettings: an empty sessionId is treated as absent (no extraBody)', () => {
+  assert.equal('extraBody' in chatSettings('openai/gpt-5', 'coding', baseResolved(), ''), false);
+});
+
+test('chatSettings: OpenRouter route carries both session_id and prompt_cache_key = sessionId', () => {
+  const s = chatSettings('openai/gpt-5', 'coding', baseResolved(), 'run-abc');
+  assert.deepEqual(s.extraBody, { session_id: 'run-abc', prompt_cache_key: 'run-abc' });
+});
+
+test('chatSettings: a direct baseURL (z.ai) carries prompt_cache_key only — no session_id', () => {
+  const s = chatSettings(
+    'zai/glm-4.6',
+    'coding',
+    baseResolved({ baseURL: 'https://api.z.ai/api/coding/paas/v4' }),
+    'run-abc',
+  );
+  assert.deepEqual(s.extraBody, { prompt_cache_key: 'run-abc' });
+  assert.equal('session_id' in (s.extraBody ?? {}), false, 'session_id is an OpenRouter-only hint');
+});
+
+test('chatSettings: a direct baseURL (moonshot) carries prompt_cache_key only', () => {
+  const s = chatSettings(
+    'moonshotai/kimi-k2',
+    'coding',
+    baseResolved({ baseURL: 'https://api.moonshot.ai/v1' }),
+    'run-xyz',
+  );
+  assert.deepEqual(s.extraBody, { prompt_cache_key: 'run-xyz' });
+});
+
+test('chatSettings: anthropic on OpenRouter keeps ephemeral breakpoints AND gains session params', () => {
+  const s = chatSettings('anthropic/claude-opus-4.7', 'coding', baseResolved(), 'run-abc');
+  assert.deepEqual(s.cache_control, { type: 'ephemeral' }, 'breakpoints preserved');
+  assert.deepEqual(s.extraBody, { session_id: 'run-abc', prompt_cache_key: 'run-abc' });
+});
+
+test('chatSettings: qwen/* and alibaba/* join the cache_control family on OpenRouter', () => {
+  for (const id of ['qwen/qwen3-235b-a22b', 'alibaba/qwen-max']) {
+    assert.deepEqual(
+      chatSettings(id, 'coding', baseResolved()).cache_control,
+      { type: 'ephemeral' },
+      `${id} enables cache_control`,
+    );
+  }
+  // A non-family id is still uncached.
+  assert.equal('cache_control' in chatSettings('mistralai/large', 'coding', baseResolved()), false);
+});
+
+test('chatSettings: a custom baseURL suppresses qwen cache_control but keeps prompt_cache_key', () => {
+  const s = chatSettings(
+    'qwen/qwen3-max',
+    'coding',
+    baseResolved({ baseURL: 'https://dashscope.example/v1' }),
+    'run-abc',
+  );
+  assert.equal('cache_control' in s, false, 'OpenRouter-only directive suppressed off-OpenRouter');
+  assert.deepEqual(s.extraBody, { prompt_cache_key: 'run-abc' });
+});
+
+test('chatSettings: session params compose with routing/fallback/reasoning/cache_control', () => {
+  const s = chatSettings(
+    'anthropic/claude-opus-4.7',
+    'coding',
+    baseResolved({
+      providerRouting: { sort: 'throughput' },
+      fallbackModels: { coding: ['anthropic/backup'] },
+      reasoningEffort: { coding: 'medium' },
+    }),
+    'run-abc',
+  );
+  assert.deepEqual(s.cache_control, { type: 'ephemeral' });
+  assert.deepEqual(s.models, ['anthropic/backup']);
+  assert.deepEqual(s.reasoning, { effort: 'medium' });
+  assert.equal(s.provider?.sort, 'throughput');
+  assert.deepEqual(s.extraBody, { session_id: 'run-abc', prompt_cache_key: 'run-abc' });
+});
+
+test('Credentials threads the run-scoped sessionId into the built handle (OpenRouter route)', () => {
+  const creds = new Credentials(baseResolved(), 'run-scoped-id');
+  assert.deepEqual(extraBodyOf(creds.modelForCapability('coding')), {
+    session_id: 'run-scoped-id',
+    prompt_cache_key: 'run-scoped-id',
+  });
+});
+
+test('Credentials threads the sessionId as prompt_cache_key only on a custom baseURL', () => {
+  const creds = new Credentials(baseResolved({ baseURL: 'https://api.moonshot.ai/v1' }), 'run-id');
+  assert.deepEqual(extraBodyOf(creds.modelForCapability('coding')), { prompt_cache_key: 'run-id' });
+});
+
+test('Credentials without a sessionId sends no extraBody (back-compat)', () => {
+  const creds = new Credentials(baseResolved());
+  assert.equal(extraBodyOf(creds.modelForCapability('coding')), undefined);
 });
 
 test('modelForCapability routes through chatSettings so default (anthropic) handles are cached', () => {

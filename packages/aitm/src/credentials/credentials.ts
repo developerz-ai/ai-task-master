@@ -16,17 +16,29 @@ import { DEFAULT_MODELS } from './defaults.ts';
 // the submit-tool-based subagents at random — always excluded (issue #124, originally the point fix).
 const ALWAYS_IGNORE_PROVIDER = 'amazon-bedrock';
 
-// Build the OpenRouter chat settings for one call (issues #124, #125, #109). Pure + exported for
-// testability, and the single settings-construction path — routing, per-capability fallback models,
-// reasoning effort, and prompt caching all compose into this ONE object rather than parallel
-// builders. `capability` selects the routing/reasoning/fallback settings (a capability served
-// through the model fallback chain still gets that capability's settings). Caching is gated on the
-// RESOLVED id AND the endpoint. With nothing configured and a non-Anthropic id the result is
-// byte-identical to the historical `{ provider: { ignore: ['amazon-bedrock'] } }`.
+// Model families that honour an explicit `cache_control` breakpoint through OpenRouter: Anthropic
+// automatic caching, plus Qwen/Alibaba per OpenRouter's caching docs. Every other family relies on
+// the provider's automatic upstream caching, so no directive is sent.
+const CACHE_CONTROL_FAMILIES = ['anthropic/', 'qwen/', 'alibaba/'] as const;
+
+function usesCacheControl(modelId: string): boolean {
+  return CACHE_CONTROL_FAMILIES.some((family) => modelId.startsWith(family));
+}
+
+// Build the OpenRouter chat settings for one call (issues #124, #125, #109; plan slice 04a). Pure +
+// exported for testability, and the single settings-construction path — routing, per-capability
+// fallback models, reasoning effort, prompt caching, and session stickiness all compose into this
+// ONE object rather than parallel builders. `capability` selects the routing/reasoning/fallback
+// settings (a capability served through the model fallback chain still gets that capability's
+// settings). Caching is gated on the RESOLVED id AND the endpoint. `sessionId` (the run-scoped
+// runId) adds sticky-routing / prompt-cache-key hints per provider family. With nothing configured,
+// a non-cache-control id, and no sessionId the result is byte-identical to the historical
+// `{ provider: { ignore: ['amazon-bedrock'] } }`.
 export function chatSettings(
   modelId: string,
   capability: Capability,
   resolved: ResolvedConfig,
+  sessionId?: string,
 ): OpenRouterChatSettings {
   const routing = resolved.providerRouting;
   const provider: NonNullable<OpenRouterChatSettings['provider']> = {
@@ -42,20 +54,31 @@ export function chatSettings(
   };
   const fallback = resolved.fallbackModels?.[capability];
   const effort = resolved.reasoningEffort?.[capability];
-  // `cache_control` is an OpenRouter request-body directive enabling Anthropic automatic prompt
-  // caching. It only makes sense talking to OpenRouter itself, and only for anthropic/* routes:
-  //   - gated on the RESOLVED id, so an anthropic override on any tier is cached and a non-Anthropic
-  //     override on a default tier is not;
-  //   - suppressed when a custom `baseURL` is set — a self-hosted / z.ai / proxy endpoint is not
-  //     OpenRouter and would receive an unknown field, so those requests stay byte-identical (#109
-  //     spec bullet 3). TTL unset → provider default 5m; below the min cacheable prefix it is a
-  //     silent no-op.
-  const cacheable = modelId.startsWith('anthropic/') && !resolved.baseURL;
+  // A custom `baseURL` (z.ai, moonshot, self-hosted, proxy) is a direct OpenAI-compatible endpoint,
+  // not OpenRouter — it must not receive OpenRouter-only directives.
+  const onOpenRouter = !resolved.baseURL;
+  // `cache_control` is an OpenRouter request-body directive enabling automatic prompt caching for
+  // the cache-control families (anthropic/*, qwen/*, alibaba/*):
+  //   - gated on the RESOLVED id, so a cache-control override on any tier is cached and a
+  //     non-cache-control override on a default tier is not;
+  //   - suppressed on a custom `baseURL` (#109 spec bullet 3) — those requests stay byte-identical.
+  //     TTL unset → provider default 5m; below the min cacheable prefix it is a silent no-op.
+  const cacheable = usesCacheControl(modelId) && onOpenRouter;
+  // Session stickiness + implicit prompt-cache key. `session_id` is an OpenRouter routing hint (keeps
+  // a conversation on one upstream provider → warmer cache); `prompt_cache_key` is the OpenAI-family
+  // cache key. OpenRouter route → both; a direct OpenAI-compatible baseURL → `prompt_cache_key` only.
+  // Carried via `extraBody`, which the provider spreads verbatim onto the top-level request body.
+  const sessionBody = sessionId
+    ? onOpenRouter
+      ? { session_id: sessionId, prompt_cache_key: sessionId }
+      : { prompt_cache_key: sessionId }
+    : undefined;
   return {
     provider,
     ...(fallback !== undefined ? { models: fallback } : {}),
     ...(effort !== undefined ? { reasoning: { effort } } : {}),
     ...(cacheable ? { cache_control: { type: 'ephemeral' as const } } : {}),
+    ...(sessionBody ? { extraBody: sessionBody } : {}),
   };
 }
 
@@ -90,7 +113,12 @@ export class Credentials {
   // only inspect role/capability mapping (tests, dry-run) don't need a real key.
   private providerInstance: OpenRouterProvider | undefined;
 
-  constructor(private readonly resolved: ResolvedConfig) {}
+  // `sessionId` is the run-scoped id (state.runId): reused across every role/stage in a run and
+  // preserved on resume, so session stickiness + prompt-cache keys stay stable per conversation.
+  constructor(
+    private readonly resolved: ResolvedConfig,
+    private readonly sessionId?: string,
+  ) {}
 
   // Build a handle per role using ROLE_CAPABILITY. Capability fallback chain:
   //   models[capability] → models.generic → built-in default.
@@ -109,7 +137,10 @@ export class Credentials {
 
   modelForCapability(capability: Capability): LanguageModel {
     const modelId = this.modelIdForCapability(capability);
-    return this.provider().chat(modelId, chatSettings(modelId, capability, this.resolved));
+    return this.provider().chat(
+      modelId,
+      chatSettings(modelId, capability, this.resolved, this.sessionId),
+    );
   }
 
   // The resolved model *id string* for a capability tier, via the same fallback chain

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { LanguageModelUsage } from 'ai';
 import {
+  appendReminderBlock,
   DEFAULT_LLM_STEP_TIMEOUT_MS,
   prependContextBlock,
   reportUsage,
@@ -49,4 +50,16 @@ test('prependContextBlock: prepends the block with a blank-line separator, or re
   );
   assert.equal(prependContextBlock(undefined, 'Goal: x'), 'Goal: x');
   assert.equal(prependContextBlock('', 'Goal: x'), 'Goal: x', 'empty block is a no-op');
+});
+
+test('appendReminderBlock: appends the trailing block with a blank-line separator, or returns the prompt unchanged (slice 04 §4)', () => {
+  assert.equal(
+    appendReminderBlock(
+      'Goal: x',
+      '<system-reminder>\n# runProgress\nStep 1 of 4\n</system-reminder>',
+    ),
+    'Goal: x\n\n<system-reminder>\n# runProgress\nStep 1 of 4\n</system-reminder>',
+  );
+  assert.equal(appendReminderBlock('Goal: x', undefined), 'Goal: x');
+  assert.equal(appendReminderBlock('Goal: x', ''), 'Goal: x', 'empty block is a no-op');
 });

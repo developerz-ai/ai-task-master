@@ -55,7 +55,13 @@ import type { PrGroup, Task } from '../state/schema.ts';
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
 import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
-import { type OnUsage, prependContextBlock, reportUsage, type SubagentInit } from './factory.ts';
+import {
+  appendReminderBlock,
+  type OnUsage,
+  prependContextBlock,
+  reportUsage,
+  type SubagentInit,
+} from './factory.ts';
 import { EDITOR_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 import { buildEditorRolePrompt } from './role-prompt.ts';
 
@@ -122,6 +128,9 @@ export type WorkerInput = {
   logger?: LoggerLike;
   // Optional harness context block prepended to the manifest (first user) message (issue #106).
   contextBlock?: string;
+  // Optional trailing `<system-reminder>` (the run's Step N/M position) appended to the END of the
+  // manifest (first user) message, kept out of the cacheable leading prefix (slice 04 §4).
+  progressBlock?: string;
   // Optional handle from an earlier manifest-planning run (a prior CI-fix pass for this group). When
   // set, the manifest agent continues that conversation instead of planning fresh (issue #107).
   priorHandle?: SubagentHandle<WorkerTools>;
@@ -452,7 +461,10 @@ function buildManifestPrompt(input: WorkerInput): string {
     );
   }
   lines.push('', 'Survey the repo, then call submit with the FileManifest.');
-  return prependContextBlock(input.contextBlock, lines.join('\n'));
+  return appendReminderBlock(
+    prependContextBlock(input.contextBlock, lines.join('\n')),
+    input.progressBlock,
+  );
 }
 
 // Strip the runtime-only extras the adapter may have mounted on the Worker tool set before the

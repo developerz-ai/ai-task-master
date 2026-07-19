@@ -20,7 +20,7 @@ import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../p
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
 import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
-import { prependContextBlock, type SubagentInit } from './factory.ts';
+import { appendReminderBlock, prependContextBlock, type SubagentInit } from './factory.ts';
 
 export type PlannerAgent = ToolLoopAgent<never, PlannerTools>;
 
@@ -46,6 +46,9 @@ export type PlannerInput = {
   // Optional harness context block (a `<system-reminder>` envelope) prepended to the first user
   // message — target-repo instructions + current date, framed as advisory context (issue #106).
   contextBlock?: string;
+  // Optional trailing `<system-reminder>` (the run's Step N/M position) appended to the END of the
+  // first user message, kept out of the cacheable leading prefix (slice 04 §4). Unset → nothing added.
+  progressBlock?: string;
 };
 
 export type PlannerResult =
@@ -123,7 +126,10 @@ function buildUserPrompt(input: PlannerInput): string {
   }
   lines.push(`maxPrs: ${input.maxPrs}`);
   lines.push('Survey the repo with the read-only tools, then call submit with the Plan.');
-  return prependContextBlock(input.contextBlock, lines.join('\n'));
+  return appendReminderBlock(
+    prependContextBlock(input.contextBlock, lines.join('\n')),
+    input.progressBlock,
+  );
 }
 
 // Truncate to maxPrs groups; fold any overflow into a single remainder task on the last kept group

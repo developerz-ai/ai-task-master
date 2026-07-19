@@ -228,6 +228,46 @@ test('runWorker: prepends the contextBlock to the manifest (first user) message,
   );
 });
 
+test('runWorker: appends the progressBlock to the END of the manifest message, after the task text (slice 04 §4)', async () => {
+  let sent = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      if (sent === '') sent = JSON.stringify(opts.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-prog',
+            toolName: 'submit',
+            input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  await runWorker(agent, {
+    ...baseInput(),
+    contextBlock: '<system-reminder>\nWORKER-LEAD\n</system-reminder>',
+    progressBlock: '<system-reminder>\nWORKER-PROG-TAIL\n</system-reminder>',
+  });
+  assert.match(sent, /WORKER-PROG-TAIL/, 'the progress block reached the manifest message');
+  // Lead first, task text ("PR group:") in the middle, progress last — the volatile bit trails the
+  // cacheable prefix so it can never invalidate it per step.
+  assert.ok(
+    sent.indexOf('WORKER-LEAD') < sent.indexOf('PR group:'),
+    'the leading context block precedes the task text',
+  );
+  assert.ok(
+    sent.indexOf('PR group:') < sent.indexOf('WORKER-PROG-TAIL'),
+    'the progress block trails the task text (out of the cacheable prefix)',
+  );
+});
+
 test('runWorker: an ok result carries a handle retaining the manifest conversation (issue #107)', async () => {
   const manifest: FileManifest = {
     files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],

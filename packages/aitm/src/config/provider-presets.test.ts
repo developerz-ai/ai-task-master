@@ -29,9 +29,17 @@ test('openrouter preset is the provider default base URL with no pinned models',
   assert.equal(or.models, undefined);
 });
 
+test('moonshot preset targets Moonshot API with kimi-k2 models', () => {
+  const moonshot = PROVIDER_PRESETS.moonshot;
+  assert.equal(moonshot.baseURL, 'https://api.moonshot.ai/v1');
+  assert.equal(moonshot.models?.coding, 'kimi-k2');
+  assert.equal(moonshot.models?.fast, 'kimi-k2');
+});
+
 test('isPresetName narrows known names and rejects others', () => {
   assert.equal(isPresetName('zai'), true);
   assert.equal(isPresetName('openrouter'), true);
+  assert.equal(isPresetName('moonshot'), true);
   assert.equal(isPresetName('anthropic'), false);
   assert.equal(isPresetName(''), false);
 });

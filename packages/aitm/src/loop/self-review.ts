@@ -86,9 +86,12 @@ export type SelfReviewSubagents = {
   onUsage?: SubagentInit<WorkerTools>['onUsage'];
   // Live rolling context threaded into the review Worker's manifest prompt. Unset → ''.
   rollingContext?: string;
-  // Optional harness context block (a `<system-reminder>` envelope: repo instructions + date + the
-  // run's phase/step) prepended to the review Worker's first user message. Unset → no block.
+  // Optional harness context block (a `<system-reminder>` envelope: repo instructions + date)
+  // prepended to the review Worker's first user message. Unset → no block.
   contextBlock?: string;
+  // Optional trailing `<system-reminder>` (the run's Step N/M position) appended to the END of the
+  // review Worker's first user message, kept out of the cacheable leading prefix (slice 04 §4).
+  progressBlock?: string;
   // Per-repo memory index injected into the review Worker's prompt. Unset → no memory block.
   memoryIndex?: readonly MemoryIndexEntry[];
   // Per-step transcript recorder callback forwarded to the review Worker agent. Unset → nothing.
@@ -186,6 +189,7 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     styleContents: subagents.styleContents,
     rollingContext: subagents.rollingContext ?? '',
     ...(subagents.contextBlock ? { contextBlock: subagents.contextBlock } : {}),
+    ...(subagents.progressBlock ? { progressBlock: subagents.progressBlock } : {}),
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),
   };

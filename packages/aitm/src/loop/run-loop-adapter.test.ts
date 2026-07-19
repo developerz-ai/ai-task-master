@@ -58,6 +58,7 @@ import {
   resolveWorkerTools,
   retryProgressMessage,
   runLoopAdapter,
+  runProgressReminder,
   runStepContextLine,
   sanitizeBranchComponent,
   selfReviewVerifyCommand,
@@ -687,26 +688,61 @@ test('localEditTools: a file changed on disk after its Read surfaces one file-ch
   }
 });
 
-test('harnessContextBlock: one envelope carrying the currentDate section, no style dup (issue #106/#231)', () => {
+test('harnessContextBlock: a byte-stable single envelope — currentDate only, no style/progress (slice 04 §4)', () => {
   const block = harnessContextBlock();
   assert.equal((block.match(/<system-reminder>/g) ?? []).length, 1, 'single envelope');
   assert.match(block, /# currentDate\n\d{4}-\d{2}-\d{2}/);
   assert.match(block, /may or may not be relevant/);
-  // The style digest lives only in the system prompt (buildRolePrompt) — never repeated here.
+  // The style digest lives only in the system prompt (buildRolePrompt) — never repeated here (#231).
   assert.equal(block.includes('# claudeMd'), false, 'no duplicate style section');
-  // No step supplied → no runProgress section (prompt-design.md §3).
-  assert.equal(block.includes('# runProgress'), false, 'no progress section without a step');
+  // The volatile Step N/M position is NOT in the leading block — it rides runProgressReminder, so the
+  // cacheable prompt prefix can't be invalidated per step (slice 04 §4).
+  assert.equal(block.includes('# runProgress'), false, 'no progress section in the leading block');
+  // No argument to vary → byte-identical every call (the point: a stable, cacheable prompt prefix).
+  assert.equal(block, harnessContextBlock(), 'byte-identical across calls');
 });
 
-test('harnessContextBlock: a step adds a runProgress section with the phase + N/M line (§3)', () => {
-  const block = harnessContextBlock({
-    phase: 'working',
-    unit: 'group',
-    index: 2,
-    total: 5,
-  });
-  assert.equal((block.match(/<system-reminder>/g) ?? []).length, 1, 'still one envelope');
+test('runProgressReminder: the run position rides a standalone TRAILING <system-reminder> (slice 04 §4)', () => {
+  const block = runProgressReminder({ phase: 'working', unit: 'group', index: 2, total: 5 });
+  assert.equal((block.match(/<system-reminder>/g) ?? []).length, 1, 'one trailing envelope');
   assert.match(block, /# runProgress\nStep 2 of 5 — working/);
+  // Phase-only (planning, before any group counter exists) still reports position.
+  assert.match(runProgressReminder({ phase: 'planning' }), /# runProgress\nPhase: planning/);
+  // Nothing to report → empty string, so appendReminderBlock leaves the prompt untouched.
+  assert.equal(runProgressReminder({}), '', 'no position → no trailing block');
+});
+
+test('stable cache-friendly prefix: leading block + system prompt byte-identical across steps; only the trailing progress moves (slice 04 §4)', () => {
+  const style = 'STYLE-DIGEST-SENTINEL';
+  const sysInput = {
+    style,
+    roleGuidance: 'You are the Worker.',
+    cwd: '/repo',
+    maxSteps: 40,
+    modelId: 'anthropic/claude-sonnet-4',
+  };
+  // The two pieces of the cacheable first-message prefix take NO step input, so they are identical no
+  // matter where the run is — the invariant this task locks in. Built in immediate succession (both
+  // fully synchronous), so the day-granular date is the same for both.
+  const prefixAtStepA = `${reminderAgentSystemPrompt(sysInput)}\n\n${harnessContextBlock()}`;
+  const prefixAtStepB = `${reminderAgentSystemPrompt(sysInput)}\n\n${harnessContextBlock()}`;
+  assert.equal(prefixAtStepA, prefixAtStepB, 'the prompt prefix is byte-identical across calls');
+
+  // The style/prefix payload appears EXACTLY once — only in the system prompt, never echoed by the
+  // per-message context block (no double-billing, nothing step-dependent near it).
+  assert.equal(
+    (prefixAtStepA.match(new RegExp(style, 'g')) ?? []).length,
+    1,
+    'the style digest appears exactly once in the prefix',
+  );
+  assert.equal(prefixAtStepA.includes('# runProgress'), false, 'no run position in the prefix');
+
+  // Only the trailing reminder reflects the live position, and it differs step to step — so it lands
+  // AFTER the cached prefix, never inside it.
+  const trailA = runProgressReminder({ phase: 'working', index: 3, total: 40 });
+  const trailB = runProgressReminder({ phase: 'working', index: 4, total: 40 });
+  assert.notEqual(trailA, trailB, 'the trailing progress tracks the live position');
+  assert.match(trailA, /Step 3 of 40 — working/);
 });
 
 test('resolveStyleContents: distilled digest wins and is left uncapped (already bounded)', () => {

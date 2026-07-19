@@ -264,8 +264,6 @@ export async function runStart(
   } catch (err) {
     return { code: 1, message: errMsg(err) };
   }
-  const credentials = new Credentials(resolved);
-
   const detector = new AgentConfigDetector(cwd);
   const detectOpts = buildDetectOpts(args.stylePath, resolved.stylePath, homeDir);
 
@@ -314,8 +312,10 @@ export async function runStart(
     // No valid state.json — proceed with fresh init.
   }
 
+  let sessionId = existingState?.runId;
   if (!resuming) {
     const initial = buildInitialRunState({ resolved, agentConfig });
+    sessionId = initial.runId;
     try {
       await state.init(initial);
       await state.writeGoal(args.goal, args.criteria);
@@ -324,6 +324,10 @@ export async function runStart(
       return { code: 1, message: errMsg(err) };
     }
   }
+
+  // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Sourced from the
+  // persisted state.runId (fresh or resumed), so a resumed run reuses the same id and keeps warm.
+  const credentials = new Credentials(resolved, sessionId);
 
   // Planning phase (issue #17): a one-shot step that runs the Planner once, before the loop,
   // so `prGroups` is populated and the loop has something to iterate. Gated on whether a plan
@@ -459,8 +463,6 @@ export async function runMergePr(
   } catch (err) {
     return { code: 1, message: errMsg(err) };
   }
-  const credentials = new Credentials(resolved);
-
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
   const github = ctx.github ?? new GitHubClient(cwd);
@@ -502,6 +504,10 @@ export async function runMergePr(
       }
     }
   }
+
+  // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Take-over reuses the
+  // resolved (or freshly synthesized) state.runId so repeat merge-pr calls share one cache session.
+  const credentials = new Credentials(resolved, runState.runId);
 
   const pr = args.pr ?? runState.currentPr ?? undefined;
   if (pr === undefined) {

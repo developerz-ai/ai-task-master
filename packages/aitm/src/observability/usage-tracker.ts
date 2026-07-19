@@ -169,6 +169,19 @@ export class UsageTracker {
   }
 }
 
+// The provider-reported prompt-token count for one model call — the "last-call input tokens" a
+// conversation's compaction trigger (issue #102, slice 06) prefers over a char estimate, because the
+// provider figure counts the system prompt and tool schemas the message-only estimate can't see.
+// Read per conversation off the most recent step's `usage` in the compaction prepareStep. Returns
+// undefined when the provider echoed no usable count (the SDK types `inputTokens` as `number |
+// undefined`) or a non-finite/negative value, so the caller falls back to its estimate. `inputTokens`
+// is the total prompt tokens (cache reads included) — i.e. the full context the provider billed,
+// which is exactly what the trigger compares against the model's context window. Never throws.
+export function reportedInputTokens(usage: LanguageModelUsage | undefined): number | undefined {
+  const tokens = usage?.inputTokens;
+  return typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 0 ? tokens : undefined;
+}
+
 // Bind a tracker to one role for the `onUsage` seam: records under `role`, falling back to the role's
 // configured model id when the provider did not echo one. Returns undefined when there is no tracker,
 // so callers omit the seam entirely. The return shape is structurally the factory's `OnUsage`.

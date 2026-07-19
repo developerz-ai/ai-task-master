@@ -11,7 +11,8 @@
 
 import type { ModelMessage, ToolLoopAgentSettings, ToolSet } from 'ai';
 import type { LoggerLike } from '../logger/logger.ts';
-import type { Compactor } from './compactor.ts';
+import { reportedInputTokens } from '../observability/usage-tracker.ts';
+import { type Compactor, effectiveInputTokens, type LiveContextSize } from './compactor.ts';
 
 // The concrete (non-optional) prepareStep function type for a given tool set — extracted from the
 // SDK's own settings so it matches createSubagent's field exactly (see the note in subagent.ts on
@@ -66,19 +67,39 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
     // Nothing to send yet → nothing to compact.
     if (messages.length === 0) return undefined;
 
-    // Size off the LIVE `messages` (the context this step will actually send), NOT the last step's
-    // usage. The installed ai does not persist a prepareStep `messages` override across steps — the
-    // override applies to the current step only, then the loop reverts to the full accumulated
-    // history on the next step. So after a compaction, the last step's usage reflects the small
-    // compacted call while `messages` reverts to the full history; sizing off usage would then read
-    // "small", skip, and let the full context overflow. Sizing off `messages` re-detects the large
-    // context each step and re-compacts, keeping every step's call bounded regardless of whether the
-    // SDK persists overrides. (A persistence-aware / cached-summary optimization is a follow-up.)
-    const liveInputTokens = estimateTokens(messages);
+    // Cumulative response-message count at step `index` (ai@6 exposes step.response.messages as the
+    // running total up to that step, not a per-step delta). Feeds both the usage delta below and the
+    // kept-steps tail cut further down.
+    const cumulativeAt = (index: number): number =>
+      index >= 0 ? (steps[index]?.response.messages.length ?? 0) : 0;
+    const last = steps.length - 1;
+
+    // Size the live context, preferring the provider's exact prompt-token count for the most recent
+    // call (system prompt + tool schemas included) over a pure char estimate, and char-estimating only
+    // the delta the last step appended since that call. No completed step / no reported usage → the
+    // whole-array estimate. shouldCompact floors the grounded figure by this estimate, so a
+    // post-compaction under-report can't skip a needed compaction: the installed ai does not persist a
+    // prepareStep `messages` override across steps, so the step after a compaction reports the small
+    // compacted call while `messages` has reverted to the full history — the estimate re-detects that
+    // and re-compacts, keeping every step's call bounded. (A cached-summary optimization is a follow-up.)
+    const estimatedInputTokens = estimateTokens(messages);
+    const reported = reportedInputTokens(steps[last]?.usage);
+    const sinceLastCall = cumulativeAt(last) - cumulativeAt(last - 1);
+    const live: LiveContextSize =
+      reported === undefined
+        ? { estimatedInputTokens }
+        : {
+            estimatedInputTokens,
+            reported: {
+              lastCallInputTokens: reported,
+              sinceTokens: estimateTokens(messagesSince(messages, sinceLastCall)),
+            },
+          };
+    const liveInputTokens = effectiveInputTokens(live);
 
     let decision: Awaited<ReturnType<Compactor['shouldCompact']>>;
     try {
-      decision = await init.compactor.shouldCompact(init.modelId, liveInputTokens);
+      decision = await init.compactor.shouldCompact(init.modelId, live);
     } catch (err) {
       init.logger?.warn('compaction: threshold lookup failed; passing through', {
         modelId: init.modelId,
@@ -101,9 +122,6 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
     // the final cumulative total minus the cumulative total keepLastSteps steps earlier — NOT the sum
     // of those arrays, which overcounts so far that `splitAt` pins to 0 and compaction never fires
     // (issue #176).
-    const cumulativeAt = (index: number): number =>
-      index >= 0 ? (steps[index]?.response.messages.length ?? 0) : 0;
-    const last = steps.length - 1;
     const tailCount = cumulativeAt(last) - cumulativeAt(last - decision.keepLastSteps);
     const splitAt = Math.max(0, messages.length - tailCount);
     const older = messages.slice(0, splitAt);
@@ -182,6 +200,14 @@ function estimateTokens(messages: readonly ModelMessage[]): number {
         : JSON.stringify(message.content).length;
   }
   return Math.ceil(chars / 4);
+}
+
+// The messages the last step appended since its own model call — the tail `delta` entries of the live
+// array (ai@6 appends each step's response messages in order). These are exactly what the provider's
+// last-call token count does NOT yet include, so the usage-grounded trigger char-estimates only them
+// and adds them to that count. A non-positive delta (no completed step) → nothing.
+function messagesSince(messages: readonly ModelMessage[], delta: number): readonly ModelMessage[] {
+  return delta > 0 ? messages.slice(Math.max(0, messages.length - delta)) : [];
 }
 
 // Cheap, model-free prune pass over the prunable prefix (`messages[0, splitAt)` — everything older

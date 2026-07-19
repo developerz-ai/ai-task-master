@@ -20,6 +20,12 @@ function step(cumulativeCount: number) {
   };
 }
 
+// Like step(), but also carries the provider-reported per-step `usage` the compaction trigger reads
+// off the most recent step (StepResult.usage.inputTokens) to ground its size estimate (issue #102).
+function stepWithUsage(cumulativeCount: number, inputTokens: number) {
+  return { ...step(cumulativeCount), usage: { inputTokens } };
+}
+
 function msg(role: string, content: string): { role: string; content: string } {
   return { role, content };
 }
@@ -161,6 +167,86 @@ test('buildCompactionStep sizes off the live messages via a real Compactor: larg
   );
   assert.ok(large && Array.isArray(large.messages));
   assert.match(String(large.messages[0].content), /REAL SUMMARY/);
+});
+
+test('buildCompactionStep: feeds shouldCompact the provider-reported last-call tokens + the delta since', async () => {
+  let seen: unknown;
+  const compactor: CompactorLike = {
+    shouldCompact: async (_modelId, live) => {
+      seen = live;
+      return { kind: 'skip' };
+    },
+    compact: async () => 'S',
+  };
+  // Four 4-char messages → whole-array estimate = ceil(16/4) = 4. Steps cumulative [2, 4] → the last
+  // step appended 2 messages (delta), so `since` = the last 2 messages = ceil(8/4) = 2. The last step
+  // reported 5000 input tokens.
+  const messages = [
+    { role: 'user', content: 'goal' },
+    { role: 'assistant', content: 'aaaa' },
+    { role: 'tool', content: 'bbbb' },
+    { role: 'assistant', content: 'cccc' },
+  ];
+  await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), stepWithUsage(4, 5000)], messages),
+  );
+  assert.deepEqual(seen, {
+    estimatedInputTokens: 4,
+    reported: { lastCallInputTokens: 5000, sinceTokens: 2 },
+  });
+});
+
+test('buildCompactionStep: no reported usage on the last step → estimate only (fallback)', async () => {
+  let seen: unknown;
+  const compactor: CompactorLike = {
+    shouldCompact: async (_modelId, live) => {
+      seen = live;
+      return { kind: 'skip' };
+    },
+    compact: async () => 'S',
+  };
+  // step() carries no `usage` → the trigger falls back to the whole-array char estimate, no `reported`.
+  await buildCompactionStep({ compactor, modelId: 'm' })(prepInput([step(2), step(4)], msgs(4)));
+  assert.ok(seen && typeof seen === 'object' && !('reported' in seen));
+});
+
+test('buildCompactionStep: usage-grounded trigger compacts when the char estimate alone stays under (issue #102)', async () => {
+  const limits: ModelLimitsLookup = {
+    forModel: async () => ({ modelId: 'm', contextLength: 100 }),
+    preload: async () => {},
+  };
+  const summarizer = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [{ type: 'text', text: 'REAL SUMMARY' }],
+      finishReason: { unified: 'stop', raw: undefined },
+      usage: {
+        inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+        outputTokens: { total: 1, text: 1, reasoning: undefined },
+        totalTokens: 2,
+      },
+      warnings: [],
+    }),
+  });
+  const build = buildCompactionStep({
+    compactor: new Compactor({ summarizer, limits, keepLastSteps: 1 }),
+    modelId: 'm',
+  });
+  const messages = [
+    { role: 'user', content: 'goal' },
+    { role: 'assistant', content: 'aaaa' },
+    { role: 'tool', content: 'bbbb' },
+    { role: 'assistant', content: 'cccc' },
+  ];
+  // Four short messages estimate ~4 tokens, far under the 70-token (0.7 × 100) trigger. But the last
+  // step reported 80 input tokens — the system prompt + tool schemas the estimate can't see — so the
+  // grounded size crosses the threshold and compaction runs.
+  const grounded = await build(prepInput([step(2), stepWithUsage(4, 80)], messages));
+  assert.ok(grounded && Array.isArray(grounded.messages));
+  assert.match(String(grounded.messages[0].content), /REAL SUMMARY/);
+
+  // Same messages, but the last step reports no usage → estimate-only (~4) stays under → pass-through.
+  const passthrough = await build(prepInput([step(2), step(4)], messages));
+  assert.equal(passthrough, undefined);
 });
 
 test('buildCompactionStep: below threshold → pass-through, summarizer never called', async () => {

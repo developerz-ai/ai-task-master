@@ -77,7 +77,7 @@ export type SearchToolInit = ToolInit & { outputStore?: ToolOutputStore };
 export function grepTool(init: SearchToolInit): Tool<GrepInput, GrepOutput> {
   return tool({
     description:
-      'Search file contents under the worktree for a JavaScript regular expression. Always use this tool for content search; never invoke `grep` or `rg` through the bash tool. Returns `path:line:text` lines; use `contextBefore`/`contextAfter` for surrounding lines (rendered `path-line-text`), `filesWithMatches` for just paths, or `count` for per-file match counts. Optionally restrict to files matching a glob (supports `{a,b}` alternation), ignore case, include hidden directories, and cap results. Skips `.git`, `node_modules`, and `.gitignore`d paths.',
+      'Search file contents under the worktree for a JavaScript regular expression. Always use this tool for content search; never invoke `grep` or `rg` through the bash tool. Returns `path:line:text` lines; use `contextBefore`/`contextAfter` for surrounding lines (rendered `path-line-text`), `filesWithMatches` for just paths, or `count` for per-file match counts. Optionally restrict to files matching a glob (supports `{a,b}` alternation), ignore case, include hidden directories, and cap results. Skips `.git`, `node_modules`, and `.gitignore`d paths. There is no batch/multi-query search tool — when you have several independent patterns or paths to search, issue one grep call per query as parallel tool calls in the same turn instead of searching them one round-trip at a time.',
     inputSchema: grepInputSchema,
     execute: async (input: GrepInput): Promise<GrepOutput> => {
       const root = await resolveInside(init.cwd, input.path ?? '.');

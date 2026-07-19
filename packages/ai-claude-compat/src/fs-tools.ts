@@ -54,7 +54,7 @@ export type WriteFileOutput = { ok: boolean };
 export function readFileTool(init: FileToolInit): Tool<ReadFileInput, ReadFileOutput> {
   return tool({
     description:
-      'Read a UTF-8 text file from the current worktree. Path may be relative (resolved against the worktree root) or absolute (must still be inside the worktree). Output is `cat -n` numbered: each line is `<line-number>\\t<content>`. Reads up to 2000 lines by default — pass `offset` (1-based start line) and `limit` to read a specific window; when you already know which part of the file you need, read only that window, as this matters for large files. Do not re-read a file you just edited to verify — the edit result already carries a snippet.',
+      'Read a UTF-8 text file from the current worktree. Path may be relative (resolved against the worktree root) or absolute (must still be inside the worktree). Output is `cat -n` numbered: each line is `<line-number>\\t<content>`. Reads up to 2000 lines by default — pass `offset` (1-based start line) and `limit` to read a specific window; when you already know which part of the file you need, read only that window, as this matters for large files. There is no batch/multi-file read tool — when you need several independent files (or several windows of one file), issue one readFile call per file/window as parallel tool calls in the same turn rather than reading them one round-trip at a time. Do not re-read a file you just edited to verify — the edit result already carries a snippet.',
     inputSchema: readFileInputSchema,
     execute: async (input: ReadFileInput): Promise<ReadFileOutput> => {
       const safe = await resolveInside(init.cwd, input.path);

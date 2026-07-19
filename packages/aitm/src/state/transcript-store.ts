@@ -84,15 +84,23 @@ function isLeadingRun(arr: readonly ModelMessage[], prefix: readonly ModelMessag
   return true;
 }
 
-// Keep only a record's messages that match the ModelMessage shape, warning on each skip. A crash
-// mid-write or a hand-edit can leave a JSON-valid line whose message shape is wrong; dropping the
-// bad element (not the whole line) keeps the rest of the transcript replayable on resume.
-function validMessages(raw: readonly unknown[], onWarn: (message: string) => void): ModelMessage[] {
+// Keep only a record's messages that match the ModelMessage shape, tallying skips into `tally` (one
+// aggregated warning per reconstruct, not one per element — see reconstructTranscript). A crash
+// mid-write or a hand-edit can leave a JSON-valid line whose message shape is wrong; dropping the bad
+// element (not the whole line) keeps the rest of the transcript replayable on resume. The failing
+// field is logged at debug so the aggregate warning stays a one-liner while detail is still reachable.
+function validMessages(raw: readonly unknown[], tally: { skipped: number }): ModelMessage[] {
   const out: ModelMessage[] = [];
   for (const item of raw) {
     const parsed = modelMessageSchema.safeParse(item);
-    if (parsed.success) out.push(parsed.data);
-    else onWarn('skipping a transcript message that is not a valid ModelMessage');
+    if (parsed.success) {
+      out.push(parsed.data);
+    } else {
+      tally.skipped++;
+      console.debug('skipping invalid transcript message', {
+        issues: parsed.error.issues.map((issue) => issue.path.join('.')),
+      });
+    }
   }
   return out;
 }
@@ -100,8 +108,10 @@ function validMessages(raw: readonly unknown[], onWarn: (message: string) => voi
 // Reconstruct the message array the agent would see next from a transcript's raw JSONL, plus whether
 // the run completed (a `run-end` record present). `step` messages concatenate; a `compaction` record
 // replaces the accumulated array (its summary subsumes earlier steps), and steps after it append. A
-// corrupt/truncated line, or a message failing the ModelMessage shape, is skipped with a warning;
-// unknown `kind`s are ignored (forward-compatible).
+// corrupt/truncated line warns immediately per line; messages failing the ModelMessage shape are
+// dropped silently in the moment and rolled into one `skipped N invalid transcript messages` warning
+// at the end, so a bad transcript can't flood the log with a warning per element. Unknown `kind`s are
+// ignored (forward-compatible).
 //
 // Transcripts written before issue #175 stored `step.messages` as the CUMULATIVE response list per
 // step (each record re-includes the whole conversation), so a record whose leading run equals the
@@ -113,6 +123,7 @@ export function reconstructTranscript(
 ): ReconstructedTranscript {
   let messages: ModelMessage[] = [];
   let complete = false;
+  const tally = { skipped: 0 };
   for (const line of raw.split('\n')) {
     if (line.trim() === '') continue;
     let record: unknown;
@@ -124,16 +135,17 @@ export function reconstructTranscript(
     }
     if (!isRecord(record)) continue;
     if (record.kind === 'step' && Array.isArray(record.messages)) {
-      const recorded = validMessages(record.messages, onWarn);
+      const recorded = validMessages(record.messages, tally);
       messages.push(
         ...(isLeadingRun(recorded, messages) ? recorded.slice(messages.length) : recorded),
       );
     } else if (record.kind === 'compaction' && Array.isArray(record.messages)) {
-      messages = validMessages(record.messages, onWarn);
+      messages = validMessages(record.messages, tally);
     } else if (record.kind === 'run-end') {
       complete = true;
     }
   }
+  if (tally.skipped > 0) onWarn(`skipped ${tally.skipped} invalid transcript messages`);
   return { messages, complete };
 }
 

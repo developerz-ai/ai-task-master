@@ -94,6 +94,7 @@ const DEFAULTS = {
   resolveConflicts: true,
   logLevel: 'info' as const,
   concurrency: 1,
+  editorConcurrency: 4,
   allowForcePush: true,
   mcpDeferToolsOver: DEFAULT_MCP_DEFER_TOOLS_OVER,
 };
@@ -247,6 +248,13 @@ export class ConfigLoader {
         project?.concurrency,
         global?.concurrency,
         DEFAULTS.concurrency,
+      ),
+      // editorConcurrency is not exposed via CliOverrides — project/global only.
+      editorConcurrency: pick(
+        undefined,
+        project?.editorConcurrency,
+        global?.editorConcurrency,
+        DEFAULTS.editorConcurrency,
       ),
       // allowForcePush is not exposed via CliOverrides — project/global only.
       allowForcePush: pick(

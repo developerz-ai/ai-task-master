@@ -71,6 +71,58 @@ export type SubagentStreamEvent =
 // a broken sink can never abort — or, through the retry kernel, re-run — a generation.
 export type SubagentStreamSink = (event: SubagentStreamEvent) => void;
 
+// --- streaming stall watchdog (slice 07) ---
+//
+// A live generation can go silent two ways, and each is handled differently. The dividing line is the
+// terminal `submit` tool-call: once the model issues it the coding step's answer is in — its tools ran
+// and a PR may already exist — even though the SDK only emits the top-level `finish` part (and settles
+// the result promises) once the underlying stream actually CLOSES.
+//   • Before submit: a provider that stops emitting is a stall. After `inactivityMs` of silence the
+//     stream is aborted and re-run ONCE — no answer was produced, so a fresh attempt is safe (the same
+//     guarantee the retry kernel already gives generateText).
+//   • After submit: the stream is given `graceMs` to close. If it does, the completed result is
+//     returned. If it doesn't, the run is a hard StreamStallError — NEVER re-run, since replaying a
+//     finished coding step would duplicate its side effects (a duplicate-PR hazard). This split into
+//     two regimes, rather than one shared deadline, is the whole point of the watchdog.
+//
+// Omitting `streamWatchdog` on SubagentConfig → these production defaults (120s / 30s, real timers).
+export const STREAM_INACTIVITY_MS = 120_000;
+export const STREAM_GRACE_MS = 30_000;
+// A mid-stream stall is retried exactly once before it becomes a hard StreamStallError.
+export const MAX_STREAM_STALL_RETRIES = 1;
+
+// A cancelable one-shot timer, injected so tests drive the watchdog deterministically without real
+// wall-clock waits. `expired` resolves after the window unless `cancel` runs first.
+export type StreamTimer = { expired: Promise<void>; cancel: () => void };
+export type StreamTimerFactory = (ms: number) => StreamTimer;
+
+// Caller overrides for the stall watchdog — every field optional, each unset one falling back to the
+// production default. Policy-free passthrough on SubagentConfig: aitm may tune the windows; tests
+// inject `timer`.
+export type StreamWatchdogConfig = {
+  inactivityMs?: number;
+  graceMs?: number;
+  timer?: StreamTimerFactory;
+};
+
+// The resolved watchdog the consumer runs with — every field settled from config-or-default.
+export type StreamWatchdog = {
+  inactivityMs: number;
+  graceMs: number;
+  timer: StreamTimerFactory;
+};
+
+// How a watched stream ended: cleanly drained, stalled mid-stream (caller retries once), or stalled
+// during the post-finish grace (caller settles — never a retry).
+export type StreamWatchdogOutcome = 'drained' | 'stalled-active' | 'stalled-grace';
+
+// A streamed generation went silent and the single mid-stream retry did not recover it. NOT retryable
+// by the provider-failure kernel: the watchdog already spent its one retry, and past the `finish` part
+// a re-run would duplicate a completed coding step. `cause` retains any underlying error.
+export class StreamStallError extends Error {
+  override readonly name = 'StreamStallError';
+}
+
 export type SubagentConfig<TOOLS extends ToolSet> = {
   model: LanguageModel;
   tools: TOOLS;
@@ -117,6 +169,10 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   // behavior byte-identical. A throw from the sink is swallowed, so a broken renderer can never abort
   // or (via the retry kernel) re-run a generation.
   onStream?: SubagentStreamSink;
+  // Overrides for the streaming stall watchdog (slice 07): the mid-stream inactivity window, the
+  // post-finish grace window, and (test seam) the timer factory. Only consulted on the streaming path
+  // (onStream set); ignored otherwise. Omitted → production defaults (see STREAM_INACTIVITY_MS).
+  streamWatchdog?: StreamWatchdogConfig;
 };
 
 // Wrap a ToolLoopAgent: register the caller's tools plus the `submit` tool, and stop when the step
@@ -142,7 +198,7 @@ export function createSubagent<TOOLS extends ToolSet>(
   // Streaming is armed BEFORE the timeout/retry wrapper so the kernel wraps the whole stream (see
   // armStreaming). Omitted onStream → generate untouched, byte-identical to the non-streaming path.
   if (config.onStream !== undefined) {
-    armStreaming(agent, config.onStream);
+    armStreaming(agent, config.onStream, resolveStreamWatchdog(config.streamWatchdog));
   }
   if (config.timeout !== undefined || config.onRetry !== undefined) {
     armStepTimeout(agent, config.timeout, config.onRetry);
@@ -184,34 +240,162 @@ function armStepTimeout<TOOLS extends ToolSet>(
 // retry/timeout kernel wraps the whole stream unchanged: a transient failure re-invokes streamText
 // fresh, a configured deadline aborts it. Only armed when a caller opts in via `onStream`; otherwise
 // generate is untouched and behavior is identical (slice 07).
+//
+// The stream is consumed through the two-regime stall watchdog (see consumeStreamWithWatchdog). The
+// regime pivots on the terminal `submit` tool-call — the compat signal that the coding step's answer is
+// in. Before it, a stall aborts and re-invokes streamText once (a persistent one throws
+// StreamStallError). After it, a stall that outlasts the grace window is a hard StreamStallError too —
+// never a re-run, so a finished coding step's PR is never duplicated. A clean drain returns the result.
 function armStreaming<TOOLS extends ToolSet>(
   agent: ToolLoopAgent<never, TOOLS>,
   onStream: SubagentStreamSink,
+  watchdog: StreamWatchdog,
 ): void {
   type Generate = ToolLoopAgent<never, TOOLS>['generate'];
   const stream = agent.stream.bind(agent);
   const streamed: Generate = async (params) => {
-    const result = await stream(params);
-    for await (const part of result.fullStream) {
-      if (part.type === 'text-delta') {
-        emitStreamEvent(onStream, { type: 'text-delta', text: part.text });
-      } else if (part.type === 'tool-call') {
-        emitStreamEvent(onStream, {
-          type: 'tool-call',
-          toolName: part.toolName,
-          input: part.input,
-        });
-      } else if (part.type === 'error') {
-        // streamText surfaces a provider failure as an `error` part (the fullStream then ends without
-        // throwing and the result promises reject with a generic NoOutputGeneratedError). Re-throw the
-        // underlying error here so the retry/timeout kernel classifies it exactly as it would a
-        // generateText throw — a transient 429 stays retryable, a deadline abort stays a timeout.
-        throw part.error;
+    let stallRetries = 0;
+    while (true) {
+      const controller = linkController(params.abortSignal);
+      const result = await stream({ ...params, abortSignal: controller.signal });
+      const outcome = await consumeStreamWithWatchdog(
+        result.fullStream,
+        {
+          onPart: (part) => {
+            if (part.type === 'text-delta') {
+              emitStreamEvent(onStream, { type: 'text-delta', text: part.text });
+            } else if (part.type === 'tool-call') {
+              emitStreamEvent(onStream, {
+                type: 'tool-call',
+                toolName: part.toolName,
+                input: part.input,
+              });
+            } else if (part.type === 'error') {
+              // streamText surfaces a provider failure as an `error` part (the fullStream then ends
+              // without throwing and the result promises reject with a generic NoOutputGeneratedError).
+              // Re-throw the underlying error so the retry/timeout kernel classifies it exactly as it
+              // would a generateText throw — a transient 429 stays retryable, a deadline abort a timeout.
+              throw part.error;
+            }
+          },
+          // The terminal submit tool-call flips the watchdog into its grace regime. It is the earliest
+          // in-stream signal that the step is answered; the SDK's own `finish` part arrives only at
+          // stream close, so keying on it alone would leave a lingering provider looking like a stall.
+          isFinish: (part) =>
+            part.type === 'finish' ||
+            (part.type === 'tool-call' && part.toolName === SUBMIT_TOOL_NAME),
+          abort: () =>
+            controller.abort(new StreamStallError(streamStallMessage(watchdog.inactivityMs))),
+        },
+        watchdog,
+      );
+      // A clean close settles the result promises — read them back into the parity result.
+      if (outcome === 'drained') return streamResultToGenerate(result);
+      // Post-submit stall: the answer is already produced. Re-running would duplicate the step's side
+      // effects (a duplicate-PR hazard), so this is a hard failure — never a retry. (streamResultToGenerate
+      // is not called: on an unclosed stream its result promises never settle.)
+      if (outcome === 'stalled-grace') {
+        throw new StreamStallError(streamGraceMessage(watchdog.graceMs));
       }
+      // Pre-submit stall: the abort above tore down the hung stream. Re-run once from scratch; a second
+      // stall is a hard failure rather than an unbounded loop.
+      if (stallRetries >= MAX_STREAM_STALL_RETRIES) {
+        throw new StreamStallError(streamStallMessage(watchdog.inactivityMs));
+      }
+      stallRetries += 1;
     }
-    return streamResultToGenerate(result);
   };
   agent.generate = streamed;
+}
+
+// Resolve caller overrides against the production defaults. Hoisted so createSubagent can call it
+// above its definition.
+function resolveStreamWatchdog(config: StreamWatchdogConfig | undefined): StreamWatchdog {
+  return {
+    inactivityMs: config?.inactivityMs ?? STREAM_INACTIVITY_MS,
+    graceMs: config?.graceMs ?? STREAM_GRACE_MS,
+    timer: config?.timer ?? defaultStreamTimer,
+  };
+}
+
+function streamStallMessage(inactivityMs: number): string {
+  return `Streamed generation stalled: no activity within ${inactivityMs} ms and the single retry did not recover`;
+}
+
+function streamGraceMessage(graceMs: number): string {
+  return `Streamed generation submitted its answer but the stream did not close within ${graceMs} ms; not re-running to avoid duplicating a completed coding step`;
+}
+
+// Real-timer factory: a setTimeout the caller can cancel. Kept portable (no unref — the watchdog is
+// always awaited alongside a live stream read, so it never keeps an otherwise-idle process alive).
+const defaultStreamTimer: StreamTimerFactory = (ms) => {
+  let handle: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<void>((resolve) => {
+    handle = setTimeout(resolve, ms);
+  });
+  return {
+    expired,
+    cancel: () => {
+      if (handle !== undefined) clearTimeout(handle);
+    },
+  };
+};
+
+// An AbortController whose signal also fires when an outer caller-supplied signal does, so the watchdog
+// owns its own abort while still honoring a caller cancel. Portable — avoids AbortSignal.any, which is
+// unavailable on Node 20.0–20.2.
+function linkController(outer: AbortSignal | undefined): AbortController {
+  const controller = new AbortController();
+  if (outer === undefined) return controller;
+  if (outer.aborted) {
+    controller.abort(outer.reason);
+    return controller;
+  }
+  outer.addEventListener('abort', () => controller.abort(outer.reason), { once: true });
+  return controller;
+}
+
+// Drive a live stream through the two-regime stall watchdog (see STREAM_INACTIVITY_MS). Each awaited
+// part resets the deadline; the first part for which `isFinish` holds flips the regime from the
+// inactivity window to the shorter grace window. On a deadline the stream is aborted and the outcome
+// names the regime — 'stalled-active' (mid-stream → caller retries once) or 'stalled-grace'
+// (post-finish → caller settles, never retries). A clean end → 'drained'. `onPart` runs for every part
+// and may throw (an `error` part); that throw propagates so the retry kernel classifies it exactly as
+// on the non-streaming path. The deadline is detected off an injectable timer — not off how the SDK
+// surfaces an abort — so the two regimes are deterministic and unit-testable.
+export async function consumeStreamWithWatchdog<PART>(
+  stream: AsyncIterable<PART>,
+  handlers: {
+    onPart: (part: PART) => void;
+    isFinish: (part: PART) => boolean;
+    abort: () => void;
+  },
+  watchdog: StreamWatchdog,
+): Promise<StreamWatchdogOutcome> {
+  const iterator = stream[Symbol.asyncIterator]();
+  let finished = false;
+  while (true) {
+    const timer = watchdog.timer(finished ? watchdog.graceMs : watchdog.inactivityMs);
+    const step = iterator.next();
+    // The step branch handles both settlements so the raw next() is never an unhandled rejection when
+    // the timer wins the race and the read is left dangling.
+    const raced = await Promise.race([
+      step.then(
+        (result) => ({ tag: 'next' as const, result }),
+        (error) => ({ tag: 'throw' as const, error }),
+      ),
+      timer.expired.then(() => ({ tag: 'stall' as const })),
+    ]);
+    if (raced.tag === 'stall') {
+      handlers.abort();
+      return finished ? 'stalled-grace' : 'stalled-active';
+    }
+    timer.cancel();
+    if (raced.tag === 'throw') throw raced.error;
+    if (raced.result.done) return 'drained';
+    handlers.onPart(raced.result.value);
+    if (handlers.isFinish(raced.result.value)) finished = true;
+  }
 }
 
 // Fire the streaming sink, swallowing a throw — a broken live renderer must never abort a generation,
@@ -398,6 +582,9 @@ function readStatusCode(err: unknown): number | undefined {
 // or message is. Exported for direct unit testing.
 export function isRetryableProviderError(err: unknown): boolean {
   if (err instanceof StepTimeoutError) return false;
+  // The stall watchdog already spent its one retry, and past `finish` a re-run would duplicate a
+  // completed coding step — so a StreamStallError propagates and blocks rather than being retried.
+  if (err instanceof StreamStallError) return false;
   if (isAbortError(err)) return false;
   const status = readStatusCode(err);
   if (status !== undefined && RETRYABLE_STATUS.has(status)) return true;

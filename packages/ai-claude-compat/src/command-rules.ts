@@ -15,7 +15,7 @@ export type CommandDecision = { denied: false } | { denied: true; pattern: strin
 // user to ask, so ask degrades to `deny`.
 export function evaluateCommand(command: string, rules: readonly CommandRule[]): CommandDecision {
   for (const sub of splitCompound(command)) {
-    const tokens = skipEnvPrefixes(tokenize(sub));
+    const tokens = skipCommandPrefixes(tokenize(sub));
     if (tokens.length === 0) continue;
     for (const rule of rules) {
       if (!matchesPattern(rule.pattern, tokens)) continue;
@@ -93,11 +93,18 @@ function tokenize(subcommand: string): string[] {
   return tokens;
 }
 
-// Drop leading `NAME=value` env-assignment tokens, so `GIT_TRACE=1 git push --force` matches a
-// `git push …` pattern anchored at the real command.
-function skipEnvPrefixes(tokens: string[]): string[] {
+// Drop leading wrappers that don't change which real command runs, so a deny rule anchored on the
+// real command still fires: `NAME=value` env-assignments (`GIT_TRACE=1 git push --force`) and the
+// `env` / `command` builtins (`env git push --force`, `command git push --force`). Best-effort — an
+// `env`/`command` invoked with its own option flags (`env -i git …`) is not fully unwrapped, per
+// #113's guardrail-not-sandbox stance.
+function skipCommandPrefixes(tokens: string[]): string[] {
   let i = 0;
-  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i] ?? '')) i++;
+  while (i < tokens.length) {
+    const t = tokens[i] ?? '';
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) || t === 'env' || t === 'command') i++;
+    else break;
+  }
   return tokens.slice(i);
 }
 
@@ -110,7 +117,10 @@ function matchesPattern(pattern: string, cmdTokens: string[]): boolean {
   const first = pat[0];
   const cmdFirst = cmdTokens[0];
   if (first === undefined || cmdFirst === undefined) return false;
-  if (!tokenMatches(first, cmdFirst)) return false;
+  // Anchor on the command's basename so an absolute/relative path can't evade a bare-name rule
+  // (`/usr/bin/git push --force` matches a `git push …` pattern). Only the command token (index 0)
+  // is normalized; argument paths keep their full value for the subsequence match.
+  if (!tokenMatches(first, commandBasename(cmdFirst))) return false;
   let ci = 1;
   for (let pi = 1; pi < pat.length; pi++) {
     const pt = pat[pi] ?? '';
@@ -138,4 +148,10 @@ function tokenMatches(patternToken: string, commandToken: string): boolean {
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// The last path segment of a command token: `/usr/bin/git` → `git`, `./git` → `git`, `git` → `git`.
+function commandBasename(token: string): string {
+  const slash = token.lastIndexOf('/');
+  return slash === -1 ? token : token.slice(slash + 1);
 }

@@ -45,6 +45,26 @@ test('evaluateCommand: a leading env-assignment prefix is skipped before matchin
   assert.equal(evaluateCommand('A=1 B=2 git push -f', DEFAULTS).denied, true);
 });
 
+test('evaluateCommand: the env / command builtins do not evade a deny rule (#191)', () => {
+  assert.equal(evaluateCommand('env git push --force', DEFAULTS).denied, true);
+  assert.equal(evaluateCommand('command git push --force', DEFAULTS).denied, true);
+  // env-assignment after the builtin is still skipped.
+  assert.equal(evaluateCommand('env GIT_TRACE=1 git push -f', DEFAULTS).denied, true);
+  // A bare env/command with no real command matches nothing (default-allow).
+  assert.equal(evaluateCommand('env', DEFAULTS).denied, false);
+});
+
+test('evaluateCommand: an absolute or relative path to the command does not evade (#191)', () => {
+  assert.deepEqual(evaluateCommand('/usr/bin/git push --force', DEFAULTS), {
+    denied: true,
+    pattern: 'git push --force*',
+  });
+  assert.equal(evaluateCommand('./git push -f', DEFAULTS).denied, true);
+  assert.equal(evaluateCommand('/usr/local/bin/gh pr merge 42', DEFAULTS).denied, true);
+  // Only the command token is basename-normalized: a path-prefixed benign subcommand still runs.
+  assert.equal(evaluateCommand('/usr/bin/git status', DEFAULTS).denied, false);
+});
+
 test('evaluateCommand: a denied subcommand anywhere in a compound denies the whole call', () => {
   assert.equal(evaluateCommand('echo ok && git push --force', DEFAULTS).denied, true);
   assert.equal(evaluateCommand('git status; git push -f', DEFAULTS).denied, true);

@@ -178,3 +178,7 @@ test('isFetchHtmlAvailable: true when the binary runs, false when it throws', as
   assert.equal(await isFetchHtmlAvailable({ exec: ok }), true);
   assert.equal(await isFetchHtmlAvailable({ exec: missing }), false);
 });
+
+test('fetchHtmlTool: exposes plain-text toModelOutput (issue #188)', () => {
+  assert.equal(typeof fetchHtmlTool().toModelOutput, 'function');
+});

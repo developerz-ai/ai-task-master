@@ -33,6 +33,18 @@ export type WebFetchOutput = {
   retrievedAt: string;
 };
 
+// Render a fetched page as plain text for the model: a one-line header (final URL, HTTP status,
+// content-type, body length, truncation) then the body verbatim — not a JSON-escaped
+// {url,body,…} envelope. The escaping tax #127 removed from the fs/bash/search tools was still paid
+// here, on the largest single-step payload (issue #188). The typed execute output is unchanged for
+// programmatic callers.
+export function renderWebFetchOutput(output: WebFetchOutput): string {
+  const header = `${output.finalUrl} — HTTP ${output.status}${
+    output.contentType ? ` ${output.contentType}` : ''
+  } — ${output.body.length} chars${output.truncated ? ' (truncated)' : ''}`;
+  return `${header}\n\n${output.body}`;
+}
+
 export type LookupFn = (hostname: string) => Promise<Array<{ address: string }>>;
 
 export type WebFetchInit = {
@@ -282,6 +294,7 @@ export function webFetchTool(init: WebFetchInit = {}): Tool<WebFetchInput, WebFe
         truncated: false,
         retrievedAt: new Date().toISOString(),
       }),
+      toModelOutput: ({ output }) => ({ type: 'text', value: renderWebFetchOutput(output) }),
     });
   }
 
@@ -314,5 +327,6 @@ export function webFetchTool(init: WebFetchInit = {}): Tool<WebFetchInput, WebFe
         retrievedAt: new Date().toISOString(),
       };
     },
+    toModelOutput: ({ output }) => ({ type: 'text', value: renderWebFetchOutput(output) }),
   });
 }

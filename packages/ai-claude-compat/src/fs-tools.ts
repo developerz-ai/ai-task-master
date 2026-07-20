@@ -98,10 +98,22 @@ export function writeFileTool(init: FileToolInit): Tool<WriteFileInput, WriteFil
     inputSchema: writeFileInputSchema,
     execute: async (input: WriteFileInput): Promise<WriteFileOutput> => {
       const safe = await resolveInside(init.cwd, input.path);
-      if ((await pathExists(safe)) && !init.fileState.hasSeen(safe)) {
-        throw new Error(
-          `Refusing to overwrite ${input.path}: it exists but was not Read this run. Read it first (or use the edit tool for a partial change), then Write.`,
-        );
+      if (await pathExists(safe)) {
+        if (!init.fileState.hasSeen(safe)) {
+          throw new Error(
+            `Refusing to overwrite ${input.path}: it exists but was not Read this run. Read it first (or use the edit tool for a partial change), then Write.`,
+          );
+        }
+        // A previously-read file that changed on disk since the Read must not be silently clobbered —
+        // the same staleness gate the edit tools enforce (issue #187). Hash the UTF-8 decode so it
+        // agrees with what Read/Edit record (issue #177). If the file vanished after the existence
+        // check, fall through and (re)create it.
+        const onDisk = await readIfPresent(safe);
+        if (onDisk !== null && init.fileState.isStale(safe, hashContent(onDisk))) {
+          throw new Error(
+            `${input.path} was modified since you read it — re-read it before overwriting.`,
+          );
+        }
       }
       await mkdir(dirname(safe), { recursive: true });
       await atomicWriteFile(safe, input.content);
@@ -167,6 +179,17 @@ async function pathExists(path: string): Promise<boolean> {
     return true;
   } catch (err) {
     if (isEnoent(err)) return false;
+    throw err;
+  }
+}
+
+// Read a file's UTF-8 contents, or null if it vanished (ENOENT) between an existence check and this
+// read. Any other error propagates.
+async function readIfPresent(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch (err) {
+    if (isEnoent(err)) return null;
     throw err;
   }
 }

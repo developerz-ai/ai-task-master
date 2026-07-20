@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn as realSpawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -354,4 +355,86 @@ test('backgroundProcessTools: bashOutput passes the filter through', async () =>
     manager.killAll('SIGKILL');
     await dir.cleanup();
   }
+});
+
+// ---- filtered partial-line reassembly across reads (issue #154) ----
+
+// A controllable fake child: emit stdout in arbitrary fragments and a terminal exit synchronously,
+// so a line split across two reads is reproducible (a real pipe's chunk boundaries are not). The
+// narrowed SpawnFn seam (ManagedChild) keeps this a plain object — no ChildProcess cast needed.
+function fragmentSpawn(): {
+  spawn: SpawnFn;
+  writeOut: (s: string) => void;
+  exit: (code?: number) => void;
+} {
+  const stdout = new EventEmitter();
+  const proc = new EventEmitter();
+  const spawn: SpawnFn = () => ({
+    stdout,
+    stderr: new EventEmitter(),
+    pid: 424242,
+    on: proc.on.bind(proc),
+    kill: () => true,
+  });
+  return {
+    spawn,
+    writeOut: (s) => {
+      stdout.emit('data', s);
+    },
+    exit: (code = 0) => {
+      proc.emit('exit', code, null);
+    },
+  };
+}
+
+test('ProcessManager: filter reassembles a line split across two reads (#154)', () => {
+  const h = fragmentSpawn();
+  const mgr = new ProcessManager({ cwd: '/tmp', spawn: h.spawn });
+  const { id } = mgr.start('irrelevant');
+  h.writeOut('ER');
+  // Only a partial line so far → nothing matches yet; the cursor still advances.
+  assert.equal(mgr.output(id, 'ERROR')?.stdout, '');
+  h.writeOut('ROR boom\nGET /\n');
+  // The retained 'ER' + 'ROR boom' reassemble into a matching line.
+  assert.equal(mgr.output(id, 'ERROR')?.stdout, 'ERROR boom');
+});
+
+test('ProcessManager: filter flushes a trailing partial line when the process exits (#154)', () => {
+  const h = fragmentSpawn();
+  const mgr = new ProcessManager({ cwd: '/tmp', spawn: h.spawn });
+  const { id } = mgr.start('irrelevant');
+  h.writeOut('ERROR unterminated');
+  h.exit(0);
+  const out = mgr.output(id, 'ERROR');
+  // No newline will ever arrive, so the trailing partial is flushed as the final line on exit.
+  assert.equal(out?.stdout, 'ERROR unterminated');
+  assert.equal(out?.running, false);
+});
+
+test('ProcessManager: an unfiltered read resets the partial-line carry (#154)', () => {
+  const h = fragmentSpawn();
+  const mgr = new ProcessManager({ cwd: '/tmp', spawn: h.spawn });
+  const { id } = mgr.start('irrelevant');
+  h.writeOut('ER');
+  assert.equal(mgr.output(id, 'ERROR')?.stdout, ''); // carry = 'ER'
+  h.writeOut('ROR\n');
+  // A raw read returns the new bytes as-is and drops the carry.
+  assert.equal(mgr.output(id)?.stdout, 'ROR\n');
+  h.writeOut('MORE ERROR\n');
+  // The stale 'ER' did not bleed into this later filtered read.
+  assert.equal(mgr.output(id, 'ERROR')?.stdout, 'MORE ERROR');
+});
+
+test('ProcessManager: a cap eviction on a filtered read drops the carry and flags truncation (#154)', () => {
+  const h = fragmentSpawn();
+  const mgr = new ProcessManager({ cwd: '/tmp', spawn: h.spawn, maxBufferBytes: 8 });
+  const { id } = mgr.start('irrelevant');
+  h.writeOut('ERR');
+  assert.equal(mgr.output(id, 'ERROR')?.stdout, ''); // carry = 'ERR'
+  h.writeOut('0123456789ERROR!\n'); // overflows the 8-byte cap
+  const out = mgr.output(id, 'ERROR');
+  assert.equal(out?.truncated, true);
+  // Continuity broke, so 'ERR' is not spliced onto the tail; the intact line in the retained tail
+  // still matches ('9ERROR!' — the leading '9' is the post-eviction boundary byte).
+  assert.equal(out?.stdout, '9ERROR!');
 });

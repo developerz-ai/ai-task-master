@@ -9,11 +9,28 @@
 // non-awaited child is straightforward. Linux-targeted like the rest of the shell surface:
 // `detached` process groups and negative-pid group signaling are POSIX, no Windows branch.
 
-import { type ChildProcess, spawn as nodeSpawn } from 'node:child_process';
+import { spawn as nodeSpawn } from 'node:child_process';
+import type { EventEmitter } from 'node:events';
 import { type Tool, tool } from 'ai';
 import { z } from 'zod';
 
-export type SpawnFn = typeof nodeSpawn;
+// The slice of a spawned child that ProcessManager consumes. Narrowing the spawn seam to this
+// (instead of the full ChildProcess) lets a test inject a controllable fake to reproduce a line
+// split across reads — real pipe chunk boundaries are non-deterministic (#154). A real ChildProcess
+// satisfies it: its stdio streams are Readables, which are EventEmitters.
+export type ManagedChild = {
+  stdout: Pick<EventEmitter, 'on'> | null;
+  stderr: Pick<EventEmitter, 'on'> | null;
+  pid?: number | undefined;
+  on: EventEmitter['on'];
+  kill(signal?: NodeJS.Signals | number): boolean;
+};
+
+export type SpawnFn = (
+  command: string,
+  args: readonly string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; detached: boolean },
+) => ManagedChild;
 
 export type BackgroundProcessInit = {
   // Initial cwd for every spawned command.
@@ -85,7 +102,7 @@ class CappedStream {
 
 type Entry = {
   command: string;
-  proc: ChildProcess;
+  proc: ManagedChild;
   stdout: CappedStream;
   stderr: CappedStream;
   running: boolean;
@@ -94,13 +111,16 @@ type Entry = {
   exitFired: boolean;
   // Pending SIGKILL escalation, cleared when the process exits within grace.
   killTimer: ReturnType<typeof setTimeout> | null;
+  // Per-stream trailing partial line (bytes after the last newline) held across consecutive filtered
+  // reads so a line split over two reads reassembles. Reset by a raw read or a cap eviction (#154).
+  stdoutCarry: string;
+  stderrCarry: string;
 };
 
 // Return only the lines of `text` matching `re`; the caller has already advanced the read cursor
-// over everything, so skipped lines are consumed (not re-delivered) but not shown. Line-oriented on
-// each read's chunk: a single line split across two incremental reads (e.g. `ER` then `ROR\n`) is
-// filtered as two fragments and can be missed. Fine for line-buffered output (the dev-server / log
-// case this targets); cross-read partial-line retention is issue #154.
+// over everything, so skipped lines are consumed (not re-delivered) but not shown. `text` is the set
+// of COMPLETE lines the caller assembled (filterStream keeps any trailing partial line back), so a
+// line split across two reads is matched once reassembled, not as fragments.
 function filterLines(text: string, re: RegExp): string {
   if (text === '') return '';
   return text
@@ -147,6 +167,8 @@ export class ProcessManager {
       exitCode: null,
       exitFired: false,
       killTimer: null,
+      stdoutCarry: '',
+      stderrCarry: '',
     };
     proc.stdout?.on('data', (d: Buffer | string) => entry.stdout.append(d.toString()));
     proc.stderr?.on('data', (d: Buffer | string) => entry.stderr.append(d.toString()));
@@ -189,14 +211,51 @@ export class ProcessManager {
     }
     const out = entry.stdout.read();
     const err = entry.stderr.read();
+    let stdout: string;
+    let stderr: string;
+    if (re) {
+      stdout = this.filterStream(entry, 'stdoutCarry', out, re, entry.running);
+      stderr = this.filterStream(entry, 'stderrCarry', err, re, entry.running);
+    } else {
+      // A raw read returns bytes as-is and resets the carry — line reassembly only spans consecutive
+      // filtered reads, so a mode switch must not prepend a stale partial to a later filtered read.
+      entry.stdoutCarry = '';
+      entry.stderrCarry = '';
+      stdout = out.chunk;
+      stderr = err.chunk;
+    }
     return {
       id,
-      stdout: re ? filterLines(out.chunk, re) : out.chunk,
-      stderr: re ? filterLines(err.chunk, re) : err.chunk,
+      stdout,
+      stderr,
       running: entry.running,
       exitCode: entry.exitCode,
       truncated: out.truncated || err.truncated,
     };
+  }
+
+  // Filter one stream's incremental read, reassembling a line split across reads. Bytes after the
+  // last newline are held back as a carry and prepended to the next filtered read; a cap eviction
+  // (`truncated`) breaks continuity, so the carry is dropped rather than fabricating a spliced line.
+  // Once the process has exited, the trailing partial is flushed as a final line — no newline will
+  // ever arrive to terminate it.
+  private filterStream(
+    entry: Entry,
+    carryKey: 'stdoutCarry' | 'stderrCarry',
+    read: { chunk: string; truncated: boolean },
+    re: RegExp,
+    running: boolean,
+  ): string {
+    const combined = (read.truncated ? '' : entry[carryKey]) + read.chunk;
+    const nl = combined.lastIndexOf('\n');
+    let complete = nl === -1 ? '' : combined.slice(0, nl);
+    let rest = nl === -1 ? combined : combined.slice(nl + 1);
+    if (!running && rest !== '') {
+      complete = complete === '' ? rest : `${complete}\n${rest}`;
+      rest = '';
+    }
+    entry[carryKey] = rest;
+    return filterLines(complete, re);
   }
 
   // Kill one process and everything it spawned. Returns false for an unknown id. A process that

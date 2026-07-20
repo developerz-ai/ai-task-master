@@ -207,6 +207,31 @@ test('writeFileTool: overwriting an existing unread file fails; succeeds after a
   }
 });
 
+test('writeFileTool: rejects overwriting a read-then-externally-modified file; succeeds after a re-read (issue #187)', async () => {
+  const dir = await tempDir();
+  try {
+    const p = join(dir.path, 'f.txt');
+    await writeFile(p, 'original\n');
+    const t = tools(dir.path);
+    await run<ReadIn, ReadOut>(t.read, { path: 'f.txt' });
+    await writeFile(p, 'external change\n');
+    await assert.rejects(
+      () => run(t.write, { path: 'f.txt', content: 'clobber\n' }),
+      /modified since you read it/,
+    );
+    assert.equal(await readFile(p, 'utf8'), 'external change\n');
+    await run<ReadIn, ReadOut>(t.read, { path: 'f.txt' });
+    const ok = await run<{ path: string; content: string }, { ok: boolean }>(t.write, {
+      path: 'f.txt',
+      content: 'replaced\n',
+    });
+    assert.equal(ok.ok, true);
+    assert.equal(await readFile(p, 'utf8'), 'replaced\n');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
 test('writeFileTool: rejects a write outside the worktree', async () => {
   const dir = await tempDir();
   try {

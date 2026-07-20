@@ -13,7 +13,13 @@ import type { Tool } from 'ai';
 import { tool } from 'ai';
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
-import { defaultLookup, type LookupFn, resolveSafeUrl, type WebFetchOutput } from './web-fetch.ts';
+import {
+  defaultLookup,
+  type LookupFn,
+  renderWebFetchOutput,
+  resolveSafeUrl,
+  type WebFetchOutput,
+} from './web-fetch.ts';
 
 const fetchHtmlInputSchema = z.object({
   url: z.string().url(),
@@ -140,6 +146,7 @@ export function fetchHtmlTool(init: FetchHtmlInit = {}): Tool<FetchHtmlInput, We
         return errorOutput(input.url, err instanceof Error ? err.message : String(err));
       }
     },
+    toModelOutput: ({ output }) => ({ type: 'text', value: renderWebFetchOutput(output) }),
   });
 }
 

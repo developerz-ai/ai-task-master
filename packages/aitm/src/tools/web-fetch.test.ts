@@ -3,6 +3,7 @@ import { afterEach, test } from 'node:test';
 import {
   DEFAULT_STEALTH_HEADERS,
   type LookupFn,
+  renderWebFetchOutput,
   resolveSafeUrl,
   webFetchTool,
 } from './web-fetch.ts';
@@ -436,4 +437,38 @@ test('resolveSafeUrl rejects a hostname resolving to a private IP', async () => 
     () => resolveSafeUrl('https://attacker.example/', async () => [{ address: '10.0.0.1' }]),
     /resolving to private\/loopback/,
   );
+});
+
+test('renderWebFetchOutput: header then verbatim body, no JSON escaping (issue #188)', () => {
+  const text = renderWebFetchOutput({
+    url: 'https://example.com/',
+    finalUrl: 'https://example.com/page',
+    status: 200,
+    contentType: 'text/html; charset=utf-8',
+    body: '<h1>Hi</h1>\n"quoted" & <tags>',
+    truncated: true,
+    retrievedAt: '2026-07-20T00:00:00.000Z',
+  });
+  assert.match(
+    text,
+    /^https:\/\/example\.com\/page — HTTP 200 text\/html; charset=utf-8 — 29 chars \(truncated\)\n\n/,
+  );
+  // Body rides verbatim — quotes and angle brackets are not JSON-escaped.
+  assert.ok(text.endsWith('<h1>Hi</h1>\n"quoted" & <tags>'));
+  // No content-type + not truncated → header omits both.
+  const bare = renderWebFetchOutput({
+    url: 'u',
+    finalUrl: 'https://x/',
+    status: 404,
+    contentType: null,
+    body: 'nope',
+    truncated: false,
+    retrievedAt: 'now',
+  });
+  assert.equal(bare, 'https://x/ — HTTP 404 — 4 chars\n\nnope');
+});
+
+test('webFetchTool: exposes plain-text toModelOutput for local and stubbed variants (issue #188)', () => {
+  assert.equal(typeof webFetchTool({ lookup: publicLookup }).toModelOutput, 'function');
+  assert.equal(typeof webFetchTool({ local: false }).toModelOutput, 'function');
 });

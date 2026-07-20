@@ -103,6 +103,10 @@ function skipCommandPrefixes(tokens: string[]): string[] {
   while (i < tokens.length) {
     const t = tokens[i] ?? '';
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) || t === 'env' || t === 'command') i++;
+    // `--` is the POSIX end-of-options separator: after a wrapper it merely precedes the real
+    // command (`env -- git …`), so skip it — but only mid-run (i > 0), never a bare command's own
+    // leading `--`.
+    else if (i > 0 && t === '--') i++;
     else break;
   }
   return tokens.slice(i);

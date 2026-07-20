@@ -50,8 +50,12 @@ test('evaluateCommand: the env / command builtins do not evade a deny rule (#191
   assert.equal(evaluateCommand('command git push --force', DEFAULTS).denied, true);
   // env-assignment after the builtin is still skipped.
   assert.equal(evaluateCommand('env GIT_TRACE=1 git push -f', DEFAULTS).denied, true);
+  // The POSIX `--` end-of-options separator after a wrapper still resolves the real command.
+  assert.equal(evaluateCommand('env -- git push --force', DEFAULTS).denied, true);
+  assert.equal(evaluateCommand('command -- git push --force', DEFAULTS).denied, true);
   // A bare env/command with no real command matches nothing (default-allow).
   assert.equal(evaluateCommand('env', DEFAULTS).denied, false);
+  assert.equal(evaluateCommand('command', DEFAULTS).denied, false);
 });
 
 test('evaluateCommand: an absolute or relative path to the command does not evade (#191)', () => {

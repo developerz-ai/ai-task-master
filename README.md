@@ -124,6 +124,23 @@ Everything else — planning, task grouping, branch management, retries, review-
 
 > 💡 Both `--key value` and `--key=value` forms are accepted: `--max-prs=3` works the same as `--max-prs 3`.
 
+#### When you need `--admin`
+
+Green CI is not always enough to merge. If the base branch requires **an approving review**, a required check the run can't satisfy, or any other protection rule, `gh pr merge` is refused with:
+
+```
+Pull request #NNN is not mergeable: the base branch policy prohibits the merge.
+```
+
+The run then blocks with a finished, green PR it isn't allowed to land. `--admin` merges past the rule — what you want for an unattended run on a repo you own:
+
+```sh
+aitm start "…" --admin
+aitm merge-pr --pr 42 --admin
+```
+
+It needs repo-admin rights and it is a real override: the review requirement is bypassed, not satisfied. On a repo where those reviews are the point, leave it off and merge by hand. `--admin` also advances a CI **timeout** to the review stage instead of blocking; it does not skip CI or ignore failing checks — those still route to the fix loop.
+
 ## ⚙️ Configuration
 
 User config lives at `~/.aitm.json`; per-project overrides at `.ai-task-master/config.json`:

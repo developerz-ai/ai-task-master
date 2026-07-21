@@ -51,6 +51,15 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | `CLI` | `aitm start`, `aitm merge-pr`. Arg parsing and exit codes only |
 | `Logger` | Structured logs to stderr, plain status to stdout |
 
+## Branch protection & `--admin`
+
+`main` on the `developerz-ai` repos requires **one approving review**, so `gh pr merge` on a solo-authored PR is refused with "the base branch policy prohibits the merge" even with every check green. Two consequences:
+
+- **Running aitm here:** pass `--admin` (`aitm start … --admin`, `aitm merge-pr --pr N --admin`) or the run blocks on a finished, green PR it cannot land.
+- **Merging by hand:** `gh pr merge <n> --squash --admin`.
+
+`--admin` overrides the policy — it does not satisfy it. It never skips CI or ignores failing checks; those still route to the CI-fix loop. It does advance a CI *timeout* to the review stage rather than blocking.
+
 ## Tolerated check failures
 
 Some status checks fail for reasons no commit can fix. `github/check-tolerance.ts` holds a whitelist of `{ check, description, reason, match }` rules; a failure matching one is treated as *skipped*, so `waitForChecks` neither reports it as failed nor loops on it. Built in: **CodeRabbit quota failures** — `match: 'contains'` on `rate limit` and `limit reached`, covering both wordings the service uses. A real verdict (`1 issue found`, `Review failed`) contains neither and still fails CI, as does the same message from any other check.

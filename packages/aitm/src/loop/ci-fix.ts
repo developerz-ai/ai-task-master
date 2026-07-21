@@ -193,8 +193,10 @@ export async function runFixSession(input: FixSessionInput): Promise<FixSessionR
   // 2. Worker fix pass, pointed at the downloaded dirs.
   const worker = await runFixWorker(input, buildFixTask(group, pr, ciDir, commentsDir));
   if (worker.kind !== 'ok') {
+    // 'no-changes' here is a contradiction — CI is red, so claiming nothing needs changing cannot
+    // fix it. Surface the worker's own reason and block, same as an explicit block.
     const reason =
-      worker.kind === 'blocked' ? worker.reason : `worker error during CI fix: ${worker.error}`;
+      worker.kind === 'error' ? `worker error during CI fix: ${worker.error}` : worker.reason;
     log?.warn('ci-fix: worker did not deliver a fix', { pr, reason });
     return { kind: 'blocked', reason };
   }

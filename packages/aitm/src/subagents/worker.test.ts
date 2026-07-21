@@ -712,6 +712,28 @@ test('runWorker returns blocked when the manifest is empty', async () => {
   assert.equal(calls.bashes.length, 0);
 });
 
+test('runWorker: empty manifest WITH noChangesNeeded → no-changes, no branch/commit', async () => {
+  // Regression: a task that legitimately requires no code changes (verification-only, change
+  // already in place) used to be conflated with the weak-model empty-manifest failure and blocked
+  // its whole PR group. A reasoned empty manifest completes the task without a commit.
+  const manifest: FileManifest = {
+    files: [],
+    draftCommitMessage: 'chore: noop',
+    noChangesNeeded: 'the fix already landed; this task only verified it',
+  };
+  const { tools, calls } = makeTools();
+  const model = makeWorkerModel(manifest);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'no-changes');
+  if (result.kind === 'no-changes') {
+    assert.match(result.reason, /already landed/);
+  }
+  // No branch checkout, no commit — nothing touched git.
+  assert.equal(calls.bashes.length, 0);
+});
+
 test('runWorker: persistently schema-invalid manifest → error after retries, naming schema validation (issue #101)', async () => {
   const { tools } = makeTools();
   // submit called with args that don't match FileManifestSchema (files is not an array) on every

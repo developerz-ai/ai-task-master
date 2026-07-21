@@ -123,7 +123,7 @@ import { type FetchHtmlInput, fetchHtmlTool, isFetchHtmlAvailable } from '../too
 import { type WebFetchOutput, webFetchTool } from '../tools/web-fetch.ts';
 import { webSearchTool } from '../tools/web-search.ts';
 import { sanitizeBranchComponent } from '../workspace/branch-name.ts';
-import { runGit } from '../workspace/git-exec.ts';
+import { commitsAheadOfBase, runGit } from '../workspace/git-exec.ts';
 import { InPlaceCheckout } from '../workspace/in-place-checkout.ts';
 import { runFixSession } from './ci-fix.ts';
 import { buildConflictResolver } from './conflict-resolution.ts';
@@ -1220,11 +1220,23 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     finalizeCommit: (group, delivery, checkoutPath, taskId) =>
       orch.finalizeCommit(group, delivery, checkoutPath, taskId),
     openPr: async (group, delivery, baseBranch) => {
+      const head = group.branch ?? `aitm/${group.id}`;
+      const prOpenTag: RunStep = { phase: 'pr-open', ...stepCounter(group.id) };
+      // Ground-truth emptiness check: a group whose tasks all completed without commits (declared
+      // no-changes tasks) leaves the branch identical to the base — `gh pr create` would fail with
+      // "No commits between …" and block a legitimately finished group. An unreadable count (probe
+      // error) means unknown, not empty: fall through and let push/create surface any real problem.
+      const ahead = await commitsAheadOfBase(input.cwd, baseBranch, head);
+      if (ahead === 0) {
+        harnessProgress(
+          `group ${group.id}: ${head} adds no commits over ${baseBranch} — nothing to ship, skipping PR`,
+          prOpenTag,
+        );
+        return 'nothing-to-ship';
+      }
       // The Worker's commits live on the group branch in the local checkout. Push it to origin
       // first — `gh pr create` won't open a PR for a branch that isn't on the remote
       // ("No commits between … / Head ref must be a branch").
-      const head = group.branch ?? `aitm/${group.id}`;
-      const prOpenTag: RunStep = { phase: 'pr-open', ...stepCounter(group.id) };
       harnessProgress(`group ${group.id}: pushing ${head} and opening PR`, prOpenTag);
       await runGit(['push', '-u', 'origin', head], { cwd: input.cwd });
       const pr = await orch.openPr(group, delivery, baseBranch);

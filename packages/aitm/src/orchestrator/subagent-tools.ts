@@ -223,6 +223,7 @@ function summarizeWorkerResult(r: WorkerResult): string {
     );
   }
   if (r.kind === 'blocked') return compactOneLine(`worker [blocked]: ${r.reason}`);
+  if (r.kind === 'no-changes') return compactOneLine(`worker [no-changes]: ${r.reason}`);
   return compactOneLine(`worker [error]: ${r.error}`);
 }
 

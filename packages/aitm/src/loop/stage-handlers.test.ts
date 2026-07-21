@@ -172,6 +172,19 @@ test('handlePrOpen: opens PR, persists number → waiting-ci', async () => {
   assert.equal(st.snapshot().prGroups[0]?.pr, 77);
 });
 
+test('handlePrOpen: nothing to ship (openPr null) → merged, no PR recorded', async () => {
+  // Regression: a group whose branch adds no commits over the base (every task completed without a
+  // commit) must complete as merged instead of blocking the run at `gh pr create`.
+  const g = group({ stage: 'pr-open' });
+  const st = makeState(baseState([g]));
+  const deps = makeDeps({
+    state: st.state,
+    orchestrator: makeOrchestrator({ openPr: async () => null }),
+  });
+  assert.equal(await handlePrOpen(deps, g), 'merged');
+  assert.equal(st.snapshot().prGroups[0]?.pr, null, 'no PR number is persisted');
+});
+
 test('handlePrOpen: PR already open (resume) → waiting-ci, no reopen', async () => {
   let opened = 0;
   const deps = makeDeps({

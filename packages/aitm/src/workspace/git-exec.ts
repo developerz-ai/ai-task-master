@@ -65,3 +65,20 @@ export async function runGit(args: readonly string[], options?: RunGitOptions) {
   assertGitAllowed(args, options);
   return execa('git', [...args], options?.cwd ? { cwd: options.cwd } : {});
 }
+
+// Count the commits `head` adds over `origin/<base>`. Returns null when the comparison cannot be
+// made (missing ref, detached state, git error) — callers must treat null as "unknown", never as
+// zero: an unmeasurable branch may still carry work, so only a definite 0 may skip shipping it.
+export async function commitsAheadOfBase(
+  cwd: string,
+  base: string,
+  head: string,
+): Promise<number | null> {
+  try {
+    const result = await runGit(['rev-list', '--count', `origin/${base}..${head}`], { cwd });
+    const count = Number.parseInt(result.stdout.trim(), 10);
+    return Number.isNaN(count) ? null : count;
+  } catch {
+    return null;
+  }
+}

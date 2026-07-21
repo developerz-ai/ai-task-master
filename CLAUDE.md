@@ -70,3 +70,7 @@ Do not add, do not stub, do not leave TODOs for:
 - Docker, devcontainers, or any containerization
 
 If a change pulls in any of these, stop and surface it instead of implementing.
+
+## Note
+
+Do not use git worktrees — work directly in this checkout. See `.claude/commands/feature.md` and `.claude/commands/planx.md`.

@@ -3,6 +3,7 @@
 
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
+import { isToleratedFailure } from './check-tolerance.ts';
 import { CiFailed, MergeConflict } from './errors.ts';
 import {
   type CheckStatus,
@@ -233,7 +234,7 @@ export class GitHubClient {
     while (true) {
       const r = await this.runCmd(
         'gh',
-        ['pr', 'checks', String(pr), '--json', 'bucket,name,state'],
+        ['pr', 'checks', String(pr), '--json', 'bucket,name,state,description'],
         { cwd: this.cwd },
       );
       // `gh pr checks` exits 8 when any check fails but still emits JSON on stdout. Treat any
@@ -639,14 +640,17 @@ function parseScopes(text: string): string[] {
   return scopes;
 }
 
-// Wire shapes for `gh pr checks --json bucket,name,state`. The bucket field is the gh CLI's
-// normalized status across providers (Actions, Circle, etc.); CheckStatus is our domain.
+// Wire shapes for `gh pr checks --json bucket,name,state,description`. The bucket field is the
+// gh CLI's normalized status across providers (Actions, Circle, etc.); CheckStatus is our domain.
+// `description` is the reporting service's free-text reason — the only way to tell a tolerated
+// failure (see check-tolerance.ts) from a real one.
 const CheckBucketSchema = z.enum(['pass', 'fail', 'pending', 'cancel', 'skipping']);
 type CheckBucket = z.infer<typeof CheckBucketSchema>;
 const CheckRowSchema = z.object({
   bucket: CheckBucketSchema,
   name: z.string(),
   state: z.string(),
+  description: z.string().optional(),
 });
 const ChecksResponseSchema = z.array(CheckRowSchema);
 type CheckRow = z.infer<typeof CheckRowSchema>;
@@ -671,6 +675,14 @@ const BUCKET_TO_STATUS: Record<CheckBucket, CheckStatus> = {
   skipping: 'skipped',
 };
 
+// A failed row whose (name, description) pair is whitelisted counts as skipped, so a rate-limited
+// review bot can neither fail the PR nor be reported as something to fix.
+function effectiveStatus(row: CheckRow): CheckStatus {
+  const status = BUCKET_TO_STATUS[row.bucket];
+  if ((status === 'failure' || status === 'cancelled') && isToleratedFailure(row)) return 'skipped';
+  return status;
+}
+
 function aggregateChecks(rows: CheckRow[]): CheckStatus {
   // No rows is not success: right after a push, CI may not have registered its checks yet, so
   // nothing has run. Report pending; waitForChecks bounds how long an empty set stays pending
@@ -678,7 +690,7 @@ function aggregateChecks(rows: CheckRow[]): CheckStatus {
   if (rows.length === 0) return 'pending';
   let pending = false;
   for (const row of rows) {
-    const status = BUCKET_TO_STATUS[row.bucket];
+    const status = effectiveStatus(row);
     if (status === 'failure') return 'failure';
     if (status === 'cancelled') return 'cancelled';
     if (status === 'pending') pending = true;
@@ -689,7 +701,7 @@ function aggregateChecks(rows: CheckRow[]): CheckStatus {
 function collectFailedChecks(rows: CheckRow[]): FailedCheck[] {
   const out: FailedCheck[] = [];
   for (const row of rows) {
-    const status = BUCKET_TO_STATUS[row.bucket];
+    const status = effectiveStatus(row);
     if (status === 'failure' || status === 'cancelled') out.push({ name: row.name, status });
   }
   return out;

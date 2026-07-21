@@ -428,7 +428,13 @@ test('waitForChecks returns success when all checks pass', async () => {
   const g = new GitHubClient('/tmp/repo', run, sleep);
   const result = await g.waitForChecks(42);
   assert.deepEqual(result, { state: 'success', failedChecks: [] });
-  assert.deepEqual(calls[0]?.args, ['pr', 'checks', '42', '--json', 'bucket,name,state']);
+  assert.deepEqual(calls[0]?.args, [
+    'pr',
+    'checks',
+    '42',
+    '--json',
+    'bucket,name,state,description',
+  ]);
   // Only the start-wait before the first poll; a green first poll adds no backoff sleeps.
   assert.deepEqual(delays, [CHECKS_START_WAIT_MS]);
 });

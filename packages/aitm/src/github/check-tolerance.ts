@@ -4,22 +4,26 @@
 // review and that no commit can fix. Treating those as CI failures sends the loop into a pointless
 // fix session and then spins on the same red check forever.
 //
-// The tolerated set is a whitelist: each rule names one check *and* the exact message that marks
-// its failure as a quota/availability response rather than a verdict on the code. Anything else —
+// The tolerated set is a whitelist: each rule names one check *and* the message that marks its
+// failure as a quota/availability response rather than a verdict on the code. Anything else —
 // including any other failure from the same check — still fails CI.
 //
-// Adding an exception: append a rule to TOLERATED_FAILURES, or, without waiting for a release,
-// set AITM_TOLERATED_CHECK_FAILURES="some-bot=quota exceeded;other-bot=busy".
-// Both sides are matched on trimmed, lower-cased text.
+// Adding an exception: append a rule to TOLERATED_FAILURES, using match: 'contains' when the
+// service words the same condition several ways; or, without waiting for a release, set
+// AITM_TOLERATED_CHECK_FAILURES="some-bot=quota exceeded;other-bot=busy" (env rules are always
+// exact). Both sides are compared on trimmed, lower-cased text.
 
 export type ToleratedFailure = {
   // Status-check name as reported by `gh pr checks` (case-insensitive).
   check: string;
-  // The exact failure description to tolerate (case-insensitive). A failure with any other
-  // description is a real failure.
+  // The failure description to tolerate (case-insensitive). A failure with any other description
+  // is a real failure.
   description: string;
   // Why it is safe to ignore — surfaced in the log line when a failure is discounted.
   reason: string;
+  // 'exact' (default) requires the whole description; 'contains' accepts any description holding
+  // it, for services that word the same condition more than one way.
+  match?: 'exact' | 'contains';
 };
 
 // The shape both predicates take: a check's reported name and its optional free-text description.
@@ -28,12 +32,21 @@ export type ToleratedCheck = { name: string; description?: string | undefined };
 // Env var holding extra rules as `check=description` pairs separated by `;` or newlines.
 export const TOLERATED_FAILURES_ENV = 'AITM_TOLERATED_CHECK_FAILURES';
 
-// The built-in exceptions. Extend this list to tolerate another check.
+// Why CodeRabbit's quota failures are safe to ignore — it is out of review budget, which says
+// nothing about the code.
+const CODERABBIT_QUOTA = 'CodeRabbit review quota, not a verdict on the code';
+
+// The built-in exceptions. Extend this list to tolerate another check. CodeRabbit words the same
+// quota condition at least two ways ("Review rate limited" on the check, "Review limit reached" in
+// its PR comment), so both fragments are matched loosely. A real verdict ("1 issue found",
+// "Review failed") contains neither and still fails CI.
 export const TOLERATED_FAILURES: readonly ToleratedFailure[] = [
+  { check: 'CodeRabbit', description: 'rate limit', reason: CODERABBIT_QUOTA, match: 'contains' },
   {
     check: 'CodeRabbit',
-    description: 'Review rate limited',
-    reason: 'CodeRabbit review quota, not a verdict on the code',
+    description: 'limit reached',
+    reason: CODERABBIT_QUOTA,
+    match: 'contains',
   },
 ];
 
@@ -59,9 +72,10 @@ export function toleratedReason(check: ToleratedCheck): string | null {
   const description = (check.description ?? '').trim().toLowerCase();
   if (!name || !description) return null;
   for (const rule of [...TOLERATED_FAILURES, ...envRules()]) {
-    if (rule.check.toLowerCase() === name && rule.description.toLowerCase() === description) {
-      return rule.reason;
-    }
+    if (rule.check.toLowerCase() !== name) continue;
+    const wanted = rule.description.toLowerCase();
+    const hit = rule.match === 'contains' ? description.includes(wanted) : description === wanted;
+    if (hit) return rule.reason;
   }
   return null;
 }

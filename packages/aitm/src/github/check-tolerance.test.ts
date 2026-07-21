@@ -45,11 +45,37 @@ test('matching ignores case and surrounding whitespace', () => {
   );
 });
 
-test('any other CodeRabbit failure is a real failure', () => {
-  for (const description of ['Review failed', '1 issue found', 'Review rate limited soon', '']) {
+// Regression: only the exact 'Review rate limited' string matched, so CodeRabbit's sibling
+// 'Review limit reached' wording still failed CI.
+test('every CodeRabbit quota wording is tolerated', () => {
+  for (const description of [
+    'Review rate limited',
+    'Review limit reached',
+    'You have reached your review rate limit',
+  ]) {
+    assert.equal(isToleratedFailure({ name: 'CodeRabbit', description }), true, description);
+  }
+});
+
+test('a real CodeRabbit verdict is still a failure', () => {
+  for (const description of ['Review failed', '1 issue found', '3 issues found', '']) {
     assert.equal(isToleratedFailure({ name: 'CodeRabbit', description }), false, description);
   }
   assert.equal(isToleratedFailure({ name: 'CodeRabbit' }), false);
+});
+
+// Loose matching is opt-in per rule: an env-declared rule stays exact, so a typo there cannot
+// silently swallow a whole family of failures.
+test('environment rules stay exact', () => {
+  const previous = process.env[TOLERATED_FAILURES_ENV];
+  process.env[TOLERATED_FAILURES_ENV] = 'bot=limit';
+  try {
+    assert.equal(isToleratedFailure({ name: 'bot', description: 'limit' }), true);
+    assert.equal(isToleratedFailure({ name: 'bot', description: 'limit reached' }), false);
+  } finally {
+    if (previous === undefined) delete process.env[TOLERATED_FAILURES_ENV];
+    else process.env[TOLERATED_FAILURES_ENV] = previous;
+  }
 });
 
 test('the same message from another check is a real failure', () => {

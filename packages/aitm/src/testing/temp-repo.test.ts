@@ -5,9 +5,6 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { makeTempRepo } from './temp-repo.ts';
 
-const listTempRepoDirs = async (): Promise<string[]> =>
-  (await readdir(tmpdir())).filter((entry) => entry.startsWith('aitm-test-'));
-
 test('creates a temp dir with a .git directory', async () => {
   const repo = await makeTempRepo();
   try {
@@ -48,15 +45,25 @@ test('setup failure (git init throws) removes the temp dir instead of leaking it
   await writeFile(gitStubPath, '#!/bin/sh\nexit 1\n');
   await chmod(gitStubPath, 0o755);
 
+  // Point TMPDIR at a private root for the duration: makeTempRepo resolves os.tmpdir() per call,
+  // so the leak check then sees only what THIS test created. Scanning the shared tmpdir instead
+  // made the assertion fail whenever another test file (node --test runs files in parallel) held
+  // an aitm-test- dir of its own at that moment — a failure about someone else's live directory.
+  const tmpRoot = await mkdtemp(join(tmpdir(), 'aitm-leakcheck-'));
   const originalPath = process.env.PATH;
-  const before = await listTempRepoDirs();
+  const originalTmpdir = process.env.TMPDIR;
   try {
+    process.env.TMPDIR = tmpRoot;
     process.env.PATH = stubBinDir;
     await assert.rejects(() => makeTempRepo(), 'makeTempRepo should reject when git init fails');
   } finally {
     process.env.PATH = originalPath;
+    if (originalTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpdir;
     await rm(stubBinDir, { recursive: true, force: true });
   }
-  const after = await listTempRepoDirs();
-  assert.deepEqual(after, before, 'no aitm-test- directory should remain after a failed setup');
+
+  const leaked = await readdir(tmpRoot);
+  await rm(tmpRoot, { recursive: true, force: true });
+  assert.deepEqual(leaked, [], 'no directory should remain after a failed setup');
 });

@@ -53,9 +53,9 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 
 ## Tolerated check failures
 
-Some status checks fail for reasons no commit can fix. `github/check-tolerance.ts` holds a whitelist of `{ check, description, reason }` rules; a failure matching one is treated as *skipped*, so `waitForChecks` neither reports it as failed nor loops on it. Built in: **CodeRabbit / "Review rate limited"**. Any other CodeRabbit failure, and the same message from any other check, still fails CI.
+Some status checks fail for reasons no commit can fix. `github/check-tolerance.ts` holds a whitelist of `{ check, description, reason, match }` rules; a failure matching one is treated as *skipped*, so `waitForChecks` neither reports it as failed nor loops on it. Built in: **CodeRabbit quota failures** — `match: 'contains'` on `rate limit` and `limit reached`, covering both wordings the service uses. A real verdict (`1 issue found`, `Review failed`) contains neither and still fails CI, as does the same message from any other check.
 
-Add an exception by appending a rule to `TOLERATED_FAILURES`, or without a release via `AITM_TOLERATED_CHECK_FAILURES="check=description;other=description"`. Mirrors `claude-task-master`'s `github/check_tolerance.py`.
+Add an exception by appending a rule (`match: 'contains'` when a service words one condition several ways), or without a release via `AITM_TOLERATED_CHECK_FAILURES="check=description;other=description"` — env rules are always exact. Mirrors `claude-task-master`'s `github/check_tolerance.py`.
 
 ## Testing
 

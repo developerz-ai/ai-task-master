@@ -51,6 +51,12 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | `CLI` | `aitm start`, `aitm merge-pr`. Arg parsing and exit codes only |
 | `Logger` | Structured logs to stderr, plain status to stdout |
 
+## Tolerated check failures
+
+Some status checks fail for reasons no commit can fix. `github/check-tolerance.ts` holds a whitelist of `{ check, description, reason }` rules; a failure matching one is treated as *skipped*, so `waitForChecks` neither reports it as failed nor loops on it. Built in: **CodeRabbit / "Review rate limited"**. Any other CodeRabbit failure, and the same message from any other check, still fails CI.
+
+Add an exception by appending a rule to `TOLERATED_FAILURES`, or without a release via `AITM_TOLERATED_CHECK_FAILURES="check=description;other=description"`. Mirrors `claude-task-master`'s `github/check_tolerance.py`.
+
 ## Testing
 
 - Every module has a paired `*.test.ts`. No exceptions.

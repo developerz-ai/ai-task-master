@@ -49,7 +49,9 @@ export type StageOrchestrator = {
   // already marked done are skipped. Returns blocked when a Worker pass can't complete.
   work(group: PrGroup): Promise<StageWorkResult>;
   // Push the group branch and open its PR from the work() delivery; returns the new PR number.
-  openPr(group: PrGroup): Promise<number>;
+  // Returns null when the branch adds no commits over the base (every task completed without a
+  // commit) — there is nothing to ship, and the group completes without a PR.
+  openPr(group: PrGroup): Promise<number | null>;
   // ci-failed: download the failed CI logs + unresolved comments, run the shared fix session
   // (Worker pass), then rebase onto origin/<base> and force-with-lease push so CI re-runs. ok →
   // waiting-ci; blocked → the fix couldn't land (still red, or a rebase conflict needing a human).
@@ -99,9 +101,12 @@ export const handleWorking: StageHandler = async (deps, group) => {
 
 // pr-open: open the PR, record its number, then wait for CI. Idempotent: if the group already
 // carries a PR (a crash between opening it and persisting the next stage), don't open a second one.
+// A null from openPr means the branch adds no commits over the base (nothing to ship): the group is
+// done without a PR, so it goes straight to the merged terminal instead of blocking the run.
 export const handlePrOpen: StageHandler = async (deps, group) => {
   if (group.pr !== null) return 'waiting-ci';
   const pr = await deps.orchestrator.openPr(group);
+  if (pr === null) return 'merged';
   await deps.state.update((s) => ({
     ...s,
     prGroups: s.prGroups.map((g) => (g.id === group.id ? { ...g, pr } : g)),

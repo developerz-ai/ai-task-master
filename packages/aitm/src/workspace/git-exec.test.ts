@@ -65,3 +65,37 @@ test('assertGitAllowed: the rule keys off the push subcommand, not the --force t
 test('runGit: rejects a force-push before spawning git', async () => {
   await assert.rejects(() => runGit(['push', '--force']), GitGuardError);
 });
+
+test('commitsAheadOfBase: 0 on a fresh branch, counts new commits, null when unmeasurable', async () => {
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const { execa } = await import('execa');
+  const { commitsAheadOfBase } = await import('./git-exec.ts');
+
+  const repo = await mkdtemp(join(tmpdir(), 'aitm-ahead-'));
+  const remote = await mkdtemp(join(tmpdir(), 'aitm-ahead-origin-'));
+  try {
+    await execa('git', ['init', '--initial-branch=main', repo]);
+    await execa('git', ['config', 'user.email', 'test@aitm.local'], { cwd: repo });
+    await execa('git', ['config', 'user.name', 'aitm test'], { cwd: repo });
+    await execa('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: repo });
+    await execa('git', ['init', '--bare', '--initial-branch=main', remote]);
+    await execa('git', ['remote', 'add', 'origin', remote], { cwd: repo });
+    await execa('git', ['push', 'origin', 'main'], { cwd: repo });
+
+    await execa('git', ['checkout', '-B', 'feature/x'], { cwd: repo });
+    assert.equal(await commitsAheadOfBase(repo, 'main', 'feature/x'), 0);
+
+    await writeFile(join(repo, 'a.txt'), 'a\n');
+    await execa('git', ['add', 'a.txt'], { cwd: repo });
+    await execa('git', ['commit', '-m', 'add a'], { cwd: repo });
+    assert.equal(await commitsAheadOfBase(repo, 'main', 'feature/x'), 1);
+
+    // Unmeasurable (unknown base ref) must be null — never a false "empty branch".
+    assert.equal(await commitsAheadOfBase(repo, 'no-such-base', 'feature/x'), null);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(remote, { recursive: true, force: true });
+  }
+});

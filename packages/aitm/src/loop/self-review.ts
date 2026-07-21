@@ -175,7 +175,7 @@ export async function runSelfReviewSession(input: SelfReviewInput): Promise<Self
     log?.info('self-review: nothing to fix', { group: group.id });
     return { kind: 'clean' };
   }
-  const detail = worker.kind === 'blocked' ? worker.reason : worker.error;
+  const detail = worker.kind === 'error' ? worker.error : worker.reason;
   log?.warn('self-review: verify still failing, opening PR anyway', { group: group.id, detail });
   return { kind: 'unclean', reason: uncleanReason(input.verifyCommand ?? '', verifyFailure) };
 }

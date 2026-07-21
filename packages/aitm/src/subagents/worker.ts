@@ -101,6 +101,10 @@ export type FileManifestEntry = z.infer<typeof FileManifestEntrySchema>;
 export const FileManifestSchema = z.object({
   files: z.array(FileManifestEntrySchema),
   draftCommitMessage: z.string().min(1),
+  // Explicit declaration that the task requires no code changes (verification-only, or the change
+  // already exists). Only honored alongside an empty `files` list: it completes the task without a
+  // commit instead of conflating a reasoned empty manifest with a weak-model failure.
+  noChangesNeeded: z.string().min(1).optional(),
 });
 export type FileManifest = z.infer<typeof FileManifestSchema>;
 
@@ -168,6 +172,9 @@ export type WorkerResult =
   // `handle` retains the manifest-planning conversation so the next CI-fix pass for this group can
   // continue it instead of re-planning from zero (issue #107).
   | { kind: 'ok'; delivery: WorkerDelivery; handle: SubagentHandle<WorkerTools> }
+  // The Worker declared (via FileManifest.noChangesNeeded) that the task requires no code changes.
+  // The task completes without a commit; nothing was branched, edited, or committed.
+  | { kind: 'no-changes'; reason: string }
   | { kind: 'blocked'; reason: string }
   | { kind: 'error'; error: string };
 
@@ -269,6 +276,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
     const planned = await planAndEdit(agent, init, input, branch);
     if (planned.kind === 'blocked') return { kind: 'blocked', reason: planned.reason };
     if (planned.kind === 'error') return { kind: 'error', error: planned.error };
+    if (planned.kind === 'no-changes') return { kind: 'no-changes', reason: planned.reason };
 
     // delivery.changes must reflect every committed edit, so a fix pass that touched new files
     // is appended to the first-pass changes (the Orchestrator narrates the PR body off this).
@@ -308,6 +316,7 @@ type PlanEditResult =
       draftCommitMessage: string;
       handle: SubagentHandle<WorkerTools>;
     }
+  | { kind: 'no-changes'; reason: string }
   | { kind: 'blocked'; reason: string }
   | { kind: 'error'; error: string };
 
@@ -334,6 +343,11 @@ async function planAndEdit(
   }
   const manifest = submitted.value;
   if (manifest.files.length === 0) {
+    // A reasoned empty manifest is a legitimate outcome (verification-only task, change already
+    // in place) — complete without a commit. An unreasoned one keeps the weak-model diagnosis.
+    if (manifest.noChangesNeeded) {
+      return { kind: 'no-changes', reason: manifest.noChangesNeeded };
+    }
     return { kind: 'blocked', reason: EMPTY_MANIFEST_REASON };
   }
   // Create/switch the group branch BEFORE the editor fanout writes any file, so every edit lands on
@@ -478,7 +492,11 @@ function buildManifestPrompt(input: WorkerInput): string {
       capText(input.rollingContext, ROLLING_CONTEXT_MAX),
     );
   }
-  lines.push('', 'Survey the repo, then call submit with the FileManifest.');
+  lines.push(
+    '',
+    'Survey the repo, then call submit with the FileManifest.',
+    'If the task genuinely requires no code changes (verification-only, or the change is already in place), submit an empty `files` list with `noChangesNeeded` explaining why — never invent edits to have something to commit.',
+  );
   return appendReminderBlock(
     prependContextBlock(input.contextBlock, lines.join('\n')),
     input.progressBlock,

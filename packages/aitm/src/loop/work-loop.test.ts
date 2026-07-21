@@ -16,6 +16,7 @@ import {
   ciFixFailedError,
   describeError,
   mergeDeliveries,
+  noChangesDelivery,
   recoveredDelivery,
   reviewFailedError,
   type SelfReviewInvocation,
@@ -2245,4 +2246,107 @@ test('reviewFailedError: same message as before, cause is the blocked StageWorkR
   const err = reviewFailedError(review);
   assert.equal(err.message, 'reviewer failed: push rejected');
   assert.equal(err.cause, review);
+});
+
+// ---- no-changes tasks & nothing-to-ship groups ---------------------------
+// Regression: a task that legitimately requires no code changes (verification-only, or the change
+// already exists) used to block its whole group — the empty manifest was misdiagnosed as a
+// weak-model failure, and a group whose branch added no commits died at `gh pr create`.
+
+test('group mode: a trailing no-changes task completes without finalizeCommit and the group PR ships the earlier commit', async () => {
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 42,
+    workerResults: [
+      okWorker(),
+      { kind: 'no-changes', reason: 'verified in prod, fix already live' },
+    ],
+  });
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciSuccess], threads: [] });
+  const ready = makeGraph([twoTaskGroup()], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, graph: ready.graph, autoMerge: true }),
+  );
+  const result = await loop.run();
+
+  assert.equal(calls.runWorker.length, 2, 'both tasks ran a Worker pass');
+  assert.equal(
+    calls.finalizeCommit.length,
+    1,
+    'only the committing task finalizes — no --amend for the no-changes task',
+  );
+  assert.equal(calls.openPr.length, 1, "the group PR still ships the first task's commit");
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [42],
+  );
+  assert.equal(result.outcomes[0]?.status, 'merged', 'clean terminal — nothing was dropped');
+  if (result.outcomes[0]?.status === 'merged') assert.equal(result.outcomes[0].pr, 42);
+  assert.equal(result.kind, 'success');
+});
+
+test('group mode: an all-no-changes group completes as merged with no PR instead of blocking', async () => {
+  const { orchestrator, calls } = makeOrchestrator({
+    workerResults: [
+      { kind: 'no-changes', reason: 'first already done' },
+      { kind: 'no-changes', reason: 'second already done' },
+    ],
+  });
+  // The branch adds no commits over the base, so the adapter reports nothing to ship.
+  const nothingToShip: WorkLoopOrchestrator = {
+    ...orchestrator,
+    openPr: async () => 'nothing-to-ship',
+  };
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciSuccess], threads: [] });
+  const ready = makeGraph([twoTaskGroup()], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator: nothingToShip, github, graph: ready.graph, autoMerge: true }),
+  );
+  const result = await loop.run();
+
+  assert.equal(calls.finalizeCommit.length, 0, 'nothing was committed');
+  assert.deepEqual(ghCalls.mergePr, [], 'no PR exists, so nothing merges');
+  assert.equal(result.outcomes.length, 1);
+  assert.equal(result.outcomes[0]?.status, 'merged');
+  if (result.outcomes[0]?.status === 'merged') {
+    assert.equal(result.outcomes[0].pr, null, 'the PR-less terminal is explicit');
+  }
+  assert.equal(result.kind, 'success', 'a legitimately empty group must not block the run');
+});
+
+test('prPerTask: a final no-changes task with nothing to ship completes the group without a PR', async () => {
+  const { orchestrator, calls } = makeOrchestrator({
+    workerResults: [{ kind: 'no-changes', reason: 'nothing to do' }],
+  });
+  const nothingToShip: WorkLoopOrchestrator = {
+    ...orchestrator,
+    openPr: async () => 'nothing-to-ship',
+  };
+  const { github, calls: ghCalls } = makeGithub({ checks: [ciSuccess], threads: [] });
+  const ready = makeGraph([group('solo')], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({
+      orchestrator: nothingToShip,
+      github,
+      graph: ready.graph,
+      autoMerge: true,
+      prPerTask: true,
+    }),
+  );
+  const result = await loop.run();
+
+  assert.equal(calls.finalizeCommit.length, 0);
+  assert.deepEqual(ghCalls.mergePr, []);
+  assert.equal(result.outcomes[0]?.status, 'merged');
+  if (result.outcomes[0]?.status === 'merged') assert.equal(result.outcomes[0].pr, null);
+  assert.equal(result.kind, 'success');
+});
+
+test('noChangesDelivery: empty changes, progress entry names the task and the reason', () => {
+  const g = group('gamma');
+  const t = g.tasks[0];
+  assert.ok(t);
+  const d = noChangesDelivery(g, t, 'already implemented');
+  assert.equal(d.branch, 'aitm/gamma');
+  assert.deepEqual(d.changes, []);
+  assert.deepEqual(d.progressEntries, ['- t (no code changes: already implemented)']);
 });

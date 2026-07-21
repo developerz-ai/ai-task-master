@@ -81,7 +81,13 @@ export type WorkLoopOrchestrator = {
     checkoutPath: string,
     taskId?: string,
   ): Promise<string>;
-  openPr(group: PrGroup, delivery: WorkerDelivery, baseBranch: string): Promise<PullRequest>;
+  // 'nothing-to-ship': the group branch adds no commits over the base (every task completed
+  // without a commit), so there is nothing to push and no PR to open — the group is done as-is.
+  openPr(
+    group: PrGroup,
+    delivery: WorkerDelivery,
+    baseBranch: string,
+  ): Promise<PullRequest | 'nothing-to-ship'>;
   // Pre-PR self-review: adversarially review + verify + fix the just-committed diff, committing any
   // fixes onto the group branch BEFORE openPr. Optional so existing stubs compile and so a run with
   // selfReview disabled never invokes it; when absent, the PR opens exactly as before. Never blocks —
@@ -196,7 +202,9 @@ export type WorkLoopDeps = {
 };
 
 export type GroupOutcome =
-  | { groupId: string; status: 'merged'; pr: number }
+  // `pr: null` marks a group that completed with nothing to ship — every task finished but the
+  // branch adds no commits over the base (e.g. all tasks were verification-only), so no PR exists.
+  | { groupId: string; status: 'merged'; pr: number | null }
   | { groupId: string; status: 'awaiting-pr'; pr: number }
   // A group that opened (and, under autoMerge, merged) a PR for its committed tasks but left at least
   // one task undone — a mid-group block after earlier tasks landed, where workTasks ships the
@@ -272,6 +280,18 @@ export function alreadyCommittedDelivery(group: PrGroup, task: Task): WorkerDeli
     draftCommitMessage: task.text,
     changes: [],
     progressEntries: [`- ${task.text}`],
+  };
+}
+
+// Synthetic delivery for a task the Worker explicitly declared needs no code changes
+// (FileManifest.noChangesNeeded): the task completes without a commit, contributing only its
+// progress entry to the merged group delivery. Exported for unit testing.
+export function noChangesDelivery(group: PrGroup, task: Task, reason: string): WorkerDelivery {
+  return {
+    branch: group.branch ?? `aitm/${group.id}`,
+    draftCommitMessage: task.text,
+    changes: [],
+    progressEntries: [`- ${task.text} (no code changes: ${reason})`],
   };
 }
 
@@ -672,9 +692,10 @@ export class WorkLoop {
           throw new Error(`group ${ctx.group.id} reached pr-open without a worker delivery`);
         }
         await this.maybeSelfReview(ctx.group, ctx.delivery, checkout, baseBranch);
-        const pr = await this.deps.orchestrator.openPr(ctx.group, ctx.delivery, baseBranch);
-        ctx.group = { ...ctx.group, pr: pr.number };
-        return pr.number;
+        const opened = await this.deps.orchestrator.openPr(ctx.group, ctx.delivery, baseBranch);
+        if (opened === 'nothing-to-ship') return null;
+        ctx.group = { ...ctx.group, pr: opened.number };
+        return opened.number;
       },
       fixCi: (group) =>
         this.deps.orchestrator.runCiFix({ group, pr: prNumberOf(group), checkout, baseBranch }),
@@ -787,6 +808,17 @@ export class WorkLoop {
       }
       return worked;
     });
+    if (result.kind === 'no-changes') {
+      // The Worker explicitly declared the task needs no code changes. Complete it without a
+      // commit — finalizeCommit must NOT run (its `--amend` would rewrite whatever commit happens
+      // to sit at the branch tip). The synthetic delivery contributes only its progress entry.
+      const next = await this.completeTask(group, task.id);
+      this.deps.progress?.(
+        `group ${group.id} task ${task.id}: no code changes needed (${result.reason})`,
+        this.stepFor(group.id, 'working', task),
+      );
+      return { kind: 'ok', group: next, delivery: noChangesDelivery(group, task, result.reason) };
+    }
     if (result.kind !== 'ok') {
       return { kind: 'blocked', reason: result.kind === 'blocked' ? result.reason : result.error };
     }
@@ -831,6 +863,11 @@ export class WorkLoop {
   // flags, so a resume that re-enters past 'working' — its tasks already finished upstream — keeps
   // its clean terminal. prNumberOf is safe — every terminal path reaches here with an open PR.
   private terminalOutcome(ctx: StageCtx, physical: 'merged' | 'awaiting-pr'): GroupOutcome {
+    // A nothing-to-ship group reaches 'merged' with no PR (handlePrOpen's null path): every task
+    // completed but the branch added no commits over the base. The only PR-less terminal.
+    if (ctx.group.pr === null) {
+      return { groupId: ctx.group.id, status: 'merged', pr: null };
+    }
     const pr = prNumberOf(ctx.group);
     if (ctx.dropped.length > 0) {
       return { groupId: ctx.group.id, status: 'partial', pr, dropped: ctx.dropped };
@@ -881,7 +918,28 @@ export class WorkLoop {
     final: boolean,
   ): Promise<void> {
     await this.maybeSelfReview(group, delivery, checkout, baseBranch);
-    const pr = await this.deps.orchestrator.openPr(group, delivery, baseBranch);
+    const opened = await this.deps.orchestrator.openPr(group, delivery, baseBranch);
+    if (opened === 'nothing-to-ship') {
+      // The task completed without adding commits (a declared no-changes task) — no PR to open or
+      // merge. Only the final task may mark the group terminal (same rule as the PR path below);
+      // its terminal must not overwrite what earlier tasks' PRs established: with an earlier PR
+      // still awaiting merge the group stays awaiting-pr, and a fresh merged outcome is pushed only
+      // when no earlier task recorded one (an all-no-changes group).
+      if (final) {
+        const prior = this.outcomes.filter((o) => o.groupId === group.id);
+        const awaiting = prior.some((o) => o.status === 'awaiting-pr');
+        await this.markStatus(group.id, awaiting ? 'awaiting-pr' : 'merged');
+        if (prior.length === 0) {
+          this.outcomes.push({ groupId: group.id, status: 'merged', pr: null });
+        }
+        this.deps.progress?.(
+          `group ${group.id}: done — nothing to ship for the final task (${this.groupElapsedLabel(group.id)})`,
+          this.stepFor(group.id, 'merged'),
+        );
+      }
+      return;
+    }
+    const pr = opened;
     await this.persistAfterSideEffect(
       { groupId: group.id, status: 'awaiting-pr', pr: pr.number },
       () => this.markStatus(group.id, final ? 'awaiting-pr' : 'in-progress', { pr: pr.number }),

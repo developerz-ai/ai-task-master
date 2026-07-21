@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/developerz-ai/ai-task-master/main/assets/logo.png" alt="AI Task Master" width="220">
+  <img src="https://raw.githubusercontent.com/developerz-ai/ai-task-master/main/assets/logo.png" alt="AI Task Master" width="340">
 </p>
 
 <h1 align="center">AI Task Master (<code>aitm</code>)</h1>

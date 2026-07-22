@@ -86,11 +86,11 @@ export class InPlaceCheckout {
     }
     await this.ensureCleanTree();
     // Reuse an existing group branch (a resumed run whose committed-but-unpushed work survives on the
-    // branch) rather than recreating it from base. A brand-new group starts a fresh branch off base
-    // with `-B` so a retry after a half-done checkout is idempotent.
+    // branch) rather than recreating it from base. A brand-new group starts a fresh branch off the
+    // up-to-date REMOTE base with `-B` so a retry after a half-done checkout is idempotent.
     const args = (await branchExists(this.repoRoot, branch))
       ? ['checkout', branch]
-      : ['checkout', '-B', branch, baseBranch];
+      : ['checkout', '-B', branch, await this.freshBase(baseBranch)];
     await runGit(args, { cwd: this.repoRoot });
     const co: Checkout = { groupId, branch, path: this.repoRoot };
     this.current = co;
@@ -115,6 +115,19 @@ export class InPlaceCheckout {
     const co: Checkout = { groupId, branch, path: this.repoRoot };
     this.current = co;
     return co;
+  }
+
+  // Start point for a NEW group branch: the up-to-date remote base. Sibling groups' PRs
+  // squash-merge remotely via gh, and nothing fetches after a merge — so the LOCAL base ref is
+  // stale and branching off it silently drops every previously-merged group's work from the new
+  // branch (issue #247; resetToBase solved the same staleness for prPerTask). A repo with no
+  // `origin` remote (pure-local run, test fixture) keeps the local ref, byte-identical to the
+  // old behavior.
+  private async freshBase(baseBranch: string): Promise<string> {
+    const { stdout } = await runGit(['remote'], { cwd: this.repoRoot });
+    if (!stdout.split('\n').some((r) => r.trim() === 'origin')) return baseBranch;
+    await runGit(['fetch', 'origin', baseBranch], { cwd: this.repoRoot });
+    return `origin/${baseBranch}`;
   }
 
   // Drop stale uncommitted edits before switching branches. A crashed or blocked prior group can

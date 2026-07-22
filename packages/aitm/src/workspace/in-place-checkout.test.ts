@@ -348,3 +348,61 @@ test('InPlaceCheckout.hasTaskCommit: reachable as a CheckoutHome method, same re
     await repo.cleanup();
   }
 });
+
+// Regression for issue #247: a sibling group's PR squash-merges REMOTELY (gh), so the local base
+// ref is stale when the next group acquires. A new group branch must include the merged work.
+test('acquire branches a NEW group off the up-to-date remote base, not the stale local ref', async () => {
+  const { repo, advanceOrigin, cleanup } = await seedRepoWithOrigin();
+  try {
+    await advanceOrigin('sibling group merged');
+    const home = new InPlaceCheckout(repo.path);
+    const co = await home.acquire('g2', 'aitm/g2', 'main');
+    assert.equal(co.branch, 'aitm/g2');
+    assert.equal(await currentBranch(repo.path), 'aitm/g2');
+    assert.ok(
+      (await logSubjects(repo.path)).includes('sibling group merged'),
+      'the new group branch carries the remotely-merged sibling work',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('acquire without an origin remote still branches off the local base ref', async () => {
+  const repo = await seedRepo();
+  try {
+    const home = new InPlaceCheckout(repo.path);
+    const co = await home.acquire('g1', 'aitm/g1', 'main');
+    assert.equal(co.branch, 'aitm/g1');
+    assert.equal(await currentBranch(repo.path), 'aitm/g1');
+    assert.ok(
+      (await logSubjects(repo.path)).includes('init'),
+      'local base history is the start point',
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('acquire reuses an existing group branch without touching the remote base (resume path)', async () => {
+  const { repo, advanceOrigin, cleanup } = await seedRepoWithOrigin();
+  try {
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+    await execa('git', ['commit', '--allow-empty', '-m', 'unpushed group work'], {
+      cwd: repo.path,
+    });
+    await home.release('g1');
+    await advanceOrigin('later remote merge');
+    const co = await home.acquire('g1', 'aitm/g1', 'main');
+    assert.equal(co.branch, 'aitm/g1');
+    const subjects = await logSubjects(repo.path);
+    assert.ok(subjects.includes('unpushed group work'), 'resumed branch keeps its committed work');
+    assert.ok(
+      !subjects.includes('later remote merge'),
+      'resume reuses the branch as-is instead of rebuilding it from base',
+    );
+  } finally {
+    await cleanup();
+  }
+});

@@ -105,6 +105,7 @@ import {
   runReviewer as runReviewerSubagent,
 } from '../subagents/reviewer.ts';
 import { buildRolePrompt, type RolePromptInput } from '../subagents/role-prompt.ts';
+import { bootstrapSpecialists } from '../subagents/specialist-bootstrap.ts';
 import {
   buildSpecialistSignal,
   composeSpecialistGuidance,
@@ -909,11 +910,48 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // Target-repo domain specialists (`.claude/agents/*.md`), discovered once per run and memoized —
   // the roster can't change mid-run, and a repo without the dir just yields []. The Worker path picks
   // the best match per group and layers its guidance onto WORKER_SYSTEM_PREFIX (byte-identical to
-  // today when nothing matches).
+  // today when nothing matches). When the repo ships NO agents and generateSpecialists is on
+  // (default), a team is generated on the fly from the goal + accepted plan and persisted under
+  // `.ai-task-master/agents/` — a resume reuses it without a second LLM call (issue #255). Lazy:
+  // the first roster consumer pays for generation, so a run that never routes never generates.
   let specialistsPromise: ReturnType<typeof discoverSpecialists> | undefined;
-  const specialistRoster = () => (specialistsPromise ??= discoverSpecialists(input.cwd));
-  // Announce the discovered roster once, up front (mirrors claudetm's "Found N subagents"). Discovery
-  // is a cheap dir read, no LLM; fire-and-forget so it never delays the run.
+  const specialistRoster = () =>
+    (specialistsPromise ??= (async () => {
+      const shipped = await discoverSpecialists(input.cwd);
+      if (shipped.length > 0) return shipped;
+      if (input.resolved.generateSpecialists === false) return shipped;
+      // Bootstrap must never break (or even delay-fail) a run: a state port without read() (test
+      // stubs), a stub credentials object, or a provider failure all degrade to the empty roster —
+      // byte-identical to a repo with no agents before this feature.
+      try {
+        const runState = await state.read();
+        const bootstrapUsage = roleUsageSink(
+          input.usage,
+          'planner',
+          input.credentials.modelIdFor('planner'),
+        );
+        return await bootstrapSpecialists(
+          {
+            model: input.credentials.modelFor('planner'),
+            timeout: stepTimeout,
+            ...(bootstrapUsage !== undefined ? { onUsage: bootstrapUsage } : {}),
+            onProgress: (message) => harnessProgress(message),
+          },
+          {
+            goal: input.goal,
+            groups: runState.prGroups,
+            ...(input.styleDigest !== undefined ? { styleDigest: input.styleDigest } : {}),
+            stateDir: resolvePath(input.cwd, '.ai-task-master'),
+          },
+        );
+      } catch {
+        return shipped;
+      }
+    })());
+  // Announce the discovered roster once, up front (mirrors claudetm's "Found N subagents"). For a
+  // repo that ships agents this is a cheap dir read; for a generated team it also fronts the one
+  // LLM call so the roster line still appears before the first group starts. Fire-and-forget —
+  // failures degrade to an empty roster inside the promise, never delaying the run.
   void specialistRoster().then((roster) => {
     if (roster.length > 0) {
       harnessProgress(

@@ -165,6 +165,11 @@ export const ConfigFileSchema = z
     // verified itself — external CI / CodeRabbit are backstops, not the only gate. Set false to open
     // the PR straight after the Worker commits (pre-selfReview behavior). See src/loop/self-review.ts.
     selfReview: z.boolean().optional(),
+    // When the target repo ships no `.claude/agents/*.md`, generate a specialist team on the fly
+    // from the goal + accepted plan (default true) and persist it under `.ai-task-master/agents/`.
+    // Repo-shipped agents always win. Set false to run with the generic Worker only.
+    // See src/subagents/specialist-bootstrap.ts.
+    generateSpecialists: z.boolean().optional(),
     // Hand a rebase/merge conflict to an AI subagent to resolve, then retry the force-push + merge,
     // instead of blocking the group for manual resolution (default true). Bounded attempts; an
     // unresolvable conflict still aborts the rebase and blocks. See src/loop/ci-fix.ts and
@@ -279,6 +284,9 @@ export type ResolvedConfig = {
   // Whether a rebase/merge conflict is handed to an AI subagent to resolve before blocking (default
   // true). Bounded retries; an unresolvable conflict still blocks. See src/loop/ci-fix.ts.
   resolveConflicts: boolean;
+  // Whether a repo without `.claude/agents` gets an on-the-fly generated specialist team (default
+  // true). See src/subagents/specialist-bootstrap.ts.
+  generateSpecialists: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   concurrency: number;
   // How many editor files may be processed in parallel during team fanout. Default 4.

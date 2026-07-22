@@ -541,3 +541,28 @@ test('round-trip: init → read → update → cleanup', async () => {
     await repo.cleanup();
   }
 });
+
+test('deleteAll removes the entire state dir including logs and memory, returns true', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+    await mkdir(store.memoryDir(), { recursive: true });
+    await writeFile(join(store.memoryDir(), 'note.md'), 'durable\n');
+    assert.equal(await store.deleteAll(), true);
+    await assert.rejects(readdir(dir), 'state dir is gone entirely');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('deleteAll on a missing state dir returns false and touches nothing', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const store = new StateStore(join(repo.path, '.ai-task-master'));
+    assert.equal(await store.deleteAll(), false);
+  } finally {
+    await repo.cleanup();
+  }
+});

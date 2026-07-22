@@ -8,6 +8,7 @@
 
 import { homedir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import {
   type AgentConfig,
   AgentConfigDetector,
@@ -36,7 +37,7 @@ import { OpenRouterClient } from '../openrouter/client.ts';
 import { type ModelLimitsLookup, ModelLimitsRegistry } from '../openrouter/model-limits.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
-import type { ParsedArgs } from './args.ts';
+import type { CleanArgs, ParsedArgs } from './args.ts';
 
 export type CommandExit = { code: 0 | 1 | 2; message?: string };
 
@@ -165,6 +166,14 @@ export type ConfigCtx = {
   cwd?: string;
   homeDir?: string;
   stdout?: (chunk: string) => void;
+};
+
+export type CleanCtx = {
+  cwd?: string;
+  stdout?: (chunk: string) => void;
+  // Confirmation seam for the non---force path. Default: prompt on a TTY via readline; deny on a
+  // non-TTY stdin so a script can never wipe state by accident (it must pass --force explicitly).
+  confirm?: (question: string) => Promise<boolean>;
 };
 
 export type ProfileCtx = {
@@ -646,6 +655,45 @@ export async function runConfig(
     }
   } catch (err) {
     return { code: 1, message: errMsg(err) };
+  }
+}
+
+// Mirror of claudetm's `clean`: delete the whole .ai-task-master/ state dir (logs and memory
+// included — an explicit fresh start), confirming first unless --force.
+export async function runClean(args: CleanArgs, ctx: CleanCtx = {}): Promise<CommandExit> {
+  const cwd = ctx.cwd ?? process.cwd();
+  const stdout = ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk));
+  const stateDir = resolvePath(cwd, '.ai-task-master');
+  const state = new StateStore(stateDir);
+  try {
+    if (!args.force) {
+      const confirm = ctx.confirm ?? ttyConfirm;
+      const approved = await confirm(`Delete ${stateDir} and all run state? [y/N] `);
+      if (!approved) {
+        return {
+          code: 1,
+          message: 'clean cancelled — state dir untouched (use --force to skip the prompt)',
+        };
+      }
+    }
+    const deleted = await state.deleteAll();
+    stdout(deleted ? 'Task state cleaned.\n' : 'No task state found.\n');
+    return { code: 0 };
+  } catch (err) {
+    return { code: 1, message: errMsg(err) };
+  }
+}
+
+// Interactive yes/no over stdin. Non-TTY stdin (CI, pipes) denies without prompting: an unattended
+// `aitm clean` must opt into deletion with --force, never hang waiting for input.
+async function ttyConfirm(question: string): Promise<boolean> {
+  if (process.stdin.isTTY !== true) return false;
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await rl.question(question);
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
   }
 }
 

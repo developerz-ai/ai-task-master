@@ -13,6 +13,7 @@ import type {
 } from './commands.ts';
 import {
   autoMergeNotice,
+  runClean,
   runConfig,
   runMergePr,
   runProfile,
@@ -1574,5 +1575,103 @@ test('runProfile: add message reflects auto-activation of the first profile only
     assert.match(second.text(), /aitm profile use openrouter/);
   } finally {
     await home.cleanup();
+  }
+});
+
+// ---- runClean ---------------------------------------------------------------
+
+async function tempStateCwd(): Promise<{
+  cwd: string;
+  stateDir: string;
+  cleanup: () => Promise<void>;
+}> {
+  const cwd = await mkdtemp(join(tmpdir(), 'aitm-clean-'));
+  const stateDir = join(cwd, '.ai-task-master');
+  await mkdir(join(stateDir, 'logs'), { recursive: true });
+  await mkdir(join(stateDir, 'memory'), { recursive: true });
+  await writeFile(join(stateDir, 'state.json'), '{}\n');
+  await writeFile(join(stateDir, 'memory', 'note.md'), 'durable\n');
+  return { cwd, stateDir, cleanup: () => rm(cwd, { recursive: true, force: true }) };
+}
+
+async function exists(path: string): Promise<boolean> {
+  return readFile(path, 'utf8').then(
+    () => true,
+    () => false,
+  );
+}
+
+test('runClean --force deletes the entire state dir, logs and memory included', async () => {
+  const { cwd, stateDir, cleanup } = await tempStateCwd();
+  try {
+    const out: string[] = [];
+    const exit = await runClean(
+      { kind: 'clean', force: true },
+      { cwd, stdout: (c) => out.push(c) },
+    );
+    assert.deepEqual(exit, { code: 0 });
+    assert.equal(await exists(join(stateDir, 'state.json')), false);
+    assert.equal(await exists(join(stateDir, 'memory', 'note.md')), false);
+    assert.match(out.join(''), /Task state cleaned/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('runClean without state dir reports nothing to do, exit 0', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'aitm-clean-empty-'));
+  try {
+    const out: string[] = [];
+    const exit = await runClean(
+      { kind: 'clean', force: true },
+      { cwd, stdout: (c) => out.push(c) },
+    );
+    assert.deepEqual(exit, { code: 0 });
+    assert.match(out.join(''), /No task state found/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('runClean prompts without --force; a denied confirm leaves state intact, exit 1', async () => {
+  const { cwd, stateDir, cleanup } = await tempStateCwd();
+  try {
+    const asked: string[] = [];
+    const exit = await runClean(
+      { kind: 'clean', force: false },
+      {
+        cwd,
+        stdout: () => {},
+        confirm: async (q) => {
+          asked.push(q);
+          return false;
+        },
+      },
+    );
+    assert.equal(exit.code, 1);
+    assert.match(exit.message ?? '', /cancelled/);
+    assert.equal(asked.length, 1);
+    assert.match(asked[0] ?? '', /\.ai-task-master/);
+    assert.equal(
+      await exists(join(stateDir, 'state.json')),
+      true,
+      'state survives a denied prompt',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('runClean with an approving confirm deletes the state dir', async () => {
+  const { cwd, stateDir, cleanup } = await tempStateCwd();
+  try {
+    const exit = await runClean(
+      { kind: 'clean', force: false },
+      { cwd, stdout: () => {}, confirm: async () => true },
+    );
+    assert.deepEqual(exit, { code: 0 });
+    assert.equal(await exists(join(stateDir, 'state.json')), false);
+  } finally {
+    await cleanup();
   }
 });

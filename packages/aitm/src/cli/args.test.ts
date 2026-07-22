@@ -589,3 +589,17 @@ test('isValidBranchName: rejects unsafe ref names', () => {
     assert.equal(isValidBranchName(bad), false, bad);
   }
 });
+
+test('clean: parses with no flags (force off)', () => {
+  assert.deepEqual(parseArgs(['clean']), { kind: 'clean', force: false });
+});
+
+test('clean: --force and -f both set force', () => {
+  assert.deepEqual(parseArgs(['clean', '--force']), { kind: 'clean', force: true });
+  assert.deepEqual(parseArgs(['clean', '-f']), { kind: 'clean', force: true });
+});
+
+test('clean: any other argument is a usage error', () => {
+  assert.deepEqual(parseArgs(['clean', 'now']), { kind: 'usage-error' });
+  assert.deepEqual(parseArgs(['clean', '--all']), { kind: 'usage-error' });
+});

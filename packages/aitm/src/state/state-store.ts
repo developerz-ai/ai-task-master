@@ -144,6 +144,21 @@ export class StateStore {
     }
   }
 
+  // `aitm clean`: remove the ENTIRE state dir — logs/ and memory/ included, unlike
+  // cleanupOnSuccess (claudetm-clean parity: an explicit fresh start abandons everything).
+  // Returns false when there was nothing to delete so the CLI can say so instead of
+  // pretending it cleaned something.
+  async deleteAll(): Promise<boolean> {
+    try {
+      await readdir(this.stateDir);
+    } catch (err) {
+      if (isNotFound(err)) return false;
+      throw err;
+    }
+    await rm(this.stateDir, { recursive: true, force: true });
+    return true;
+  }
+
   // The per-repo memory directory (issue #118). Handed out here so nothing rebuilds the path ad hoc;
   // the memory-loader (compat) reads/writes under it. Not created until the first memory write.
   memoryDir(): string {

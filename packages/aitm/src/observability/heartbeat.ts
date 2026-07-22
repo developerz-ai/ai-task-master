@@ -6,7 +6,12 @@
 // timestamp compare (createHeartbeatSink records every write). Plain lines only — no cursor/ANSI
 // rewrite — so it is safe on a piped non-TTY log exactly as on a terminal.
 
-import { harnessProgress, type ProgressSink } from './step-progress.ts';
+import {
+  harnessProgress,
+  labelText,
+  type ProgressSink,
+  type StreamLabel,
+} from './step-progress.ts';
 
 const DEFAULT_INTERVAL_MS = 60_000;
 
@@ -62,7 +67,7 @@ export type HeartbeatOptions = {
 // `[aitm …] <label>: still working… <elapsed>` only once a full interval has passed with no line
 // written; otherwise stays quiet and lets the live stream speak for itself.
 export function startHeartbeat(
-  label: string,
+  label: StreamLabel,
   sink: HeartbeatSink,
   options: HeartbeatOptions = {},
 ): () => void {
@@ -75,7 +80,7 @@ export function startHeartbeat(
       const nowMs = sink.now().getTime();
       if (nowMs - sink.lastEmitMs() < intervalMs) return;
       harnessProgress(
-        `${label}: still working… ${formatElapsed(nowMs - startMs)}`,
+        `${labelText(label)}: still working… ${formatElapsed(nowMs - startMs)}`,
         undefined,
         sink,
       );

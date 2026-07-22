@@ -85,8 +85,24 @@ aitm merge-pr
 
 - **Provider**: any OpenAI-compatible endpoint through one credential — OpenRouter by default, or point `baseURL` at z.ai GLM, a self-hosted gateway, or another provider. No Anthropic SDK. See [🔀 Providers & profiles](#-providers--profiles).
 - **Coding style**: `aitm` reads your repo's `CLAUDE.md` or `AGENTS.md` and feeds it to subagents as a style signal.
-- **State**: every run persists to `.ai-task-master/` so resume-after-crash is one command.
-- **Worktrees**: concurrent groups run in isolated `git worktree`s — no branch trampling.
+- **State**: every run persists to `.ai-task-master/` so resume-after-crash is one command — including a human-readable `plan.md` (per-task checkboxes) and `progress.md` (timestamped lifecycle log). `aitm clean` wipes it for a fresh start.
+- **One checkout**: groups run sequentially in your working tree on `aitm/<group>` branches — no worktrees, no hidden copies. Within a group, the Worker fans out parallel per-file editor subagents.
+
+### 📺 Reading the console stream
+
+Every line is prefixed with who is talking and where the run is:
+
+```
+[aitm group 2/5 pr-open 21:46:29] group g2: pushing and opening PR     ← cyan: the harness
+[k3 worker g2 group 2/5 working 21:47:03] Using tool: bash → bun test  ← orange: a subagent
+[k3 editor:auth.ts #2 g2 group 2/5 working 21:47:10] Using tool: …     ← a per-file editor leaf
+```
+
+Anatomy: `[<model> <subagent> <group> <state> <time>]` — the **subagent name** renders blue
+(a routed specialist's name, the bare role, or `editor:<file>` with `#N` when several editors
+share a basename), the **state tag** (`group 2/5 working`) magenta, and the **timestamp** dim at
+the end. Dim lines are the model's reasoning. Colors are TTY-gated (`NO_COLOR` respected); the
+same lifecycle lines are also appended to `.ai-task-master/progress.md`.
 
 ## 🧰 Requirements
 

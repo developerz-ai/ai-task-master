@@ -9,6 +9,7 @@ import {
   formatDuration,
   formatStepTag,
   harnessProgress,
+  labelText,
   type ProgressSink,
   renderStepLines,
   summarizeToolInput,
@@ -214,7 +215,11 @@ test('agentStepProgress writes orange-prefixed lines when color is on', () => {
   });
   assert.equal(lines.length, 2);
   assert.equal(lines[0], '\n');
-  assert.ok(lines[1]?.startsWith('\x1b[38;5;208m\x1b[1m[planner 03:04:05]\x1b[0m'));
+  assert.ok(
+    lines[1]?.startsWith(
+      '\x1b[38;5;208m\x1b[1m[planner \x1b[2m03:04:05\x1b[0m\x1b[38;5;208m\x1b[1m]\x1b[0m',
+    ),
+  );
   assert.ok(lines[1]?.includes('Using tool: glob → **/*.ts'));
 });
 
@@ -225,7 +230,7 @@ test('agentStepProgress stamps the step counter into the bracket', () => {
     { unit: 'task', index: 3, total: 38, phase: 'working' },
     sink,
   )({ toolCalls: [{ toolName: 'glob', input: { pattern: '**/*.ts' } }] });
-  assert.equal(lines[1], '[k3 backend g1 03:04:05 task 3/38 working] Using tool: glob → **/*.ts\n');
+  assert.equal(lines[1], '[k3 backend g1 task 3/38 working 03:04:05] Using tool: glob → **/*.ts\n');
 });
 
 test('agentStepProgress never throws when the sink dies', () => {
@@ -243,7 +248,7 @@ test('harnessProgress writes one cyan aitm line', () => {
   const { sink, lines } = stubSink(true);
   harnessProgress('worker g1: starting "Add config"', undefined, sink);
   assert.deepEqual(lines, [
-    '\x1b[36m\x1b[1m[aitm 03:04:05]\x1b[0m worker g1: starting "Add config"\n',
+    '\x1b[36m\x1b[1m[aitm \x1b[2m03:04:05\x1b[0m\x1b[36m\x1b[1m]\x1b[0m worker g1: starting "Add config"\n',
   ]);
 });
 
@@ -254,7 +259,7 @@ test('harnessProgress stamps the phase + step tag into the bracket', () => {
     { unit: 'group', index: 2, total: 5, phase: 'pr-open' },
     sink,
   );
-  assert.deepEqual(lines, ['[aitm 03:04:05 group 2/5 pr-open] group backend: working → pr-open\n']);
+  assert.deepEqual(lines, ['[aitm group 2/5 pr-open 03:04:05] group backend: working → pr-open\n']);
 });
 
 test('formatStepTag renders counter then phase, tolerating missing parts', () => {
@@ -270,27 +275,27 @@ test('formatStepTag renders counter then phase, tolerating missing parts', () =>
 
 test('agentLabel prefers the specialist name over the role, falling back to the role', () => {
   assert.equal(
-    agentLabel({ model: 'k3', role: 'worker', specialist: 'backend', ctx: 'g1' }),
+    agentLabel({ model: 'k3', role: 'worker', specialist: 'backend', ctx: 'g1' }).text,
     'k3 backend g1',
   );
-  assert.equal(agentLabel({ model: 'k3', role: 'worker', ctx: 'g1' }), 'k3 worker g1');
-  assert.equal(agentLabel({ model: 'k3', role: 'planner' }), 'k3 planner');
+  assert.equal(agentLabel({ model: 'k3', role: 'worker', ctx: 'g1' }).text, 'k3 worker g1');
+  assert.equal(agentLabel({ model: 'k3', role: 'planner' }).text, 'k3 planner');
 });
 
 test('agentLabel renders an editor:<basename> name when a file is given, taking priority over specialist', () => {
   assert.equal(
-    agentLabel({ model: 'k3', role: 'editor', file: 'src/auth/login.ts', ctx: 'g1' }),
+    agentLabel({ model: 'k3', role: 'editor', file: 'src/auth/login.ts', ctx: 'g1' }).text,
     'k3 editor:login.ts g1',
   );
   assert.equal(
-    agentLabel({ model: 'k3', role: 'editor', specialist: 'backend', file: 'a.ts' }),
+    agentLabel({ model: 'k3', role: 'editor', specialist: 'backend', file: 'a.ts' }).text,
     'k3 editor:a.ts',
   );
 });
 
 test('agentLabel caps a long ctx slug so it cannot blow up every stream line', () => {
   const longSlug = 'refactor-the-entire-authentication-and-session-subsystem-end-to-end';
-  const label = agentLabel({ model: 'k3', role: 'worker', ctx: longSlug });
+  const label = agentLabel({ model: 'k3', role: 'worker', ctx: longSlug }).text;
   assert.ok(label.length < `k3 worker ${longSlug}`.length);
   assert.ok(label.endsWith('…'));
 });
@@ -377,7 +382,7 @@ test('createLiveStreamRenderer stamps the step counter into the bracket', () => 
     sink,
   );
   render({ type: 'text-delta', text: 'hi\n' });
-  assert.equal(lines[1], '[k3 backend g1 03:04:05 task 3/38 working] hi\n');
+  assert.equal(lines[1], '[k3 backend g1 task 3/38 working 03:04:05] hi\n');
 });
 
 test('createLiveStreamRenderer strips ANSI/control so streamed text cannot forge a harness prefix', () => {
@@ -425,4 +430,44 @@ test('formatDuration clamps negative or non-finite input to zero', () => {
   assert.equal(formatDuration(-500), '0.0s');
   assert.equal(formatDuration(Number.NaN), '0.0s');
   assert.equal(formatDuration(Number.POSITIVE_INFINITY), '0.0s');
+});
+
+test('a structured AgentLabel colors the subagent name blue, the tag magenta, the time dim', () => {
+  const { sink, lines } = stubSink(true);
+  agentStepProgress(
+    agentLabel({ model: 'k3', role: 'editor', file: 'src/auth.ts', ctx: 'g1' }),
+    { unit: 'task', index: 3, total: 4, phase: 'working' },
+    sink,
+  )({ toolCalls: [{ toolName: 'bash', input: { command: 'ls' } }] });
+  const line = lines[1] ?? '';
+  const orange = '\x1b[38;5;208m\x1b[1m';
+  assert.ok(line.includes(`k3 \x1b[34m\x1b[1meditor:auth.ts\x1b[0m${orange} g1`), 'name is blue');
+  assert.ok(line.includes(`\x1b[35mtask 3/4 working\x1b[0m${orange}`), 'state tag is magenta');
+  assert.ok(line.includes(`\x1b[2m03:04:05\x1b[0m${orange}]`), 'timestamp is dim, at the end');
+});
+
+test('a structured AgentLabel renders as plain text when color is off (non-TTY)', () => {
+  const { sink, lines } = stubSink();
+  agentStepProgress(
+    agentLabel({ model: 'k3', role: 'worker', ctx: 'g1' }),
+    { phase: 'working' },
+    sink,
+  )({ toolCalls: [{ toolName: 'bash', input: { command: 'ls' } }] });
+  assert.equal(lines[1], '[k3 worker g1 working 03:04:05] Using tool: bash → ls\n');
+});
+
+test('labelText flattens a structured label and passes strings through', () => {
+  assert.equal(labelText('aitm'), 'aitm');
+  assert.equal(labelText(agentLabel({ model: 'k3', role: 'worker', ctx: 'g1' })), 'k3 worker g1');
+});
+
+test('dim reasoning lines suppress inner segment colors so the whole line stays dim', () => {
+  const { sink, lines } = stubSink(true);
+  const rendered = renderStepLines(
+    agentLabel({ model: 'k3', role: 'worker', ctx: 'g1' }),
+    { reasoningText: 'pondering' },
+    sink,
+  );
+  void lines;
+  assert.equal(rendered[1], '\x1b[2m[k3 worker g1 03:04:05] thinking: pondering\x1b[0m\n');
 });

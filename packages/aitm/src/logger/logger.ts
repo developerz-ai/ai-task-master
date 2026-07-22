@@ -138,11 +138,18 @@ export class Logger implements LoggerLike {
   }
 }
 
+// `seen` holds only the CURRENT ancestor chain (added before recursing into a value's children,
+// removed after) so exactly true cycles read "[CYCLE]". A grow-only set would also flag an object
+// that merely appears twice as siblings (SDK messages share references freely, e.g. one
+// providerOptions object across tool-result parts) — corrupting valid data into a string that then
+// fails modelMessageSchema on transcript reconstruction (issue #251).
 function redactValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
   if (Array.isArray(value)) {
     if (seen.has(value)) return '[CYCLE]';
     seen.add(value);
-    return value.map((v) => redactValue(v, seen));
+    const out = value.map((v) => redactValue(v, seen));
+    seen.delete(value);
+    return out;
   }
   if (value !== null && typeof value === 'object') {
     if (seen.has(value)) return '[CYCLE]';
@@ -151,6 +158,7 @@ function redactValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unk
     for (const [k, v] of Object.entries(value)) {
       out[k] = REDACT_KEY.test(k) ? REDACTED : redactValue(v, seen);
     }
+    seen.delete(value);
     return out;
   }
   return typeof value === 'string' ? scrubSecrets(value) : value;

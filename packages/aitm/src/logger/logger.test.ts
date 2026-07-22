@@ -270,3 +270,52 @@ test('Logger does not collide level/msg/runId when fields supply same keys', () 
   assert.equal(record.msg, 'real-msg');
   assert.equal(record.runId, 'canonical');
 });
+
+// Issue #251: shared references are NOT cycles. A grow-only seen-set stamped the second
+// occurrence "[CYCLE]", corrupting transcript tool messages at write time (they then failed
+// modelMessageSchema on reconstruction and were dropped from resume context).
+test('Logger.redact keeps an object that appears twice (shared reference, not a cycle)', () => {
+  const shared = { openrouter: { cacheControl: true } };
+  const out = Logger.redact({
+    content: [
+      { type: 'tool-result', providerOptions: shared },
+      { type: 'tool-result', providerOptions: shared },
+    ],
+  }) as { content: Array<{ providerOptions: unknown }> };
+  assert.deepEqual(out.content[0]?.providerOptions, shared);
+  assert.deepEqual(out.content[1]?.providerOptions, shared, 'second occurrence survives intact');
+});
+
+test('Logger.redact still breaks a true cycle with [CYCLE]', () => {
+  const node: Record<string, unknown> = { name: 'root' };
+  node.self = node;
+  const out = Logger.redact(node) as { name: string; self: unknown };
+  assert.equal(out.name, 'root');
+  assert.equal(out.self, '[CYCLE]');
+});
+
+test('a redacted tool message with a shared providerOptions object still passes modelMessageSchema', async () => {
+  const { modelMessageSchema } = await import('ai');
+  const shared = { openrouter: {} };
+  const message = {
+    role: 'tool',
+    content: [
+      {
+        type: 'tool-result',
+        toolCallId: 'call-1',
+        toolName: 'bash',
+        output: { type: 'text', value: 'ok' },
+        providerOptions: shared,
+      },
+      {
+        type: 'tool-result',
+        toolCallId: 'call-2',
+        toolName: 'glob',
+        output: { type: 'text', value: 'a.ts' },
+        providerOptions: shared,
+      },
+    ],
+  };
+  const parsed = modelMessageSchema.safeParse(Logger.redact(message));
+  assert.equal(parsed.success, true, JSON.stringify(parsed.success ? '' : parsed.error.issues));
+});

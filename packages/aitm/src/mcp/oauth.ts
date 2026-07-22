@@ -87,7 +87,7 @@ async function findAvailablePort(start: number, end: number): Promise<number> {
 
 // Browser launching by platform.
 async function openBrowser(url: string): Promise<void> {
-  const { spawn } = await import('child_process');
+  const { spawn } = await import('node:child_process');
 
   const platform = process.platform;
   const command = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
@@ -197,9 +197,10 @@ class NodeServer implements ServerImpl {
   }
 
   async stop(): Promise<void> {
-    if (this.server) {
+    const server = this.server;
+    if (server) {
       await new Promise<void>((resolve) => {
-        this.server!.close(() => resolve());
+        server.close(() => resolve());
       });
     }
   }
@@ -243,11 +244,12 @@ class NodeServer implements ServerImpl {
         };
       }
 
-      const html = 'error' in params
-        ? this.errorHtmlTemplate
-            .replace('{{error}}', params.error)
-            .replace('{{error_description}}', params.errorDescription || '')
-        : this.successHtmlTemplate;
+      const html =
+        'error' in params
+          ? this.errorHtmlTemplate
+              .replace('{{error}}', params.error)
+              .replace('{{error_description}}', params.errorDescription || '')
+          : this.successHtmlTemplate;
 
       if (this.resolver) {
         this.resolver(params);
@@ -376,7 +378,7 @@ function extractServerName(authUrl: string): string {
   try {
     const url = new URL(authUrl);
     const hostname = url.hostname.replace(/^www\./, '');
-    return hostname.replace(/[\.\-]/g, '-');
+    return hostname.replace(/[.-]/g, '-');
   } catch {
     return 'mcp-server';
   }

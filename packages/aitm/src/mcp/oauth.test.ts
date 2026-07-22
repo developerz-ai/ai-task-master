@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
 import { randomBytes } from 'node:crypto';
-import { performOAuthFlow, type OAuthConfig, type OAuthOptions } from './oauth.ts';
+import { test } from 'node:test';
+import { type OAuthConfig, type OAuthOptions, performOAuthFlow } from './oauth.ts';
 
 test('generateState produces cryptographically random values', () => {
   const states = new Set<string>();

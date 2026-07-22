@@ -152,7 +152,8 @@ function parseMcpLogin(args: ReadonlyArray<string>): ParsedArgs {
 
   if (positionals.length !== 1) return USAGE_ERROR;
 
-  const serverUrl = positionals[0]!;
+  const serverUrl = positionals[0];
+  if (serverUrl === undefined) return USAGE_ERROR;
   const result: McpLoginArgs = {
     kind: 'mcp-login',
     serverUrl,

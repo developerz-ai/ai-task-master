@@ -105,7 +105,11 @@ function buildCleanCtx(ctx: MainCtx, stdout: (chunk: string) => void): CleanCtx 
   return out;
 }
 
-function buildMcpLoginCtx(ctx: MainCtx, stdout: (chunk: string) => void, stderr: (chunk: string) => void): McpLoginCtx {
+function buildMcpLoginCtx(
+  ctx: MainCtx,
+  stdout: (chunk: string) => void,
+  stderr: (chunk: string) => void,
+): McpLoginCtx {
   return { stdout, stderr };
 }
 

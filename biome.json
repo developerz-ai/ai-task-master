@@ -58,5 +58,10 @@
   },
   "json": {
     "formatter": { "trailingCommas": "none" }
+  },
+  "html": {
+    "parser": {
+      "interpolation": true
+    }
   }
 }

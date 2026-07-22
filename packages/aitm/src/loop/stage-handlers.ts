@@ -41,6 +41,13 @@ export type StageGithub = {
 
 export type StageWorkResult = { kind: 'ok' } | { kind: 'blocked'; reason: string };
 
+// A stage handler returns either the next GroupStage, or — when it blocks — the next stage paired
+// with the SPECIFIC human reason (which checks failed, whether a rebase conflicted, etc.). The
+// dispatcher threads that reason into the group's persisted block reason so an operator sees what
+// actually happened, instead of a generic either/or. Handlers that block without a specific reason
+// still return the bare 'blocked' string; the dispatcher falls back to blockReasonFor then.
+export type StageHandlerResult = GroupStage | { stage: 'blocked'; reason: string };
+
 // Checkout-bound execution facade, built per group-run by the dispatcher (which owns the checkout,
 // base branch and subagents). Its methods take the group so the handlers stay checkout-agnostic.
 export type StageOrchestrator = {
@@ -91,7 +98,7 @@ export type StageDeps = {
   adminMerge?: boolean;
 };
 
-export type StageHandler = (deps: StageDeps, group: PrGroup) => Promise<GroupStage>;
+export type StageHandler = (deps: StageDeps, group: PrGroup) => Promise<StageHandlerResult>;
 
 // working: drive the group's tasks to commits on its branch, then advance to open the PR.
 export const handleWorking: StageHandler = async (deps, group) => {
@@ -151,11 +158,14 @@ export const handleReadyToMerge: StageHandler = async (deps, group) => {
 
 // ci-failed: run the shared fix session via the orchestrator (download → Worker → rebase +
 // force-with-lease) and loop back to waiting-ci so the freshly-pushed commit re-runs CI. A fix that
-// can't land (still red, or a rebase conflict) blocks the group for a human.
+// can't land carries its SPECIFIC reason (a rebase conflict the AI resolver couldn't close, a push
+// failure, or a Worker that couldn't produce a fix) so the operator sees what really happened — not
+// a generic either/or that falsely implies a conflict when none exists.
 export const handleCiFailed: StageHandler = async (deps, group) => {
   requirePr(group, 'ci-failed');
   const result = await deps.orchestrator.fixCi(group);
-  return result.kind === 'ok' ? 'waiting-ci' : 'blocked';
+  if (result.kind === 'ok') return 'waiting-ci';
+  return { stage: 'blocked', reason: result.reason };
 };
 
 // addressing-reviews: run the Reviewer over the not-yet-addressed threads, record them as addressed,
@@ -166,7 +176,7 @@ export const handleAddressingReviews: StageHandler = async (deps, group) => {
   const fresh = await freshThreads(deps, pr);
   if (fresh.length === 0) return 'waiting-reviews';
   const result = await deps.orchestrator.addressReviews(group, fresh);
-  if (result.kind === 'blocked') return 'blocked';
+  if (result.kind === 'blocked') return { stage: 'blocked', reason: result.reason };
   await deps.prContext?.recordAddressedThreads(
     pr,
     fresh.map((t) => t.id),

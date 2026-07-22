@@ -1023,9 +1023,9 @@ test('buildFallbackComposition: empty group.title falls back to the group id', (
 test('buildFallbackComposition: body passes assertPrBodySections for the default section set', () => {
   const { body } = buildFallbackComposition(baseGroup(), baseDelivery(), PR_BODY_SECTIONS);
   assert.doesNotThrow(() => assertPrBodySections(body, PR_BODY_SECTIONS));
-  // The Changes section lists the delivery's file changes verbatim.
-  assert.match(body, /- create src\/a\.ts: created a/);
-  assert.match(body, /- modify src\/b\.ts: fixed b/);
+  // The Changes section groups paths by directory and lists the change-kind — it never echoes the
+  // raw (often noisy) editor summaries.
+  assert.match(body, /- \*\*src\/\*\* — create a\.ts; modify b\.ts/);
 });
 
 test('buildFallbackComposition: body passes assertPrBodySections for a custom section set', () => {
@@ -1040,7 +1040,9 @@ test('buildFallbackComposition: an empty change set still yields a valid, non-em
   assert.doesNotThrow(() => assertPrBodySections(body, PR_BODY_SECTIONS));
 });
 
-test('buildFallbackComposition: a newline-laden change summary cannot inject a section heading', () => {
+test('buildFallbackComposition: a noisy change summary is dropped, never echoed or able to inject a heading', () => {
+  // The fallback builds the Changes list from path + kind only; the raw summary (which can carry
+  // newlines, agent self-talk, or a smuggled `##` heading) is never placed in the body.
   const delivery = {
     ...baseDelivery(),
     changes: [{ path: 'src/a.ts', kind: 'modify' as const, summary: 'line1\n## Testing\nline2' }],
@@ -1051,7 +1053,8 @@ test('buildFallbackComposition: a newline-laden change summary cannot inject a s
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l === '## Testing');
-  assert.equal(testingHeadings.length, 1, 'the smuggled heading is flattened, not emitted as one');
+  assert.equal(testingHeadings.length, 1, 'no smuggled heading from the summary');
+  assert.ok(!body.includes('line1'), 'the raw summary text is dropped, not echoed');
 });
 
 test('openPr prompt anchors the title on the group goal, not the worker draft message', async () => {

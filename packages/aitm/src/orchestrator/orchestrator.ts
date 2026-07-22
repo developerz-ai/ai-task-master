@@ -259,10 +259,7 @@ function oneLine(text: string): string {
 function fallbackSectionContent(heading: string, group: PrGroup, delivery: WorkerDelivery): string {
   const name = heading.replace(/^#+\s*/, '').toLowerCase();
   if (name.startsWith('change')) {
-    const lines = delivery.changes.map(
-      (c) => `- ${c.kind} ${oneLine(c.path)}: ${oneLine(c.summary)}`,
-    );
-    return lines.length > 0 ? lines.join('\n') : '- No file changes were recorded.';
+    return fallbackChangeList(delivery.changes);
   }
   if (name.startsWith('test')) {
     return 'Automated verification output was not captured for this fallback; confirm via CI on this pull request.';
@@ -271,6 +268,34 @@ function fallbackSectionContent(heading: string, group: PrGroup, delivery: Worke
     return `Auto-generated composition for PR group ${oneLine(group.id)} — ${oneLine(group.title.trim() || group.id)}.`;
   }
   return `Auto-generated fallback content for PR group ${oneLine(group.id)}.`;
+}
+
+// The deterministic fallback's Changes section. The per-file `summary` fields are raw editor output
+// — often narration or self-talk ("owned by another leaf", "already contains the described changes")
+// that reads as noise to a human reviewer. The only reliable signal in the fallback is the path +
+// change-kind, so group by directory and list paths under each. Always clean, never leaks agent
+// chatter, and scannable for multi-file PRs. Paths carry no newlines/`##`, so no section-heading
+// injection is possible (the guard the old per-summary formatter needed).
+function fallbackChangeList(changes: WorkerDelivery['changes']): string {
+  if (changes.length === 0) return '- No file changes were recorded.';
+  const groups = new Map<string, Map<string, string[]>>();
+  for (const c of changes) {
+    const slash = c.path.lastIndexOf('/');
+    const dir = slash === -1 ? '.' : c.path.slice(0, slash);
+    const file = slash === -1 ? c.path : c.path.slice(slash + 1);
+    const byKind = groups.get(dir) ?? new Map<string, string[]>();
+    const names = byKind.get(c.kind) ?? [];
+    names.push(oneLine(file));
+    byKind.set(c.kind, names);
+    groups.set(dir, byKind);
+  }
+  const lines: string[] = [];
+  for (const [dir, byKind] of groups) {
+    const label = dir === '.' ? '(root)' : `${dir}/`;
+    const parts = [...byKind.entries()].map(([kind, names]) => `${kind} ${names.join(', ')}`);
+    lines.push(`- **${label}** — ${parts.join('; ')}`);
+  }
+  return lines.join('\n');
 }
 
 // Deterministic PR composition used when the model's composePr attempts are exhausted (invalid
@@ -300,7 +325,9 @@ export const PR_BODY_GUIDE = [
   `  ${PR_BODY_SECTIONS[0]}`,
   '    1-2 sentences on what changed and why.',
   `  ${PR_BODY_SECTIONS[1]}`,
-  '    Bulleted list of the notable file/area changes.',
+  '    Scannable bulleted list of WHAT changed. Each entry a terse imperative one-liner naming the',
+  '    change (e.g. `add fail-fast env loader with zod validation`), grouped by area when there are',
+  '    several files. Treat the raw file notes as LEADS, not prose to copy — rewrite them for a human.',
   `  ${PR_BODY_SECTIONS[2]}`,
   '    How the change was verified (tests, lint). If not verified, say so explicitly.',
 ].join('\n');
@@ -520,6 +547,11 @@ export class Orchestrator {
       '- title: conventional-commit style, ≤72 chars, summarizing the PR group goal below.',
       '  Do NOT copy a single commit message — the title describes the whole group, not one task.',
       prBodyGuideFor(this.prBodySections()),
+      '- The `Files changed:` notes below are RAW editor output. They often contain narration,',
+      '  repetition, or agent self-talk (e.g. "owned by another leaf", "already contains the described',
+      '  changes", "type errors are pre-existing"). NEVER copy such phrases into the body. Rewrite each',
+      '  into a clean, human one-liner describing WHAT changed — and group cohesive files so the list',
+      '  stays scannable, not one noisy bullet per file.',
       '',
       `PR group goal (use this as the title's subject): ${group.id} — ${group.title}`,
       `Worker draft message (context for the body only — not the title): ${delivery.draftCommitMessage}`,

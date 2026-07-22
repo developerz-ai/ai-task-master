@@ -621,7 +621,16 @@ export class WorkLoop {
       const prBefore = ctx.group.pr;
       let next: GroupStage;
       try {
-        next = await handler(deps, ctx.group);
+        const outcome = await handler(deps, ctx.group);
+        // A handler may pair its 'blocked' with the specific reason (which checks failed, a rebase
+        // conflict the AI resolver couldn't close, etc.) — surface that instead of the generic
+        // blockReasonFor fallback so an operator sees what actually happened.
+        if (typeof outcome === 'string') {
+          next = outcome;
+        } else {
+          next = outcome.stage;
+          ctx.blockedReason ??= outcome.reason;
+        }
       } catch (err) {
         // openPr landed (pr now set) but the handler's own state write failed — preserve the
         // awaiting-pr outcome so a retry doesn't reopen the PR (cf. StateWriteAfterSuccess).
@@ -1208,11 +1217,15 @@ function statusForStage(stage: GroupStage): PrGroupStatus {
 
 // Human reason a stage handler yielded 'blocked'. A block at ci-failed/addressing-reviews means the
 // automated recovery itself couldn't finish — the fix didn't go green / hit a rebase conflict, or
-// the Reviewer errored — so the PR needs a human.
+// the Reviewer errored — so the PR needs a human. This is the LAST-RESORT fallback: a handler that
+// knows the specific reason (which checks failed, an unresolvable conflict) pairs it with its
+// 'blocked' return and the dispatcher prefers it, so this generic wording only fires when no
+// specific reason was carried. It deliberately does NOT assert a rebase conflict — that's only one
+// possible cause and claiming one when CI is merely still red is misleading.
 function blockReasonFor(stage: GroupStage, group: PrGroup): string {
   switch (stage) {
     case 'ci-failed':
-      return `CI fix could not land for PR #${group.pr ?? '?'} (still failing, or a rebase conflict needs manual resolution)`;
+      return `CI fix could not land for PR #${group.pr ?? '?'} — open the PR to see which checks still fail`;
     case 'addressing-reviews':
       return `could not address review threads on PR #${group.pr ?? '?'} (reviewer error or failed push)`;
     default:

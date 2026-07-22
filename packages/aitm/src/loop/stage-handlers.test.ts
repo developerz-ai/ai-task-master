@@ -422,13 +422,17 @@ test('handleCiFailed: fix session ok → waiting-ci', async () => {
   assert.equal(fixed, 1);
 });
 
-test('handleCiFailed: fix session blocked → blocked', async () => {
+test('handleCiFailed: fix session blocked → blocked, carrying the specific reason', async () => {
   const deps = makeDeps({
     orchestrator: makeOrchestrator({
-      fixCi: async () => ({ kind: 'blocked', reason: 'rebase conflict' }),
+      fixCi: async () => ({ kind: 'blocked', reason: 'rebase conflict the AI could not resolve' }),
     }),
   });
-  assert.equal(await handleCiFailed(deps, group({ stage: 'ci-failed', pr: 5 })), 'blocked');
+  const out = await handleCiFailed(deps, group({ stage: 'ci-failed', pr: 5 }));
+  assert.deepEqual(out, {
+    stage: 'blocked',
+    reason: 'rebase conflict the AI could not resolve',
+  });
 });
 
 test('handleCiFailed: missing PR throws', async () => {
@@ -536,9 +540,9 @@ test('handleAddressingReviews: Reviewer blocked → blocked, nothing recorded', 
     }),
     prContext: addressed.store,
   });
-  assert.equal(
+  assert.deepEqual(
     await handleAddressingReviews(deps, group({ stage: 'addressing-reviews', pr: 5 })),
-    'blocked',
+    { stage: 'blocked', reason: 'reviewer error' },
   );
   assert.deepEqual(addressed.ids(), [], 'threads not recorded when the Reviewer is blocked');
 });

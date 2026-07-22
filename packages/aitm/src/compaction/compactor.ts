@@ -168,13 +168,18 @@ export class Compactor {
 // Cycle-safe JSON.stringify. SDK message objects can transitively reference each other
 // (tool result -> tool call -> step -> message), and a single circular ref would throw a
 // raw TypeError out of compact() and crash the agent loop mid-step. Replace any cycle
-// with the literal "[CYCLE]" so the summarizer still gets a usable transcript.
-function safeStringify(value: unknown): string {
-  const seen = new WeakSet<object>();
-  return JSON.stringify(value, (_key, v) => {
+// with the literal "[CYCLE]" so the summarizer still gets a usable transcript. Only TRUE
+// cycles (a value that is its own ancestor) are replaced: the replacer tracks the ancestor
+// chain via JSON.stringify's holder (`this`), because a grow-only seen-set would also mangle
+// an object that merely appears twice (shared references are normal in SDK messages —
+// issue #251, same family as the Logger.redact transcript corruption). Exported for unit testing.
+export function safeStringify(value: unknown): string {
+  const ancestors: unknown[] = [];
+  return JSON.stringify(value, function (this: unknown, _key, v) {
     if (v !== null && typeof v === 'object') {
-      if (seen.has(v)) return '[CYCLE]';
-      seen.add(v);
+      while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+      if (ancestors.includes(v)) return '[CYCLE]';
+      ancestors.push(v);
     }
     return v;
   });

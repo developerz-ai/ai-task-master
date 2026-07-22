@@ -666,6 +666,12 @@ export async function runClean(args: CleanArgs, ctx: CleanCtx = {}): Promise<Com
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
   try {
+    // Probe before confirming: with nothing to delete there is nothing to ask about — a non-TTY
+    // `aitm clean` in a fresh repo must be the friendly exit-0 no-op, not a denied prompt.
+    if (!(await state.exists())) {
+      stdout('No task state found.\n');
+      return { code: 0 };
+    }
     if (!args.force) {
       const confirm = ctx.confirm ?? ttyConfirm;
       const approved = await confirm(`Delete ${stateDir} and all run state? [y/N] `);
@@ -676,8 +682,8 @@ export async function runClean(args: CleanArgs, ctx: CleanCtx = {}): Promise<Com
         };
       }
     }
-    const deleted = await state.deleteAll();
-    stdout(deleted ? 'Task state cleaned.\n' : 'No task state found.\n');
+    await state.deleteAll();
+    stdout('Task state cleaned.\n');
     return { code: 0 };
   } catch (err) {
     return { code: 1, message: errMsg(err) };

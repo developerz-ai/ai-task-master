@@ -1618,13 +1618,19 @@ test('runClean --force deletes the entire state dir, logs and memory included', 
   }
 });
 
-test('runClean without state dir reports nothing to do, exit 0', async () => {
+test('runClean without state dir reports nothing to do, exit 0, and never prompts', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'aitm-clean-empty-'));
   try {
     const out: string[] = [];
     const exit = await runClean(
-      { kind: 'clean', force: true },
-      { cwd, stdout: (c) => out.push(c) },
+      { kind: 'clean', force: false },
+      {
+        cwd,
+        stdout: (c) => out.push(c),
+        confirm: async () => {
+          throw new Error('must not prompt when there is nothing to delete');
+        },
+      },
     );
     assert.deepEqual(exit, { code: 0 });
     assert.match(out.join(''), /No task state found/);

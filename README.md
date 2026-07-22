@@ -92,7 +92,7 @@ aitm merge-pr
 
 Every line is prefixed with who is talking and where the run is:
 
-```
+```text
 [aitm group 2/5 pr-open 21:46:29] group g2: pushing and opening PR     ← cyan: the harness
 [k3 worker g2 group 2/5 working 21:47:03] Using tool: bash → bun test  ← orange: a subagent
 [k3 editor:auth.ts #2 g2 group 2/5 working 21:47:10] Using tool: …     ← a per-file editor leaf
@@ -131,7 +131,7 @@ Everything else — planning, task grouping, branch management, retries, review-
 | `--max-prs N` | 5 | Hard cap on PR groups Planner may emit. |
 | `--max-sessions N` | unlimited | Hard cap on subagent sessions per run. |
 | `--max-fix-attempts N` | 3 | Cap on CI-fix passes per PR before it blocks for a human. Bounds the retry loop on an unfixable red PR. |
-| `--concurrency N` | 1 | How many groups to run in parallel (isolated worktrees). |
+| `--concurrency N` | 1 | Reserved: accepted and persisted, but runs are currently pinned to 1 (groups run sequentially in the single checkout). |
 | `--no-automerge` | off | Stop after each PR opens; require manual `aitm merge-pr`. |
 | `--admin` | off | Merge via `gh pr merge --admin` to override base-branch protection (requires repo-admin rights). Also accepted by `aitm merge-pr`. |
 | `--style <path>` | `CLAUDE.md` / `AGENTS.md` | Override the coding-style file fed to subagents. |

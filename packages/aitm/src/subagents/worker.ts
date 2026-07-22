@@ -274,9 +274,18 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
   const branch = input.group.branch ?? `aitm/${input.group.id}`;
   try {
     const planned = await planAndEdit(agent, init, input, branch);
-    if (planned.kind === 'blocked') return { kind: 'blocked', reason: planned.reason };
-    if (planned.kind === 'error') return { kind: 'error', error: planned.error };
-    if (planned.kind === 'no-changes') return { kind: 'no-changes', reason: planned.reason };
+    if (planned.kind === 'blocked' || planned.kind === 'error' || planned.kind === 'no-changes') {
+      // Nothing committed this pass, yet the planning agent (or a failed fix fanout) may have left
+      // stray edits in the working tree — it holds the edit/write/bash tools and explores the diff
+      // before submitting. The self-review "clean" case (an empty noChangesNeeded manifest) is the
+      // canonical trigger: the reviewer can tweak a file, then declare nothing to fix. Restore a
+      // clean tree so the shared in-place checkout stays deterministic — a later `checkout -B`
+      // never resets uncommitted changes, so they would otherwise carry onto the next branch.
+      await discardStrayEdits(init.tools.bash, input.checkoutPath);
+      if (planned.kind === 'blocked') return { kind: 'blocked', reason: planned.reason };
+      if (planned.kind === 'error') return { kind: 'error', error: planned.error };
+      return { kind: 'no-changes', reason: planned.reason };
+    }
 
     // delivery.changes must reflect every committed edit, so a fix pass that touched new files
     // is appended to the first-pass changes (the Orchestrator narrates the PR body off this).
@@ -285,7 +294,11 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
       // Verify gate: format + verify, one bounded fix pass, commit only when green. A red diff
       // never reaches the remote when the operator has configured a verify command (issue #122).
       const gated = await commitWithVerify(agent, init, input, branch, planned.draftCommitMessage);
-      if (gated.kind === 'blocked') return { kind: 'blocked', reason: gated.reason };
+      if (gated.kind === 'blocked') {
+        // The verify gate's failed fix left its edits uncommitted — restore a clean tree.
+        await discardStrayEdits(init.tools.bash, input.checkoutPath);
+        return { kind: 'blocked', reason: gated.reason };
+      }
       if (gated.extraChanges.length > 0) changes = [...changes, ...gated.extraChanges];
     } else {
       // Branch already created by planAndEdit (branch-before-edit), so this only formats + commits.
@@ -305,6 +318,9 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
       handle: planned.handle,
     };
   } catch (err) {
+    // A throw mid-pass (e.g. a bash fault during commit) can leave a half-staged tree. Restore it so
+    // the next pass starts clean rather than carrying the partial mutation onto another branch.
+    await discardStrayEdits(init.tools.bash, input.checkoutPath);
     return { kind: 'error', error: err instanceof Error ? err.message : String(err) };
   }
 }
@@ -864,6 +880,42 @@ async function stageAndCommit(
   await runBash(exec, `git -C ${wt} add -A`);
   await runBash(exec, `git -C ${wt} reset -q -- .ai-task-master`);
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
+}
+
+// Restore the checkout to a clean tree after a worker pass that committed nothing. The planning
+// agent and any fix-pass fanout can leave edits behind (an empty manifest declared clean — the
+// self-review "clean" case — a blocked fix, a phantom edit, a verify failure, or a mid-commit
+// throw), and the shared in-place checkout never auto-resets uncommitted changes: a later
+// `checkout -B` carries them onto whatever branch comes next, so a stray edit surfaced post-merge
+// as an uncommitted file (the README.md leftover). When the tree is dirty, reset tracked files to
+// HEAD and drop untracked ones — `git clean -fd` (no `-x`) leaves ignored files like
+// .ai-task-master in place. A clean tree is a no-op (one cheap status check). Best-effort: a
+// cleanup fault never masks the worker's real result. Safe because a successful stageAndCommit
+// already captured any real work; whatever remains is, by definition, not meant to ship.
+async function discardStrayEdits(
+  bash: Tool<BashInput, BashOutput>,
+  checkoutPath: string,
+): Promise<void> {
+  const exec = bash?.execute;
+  if (typeof exec !== 'function') return; // best-effort: no cleanup without a runnable bash tool
+  const wt = shQuote(checkoutPath);
+  const out = await exec(
+    {
+      command: `git -C ${wt} status --porcelain`,
+      description: 'check for stray edits left by a non-committing worker pass',
+    },
+    { toolCallId: `worker-tree-status-${Date.now()}`, messages: [] },
+  );
+  if (isAsyncIterable(out)) return;
+  if (out.exitCode !== 0) return;
+  if (out.stdout.trim().length === 0) return;
+  for (const command of [`git -C ${wt} reset --hard HEAD`, `git -C ${wt} clean -fd`]) {
+    try {
+      await runBash(exec, command);
+    } catch {
+      // best-effort: never mask the worker's real result with a cleanup failure
+    }
+  }
 }
 
 function requireExec(

@@ -612,11 +612,19 @@ test('mcp-login: bare server URL', () => {
 });
 
 test('mcp-login: with callback URL', () => {
-  assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com', '--callback-url', 'http://localhost:3000/callback']), {
-    kind: 'mcp-login',
-    serverUrl: 'https://my-mcp.com',
-    callbackUrl: 'http://localhost:3000/callback',
-  });
+  assert.deepEqual(
+    parseArgs([
+      'mcp-login',
+      'https://my-mcp.com',
+      '--callback-url',
+      'http://localhost:3000/callback',
+    ]),
+    {
+      kind: 'mcp-login',
+      serverUrl: 'https://my-mcp.com',
+      callbackUrl: 'http://localhost:3000/callback',
+    },
+  );
 });
 
 test('mcp-login: with timeout', () => {
@@ -629,7 +637,14 @@ test('mcp-login: with timeout', () => {
 
 test('mcp-login: all flags', () => {
   assert.deepEqual(
-    parseArgs(['mcp-login', 'https://my-mcp.com', '--callback-url', 'http://localhost:3000/callback', '--timeout', '60000']),
+    parseArgs([
+      'mcp-login',
+      'https://my-mcp.com',
+      '--callback-url',
+      'http://localhost:3000/callback',
+      '--timeout',
+      '60000',
+    ]),
     {
       kind: 'mcp-login',
       serverUrl: 'https://my-mcp.com',
@@ -644,10 +659,16 @@ test('mcp-login: missing server URL is usage error', () => {
 });
 
 test('mcp-login: multiple server URLs is usage error', () => {
-  assert.deepEqual(parseArgs(['mcp-login', 'https://one.com', 'https://two.com']), { kind: 'usage-error' });
+  assert.deepEqual(parseArgs(['mcp-login', 'https://one.com', 'https://two.com']), {
+    kind: 'usage-error',
+  });
 });
 
 test('mcp-login: invalid timeout is usage error', () => {
-  assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com', '--timeout', 'abc']), { kind: 'usage-error' });
-  assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com', '--timeout', '-100']), { kind: 'usage-error' });
+  assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com', '--timeout', 'abc']), {
+    kind: 'usage-error',
+  });
+  assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com', '--timeout', '-100']), {
+    kind: 'usage-error',
+  });
 });

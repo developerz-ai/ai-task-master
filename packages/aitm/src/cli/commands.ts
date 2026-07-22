@@ -189,9 +189,9 @@ export type McpLoginCtx = {
   stdout?: (chunk: string) => void;
   stderr?: (chunk: string) => void;
   // OAuth flow injection seams for testing
-  performOAuth?: (options: import('../mcp/oauth.js').OAuthOptions) => Promise<
-    import('../mcp/oauth.js').OAuthConfig
-  >;
+  performOAuth?: (
+    options: import('../mcp/oauth.js').OAuthOptions,
+  ) => Promise<import('../mcp/oauth.js').OAuthConfig>;
 };
 
 async function drainStdin(): Promise<string> {
@@ -787,7 +787,10 @@ export async function runProfile(
 }
 
 // OAuth login for MCP servers: perform authorization code flow and output config snippet.
-export async function runMcpLogin(args: Extract<ParsedArgs, { kind: 'mcp-login' }>, ctx: McpLoginCtx = {}): Promise<CommandExit> {
+export async function runMcpLogin(
+  args: Extract<ParsedArgs, { kind: 'mcp-login' }>,
+  ctx: McpLoginCtx = {},
+): Promise<CommandExit> {
   const stdout = ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk));
   const stderr = ctx.stderr ?? ((chunk: string) => process.stderr.write(chunk));
 

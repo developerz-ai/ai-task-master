@@ -77,8 +77,16 @@ type ToolCallLog = {
 // `cleanStatusPaths` lists the paths that `git status --porcelain` reports as unchanged — i.e. the
 // editor narrated but never wrote (a phantom edit). Every other queried path reports dirty, so the
 // default (no phantom) keeps the existing happy-path tests recording changes.
+// `strayEdits` makes the bare tree-wide `git status --porcelain` (no pathspec — the post-pass
+// cleanup guard) report a dirty tree so a test can assert the reset/clean it triggers. Default
+// false keeps the clean no-changes/blocked paths skipping cleanup, byte-identical to today.
 function makeTools(
-  opts: { bashExitCode?: number; bashStderr?: string; cleanStatusPaths?: string[] } = {},
+  opts: {
+    bashExitCode?: number;
+    bashStderr?: string;
+    cleanStatusPaths?: string[];
+    strayEdits?: boolean;
+  } = {},
 ): {
   tools: WorkerTools;
   calls: ToolCallLog;
@@ -105,10 +113,20 @@ function makeTools(
       description: 'run a bash command in the checkout',
       inputSchema: z.object({ command: z.string() }),
       execute: async (input) => {
-        // The editor-change verification never mutates and is exit-0 regardless of bashExitCode.
         if (input.command.includes('status --porcelain')) {
-          calls.statuses.push(input);
           const path = /-- '(.*)'\s*$/.exec(input.command)?.[1] ?? '';
+          // Bare tree-wide status (no pathspec) — the post-pass cleanup guard, not an editor's
+          // per-file verification. Reports the tree dirty only when the test simulates stray edits;
+          // never recorded in `bashes` so the clean no-op path stays byte-identical.
+          if (path === '') {
+            return {
+              stdout: opts.strayEdits ? ' M stray.md\n?? stray-new.ts\n' : '',
+              stderr: '',
+              exitCode: 0,
+            };
+          }
+          // The editor-change verification never mutates and is exit-0 regardless of bashExitCode.
+          calls.statuses.push(input);
           const clean = (opts.cleanStatusPaths ?? []).some((p) => p === path);
           return { stdout: clean ? '' : ` M ${path}\n`, stderr: '', exitCode: 0 };
         }
@@ -734,6 +752,83 @@ test('runWorker: empty manifest WITH noChangesNeeded → no-changes, no branch/c
   assert.equal(calls.bashes.length, 0);
 });
 
+test('runWorker: a no-changes pass with stray planning edits restores a clean tree (self-review clean left a dirty tree after merge)', async () => {
+  // Regression: the manifest-planning agent holds the edit/write/bash tools and explores the diff
+  // before submitting. A self-review "clean" pass (empty noChangesNeeded manifest) can tweak a file
+  // during that survey, then declare nothing to fix — leaving the edit uncommitted. The shared
+  // in-place checkout never auto-resets, so the stray edit surfaced after the PR merged as a
+  // modified README.md. The non-commit exit paths now reset tracked files + drop untracked ones.
+  const manifest: FileManifest = {
+    files: [],
+    draftCommitMessage: 'chore: noop',
+    noChangesNeeded: 'already clean — nothing to fix',
+  };
+  const { tools, calls } = makeTools({ strayEdits: true });
+  const model = makeWorkerModel(manifest);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'no-changes');
+
+  // The cleanup guard detected a dirty tree and restored it: reset tracked files to HEAD, then drop
+  // untracked ones. No add/commit (nothing was meant to ship from a no-changes declaration).
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.ok(
+    cmds.some((c) => /reset --hard HEAD/.test(c)),
+    'a dirty tree is reset to HEAD',
+  );
+  assert.ok(
+    cmds.some((c) => /clean -fd/.test(c)),
+    'untracked stray files are cleaned',
+  );
+  assert.equal(
+    cmds.some((c) => /add -A|commit -m/.test(c)),
+    false,
+    'a no-changes pass never stages or commits',
+  );
+});
+
+test('runWorker: a blocked pass with stray edits restores a clean tree (no partial mutation leaks to the next branch)', async () => {
+  const manifest: FileManifest = { files: [], draftCommitMessage: 'chore: noop' };
+  const { tools, calls } = makeTools({ strayEdits: true });
+  const model = makeWorkerModel(manifest);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'blocked');
+
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.ok(
+    cmds.some((c) => /reset --hard HEAD/.test(c)),
+    'blocked dirty tree is reset',
+  );
+  assert.ok(
+    cmds.some((c) => /clean -fd/.test(c)),
+    'untracked stray files are cleaned',
+  );
+});
+
+test('runWorker: a clean no-changes tree is left untouched (no-op cleanup, byte-identical git sequence)', async () => {
+  const manifest: FileManifest = {
+    files: [],
+    draftCommitMessage: 'chore: noop',
+    noChangesNeeded: 'already clean',
+  };
+  const { tools, calls } = makeTools(); // strayEdits unset → tree-wide status reports clean
+  const model = makeWorkerModel(manifest);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'no-changes');
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.equal(
+    cmds.some((c) => /reset --hard|clean -fd/.test(c)),
+    false,
+    'a clean tree triggers no reset/clean',
+  );
+  assert.equal(calls.bashes.length, 0, 'no mutating git command runs on a clean no-changes pass');
+});
+
 test('runWorker: persistently schema-invalid manifest → error after retries, naming schema validation (issue #101)', async () => {
   const { tools } = makeTools();
   // submit called with args that don't match FileManifestSchema (files is not an array) on every
@@ -1334,6 +1429,11 @@ function makeVerifyTools(verifyExitCodes: number[]): {
       // `git status --porcelain` check reports dirty (and stays out of the `bashes` sequence).
       if (input.command.includes('status --porcelain')) {
         const path = /-- '(.*)'\s*$/.exec(input.command)?.[1] ?? '';
+        // Bare tree-wide status (the post-pass cleanup guard): clean by default so the verify-blocked
+        // path skips reset/clean, byte-identical to today.
+        if (path === '') {
+          return { stdout: '', stderr: '', exitCode: 0 };
+        }
         return { stdout: ` M ${path}\n`, stderr: '', exitCode: 0 };
       }
       bashes.push(input);

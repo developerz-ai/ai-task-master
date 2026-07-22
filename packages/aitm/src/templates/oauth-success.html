@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Authorization Successful</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    .container {
+      text-align: center;
+      padding: 3rem 2rem;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      max-width: 480px;
+    }
+    .icon {
+      font-size: 4rem;
+      margin-bottom: 1rem;
+      animation: bounce 1s ease-in-out;
+    }
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-10px); }
+    }
+    h1 {
+      color: #10b981;
+      font-size: 1.75rem;
+      margin-bottom: 0.75rem;
+      font-weight: 600;
+    }
+    p {
+      color: #6b7280;
+      font-size: 1rem;
+      line-height: 1.5;
+    }
+    .code {
+      margin-top: 1.5rem;
+      padding: 0.75rem;
+      background: #f3f4f6;
+      border-radius: 6px;
+      font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+      font-size: 0.875rem;
+      color: #374151;
+      border-left: 3px solid #10b981;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">✅</div>
+    <h1>Authorization Successful</h1>
+    <p>Your MCP server has been authenticated. You can now close this window and return to your terminal.</p>
+    <div class="code">Config snippet ready to paste into .mcp.json</div>
+  </div>
+</body>
+</html>

@@ -185,6 +185,15 @@ export type ProfileCtx = {
   readStdin?: () => Promise<string>;
 };
 
+export type McpLoginCtx = {
+  stdout?: (chunk: string) => void;
+  stderr?: (chunk: string) => void;
+  // OAuth flow injection seams for testing
+  performOAuth?: (options: import('../mcp/oauth.js').OAuthOptions) => Promise<
+    import('../mcp/oauth.js').OAuthConfig
+  >;
+};
+
 async function drainStdin(): Promise<string> {
   let data = '';
   process.stdin.setEncoding('utf8');
@@ -772,6 +781,57 @@ export async function runProfile(
           message: `Unknown profile subcommand: ${(args as { kind: string }).kind}`,
         };
     }
+  } catch (err) {
+    return { code: 1, message: errMsg(err) };
+  }
+}
+
+// OAuth login for MCP servers: perform authorization code flow and output config snippet.
+export async function runMcpLogin(args: Extract<ParsedArgs, { kind: 'mcp-login' }>, ctx: McpLoginCtx = {}): Promise<CommandExit> {
+  const stdout = ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk));
+  const stderr = ctx.stderr ?? ((chunk: string) => process.stderr.write(chunk));
+
+  try {
+    // Infer OAuth endpoints from the MCP server URL
+    const serverUrl = new URL(args.serverUrl);
+    const authUrl = `${serverUrl.origin}/oauth/authorize`;
+    const tokenUrl = `${serverUrl.origin}/oauth/token`;
+
+    // Extract client_id from URL if provided as query param (common dev pattern)
+    const clientId = serverUrl.searchParams.get('client_id') ?? 'aitm-cli';
+
+    const performOAuthFlow = ctx.performOAuth ?? (await import('../mcp/oauth.js')).performOAuthFlow;
+
+    const oauthOptions: import('../mcp/oauth.js').OAuthOptions = {
+      authUrl,
+      tokenUrl,
+      clientId,
+    };
+
+    if (args.callbackUrl) oauthOptions.callbackUrl = args.callbackUrl;
+    if (args.timeout) oauthOptions.timeout = args.timeout;
+
+    const config = await performOAuthFlow(oauthOptions);
+
+    const configSnippet = JSON.stringify(
+      {
+        mcpServers: {
+          [config.name]: {
+            type: config.type,
+            url: config.url,
+            headers: config.headers,
+          },
+        },
+      },
+      null,
+      2,
+    );
+
+    stdout('\n✅ OAuth authentication successful!\n\n');
+    stdout('Add this to your .mcp.json or ~/.aitm.json:\n\n');
+    stdout(`${configSnippet}\n\n`);
+
+    return { code: 0 };
   } catch (err) {
     return { code: 1, message: errMsg(err) };
   }

@@ -61,12 +61,21 @@ export type ProfileArgs =
 // confirmation prompt (claudetm's --force/-f).
 export type CleanArgs = { kind: 'clean'; force: boolean };
 
+// OAuth login for MCP servers: perform authorization code flow and output config snippet.
+export type McpLoginArgs = {
+  kind: 'mcp-login';
+  serverUrl: string;
+  callbackUrl?: string;
+  timeout?: number;
+};
+
 export type ParsedArgs =
   | StartArgs
   | MergePrArgs
   | ConfigArgs
   | ProfileArgs
   | CleanArgs
+  | McpLoginArgs
   | { kind: 'help' }
   | { kind: 'usage-error' };
 
@@ -91,6 +100,8 @@ export function parseArgs(argv: ReadonlyArray<string>): ParsedArgs {
       return parseProfile(rest);
     case 'clean':
       return parseClean(rest);
+    case 'mcp-login':
+      return parseMcpLogin(rest);
     default:
       return USAGE_ERROR;
   }
@@ -106,6 +117,51 @@ function parseClean(args: ReadonlyArray<string>): ParsedArgs {
     }
   }
   return { kind: 'clean', force };
+}
+
+function parseMcpLogin(args: ReadonlyArray<string>): ParsedArgs {
+  const positionals: string[] = [];
+  let callbackUrl: string | undefined;
+  let timeout: number | undefined;
+
+  let i = 0;
+  while (i < args.length) {
+    const raw = args[i];
+    if (raw === undefined) break;
+    const { flag, inlineValue, consumed } = splitFlag(raw);
+    if (flag === '--callback-url') {
+      const v = takeValue(args, i, inlineValue);
+      if (v === null || (inlineValue === null && v.startsWith('--'))) return USAGE_ERROR;
+      callbackUrl = v;
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--timeout') {
+      const v = takeValue(args, i, inlineValue);
+      const n = parsePositiveInt(v);
+      if (n === null) return USAGE_ERROR;
+      timeout = n;
+      i += consumed(inlineValue !== null);
+    } else if (raw.startsWith('--')) {
+      return USAGE_ERROR;
+    } else if (raw.startsWith('-')) {
+      return USAGE_ERROR;
+    } else {
+      positionals.push(raw);
+      i += 1;
+    }
+  }
+
+  if (positionals.length !== 1) return USAGE_ERROR;
+
+  const serverUrl = positionals[0]!;
+  const result: McpLoginArgs = {
+    kind: 'mcp-login',
+    serverUrl,
+  };
+
+  if (callbackUrl !== undefined) result.callbackUrl = callbackUrl;
+  if (timeout !== undefined) result.timeout = timeout;
+
+  return result;
 }
 
 function parseStart(args: ReadonlyArray<string>): ParsedArgs {

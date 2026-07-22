@@ -603,3 +603,51 @@ test('clean: any other argument is a usage error', () => {
   assert.deepEqual(parseArgs(['clean', 'now']), { kind: 'usage-error' });
   assert.deepEqual(parseArgs(['clean', '--all']), { kind: 'usage-error' });
 });
+
+test('mcp-login: bare server URL', () => {
+  assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com']), {
+    kind: 'mcp-login',
+    serverUrl: 'https://my-mcp.com',
+  });
+});
+
+test('mcp-login: with callback URL', () => {
+  assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com', '--callback-url', 'http://localhost:3000/callback']), {
+    kind: 'mcp-login',
+    serverUrl: 'https://my-mcp.com',
+    callbackUrl: 'http://localhost:3000/callback',
+  });
+});
+
+test('mcp-login: with timeout', () => {
+  assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com', '--timeout', '45000']), {
+    kind: 'mcp-login',
+    serverUrl: 'https://my-mcp.com',
+    timeout: 45000,
+  });
+});
+
+test('mcp-login: all flags', () => {
+  assert.deepEqual(
+    parseArgs(['mcp-login', 'https://my-mcp.com', '--callback-url', 'http://localhost:3000/callback', '--timeout', '60000']),
+    {
+      kind: 'mcp-login',
+      serverUrl: 'https://my-mcp.com',
+      callbackUrl: 'http://localhost:3000/callback',
+      timeout: 60000,
+    },
+  );
+});
+
+test('mcp-login: missing server URL is usage error', () => {
+  assert.deepEqual(parseArgs(['mcp-login']), { kind: 'usage-error' });
+});
+
+test('mcp-login: multiple server URLs is usage error', () => {
+  assert.deepEqual(parseArgs(['mcp-login', 'https://one.com', 'https://two.com']), { kind: 'usage-error' });
+});
+
+test('mcp-login: invalid timeout is usage error', () => {
+  assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com', '--timeout', 'abc']), { kind: 'usage-error' });
+  assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com', '--timeout', '-100']), { kind: 'usage-error' });
+});

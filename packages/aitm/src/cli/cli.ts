@@ -6,8 +6,8 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { initErrorReporter } from '../observability/error-reporter.ts';
 import { parseArgs } from './args.ts';
-import type { CleanCtx, MergePrCtx, ProfileCtx, StartCtx } from './commands.ts';
-import { runClean, runConfig, runMergePr, runProfile, runStart } from './commands.ts';
+import type { CleanCtx, McpLoginCtx, MergePrCtx, ProfileCtx, StartCtx } from './commands.ts';
+import { runClean, runConfig, runMcpLogin, runMergePr, runProfile, runStart } from './commands.ts';
 
 export type MainCtx = {
   cwd?: string;
@@ -49,6 +49,8 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
       return emit(await runProfile(parsed, buildProfileCtx(ctx, stdout)), stdout, stderr);
     case 'clean':
       return emit(await runClean(parsed, buildCleanCtx(ctx, stdout)), stdout, stderr);
+    case 'mcp-login':
+      return emit(await runMcpLogin(parsed, buildMcpLoginCtx(ctx, stdout, stderr)), stdout, stderr);
     case 'help':
       stdout(`${HELP_TEXT}\n`);
       return 0;
@@ -103,6 +105,10 @@ function buildCleanCtx(ctx: MainCtx, stdout: (chunk: string) => void): CleanCtx 
   return out;
 }
 
+function buildMcpLoginCtx(ctx: MainCtx, stdout: (chunk: string) => void, stderr: (chunk: string) => void): McpLoginCtx {
+  return { stdout, stderr };
+}
+
 function emit(
   exit: { code: 0 | 1 | 2; message?: string },
   stdout: (chunk: string) => void,
@@ -134,6 +140,7 @@ Usage:
   aitm profile get <name> <key>
   aitm profile remove <name>
   aitm profile show [<name>]
+  aitm mcp-login <server-url> [--callback-url <url>] [--timeout <ms>]
   aitm clean [--force|-f]
   aitm help | --help | -h
 

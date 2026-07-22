@@ -92,6 +92,8 @@ const DEFAULTS = {
   // AI conflict resolution is default-ON: a rebase/merge conflict is handed to a subagent before
   // the group blocks for a human.
   resolveConflicts: true,
+  // Specialist bootstrap is default-ON: a repo with no .claude/agents gets a generated team.
+  generateSpecialists: true,
   logLevel: 'info' as const,
   concurrency: 1,
   editorConcurrency: 4,
@@ -242,6 +244,13 @@ export class ConfigLoader {
         project?.resolveConflicts,
         global?.resolveConflicts,
         DEFAULTS.resolveConflicts,
+      ),
+      // generateSpecialists defaults ON (project > global). No CLI flag — a per-repo toggle.
+      generateSpecialists: pick(
+        undefined,
+        project?.generateSpecialists,
+        global?.generateSpecialists,
+        DEFAULTS.generateSpecialists,
       ),
       // logLevel is not exposed via CliOverrides — project/global only.
       logLevel: pick(undefined, project?.logLevel, global?.logLevel, DEFAULTS.logLevel),

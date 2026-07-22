@@ -6,8 +6,8 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { initErrorReporter } from '../observability/error-reporter.ts';
 import { parseArgs } from './args.ts';
-import type { MergePrCtx, ProfileCtx, StartCtx } from './commands.ts';
-import { runConfig, runMergePr, runProfile, runStart } from './commands.ts';
+import type { CleanCtx, MergePrCtx, ProfileCtx, StartCtx } from './commands.ts';
+import { runClean, runConfig, runMergePr, runProfile, runStart } from './commands.ts';
 
 export type MainCtx = {
   cwd?: string;
@@ -47,6 +47,8 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
     case 'profile-remove':
     case 'profile-show':
       return emit(await runProfile(parsed, buildProfileCtx(ctx, stdout)), stdout, stderr);
+    case 'clean':
+      return emit(await runClean(parsed, buildCleanCtx(ctx, stdout)), stdout, stderr);
     case 'help':
       stdout(`${HELP_TEXT}\n`);
       return 0;
@@ -95,6 +97,12 @@ function buildProfileCtx(ctx: MainCtx, stdout: (chunk: string) => void): Profile
   return out;
 }
 
+function buildCleanCtx(ctx: MainCtx, stdout: (chunk: string) => void): CleanCtx {
+  const out: CleanCtx = { stdout };
+  if (ctx.cwd !== undefined) out.cwd = ctx.cwd;
+  return out;
+}
+
 function emit(
   exit: { code: 0 | 1 | 2; message?: string },
   stdout: (chunk: string) => void,
@@ -126,6 +134,7 @@ Usage:
   aitm profile get <name> <key>
   aitm profile remove <name>
   aitm profile show [<name>]
+  aitm clean [--force|-f]
   aitm help | --help | -h
 
 Exit codes:

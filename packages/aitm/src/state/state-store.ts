@@ -144,6 +144,28 @@ export class StateStore {
     }
   }
 
+  // True when the state dir exists — `aitm clean`'s pre-confirmation probe, so a repo with no
+  // state gets the friendly no-op instead of a pointless confirmation prompt.
+  async exists(): Promise<boolean> {
+    try {
+      await readdir(this.stateDir);
+      return true;
+    } catch (err) {
+      if (isNotFound(err)) return false;
+      throw err;
+    }
+  }
+
+  // `aitm clean`: remove the ENTIRE state dir — logs/ and memory/ included, unlike
+  // cleanupOnSuccess (claudetm-clean parity: an explicit fresh start abandons everything).
+  // Returns false when there was nothing to delete so the CLI can say so instead of
+  // pretending it cleaned something.
+  async deleteAll(): Promise<boolean> {
+    if (!(await this.exists())) return false;
+    await rm(this.stateDir, { recursive: true, force: true });
+    return true;
+  }
+
   // The per-repo memory directory (issue #118). Handed out here so nothing rebuilds the path ad hoc;
   // the memory-loader (compat) reads/writes under it. Not created until the first memory write.
   memoryDir(): string {

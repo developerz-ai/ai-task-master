@@ -57,11 +57,16 @@ export type ProfileArgs =
   | { kind: 'profile-remove'; name: string }
   | { kind: 'profile-show'; name?: string };
 
+// Mirrors claudetm's `clean` command: wipe .ai-task-master/ to start fresh. `force` skips the
+// confirmation prompt (claudetm's --force/-f).
+export type CleanArgs = { kind: 'clean'; force: boolean };
+
 export type ParsedArgs =
   | StartArgs
   | MergePrArgs
   | ConfigArgs
   | ProfileArgs
+  | CleanArgs
   | { kind: 'help' }
   | { kind: 'usage-error' };
 
@@ -84,9 +89,23 @@ export function parseArgs(argv: ReadonlyArray<string>): ParsedArgs {
       return parseConfig(rest);
     case 'profile':
       return parseProfile(rest);
+    case 'clean':
+      return parseClean(rest);
     default:
       return USAGE_ERROR;
   }
+}
+
+function parseClean(args: ReadonlyArray<string>): ParsedArgs {
+  let force = false;
+  for (const arg of args) {
+    if (arg === '--force' || arg === '-f') {
+      force = true;
+    } else {
+      return USAGE_ERROR;
+    }
+  }
+  return { kind: 'clean', force };
 }
 
 function parseStart(args: ReadonlyArray<string>): ParsedArgs {

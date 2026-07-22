@@ -127,6 +127,7 @@ import { commitsAheadOfBase, runGit } from '../workspace/git-exec.ts';
 import { InPlaceCheckout } from '../workspace/in-place-checkout.ts';
 import { runFixSession } from './ci-fix.ts';
 import { buildConflictResolver } from './conflict-resolution.ts';
+import { makeProgressTee } from './progress-file.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
 import { runSelfReviewSession } from './self-review.ts';
 import {
@@ -472,6 +473,9 @@ export type AdapterStatePort = {
   // Persist plan groups as the loop marks tasks done; StateStore renders them to plan.md.
   // Optional so in-memory test stubs can omit it; StateStore supplies it in production.
   writePlan?(groups: readonly PlanMarkdownGroup[]): Promise<void>;
+  // Append one lifecycle line to progress.md (plan.md's sibling) as the loop narrates group/task
+  // transitions. Optional like writePlan; StateStore supplies it in production.
+  appendProgress?(entry: string): Promise<void>;
   // The per-repo memory dir (issue #118). Optional: a port that omits it turns memory off entirely
   // (no index block, no memory tool). StateStore supplies it in production.
   memoryDir?(): string;
@@ -717,7 +721,10 @@ export async function runLoopAdapter(
       mergeMethod: input.resolved.mergeMethod,
       adminMerge: input.resolved.adminMerge ?? false,
       initialSessionCount: current.sessionCount,
-      progress: harnessProgress,
+      // Every harness narration line also lands in .ai-task-master/progress.md via the state port.
+      progress: makeProgressTee(
+        state.appendProgress ? { append: state.appendProgress.bind(state) } : {},
+      ),
       stepCounter,
       ...(input.signal ? { signal: input.signal } : {}),
     });

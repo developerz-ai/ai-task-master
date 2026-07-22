@@ -101,10 +101,18 @@ export type FileManifestEntry = z.infer<typeof FileManifestEntrySchema>;
 export const FileManifestSchema = z.object({
   files: z.array(FileManifestEntrySchema),
   draftCommitMessage: z.string().min(1),
-  // Explicit declaration that the task requires no code changes (verification-only, or the change
+  // Explicit declaration that the task requires no code changes (verificationonly, or the change
   // already exists). Only honored alongside an empty `files` list: it completes the task without a
   // commit instead of conflating a reasoned empty manifest with a weak-model failure.
   noChangesNeeded: z.string().min(1).optional(),
+  // The Coordinator already wrote every listed change to disk itself (inline edits) — the harness
+  // skips the editor fanout and commits straight away. Set for small/cohesive tasks where spawning
+  // leaf editors would be pure overhead (the model is fast and holds a large context). The model
+  // decides based on the sizing rule in WORKER_SYSTEM_PREFIX: fan out only when the work is large
+  // (>~500 LOC) or needs debugging across many places. The harness phantom-guards every planned file
+  // (git status), so a claimed `applied` with nothing on disk still surfaces as `blocked` rather than
+  // producing an empty commit. Absent/false → fan out as usual.
+  applied: z.boolean().optional(),
 });
 export type FileManifest = z.infer<typeof FileManifestSchema>;
 
@@ -188,13 +196,15 @@ export { WORKER_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 export const WORKER_MAX_STEPS = 30;
 export const EDITOR_MAX_STEPS = 12;
 
-// Editor fanout shape (slice 05, editor team fanout). The manifest is grouped by directory so one leaf
-// owns a handful of cohesive files instead of the fanout opening one provider call per file, and the
-// groups run through a bounded pool. MAX_FILES_PER_EDITOR caps how many files a leaf owns (a large
-// directory still spreads across several leaves); EDITOR_CONCURRENCY_DEFAULT caps how many leaves run
-// at once so a big manifest can't open dozens of concurrent LLM requests. The per-run config that
-// overrides the concurrency is wired separately; unset falls back to this default.
-export const MAX_FILES_PER_EDITOR = 3;
+// Editor fanout shape. The manifest is grouped by directory so one leaf owns a cohesive slice of
+// files instead of the fanout opening one provider call per file, and the groups run through a
+// bounded pool. MAX_FILES_PER_EDITOR caps how many files a leaf owns (a large directory still spreads
+// across several leaves); EDITOR_CONCURRENCY_DEFAULT caps how many leaves run at once so a big
+// manifest can't open dozens of concurrent LLM requests. Bigger than a typical "one file per leaf":
+// modern coding models finish a single file in seconds, so a leaf should own a meaty, multi-file
+// chunk that keeps an editor working for minutes — aitm is built for big work. The per-run config
+// that overrides the concurrency is wired separately; unset falls back to this default.
+export const MAX_FILES_PER_EDITOR = 6;
 export const EDITOR_CONCURRENCY_DEFAULT = 4;
 
 // Module-private link from a Worker agent back to its init, so runWorker can spawn editor
@@ -366,6 +376,29 @@ async function planAndEdit(
     }
     return { kind: 'blocked', reason: EMPTY_MANIFEST_REASON };
   }
+  // Inline-edit path: the Coordinator declared `applied` — it wrote every planned change to disk
+  // itself during planning (opencode-style: the agent decides when to delegate; the harness honors "I
+  // did it myself"). The work-loop's acquire already checked out the group branch, so inline edits
+  // landed there directly; checkoutBranch is a harmless no-op when already on it. Each planned file is
+  // phantom-guarded (git status) so a claimed `applied` with nothing on disk blocks rather than an
+  // empty commit — the same discipline the fanout path enforces per editor. Summary comes from each
+  // entry's `purpose` (the Coordinator's own description); there are no editor texts to harvest.
+  if (manifest.applied) {
+    await checkoutBranch(requireExec(init.tools.bash), input, branch);
+    const changes: FileChange[] = [];
+    const unchanged: string[] = [];
+    for (const file of manifest.files) {
+      if (await editorTouchedPath(init.tools.bash, input.checkoutPath, file.path)) {
+        changes.push({ path: file.path, kind: file.kind, summary: file.purpose });
+      } else {
+        unchanged.push(file.path);
+      }
+    }
+    if (unchanged.length > 0) {
+      return { kind: 'blocked', reason: appliedPhantomReason(unchanged) };
+    }
+    return { kind: 'ok', changes, draftCommitMessage: manifest.draftCommitMessage, handle };
+  }
   // Create/switch the group branch BEFORE the editor fanout writes any file, so every edit lands on
   // the group branch from the start rather than on whatever branch is currently checked out. Under
   // the shared single checkout (worktrees removed), a `checkout -B` after the writes would otherwise
@@ -397,6 +430,21 @@ function editorNoChangeReason(paths: string[]): string {
     'was committed and no PR was opened. This usually means the coding model is not capable enough; try a',
     'more capable coding model (set `models.coding` in .ai-task-master/config.json or pass a stronger',
     '`--model`).',
+  ].join(' ');
+}
+
+// Mirrors editorNoChangeReason for the inline path: the Coordinator declared `applied` but a planned
+// file is unchanged on disk — it claimed an inline edit it never made (a phantom). Same root cause
+// (a coding model too weak to edit) and the same remediation; only the wording differs.
+function appliedPhantomReason(paths: string[]): string {
+  return [
+    `The Coordinator declared \`applied\` (inline edits) but left ${
+      paths.length === 1 ? 'a planned file' : 'planned files'
+    } unchanged on disk:`,
+    `${paths.join(', ')}. Nothing was committed and no PR was opened — the coding model claimed it edited`,
+    'inline but never wrote the change (a phantom edit). This usually means the coding model is not',
+    'capable enough; try a more capable coding model (set `models.coding` in .ai-task-master/config.json',
+    'or pass a stronger `--model`).',
   ].join(' ');
 }
 

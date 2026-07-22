@@ -169,18 +169,19 @@ function baseInput(group: PrGroup = baseGroup()): WorkerInput {
   };
 }
 
-test('WORKER_SYSTEM_PREFIX is the Coordinator: file manifest + the split/right-size judgment', () => {
+test('WORKER_SYSTEM_PREFIX is the Coordinator: file manifest + the inline/fanout decision + right-sizing', () => {
   assert.match(WORKER_SYSTEM_PREFIX, /Coordinator/);
   assert.match(WORKER_SYSTEM_PREFIX, /file manifest/);
-  assert.match(WORKER_SYSTEM_PREFIX, /Split heuristic/);
-  assert.match(WORKER_SYSTEM_PREFIX, /Right-size/);
+  assert.match(WORKER_SYSTEM_PREFIX, /INLINE/);
+  assert.match(WORKER_SYSTEM_PREFIX, /FANOUT/);
+  assert.match(WORKER_SYSTEM_PREFIX, /applied: true/);
   // The "only the coordinator spawns" boundary and leaf independence, the product principles §2a adds.
   assert.match(WORKER_SYSTEM_PREFIX, /Only you spawn; leaves never spawn\./);
-  assert.match(WORKER_SYSTEM_PREFIX, /every entry MUST be independent/);
+  assert.match(WORKER_SYSTEM_PREFIX, /DISJOINT, non-interfering scopes/);
 });
 
 test('WORKER_SYSTEM_PREFIX carries the explore delegation guidance, gated on availability (issue #126)', () => {
-  assert.match(WORKER_SYSTEM_PREFIX, /`explore` when present/);
+  assert.match(WORKER_SYSTEM_PREFIX, /`explore` for broad or multi-file questions/);
   assert.match(WORKER_SYSTEM_PREFIX, /in parallel/);
 });
 
@@ -949,6 +950,92 @@ test('runWorker fans out editors in parallel — manifest call comes first, edit
     );
     assert.ok(maxInFlight >= 2, `expected parallel fanout, got ${summaries.join(' / ')}`);
   }
+});
+
+// ---- inline-edit path: `applied: true` skips the editor fanout entirely ----
+
+test('runWorker: manifest with `applied: true` skips the editor fanout and commits the Coordinator inline edits', async () => {
+  // The Coordinator wrote everything itself — the fanout must not spawn any editor. The model is
+  // called exactly once (the manifest submit); FileChanges come from the manifest purposes, not
+  // editor summaries.
+  let modelCalls = 0;
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/errors/AppError.ts', kind: 'create', purpose: 'base AppError class' },
+      { path: 'src/server/app.ts', kind: 'modify', purpose: 'wire errorHandler into app.onError' },
+      { path: 'tests/errors.test.ts', kind: 'create', purpose: 'error mapper tests' },
+    ],
+    draftCommitMessage: 'feat: typed errors layer',
+    applied: true,
+  };
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      modelCalls++;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify(manifest),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools, calls } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  if (result.kind !== 'ok') return;
+  assert.equal(
+    modelCalls,
+    1,
+    'no editor fanout — the model is called exactly once (manifest submit)',
+  );
+  // The phantom-guard ran `git status` once per planned file.
+  assert.equal(calls.statuses.length, manifest.files.length);
+  assert.deepEqual(
+    result.delivery.changes.map((c) => ({ path: c.path, summary: c.summary })),
+    [
+      { path: 'src/errors/AppError.ts', summary: 'base AppError class' },
+      { path: 'src/server/app.ts', summary: 'wire errorHandler into app.onError' },
+      { path: 'tests/errors.test.ts', summary: 'error mapper tests' },
+    ],
+  );
+  assert.equal(result.delivery.draftCommitMessage, 'feat: typed errors layer');
+  // The commit phase ran (the inline edits were committed, not fanned out).
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.ok(
+    cmds.some((c) => /commit/.test(c)),
+    'the inline edits were committed',
+  );
+});
+
+test('runWorker: `applied: true` with an unwritten file blocks (phantom guard) and commits nothing', async () => {
+  // src/b.ts reports clean — the Coordinator claimed `applied` but never wrote it (a phantom).
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
+      { path: 'src/b.ts', kind: 'create', purpose: 'create b' },
+    ],
+    draftCommitMessage: 'feat: a + b',
+    applied: true,
+  };
+  const model = makeWorkerModel(manifest);
+  const { tools, calls } = makeTools({ cleanStatusPaths: ['src/b.ts'] });
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'blocked');
+  if (result.kind !== 'blocked') return;
+  assert.match(result.reason, /src\/b\.ts/);
+  assert.match(result.reason, /applied/);
+  // Nothing committed.
+  const cmds = calls.bashes.map((b) => b.command);
+  assert.ok(!cmds.some((c) => /commit/.test(c)), 'a phantom inline edit commits nothing');
 });
 
 // ---- editor team fanout: dir grouping + bounded pool + shared brief (slice 05) ----

@@ -18,6 +18,8 @@ const REASONING_MAX = 200;
 
 const CYAN_BOLD = '\x1b[36m\x1b[1m';
 const ORANGE_BOLD = '\x1b[38;5;208m\x1b[1m';
+const BLUE_BOLD = '\x1b[34m\x1b[1m';
+const MAGENTA = '\x1b[35m';
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
 
@@ -72,23 +74,36 @@ export function formatStepTag(step: RunStep): string {
 // group start, then pass a short `g<N>`-style ctx (or whatever they have) for every line after.
 const CTX_MAX = 24;
 
+// A stream-line label: either a plain string (harness lines, older callers — rendered as-is) or
+// the structured per-agent form whose segments the bracket colors independently (subagent name
+// blue, so parallel fan-out streams are tellable-apart at a glance). `text` is the exact string
+// the un-structured label used to be, so anything that needs a flat form (heartbeat messages,
+// tests, non-TTY sinks) reads identically to before.
+export type AgentLabel = { model: string; name: string; ctx?: string; text: string };
+export type StreamLabel = string | AgentLabel;
+
+export function labelText(label: StreamLabel): string {
+  return typeof label === 'string' ? label : label.text;
+}
+
 // Compose a per-agent stream-line label: model, then the subagent's name — a routed domain
 // specialist's name when one was picked, else the bare role, else `role:<basename>` for a
 // per-file editor fanout (05 spawns one editor per file and needs to tell them apart) — then
 // optional context (the group id), capped so a long slug can't blow up every line. No specialist,
-// no file → `k3 worker g1` (today's label, unchanged).
+// no file → text `k3 worker g1` (today's label, unchanged).
 export function agentLabel(input: {
   model: string;
   role: string;
   specialist?: string;
   file?: string;
   ctx?: string;
-}): string {
+}): AgentLabel {
   const name = input.file
     ? `${input.role}:${basename(input.file)}`
     : (input.specialist ?? input.role);
   const ctx = input.ctx ? clip(input.ctx, CTX_MAX) : undefined;
-  return ctx ? `${input.model} ${name} ${ctx}` : `${input.model} ${name}`;
+  const text = ctx ? `${input.model} ${name} ${ctx}` : `${input.model} ${name}`;
+  return ctx ? { model: input.model, name, ctx, text } : { model: input.model, name, text };
 }
 
 // Output seam: where lines go, whether ANSI color is applied, and the clock. Injectable for tests;
@@ -114,23 +129,42 @@ function defaultSink(): ProgressSink {
   return defaultProgressSink();
 }
 
-function bracket(label: string, sink: ProgressSink, tag: string): string {
+// The bracket, segment by segment: `[<model> <name> <ctx> <tag> <time>]` — the subagent name in
+// blue, the state tag in magenta, the timestamp dim at the END so the leading columns are the
+// stable who/where and the clock stays out of the way. `outer` is the resume color re-applied
+// after each inner segment (a bare RESET would cancel the enclosing prefix color mid-bracket);
+// null → no inner coloring (non-TTY sinks, dim reasoning lines that must stay uniformly dim).
+function bracket(
+  label: StreamLabel,
+  sink: ProgressSink,
+  tag: string,
+  outer: string | null,
+): string {
   const t = sink.now();
   const hh = String(t.getHours()).padStart(2, '0');
   const mm = String(t.getMinutes()).padStart(2, '0');
   const ss = String(t.getSeconds()).padStart(2, '0');
-  return tag ? `[${label} ${hh}:${mm}:${ss} ${tag}]` : `[${label} ${hh}:${mm}:${ss}]`;
+  const time = `${hh}:${mm}:${ss}`;
+  const paint = (code: string, s: string): string =>
+    outer === null ? s : `${code}${s}${RESET}${outer}`;
+  const who =
+    typeof label === 'string'
+      ? label
+      : `${label.model} ${paint(BLUE_BOLD, label.name)}${label.ctx ? ` ${label.ctx}` : ''}`;
+  const parts = [who, ...(tag ? [paint(MAGENTA, tag)] : []), paint(DIM, time)];
+  return `[${parts.join(' ')}]`;
 }
 
-function prefix(label: string, sink: ProgressSink, colorCode: string, tag = ''): string {
-  const body = bracket(label, sink, tag);
-  return sink.color ? `${colorCode}${body}${RESET}` : body;
+function prefix(label: StreamLabel, sink: ProgressSink, colorCode: string, tag = ''): string {
+  if (!sink.color) return bracket(label, sink, tag, null);
+  return `${colorCode}${bracket(label, sink, tag, colorCode)}${RESET}`;
 }
 
 // The reasoning line rides the same bracket as tool/text lines but dims the WHOLE line — bracket
-// included — so it reads as background chatter next to the orange work lines, not another one.
-function dimLine(label: string, sink: ProgressSink, tag: string, message: string): string {
-  const body = `${bracket(label, sink, tag)} ${message}`;
+// included, inner segment colors suppressed — so it reads as background chatter next to the
+// orange work lines, not another one.
+function dimLine(label: StreamLabel, sink: ProgressSink, tag: string, message: string): string {
+  const body = `${bracket(label, sink, tag, null)} ${message}`;
   return sink.color ? `${DIM}${body}${RESET}\n` : `${body}\n`;
 }
 
@@ -220,7 +254,7 @@ export function summarizeToolInput(toolName: string, input: unknown): string {
 // a fast-moving stream still reads as distinct chunks. `blank` is idempotent: back-to-back
 // sections (e.g. reasoning immediately followed by text) never produce two blanks in a row.
 export function renderStepLines(
-  label: string,
+  label: StreamLabel,
   event: StepProgressEvent,
   sink: ProgressSink,
   step?: RunStep,
@@ -261,7 +295,7 @@ export function renderStepLines(
 // here at step-finish would duplicate every line. Reasoning has no live equivalent (the streamed
 // funnel forwards text-delta/tool-call only), so it still renders at step-finish either way.
 export function agentStepProgress(
-  label: string,
+  label: StreamLabel,
   step?: RunStep,
   sink: ProgressSink = defaultSink(),
   options?: { textAndTools?: boolean },
@@ -296,7 +330,7 @@ export type LiveStreamEvent =
 // second) but only once per renderer instance — callers build a fresh renderer per subagent call, one
 // continuous streamed generation. Never throws — a broken renderer must not abort the stream.
 export function createLiveStreamRenderer(
-  label: string,
+  label: StreamLabel,
   step?: RunStep,
   sink: ProgressSink = defaultSink(),
 ): (event: LiveStreamEvent) => void {

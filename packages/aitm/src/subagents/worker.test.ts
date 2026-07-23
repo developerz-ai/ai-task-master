@@ -2682,3 +2682,51 @@ test('buildManifestPrompt: the Coordinator is asked for the leaf hand-off digest
   assert.match(sent, /sharedContext/);
   assert.match(sent, /they can read the rest themselves/);
 });
+
+test('runWorker: a self-review pass whose planner already edited every file skips the fanout', async () => {
+  // The waste this closes, measured on a real run: the self-review Coordinator fixed a bug and wrote
+  // its regression test with its own tools, submitted a manifest without `applied`, and the harness
+  // fanned two editors out over finished work — ~70s for a net zero-line diff, one leaf reverting and
+  // restoring a file just to re-prove a test it had not written.
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/TodoItem.tsx', kind: 'modify', purpose: 'clear the draft in cancel()' },
+      { path: 'test/TodoItem.test.tsx', kind: 'modify', purpose: 'Escape+blur regression test' },
+    ],
+    draftCommitMessage: 'fix: escape-cancel resurrects the draft',
+  };
+  const { tools, calls } = makeTools();
+  // Only the manifest reply is scripted — an editor turn would have no model response to consume.
+  const model = makeWorkerModel(manifest, []);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), inlineEditsExpected: true });
+
+  assert.equal(result.kind, 'ok');
+  if (result.kind !== 'ok') return;
+  // Summaries come from the manifest's own `purpose`, which is the inline path's signature — the
+  // fanout path harvests editor text instead.
+  assert.deepEqual(result.delivery.changes, [
+    { path: 'src/TodoItem.tsx', kind: 'modify', summary: 'clear the draft in cancel()' },
+    { path: 'test/TodoItem.test.tsx', kind: 'modify', summary: 'Escape+blur regression test' },
+  ]);
+  assert.equal(calls.writes.length, 0, 'no editor leaf wrote anything');
+});
+
+test('runWorker: the inline inference is off for a normal task, which still fans out', async () => {
+  // The normal path must keep planning and editing as distinct phases — a Coordinator that merely
+  // looked at files does not get its manifest treated as executed.
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  const { tools } = makeTools();
+  const model = makeWorkerModel(manifest, ['created a']);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+
+  assert.equal(result.kind, 'ok');
+  if (result.kind !== 'ok') return;
+  assert.equal(result.delivery.changes[0]?.summary, 'created a', 'the editor produced the summary');
+});

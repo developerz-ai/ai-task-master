@@ -197,6 +197,11 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     ...(subagents.progressBlock ? { progressBlock: subagents.progressBlock } : {}),
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),
+    // A reviewer fixes what it finds as it finds it — it reads the diff, spots the bug, and edits.
+    // Its manifest therefore describes work already on disk, and fanning editors out over it makes
+    // them re-derive finished changes (observed: two editors, ~70s, zero net edits, one of them
+    // reverting and restoring a file to re-prove a test it had not written).
+    inlineEditsExpected: true,
   };
   if (subagents.runWorkerOverride) return subagents.runWorkerOverride(baseInput);
 

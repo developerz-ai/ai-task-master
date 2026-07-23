@@ -381,13 +381,43 @@ test('mergePr throws MergeConflict on conflict stderr signal', async () => {
       stderr:
         'failed to merge: pull request is not mergeable: the merge commit cannot be cleanly created',
     },
+    // The failure-path state check: an unmerged (OPEN) PR, so the conflict verdict stands.
+    { exitCode: 0, stdout: '{"state":"OPEN"}' },
   ]);
   const g = new GitHubClient('/tmp/repo', run);
   await assert.rejects(() => g.mergePr(9, 'squash'), MergeConflict);
 });
 
 test('mergePr surfaces non-conflict failures generically', async () => {
-  const { run } = makeRun([{ exitCode: 1, stderr: 'HTTP 403: forbidden' }]);
+  const { run } = makeRun([
+    { exitCode: 1, stderr: 'HTTP 403: forbidden' },
+    { exitCode: 0, stdout: '{"state":"OPEN"}' },
+  ]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(() => g.mergePr(9, 'squash'), /gh pr merge failed/);
+});
+
+test('mergePr is idempotent: an already-merged PR is success, not a failure (resume crash window)', async () => {
+  // gh pr merge on an already-merged PR exits non-zero; the state query confirms MERGED, so the
+  // desired end state is already true. This is the crash window between mergePr succeeding on GitHub
+  // and state.json persisting 'merged', then a resume re-driving the merge stage.
+  const { run, calls } = makeRun([
+    { exitCode: 1, stderr: 'X Pull request #5 is not mergeable: it has already been merged' },
+    { exitCode: 0, stdout: '{"state":"MERGED"}' },
+  ]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await g.mergePr(5, 'squash'); // resolves, does not throw
+  assert.equal(calls.length, 2, 'the merge attempt plus one state confirmation');
+  assert.deepEqual(calls[1]?.args, ['pr', 'view', '5', '--json', 'state']);
+});
+
+test('mergePr does not swallow a real failure when the state query itself fails', async () => {
+  // isMerged is best-effort: an unparseable/failed state query returns false, so a genuine merge
+  // failure still surfaces rather than being silently treated as merged.
+  const { run } = makeRun([
+    { exitCode: 1, stderr: 'HTTP 500: server error' },
+    { exitCode: 1, stderr: 'gh: could not resolve PR' },
+  ]);
   const g = new GitHubClient('/tmp/repo', run);
   await assert.rejects(() => g.mergePr(9, 'squash'), /gh pr merge failed/);
 });

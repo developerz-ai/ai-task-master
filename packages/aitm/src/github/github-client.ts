@@ -547,11 +547,38 @@ export class GitHubClient {
       cwd: this.cwd,
     });
     if (r.exitCode === 0) return;
+    // Idempotent: merging an already-merged PR is not a failure — the desired end state is already
+    // true. This happens on a resume that re-drives the merge stage after a crash between mergePr
+    // succeeding on GitHub and state.json persisting 'merged'. Confirm against the PR's REAL state
+    // rather than gh's message wording, which "already merged" phrases differently across versions
+    // (and which can read as "not mergeable", the same words a genuine conflict uses). Checked before
+    // the conflict branch so an already-merged PR is never misreported as a conflict.
+    if (await this.isMerged(pr)) return;
     const combined = `${r.stderr}\n${r.stdout}`;
     if (/merge conflict|not mergeable|conflict/i.test(combined)) {
       throw new MergeConflict(`Merge conflict on PR #${pr}: ${r.stderr.trim() || r.stdout.trim()}`);
     }
     throw new Error(`gh pr merge failed: ${r.stderr.trim() || r.stdout.trim()}`);
+  }
+
+  // Whether the PR is already in the terminal MERGED state. Best-effort: a failed/unparseable state
+  // query returns false, so a real merge failure still surfaces rather than being swallowed.
+  private async isMerged(pr: number): Promise<boolean> {
+    const r = await this.runCmd('gh', ['pr', 'view', String(pr), '--json', 'state'], {
+      cwd: this.cwd,
+    });
+    if (r.exitCode !== 0) return false;
+    try {
+      const parsed: unknown = JSON.parse(r.stdout);
+      return (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        'state' in parsed &&
+        (parsed as { state: unknown }).state === 'MERGED'
+      );
+    } catch {
+      return false;
+    }
   }
 
   async authStatus(): Promise<{ ok: boolean; scopes: string[] }> {

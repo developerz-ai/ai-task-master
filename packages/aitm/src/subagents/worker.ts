@@ -258,10 +258,11 @@ const MANIFEST_FIELD_MAX = 500;
 // `rollingContext` accumulates one summary per prior PR group across the whole run, so it grows with
 // run length rather than staying label-sized; capped at the VERIFY_TAIL_MAX order of magnitude instead.
 const ROLLING_CONTEXT_MAX = 4000;
-// Editor leaves get a tighter style budget than the Coordinator's full digest (RAW_STYLE_MAX_CHARS in
-// run-loop-adapter.ts) — a leaf realizes one file and needs the essentials, not the complete guide,
-// and the cost multiplies by every parallel editor in the fanout.
-const EDITOR_STYLE_MAX = 1500;
+// Editor leaves are the ones actually writing the code, so the budget has to fit the project style
+// file that composeStyleGuide puts at the head of the guide (a typical CLAUDE.md runs 4-6k chars) —
+// truncating it mid-rule is how a leaf ends up violating the house rules it was handed. The digest
+// half tails it and is what gets cut when a repo ships an unusually long style file.
+const EDITOR_STYLE_MAX = 6000;
 
 const TRUNCATION_MARKER = ' […truncated]';
 
@@ -911,6 +912,10 @@ async function checkoutBranch(
   await runBash(exec, `git -C ${shQuote(input.checkoutPath)} checkout -B ${shQuote(branch)}`);
 }
 
+// aitm's own state dir, relative to the checkout root. Every git command in this module that could
+// otherwise sweep it into a commit — or delete it — names it, so the three call sites agree.
+const STATE_DIR = '.ai-task-master';
+
 // Stage (excluding aitm's own state dir) + commit — the post-verify steps shared by both paths.
 // Excluding `.ai-task-master/` keeps our state.json/goal out of the target-repo commit even when
 // the target repo does not gitignore it; the `:!` pathspec leaves its tracked files untouched.
@@ -926,7 +931,7 @@ async function stageAndCommit(
   // `add -A` skips ignored files silently; the `reset` then also drops the dir if it ISN'T ignored,
   // so aitm never commits its own state either way. No-op (exit 0) when nothing was staged for it.
   await runBash(exec, `git -C ${wt} add -A`);
-  await runBash(exec, `git -C ${wt} reset -q -- .ai-task-master`);
+  await runBash(exec, `git -C ${wt} reset -q -- ${STATE_DIR}`);
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
 }
 
@@ -936,10 +941,15 @@ async function stageAndCommit(
 // throw), and the shared in-place checkout never auto-resets uncommitted changes: a later
 // `checkout -B` carries them onto whatever branch comes next, so a stray edit surfaced post-merge
 // as an uncommitted file (the README.md leftover). When the tree is dirty, reset tracked files to
-// HEAD and drop untracked ones — `git clean -fd` (no `-x`) leaves ignored files like
-// .ai-task-master in place. A clean tree is a no-op (one cheap status check). Best-effort: a
-// cleanup fault never masks the worker's real result. Safe because a successful stageAndCommit
-// already captured any real work; whatever remains is, by definition, not meant to ship.
+// HEAD and drop untracked ones. aitm's own state dir must survive that: `git clean` without `-x`
+// spares it only when the TARGET repo happens to gitignore it, so `-e .ai-task-master` protects it
+// when the repo does not — otherwise this cleanup deletes the run's own plan, style cache, generated
+// specialists, and scratch mid-run (same guard as InPlaceCheckout.ensureCleanTree). For the same
+// reason the dirty check ignores state-dir entries: in a repo that doesn't ignore it, the untracked
+// state dir alone would read as "dirty" and hard-reset the tree on every non-committing pass.
+// A clean tree is a no-op (one cheap status check). Best-effort: a cleanup fault never masks the
+// worker's real result. Safe because a successful stageAndCommit already captured any real work;
+// whatever remains is, by definition, not meant to ship.
 async function discardStrayEdits(
   bash: Tool<BashInput, BashOutput>,
   checkoutPath: string,
@@ -956,14 +966,26 @@ async function discardStrayEdits(
   );
   if (isAsyncIterable(out)) return;
   if (out.exitCode !== 0) return;
-  if (out.stdout.trim().length === 0) return;
-  for (const command of [`git -C ${wt} reset --hard HEAD`, `git -C ${wt} clean -fd`]) {
+  if (!hasStrayEdit(out.stdout)) return;
+  for (const command of [
+    `git -C ${wt} reset --hard HEAD`,
+    `git -C ${wt} clean -fd -e ${STATE_DIR}`,
+  ]) {
     try {
       await runBash(exec, command);
     } catch {
       // best-effort: never mask the worker's real result with a cleanup failure
     }
   }
+}
+
+// Does this `git status --porcelain` output show anything worth cleaning? State-dir entries do not
+// count: in a repo that does not gitignore `.ai-task-master`, its own untracked files would
+// otherwise make every tree look dirty. Exported for the unit test of that exact case.
+export function hasStrayEdit(porcelain: string): boolean {
+  return porcelain
+    .split('\n')
+    .some((line) => line.trim() !== '' && !line.slice(3).startsWith(STATE_DIR));
 }
 
 function requireExec(

@@ -70,10 +70,10 @@ test('migrations: an unversioned state.json → stamped with the current schema 
   assert.equal(field(migrated, 'schemaVersion'), CURRENT_SCHEMA_VERSION);
 });
 
-test('migrations: v0 string tasks → structured Tasks with slug ids', () => {
+test('migrations: v0 string tasks → structured Tasks with indexed slug ids', () => {
   const migrated = migrateState(v0([v0Group({ tasks: ['Add the login form'] })]), PATH);
   assert.deepEqual(field(firstGroup(migrated), 'tasks'), [
-    { id: 'add-the-login-form', text: 'Add the login form', complexity: 'normal', done: false },
+    { id: 'add-the-login-form-1', text: 'Add the login form', complexity: 'normal', done: false },
   ]);
 });
 
@@ -92,7 +92,7 @@ test('migrations: v0 already-structured tasks → passed through untouched', () 
   assert.ok(Array.isArray(tasks));
   assert.deepEqual(tasks[0], kept);
   assert.deepEqual(tasks[1], {
-    id: 'and-a-string-one',
+    id: 'and-a-string-one-2',
     text: 'and a string one',
     complexity: 'normal',
     done: false,

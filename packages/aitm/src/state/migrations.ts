@@ -76,7 +76,13 @@ function liftGroupV0(group: unknown): unknown {
 }
 
 function legacyTask(text: string, index: number): Task {
-  return { id: slugify(text) || `task-${index + 1}`, text, complexity: 'normal', done: false };
+  const slug = slugify(text);
+  return {
+    id: slug ? `${slug}-${index + 1}` : `task-${index + 1}`,
+    text,
+    complexity: 'normal',
+    done: false,
+  };
 }
 
 // A v0 group carries no stage, so infer one from the signal it does carry — otherwise a paused run

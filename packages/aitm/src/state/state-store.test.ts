@@ -220,7 +220,7 @@ test('read: coerces legacy string[] tasks, leaves structured tasks intact', asyn
 
     const read = await store.read();
     assert.deepEqual(read.prGroups[0]?.tasks, [
-      { id: 'add-the-login-form', text: 'Add the login form', complexity: 'normal', done: false },
+      { id: 'add-the-login-form-1', text: 'Add the login form', complexity: 'normal', done: false },
       { id: 'kept', text: 'Already structured', complexity: 'complex', done: true },
     ]);
   } finally {

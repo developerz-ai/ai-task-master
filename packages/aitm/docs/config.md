@@ -287,7 +287,7 @@ Provider-shaped, so it can live in a named profile (`aitm profile set <name> rea
 ## Validation
 
 - Zod schema. Unknown keys → warning, not error (forward-compat).
-- Type errors → exit 1 with file + path, e.g., `.ai-task-master/config.json: models.worker must be string`.
+- Type errors → exit 1 with file + path, e.g., `.ai-task-master/config.json: models.coding must be string`.
 - `OPENROUTER_API_KEY` missing AND not in config → exit 1 with auth instructions.
 
 ## Cross-links

@@ -30,6 +30,7 @@ import {
   DEFAULT_MAX_STEPS,
   describeSubmitPayload,
   type GhClient,
+  normalizePrBodyHeadings,
   ORCHESTRATOR_ROLE_PREFIX,
   Orchestrator,
   type OrchestratorBuildContext,
@@ -38,6 +39,7 @@ import {
   prBodyGuideFor,
   type RunCmd,
   recoverComposition,
+  repairPrBody,
   resolveMaxSteps,
   resolvePrBodySections,
   SUBMIT_PAYLOAD_PREVIEW_CHARS,
@@ -1452,4 +1454,110 @@ test('openPr uses group.branch when set, otherwise aitm/<id>', async () => {
   const customGroup = { ...baseGroup(), branch: 'feature/custom' };
   await o.openPr(customGroup, baseDelivery(), 'main');
   assert.equal(createCalls[0]?.head, 'feature/custom');
+});
+
+test('normalizePrBodyHeadings: near-miss markup is rewritten to the canonical heading', () => {
+  // Models get the SECTIONS right and the markup wrong. Rejecting `### Changes` used to discard an
+  // otherwise good body in favour of a generated stub — a far worse PR than a fixed `#`.
+  const body = [
+    '# Summary',
+    's',
+    '### Changes:',
+    'c',
+    '## **Testing**',
+    't',
+    '## Evidence',
+    'e',
+  ].join('\n');
+  const out = normalizePrBodyHeadings(body, PR_BODY_SECTIONS);
+  assert.doesNotThrow(() => assertPrBodySections(out, PR_BODY_SECTIONS));
+});
+
+test('normalizePrBodyHeadings: a non-heading line naming a section is left alone', () => {
+  // Only heading lines are rewritten, so prose mentioning "Changes" cannot fabricate a section.
+  const body = 'We discuss Changes here.\n## Summary\ns';
+  assert.match(normalizePrBodyHeadings(body, PR_BODY_SECTIONS), /^We discuss Changes here\./);
+});
+
+test('repairPrBody: keeps the model prose and fills only the missing section', () => {
+  // The failure this exists for: a real run where 2 of 2 PR bodies were thrown away because one
+  // heading of four was absent, and both PRs shipped a generated stub instead.
+  const body = ['## Summary', 'Adds the todo route.', '## Testing', 'bun test — 45 pass'].join(
+    '\n',
+  );
+  const repaired = repairPrBody(body, PR_BODY_SECTIONS, baseGroup(), baseDelivery());
+  assert.doesNotThrow(() => assertPrBodySections(repaired, PR_BODY_SECTIONS));
+  assert.match(repaired, /Adds the todo route\./, "the model's Summary survives");
+  assert.match(repaired, /bun test — 45 pass/, "the model's Testing survives");
+});
+
+test('repairPrBody: reorders sections the model emitted out of order', () => {
+  const body = ['## Testing', 't', '## Summary', 's', '## Evidence', 'e', '## Changes', 'c'].join(
+    '\n',
+  );
+  const repaired = repairPrBody(body, PR_BODY_SECTIONS, baseGroup(), baseDelivery());
+  assert.doesNotThrow(() => assertPrBodySections(repaired, PR_BODY_SECTIONS));
+  const order = repaired
+    .split('\n')
+    .filter((l) => l.startsWith('## '))
+    .slice(0, 4);
+  assert.deepEqual(order, [...PR_BODY_SECTIONS]);
+});
+
+test('repairPrBody: prose before the first heading is folded in, never dropped', () => {
+  const repaired = repairPrBody(
+    'An intro the model wrote first.\n## Changes\nc',
+    PR_BODY_SECTIONS,
+    baseGroup(),
+    baseDelivery(),
+  );
+  assert.match(repaired, /An intro the model wrote first\./);
+});
+
+test('repairPrBody: an unrequested section is preserved at the end', () => {
+  const body = ['## Summary', 's', '## Risks', 'this ships behind a flag'].join('\n');
+  const repaired = repairPrBody(body, PR_BODY_SECTIONS, baseGroup(), baseDelivery());
+  assert.doesNotThrow(() => assertPrBodySections(repaired, PR_BODY_SECTIONS));
+  assert.match(repaired, /## Risks\nthis ships behind a flag/);
+});
+
+test('repairPrBody: an empty section gets generated content, never a bare heading', () => {
+  const repaired = repairPrBody(
+    '## Summary\n\n## Changes\n\n',
+    PR_BODY_SECTIONS,
+    baseGroup(),
+    baseDelivery(),
+  );
+  assert.doesNotThrow(() => assertPrBodySections(repaired, PR_BODY_SECTIONS));
+  for (const heading of PR_BODY_SECTIONS) {
+    const after = repaired.slice(repaired.indexOf(heading) + heading.length).trimStart();
+    assert.ok(after !== '' && !after.startsWith('## '), `${heading} has content`);
+  }
+});
+
+test('compositionOutcome: a body that is only mis-marked passes without a retry', () => {
+  const submitted = {
+    ok: true as const,
+    value: {
+      title: 'feat: x',
+      body: ['### Summary', 's', '### Changes', 'c', '### Testing', 't', '### Evidence', 'e'].join(
+        '\n',
+      ),
+    },
+  };
+  const outcome = compositionOutcome(submitted, PR_BODY_SECTIONS);
+  assert.equal(outcome.ok, true);
+});
+
+test('compositionOutcome: a section-contract failure still carries the body forward for repair', () => {
+  // Without this the composePr retry loop has nothing to repair at exhaustion and falls back to the
+  // stub, which is exactly the behaviour being replaced.
+  const submitted = {
+    ok: true as const,
+    value: { title: 'feat: x', body: '## Summary\ns' },
+  };
+  const outcome = compositionOutcome(submitted, PR_BODY_SECTIONS);
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.submitted?.body, '## Summary\ns');
 });

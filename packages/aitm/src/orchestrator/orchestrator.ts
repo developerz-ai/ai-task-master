@@ -169,6 +169,35 @@ export function resolvePrBodySections(raw: readonly string[] | undefined): reado
   return cleaned.every((s) => /^##\s+\S/.test(s)) ? cleaned : PR_BODY_SECTIONS;
 }
 
+// The comparable form of a heading: level markers, surrounding emphasis, trailing punctuation and
+// case all dropped, so `### Changes:` and `## **changes**` both reduce to `changes`.
+function headingKey(line: string): string {
+  return line
+    .replace(/^#+\s*/, '')
+    .replace(/[*_`]/g, '')
+    .replace(/[\s:;.\-–—]+$/, '')
+    .trim()
+    .toLowerCase();
+}
+
+// Rewrite near-miss section headings to their canonical form before the contract is checked.
+// Models reliably produce the right SECTIONS and the wrong markup — `### Changes` instead of
+// `## Changes`, a trailing colon, bold around the word. Rejecting those threw away an otherwise good
+// body and replaced it with a generated stub, which is a far worse outcome than fixing the `#`.
+// Only lines that are already headings are touched, and only when they name a required section.
+// Exported for unit testing.
+export function normalizePrBodyHeadings(body: string, sections: readonly string[]): string {
+  const canonical = new Map(sections.map((s) => [headingKey(s), s]));
+  return body
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!/^#{1,6}\s+\S/.test(trimmed)) return line;
+      return canonical.get(headingKey(trimmed)) ?? line;
+    })
+    .join('\n');
+}
+
 // Enforce the PR body contract: every section must be present, as a real markdown heading line,
 // and in order. Throws a descriptive error otherwise, so a malformed body is rejected before the
 // PR is opened. Matches against actual `## …` heading lines (not arbitrary substrings) so a
@@ -351,9 +380,12 @@ export const COMPOSE_PR_MAX_RETRIES = 2;
 // plus the corrective user message to resend. Two validation layers collapse here — PrCompositionSchema
 // (via submittedOutput) and the section contract (assertPrBodySections) — so composePr's retry loop
 // stays a flat drive over a message array. Exported for unit testing.
+// `submitted` is carried on failure whenever the model DID produce a schema-valid composition that
+// merely broke the section contract. That body is real work — prose about a real diff — and is what
+// the repair path splices missing sections into instead of discarding it.
 export type ComposeAttempt =
   | { ok: true; value: PrComposition }
-  | { ok: false; reason: string; correction: string };
+  | { ok: false; reason: string; correction: string; submitted?: PrComposition };
 
 // `submittedInput` is the raw `submit` payload (submitToolInput). It is quoted, truncated, in the
 // schema-failure reason only — the corrective message the model sees already restates the issues, and a
@@ -370,17 +402,23 @@ export function compositionOutcome(
         : 'orchestrator did not submit a PR composition';
     return { ok: false, reason, correction: correctiveMessage(submitted) };
   }
+  // Normalize first, so a body that is right in substance and wrong only in markup passes as-is.
+  const value: PrComposition = {
+    ...submitted.value,
+    body: normalizePrBodyHeadings(submitted.value.body, sections),
+  };
   try {
-    assertPrBodySections(submitted.value.body, sections);
+    assertPrBodySections(value.body, sections);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
       reason,
       correction: `${reason}\nCall \`submit\` again with a corrected body that includes every required section heading, verbatim and in order.`,
+      submitted: value,
     };
   }
-  return { ok: true, value: submitted.value };
+  return { ok: true, value };
 }
 
 // Truncate to `max` chars on a word boundary: hard-slice, then retreat to the last space so a word
@@ -463,6 +501,67 @@ function fallbackChangeList(changes: WorkerDelivery['changes']): string {
     lines.push(`- **${label}** — ${parts.join('; ')}`);
   }
   return lines.join('\n');
+}
+
+// Split a body at its `## …` heading lines. The first block carries no heading when the body opens
+// with prose; every later block is one heading plus everything until the next heading.
+function splitBodyBlocks(body: string): Array<{ heading: string | undefined; content: string }> {
+  const blocks: Array<{ heading: string | undefined; content: string[] }> = [
+    { heading: undefined, content: [] },
+  ];
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim();
+    if (/^##\s+\S/.test(trimmed)) blocks.push({ heading: trimmed, content: [] });
+    else blocks[blocks.length - 1]?.content.push(line);
+  }
+  return blocks.map((b) => ({ heading: b.heading, content: b.content.join('\n').trim() }));
+}
+
+// Rebuild a body that broke the section contract, keeping everything the model wrote.
+//
+// The old behavior on a contract failure was to throw the whole composition away and open the PR
+// with a generated stub. Measured on a real run, that fired on 2 of 2 PRs — every body the operator
+// actually got was the stub, and paragraphs of accurate prose about the diff were discarded because
+// one heading of four was missing. Repair inverts that: the model's sections are kept verbatim,
+// sections it omitted are filled from the same deterministic material the full fallback uses, and
+// the result is emitted in the required order. Content the model wrote under a heading nobody asked
+// for is preserved at the end rather than dropped, and a preamble before the first heading is folded
+// into the first section so no prose is lost.
+//
+// Passes assertPrBodySections by construction, for any section set. Exported for unit testing.
+export function repairPrBody(
+  body: string,
+  sections: readonly string[],
+  group: PrGroup,
+  delivery: WorkerDelivery,
+): string {
+  const blocks = splitBodyBlocks(normalizePrBodyHeadings(body, sections));
+  const required = new Set(sections);
+  const owned = new Map<string, string[]>();
+  const extras: Array<{ heading: string; content: string }> = [];
+  let preamble = '';
+  for (const block of blocks) {
+    if (block.heading === undefined) {
+      preamble = block.content;
+      continue;
+    }
+    if (required.has(block.heading)) {
+      const bucket = owned.get(block.heading) ?? [];
+      // A duplicated heading keeps both bodies rather than silently losing the second.
+      if (block.content !== '') bucket.push(block.content);
+      owned.set(block.heading, bucket);
+    } else if (block.content !== '' || block.heading !== '') {
+      extras.push({ heading: block.heading, content: block.content });
+    }
+  }
+  const rendered = sections.map((heading, index) => {
+    const own = (owned.get(heading) ?? []).join('\n\n').trim();
+    const lead = index === 0 && preamble !== '' ? preamble : '';
+    const content = [lead, own].filter((s) => s !== '').join('\n\n');
+    return `${heading}\n${content !== '' ? content : fallbackSectionContent(heading, group, delivery)}`;
+  });
+  const tail = extras.map((e) => `${e.heading}\n${e.content}`.trimEnd());
+  return [...rendered, ...tail].join('\n\n');
 }
 
 // Deterministic PR composition used when the model's composePr attempts are exhausted (invalid
@@ -680,6 +779,7 @@ export class Orchestrator {
     const sections = this.prBodySections();
     let messages: ModelMessage[] = [{ role: 'user', content: this.buildPrPrompt(group, delivery) }];
     let lastReason = 'orchestrator did not submit a PR composition';
+    let lastSubmitted: PrComposition | undefined;
     for (let attempt = 0; attempt <= COMPOSE_PR_MAX_RETRIES; attempt++) {
       const result = await callWithStepTimeout(
         () =>
@@ -708,12 +808,26 @@ export class Orchestrator {
       );
       if (outcome.ok) return outcome.value;
       lastReason = outcome.reason;
+      if (outcome.submitted !== undefined) lastSubmitted = outcome.submitted;
       if (attempt === COMPOSE_PR_MAX_RETRIES) break;
       messages = [
         ...messages,
         ...result.response.messages,
         { role: 'user', content: outcome.correction },
       ];
+    }
+    // Retries are exhausted, but a body that merely broke the section contract is still the model's
+    // real description of this diff — repair it rather than discard it. Only a run where the model
+    // never produced a schema-valid composition falls all the way through to the generated stub.
+    if (lastSubmitted !== undefined) {
+      const repaired = {
+        title: lastSubmitted.title,
+        body: repairPrBody(lastSubmitted.body, sections, group, delivery),
+      };
+      this.init.onProgress?.(
+        `PR composition repaired: kept the model's title and body, filled the missing sections (${lastReason})`,
+      );
+      return repaired;
     }
     const fallback = buildFallbackComposition(group, delivery, sections);
     this.init.onProgress?.(

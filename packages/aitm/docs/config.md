@@ -105,7 +105,7 @@ code-execution surfaces). Keys absent from a file fall through per the
 | `formatCommand` | string | unset | project + global | Formatter run before `git add`. See [formatCommand](#formatcommand). |
 | `verifyCommand` | string | unset | project + global | Test/lint gate run before commit. See [verifyCommand](#verifycommand). |
 | `selfReview` | boolean | `true` | project + global | Pre-PR adversarial self-review + verify + fix pass. See [selfReview](#selfreview). |
-| `webSearch` | boolean | unset (CI-fix only) | project + global | OpenRouter `web_search` on Worker calls (tri-state). See [webSearch](#websearch). |
+| `webSearch` | boolean \| object | unset (CI-fix only) | project + global | OpenRouter `web_search` on Worker calls (tri-state) + optional domain filters. See [webSearch](#websearch). |
 | `generateSpecialists` | boolean | `true` | project + global | Generate a specialist team when the repo ships no `.claude/agents`. See [generateSpecialists](#generatespecialists). |
 | `prBodySections` | string[] | Summary / Changes / Testing | project + global | PR body headings. See [prBodySections](#prbodysections). |
 
@@ -206,7 +206,21 @@ Attaches OpenRouter's server-side `web_search` tool to Worker generate calls. **
 - `true` — enabled on **all** Worker calls.
 - `false` — **never** enabled.
 
-Project/global config only — not a CLI flag.
+### Domain filters
+
+To restrict which sites `web_search` may draw from, use the **object form** instead of a bare boolean. `enabled` occupies the same tri-state axis (omit it for the CI-fix-only default, `true` for all Worker calls, `false` for never); `allowedDomains` / `excludedDomains` map onto OpenRouter's `allowed_domains` / `excluded_domains` and ride the server-tool payload whenever web_search is enabled:
+
+```jsonc
+{
+  "webSearch": {
+    "enabled": true,                       // same tri-state as the bare boolean; omit for CI-fix-only
+    "allowedDomains": ["docs.rs", "developer.mozilla.org"],
+    "excludedDomains": ["pinterest.com"]
+  }
+}
+```
+
+A bare boolean (`"webSearch": true`) carries no domain filters — identical to before. Project/global config only — not a CLI flag.
 
 ## streaming
 

@@ -49,6 +49,7 @@ import { z } from 'zod';
 import type { RunLoopInput } from '../cli/commands.ts';
 import { buildCompactionStep } from '../compaction/compaction-step.ts';
 import { Compactor } from '../compaction/compactor.ts';
+import type { WebSearchConfig } from '../config/schema.ts';
 import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager, type ToolSurface } from '../mcp/mcp-client.ts';
 import { guardDeferred, TOOL_SEARCH_TOOL_NAME, toolSearch } from '../mcp/tool-search.ts';
@@ -71,7 +72,11 @@ import {
 import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
-import { providerOptionsWithServerTools, webSearchServerTool } from '../openrouter/server-tools.ts';
+import {
+  providerOptionsWithServerTools,
+  type WebSearchOptions,
+  webSearchServerTool,
+} from '../openrouter/server-tools.ts';
 import { DEFAULT_MAX_STEPS, Orchestrator } from '../orchestrator/orchestrator.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
@@ -876,15 +881,26 @@ async function defaultPlanGroups(
 
 // ---- Orchestrator bridge ---------------------------------------------------
 
-// web_search server-tool gating (issue #112). webSearch undefined → CI-fix sessions only (highest
-// lookup value, bounded cost); true → all Worker calls; false → never. Returns the providerOptions
-// fragment (openrouter namespace) or undefined when web_search should not attach. Exported for tests.
+// web_search server-tool gating (issue #112) + optional domain filters (issue #195). The tri-state
+// gate lives on a bare boolean or, for the object form, on its `enabled` field: undefined → CI-fix
+// sessions only (highest lookup value, bounded cost); true → all Worker calls; false → never. When
+// enabled, the object form's allowed/excluded domains ride the server-tool payload. Returns the
+// providerOptions fragment (openrouter namespace) or undefined when web_search should not attach.
+// Exported for tests.
 export function webSearchProviderOptions(
-  webSearch: boolean | undefined,
+  webSearch: WebSearchConfig | undefined,
   ciFix: boolean,
 ): ReturnType<typeof providerOptionsWithServerTools> | undefined {
-  const enabled = webSearch === true || (ciFix && webSearch !== false);
-  return enabled ? providerOptionsWithServerTools([webSearchServerTool()]) : undefined;
+  const config = typeof webSearch === 'object' ? webSearch : undefined;
+  // The tri-state flag is the bare boolean, or the object's `enabled` (unset → CI-fix-only default).
+  const flag = typeof webSearch === 'boolean' ? webSearch : config?.enabled;
+  const enabled = flag === true || (ciFix && flag !== false);
+  if (!enabled) return undefined;
+  const options: WebSearchOptions = {
+    ...(config?.allowedDomains?.length ? { allowed_domains: config.allowedDomains } : {}),
+    ...(config?.excludedDomains?.length ? { excluded_domains: config.excludedDomains } : {}),
+  };
+  return providerOptionsWithServerTools([webSearchServerTool(options)]);
 }
 
 // The effective verify command for the pre-PR self-review: the configured verifyCommand when set,

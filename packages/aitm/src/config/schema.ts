@@ -112,6 +112,20 @@ export const ProfileSchema = z
 
 export type Profile = z.infer<typeof ProfileSchema>;
 
+// web_search config (issues #112, #195). A bare boolean keeps the original tri-state gating
+// (undefined → CI-fix sessions only; true → all Worker calls; false → never). The object form adds
+// OpenRouter allowed/excluded domain filters, with `enabled` occupying the same tri-state axis (unset
+// → CI-fix only). Back-compat: `webSearch: true|false` behaves exactly as before.
+export const WebSearchConfigSchema = z.union([
+  z.boolean(),
+  z.object({
+    enabled: z.boolean().optional(),
+    allowedDomains: z.array(z.string()).optional(),
+    excludedDomains: z.array(z.string()).optional(),
+  }),
+]);
+export type WebSearchConfig = z.infer<typeof WebSearchConfigSchema>;
+
 export const ConfigFileSchema = z
   .object({
     // Provider credential. User-owned only: honored from ~/.aitm.json (or a profile), ignored +
@@ -187,8 +201,9 @@ export const ConfigFileSchema = z
     allowForcePush: z.boolean().optional(),
     // Attach OpenRouter's server-side web_search tool to Worker generate calls (issue #112). Unset →
     // enabled for CI-fix sessions only (highest lookup value, bounded cost); true → all Worker calls;
-    // false → never. See src/loop/run-loop-adapter.ts §web-search gating.
-    webSearch: z.boolean().optional(),
+    // false → never. The object form adds allowed/excluded domain filters (issue #195). See
+    // src/loop/run-loop-adapter.ts §web-search gating.
+    webSearch: WebSearchConfigSchema.optional(),
     // Per-repo PR body section headings (each a `## ` heading, in order). Unset → the default
     // Summary/Changes/Testing. See src/orchestrator/orchestrator.ts §resolvePrBodySections.
     prBodySections: z.array(z.string()).optional(),
@@ -293,9 +308,10 @@ export type ResolvedConfig = {
   editorConcurrency: number;
   // Whether aitm may force-push (`--force-with-lease`). Default true.
   allowForcePush: boolean;
-  // Whether OpenRouter web_search rides Worker calls (issue #112). Tri-state, so NOT collapsed to a
-  // default: undefined → CI-fix sessions only; true → all Worker calls; false → never.
-  webSearch?: boolean | undefined;
+  // Whether OpenRouter web_search rides Worker calls (issue #112) + optional domain filters (#195).
+  // Tri-state, so NOT collapsed to a default: undefined → CI-fix sessions only; true → all Worker
+  // calls; false → never. The object form carries the same tri-state via `enabled` plus domain lists.
+  webSearch?: WebSearchConfig | undefined;
   // Per-repo PR body section headings. Undefined → orchestrator uses its default set.
   prBodySections?: readonly string[] | undefined;
   // Effective bash deny/allow rules: configured rules (project over global) followed by the built-in

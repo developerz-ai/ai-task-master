@@ -426,6 +426,10 @@ export async function runStart(
     // other error (permissions, IO) as a hard failure rather than silently re-initing.
     let resuming = false;
     let existingState: RunState | null = null;
+    // Whether a state.json we are about to overwrite is on disk. StateStore.init refuses a clobber
+    // unless told, so the two cases that legitimately discard prior state — a file too corrupt to
+    // resume, and a finished run superseded below — have to say so; a missing file must not.
+    let discardingPriorState = false;
     try {
       existingState = await state.read();
       resuming = true;
@@ -434,6 +438,7 @@ export async function runStart(
         return { code: 1, message: `Could not read run state: ${errMsg(err)}` };
       }
       // No valid state.json — proceed with fresh init.
+      discardingPriorState = !isFileNotFound(err);
     }
 
     // A FINISHED run in this directory must not swallow a new `aitm start`. Without this, re-running
@@ -446,6 +451,7 @@ export async function runStart(
       );
       existingState = null;
       resuming = false;
+      discardingPriorState = true;
     } else if (existingState) {
       // An UNFINISHED run is resumed as before (idempotent `start`). If the operator typed a different
       // goal, say so plainly — `start` continues the in-progress run, it does not re-plan the new text —
@@ -468,7 +474,7 @@ export async function runStart(
       const initial = buildInitialRunState({ resolved, agentConfig });
       sessionId = initial.runId;
       try {
-        await state.init(initial);
+        await state.init(initial, { force: discardingPriorState });
         await state.writeGoal(args.goal, args.criteria);
         await loader.writeSnapshot(resolved, stateDir);
       } catch (err) {
@@ -719,7 +725,9 @@ export async function runMergePr(
       if (synth.kind === 'error') return synth.exit;
       runState = synth.state;
       try {
-        await state.init(runState);
+        // `--no-resume` is the operator saying persisted state is not to be trusted, so replacing it
+        // with the synthesized take-over state is the requested clobber, not an accidental one.
+        await state.init(runState, { force: true });
       } catch (initErr) {
         return { code: 1, message: errMsg(initErr) };
       }

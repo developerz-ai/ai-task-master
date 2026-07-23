@@ -1,7 +1,7 @@
 // docs/state.md
 // Only module that reads or writes .ai-task-master/. Atomic writes via temp file + fsync + rename.
 
-import { appendFile, mkdir, readdir, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ZodError } from 'zod';
 import { atomicWrite } from '../fs/atomic-write.ts';
@@ -21,6 +21,30 @@ const LOGS_DIR = 'logs';
 // Durable cross-run memory (issue #118). Like logs/, it survives cleanupOnSuccess() — the one place
 // under .ai-task-master/ that outlives the run whose knowledge it holds.
 const MEMORY_DIR = 'memory';
+
+export type StateInitOptions = {
+  // Discard an existing state.json instead of refusing. Only for callers that decided the prior run
+  // is superseded (finished, corrupt, or explicitly ignored) — never as a way past the check.
+  force?: boolean;
+};
+
+// Raised at run entry like RunLockHeld and DirtyWorkingTree: a precondition the operator resolves,
+// not a failure of the work itself.
+export class StateAlreadyInitialized extends Error {
+  readonly path: string;
+
+  constructor(path: string) {
+    super(
+      [
+        `Refusing to initialize: ${path} already holds a run.`,
+        'Overwriting it would discard that run: its plan, group stages and PR numbers.',
+        'Continue it with `aitm resume`, or start over with `aitm clean` first.',
+      ].join('\n'),
+    );
+    this.name = 'StateAlreadyInitialized';
+    this.path = path;
+  }
+}
 
 export class StateStore {
   // Chained promise serializes concurrent update() calls so they observe linear semantics.
@@ -48,11 +72,23 @@ export class StateStore {
     return acquireRunLock(this.stateDir);
   }
 
-  async init(initial: RunState): Promise<void> {
+  // Writes the starting state, refusing to overwrite a run that is already here: a mistaken second
+  // `aitm start` in a directory holding a resumable run would otherwise lose its plan at the store
+  // layer, whatever the CLI's own resume detection concluded. A caller that means to discard the
+  // prior run says so with `force`.
+  //
+  // The probe is not mutual exclusion — run.lock is (see acquireRunLock). It guards the operator
+  // mistake, so it stays a plain check-then-atomicWrite: a run that dies mid-init leaves no
+  // state.json at all, where a claim-first scheme would leave an empty one blocking the next start.
+  async init(initial: RunState, opts: StateInitOptions = {}): Promise<void> {
     const validated = RunStateSchema.parse(initial);
+    const path = this.path(STATE_FILE);
+    if (opts.force !== true && (await fileExists(path))) {
+      throw new StateAlreadyInitialized(path);
+    }
     await mkdir(this.stateDir, { recursive: true });
     await mkdir(join(this.stateDir, LOGS_DIR), { recursive: true });
-    await atomicWrite(this.path(STATE_FILE), `${JSON.stringify(validated, null, 2)}\n`);
+    await atomicWrite(path, `${JSON.stringify(validated, null, 2)}\n`);
   }
 
   async read(): Promise<RunState> {
@@ -272,6 +308,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function ensureTrailingNewline(s: string): string {
   return s.endsWith('\n') ? s : `${s}\n`;
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (err) {
+    if (isNotFound(err)) return false;
+    throw err;
+  }
 }
 
 function isNotFound(err: unknown): boolean {

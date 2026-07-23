@@ -817,6 +817,44 @@ test('runStart: resume (existing state.json) skips runPlanner, preserves prior p
   }
 });
 
+test('runStart: an unparseable state.json is replaced, not treated as a run to protect', async () => {
+  // StateStore.init refuses a clobber by default; a state.json too corrupt to resume is one of the
+  // two cases start is entitled to overwrite, so it must pass force rather than fail to start.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'state.json'), '{not json');
+    let plannerGoal: string | undefined;
+    const result = await runStart(
+      { kind: 'start', goal: 'add hello' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        modelBanner: async () => '',
+        runPlanner: async (input) => {
+          plannerGoal = input.goal;
+          return { kind: 'ok', groups: [] };
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(plannerGoal, 'add hello', 'the run started fresh instead of refusing');
+    const persisted = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')) as {
+      runId: string;
+    };
+    assert.ok(persisted.runId.length > 0);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('runStart: resume with empty prGroups (prior planning blocked) re-runs runPlanner', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();

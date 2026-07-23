@@ -31,7 +31,7 @@ All run state lives in `.ai-task-master/` at the target repo root (mirrors the o
 | `goal.txt` | `CLI` (write once) | Verbatim goal from `aitm start`. |
 | `criteria.txt` | `Planner` | Acceptance criteria derived from goal. |
 | `plan.md` | `Planner` | Human-readable PR groups + tasks. |
-| `state.json` | `StateStore` | Machine state. See schema. |
+| `state.json` | `StateStore` | Machine state. See schema. Written once by `StateStore.init`, which refuses an existing file (`StateAlreadyInitialized`) unless the caller passes `force` — only a finished run superseded by a new goal, an unparseable file, and `merge-pr --no-resume` do. Every later write goes through `update()`. |
 | `progress.md` | `Worker` | Per-task notes, what changed and why. |
 | `context.md` | run-loop adapter | Rolling per-group digest fed back into later Workers' prompts (issue #123). After each PR opens, one deterministic block is appended — `PR #N — <title> (group <id>, branch <branch>)` then the group's change lines and progress entries. FIFO-capped at 8 KB: oldest whole blocks drop first, a block is never split (multi-line summary/progress text is flattened so a block can never contain the blank-line block separator). Appends are serialized, so the concurrent group batch (WorkLoop's `Promise.all`) cannot lose a digest to a read-modify-write race. Persisted failure-tolerantly (a write error is warned, never fails the PR-open path). |
 | `config.snapshot.json` | `ConfigLoader` | Frozen `ResolvedConfig` for this run, so resume reproduces exact behavior. |

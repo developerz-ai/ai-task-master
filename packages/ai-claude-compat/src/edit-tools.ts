@@ -9,6 +9,7 @@ import { readFile as fsReadFile } from 'node:fs/promises';
 import { type Tool, tool } from 'ai';
 import { z } from 'zod';
 import { atomicWriteFile } from './atomic-write.ts';
+import { findFuzzyMatch, isDisproportionateMatch } from './edit-replacers.ts';
 import { type FileStateTracker, hashContent } from './file-state.ts';
 import type { FileToolInit } from './fs-tools.ts';
 import { resolveInside } from './safe-path.ts';
@@ -131,20 +132,44 @@ export function applyEdit(content: string, edit: EditSpec): { next: string; coun
   if (edit.oldString === edit.newString) {
     throw new Error('oldString and newString are identical — the edit would change nothing');
   }
-  const occurrences = content.split(edit.oldString).length - 1;
-  if (occurrences === 0) {
+  // Exact match always wins (byte-identical to the pre-#268 path).
+  if (content.split(edit.oldString).length - 1 >= 1) {
+    return replaceSpan(content, edit.oldString, edit.newString, edit.replaceAll ?? false);
+  }
+  // Exact miss — fall back to a guarded fuzzy match (issue #268). The ladder runs only on zero
+  // exact hits; the located span is refused if it is disproportionately larger than `oldString`,
+  // and still goes through the same uniqueness contract below, so fuzzy never clobbers.
+  const matched = findFuzzyMatch(content, edit.oldString);
+  if (matched === undefined) {
     throw new Error(`oldString not found: ${preview(edit.oldString)}`);
   }
-  if (occurrences > 1 && !edit.replaceAll) {
+  if (isDisproportionateMatch(matched, edit.oldString)) {
     throw new Error(
-      `oldString is not unique (${occurrences} matches): ${preview(edit.oldString)} — add surrounding context or pass replaceAll`,
+      `fuzzy match refused — the located span is much larger than oldString (${preview(edit.oldString)}); re-read the file and pass the exact text to replace`,
     );
   }
-  if (edit.replaceAll) {
-    return { next: content.split(edit.oldString).join(edit.newString), count: occurrences };
+  return replaceSpan(content, matched, edit.newString, edit.replaceAll ?? false);
+}
+
+// Apply a replacement of an exact `target` span under the uniqueness contract: >1 occurrence
+// without `replaceAll` is rejected. Shared by the exact and fuzzy-fallback paths of `applyEdit`.
+function replaceSpan(
+  content: string,
+  target: string,
+  newString: string,
+  replaceAll: boolean,
+): { next: string; count: number } {
+  const occurrences = content.split(target).length - 1;
+  if (occurrences > 1 && !replaceAll) {
+    throw new Error(
+      `oldString is not unique (${occurrences} matches): ${preview(target)} — add surrounding context or pass replaceAll`,
+    );
   }
-  const at = content.indexOf(edit.oldString);
-  const next = content.slice(0, at) + edit.newString + content.slice(at + edit.oldString.length);
+  if (replaceAll) {
+    return { next: content.split(target).join(newString), count: occurrences };
+  }
+  const at = content.indexOf(target);
+  const next = content.slice(0, at) + newString + content.slice(at + target.length);
   return { next, count: 1 };
 }
 

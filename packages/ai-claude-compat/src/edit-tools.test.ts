@@ -100,6 +100,65 @@ test('applyEdit: newString with $ tokens is inserted verbatim', () => {
   assert.equal(next, '$&$1');
 });
 
+// ---- applyEdit fuzzy fallback (issue #268) ----
+
+test('applyEdit: lands an edit whose oldString indentation is off (fuzzy fallback)', () => {
+  const content = 'function foo() {\n  return 42;\n}\n';
+  // oldString over-indented to 4 spaces — not an exact substring of the 2-space line, so the exact
+  // pass misses and the fallback locates the real line.
+  const { next, count } = applyEdit(content, {
+    oldString: '    return 42;',
+    newString: '  return 43;',
+  });
+  assert.equal(count, 1);
+  assert.equal(next, 'function foo() {\n  return 43;\n}\n');
+});
+
+test('applyEdit: an exact match is preferred over a fuzzy candidate', () => {
+  // Line 1 matches exactly; line 2 differs only by internal spacing (a whitespace-normalized
+  // candidate). The exact hit on line 1 wins and line 2 is left untouched.
+  const content = 'x = 1;\nx  =  1;\n';
+  const { next, count } = applyEdit(content, { oldString: 'x = 1;', newString: 'x = 9;' });
+  assert.equal(count, 1);
+  assert.equal(next, 'x = 9;\nx  =  1;\n');
+});
+
+test('applyEdit: refuses a disproportionate fuzzy match rather than clobbering', () => {
+  // A 2-line search normalizes to the same as a span whose real text is vastly larger.
+  const content = `a${' '.repeat(600)}\n   b\n`;
+  assert.throws(
+    () => applyEdit(content, { oldString: 'a\nb', newString: 'x\ny' }),
+    /fuzzy match refused/,
+  );
+});
+
+test('applyEdit: a fuzzy span occurring more than once is rejected as not unique', () => {
+  const content = '\tx = 1;\n\tx = 1;\n';
+  // 2-space oldString matches neither tab-indented line exactly; the fuzzy span "\tx = 1;" occurs twice.
+  assert.throws(
+    () => applyEdit(content, { oldString: '  x = 1;', newString: '  x = 2;' }),
+    /not unique \(2 matches\)/,
+  );
+});
+
+test('applyEdit: replaceAll applies a fuzzy span to every occurrence', () => {
+  const content = '\tx = 1;\n\tx = 1;\n';
+  const { next, count } = applyEdit(content, {
+    oldString: '  x = 1;',
+    newString: '\tx = 2;',
+    replaceAll: true,
+  });
+  assert.equal(count, 2);
+  assert.equal(next, '\tx = 2;\n\tx = 2;\n');
+});
+
+test('applyEdit: still throws not-found when neither exact nor fuzzy matches', () => {
+  assert.throws(
+    () => applyEdit('alpha\nbeta\n', { oldString: 'gamma delta epsilon', newString: 'x' }),
+    /not found/,
+  );
+});
+
 // ---- editFileTool ----
 
 test('editFileTool: fails without a prior read; succeeds after one and returns a numbered snippet (issue #104)', async () => {

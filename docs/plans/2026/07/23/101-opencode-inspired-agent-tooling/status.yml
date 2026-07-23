@@ -1,0 +1,27 @@
+plan: 101-opencode-inspired-agent-tooling
+title: "OpenCode-inspired agent tooling for aitm"
+status: not_started        # not_started | in_progress | blocked | complete | superseded
+created_by: marshall
+worked_by: ""              # executor fills with their git user.name; empty = unclaimed
+owner: marshall
+percent: 0                 # 0–100, overall completion
+current_focus: ""          # next slice to pick up: 01 (highest leverage)
+slices:
+  - file: 01-fuzzy-edit-fallback.md
+    status: not_started
+    percent: 0
+  - file: 02-bash-timeout-notice.md
+    status: not_started
+    percent: 0
+  - file: 03-editor-toolset-scoping.md
+    status: not_started
+    percent: 0
+evidence: []               # commits/PRs proving progress
+notes: >
+  Research plan from studying sst/opencode (cloned ~/workspace/opencode) + Aider (~/workspace/aider)
+  vs aitm. Three non-overlapping OpenCode-inspired mechanics: 01 fuzzy edit fallback (edit-tools.ts,
+  highest leverage — attacks the phantom-edit/empty-manifest failure surface), 02 bash timeout notice
+  (bash-tool.ts), 03 declarative editor toolset + depth guard (worker.ts / agent-spawn.ts). Orthogonal
+  to sebi's plan 2026/07/18/102 (spill/background-bash/streaming/editor-fanout) — no file overlap.
+  All slices additive/surgical, CLAUDE.md-compliant, tested on Bun + Node.
+last_updated: 2026-07-23

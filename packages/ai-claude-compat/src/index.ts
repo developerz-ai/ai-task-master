@@ -46,6 +46,15 @@ export {
   evaluateCommand,
 } from './command-rules.ts';
 export {
+  blockAnchorMatch,
+  findFuzzyMatch,
+  isDisproportionateMatch,
+  lineTrimmedMatch,
+  type SpanMatcher,
+  spanMatchers,
+  whitespaceNormalizedMatch,
+} from './edit-replacers.ts';
+export {
   applyEdit,
   type EditFileInput,
   type EditFileOutput,

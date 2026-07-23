@@ -164,6 +164,7 @@ export {
   type SubagentConfig,
   type SubagentHandle,
   type SubagentRun,
+  type SubagentRunOptions,
   type SubagentStreamEvent,
   type SubagentStreamSink,
   type SubmittedOutput,

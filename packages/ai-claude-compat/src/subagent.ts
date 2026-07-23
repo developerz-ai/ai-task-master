@@ -210,11 +210,17 @@ export function createSubagent<TOOLS extends ToolSet>(
 // drops a constructor-level `timeout`: `ToolLoopAgent.generate` destructures the per-call `timeout`
 // and forwards it to `generateText`, so the prepared constructor settings are overwritten with
 // `undefined` on every call that omits it — which is every aitm call site. We therefore wrap
-// `generate` to inject the configured timeout when the caller supplied neither a `timeout` nor an
-// `abortSignal` (either means the caller owns the deadline, so we leave it untouched), and translate
-// the SDK's generic abort into a deadline-named error via callWithStepTimeout. `onRetry` rides along
+// `generate` to inject the configured timeout unless the caller passed a `timeout` of their own (that
+// one means the caller owns the deadline, so we leave the call untouched), and translate the SDK's
+// generic abort into a deadline-named error via callWithStepTimeout. `onRetry` rides along
 // unconditionally — it is armed even with no configured `timeout`, so a caller that only wants retry
 // visibility doesn't have to opt into a deadline to get it.
+//
+// A caller `abortSignal` is cancellation, NOT a deadline: it COMPOSES with the configured timeout
+// rather than replacing it (generateText merges the caller's signal with its own timeout-derived ones,
+// so whichever fires first aborts the step). Disarming the deadline on its presence would mean a run
+// that opts into cancellation silently loses its stall protection. The signal rides into the kernel so
+// a caller-cancelled abort is never relabelled a deadline breach and retries stop on cancel.
 function armStepTimeout<TOOLS extends ToolSet>(
   agent: ToolLoopAgent<never, TOOLS>,
   timeout: TimeoutConfiguration | undefined,
@@ -223,11 +229,14 @@ function armStepTimeout<TOOLS extends ToolSet>(
   type Generate = ToolLoopAgent<never, TOOLS>['generate'];
   const original = agent.generate.bind(agent) as Generate;
   const wrapped: Generate = (params) => {
-    if (params.timeout !== undefined || params.abortSignal !== undefined) return original(params);
+    if (params.timeout !== undefined) return original(params);
     return callWithStepTimeout(
       () => original(timeout === undefined ? params : { ...params, timeout }),
       timeout,
-      onRetry === undefined ? {} : { onRetry },
+      {
+        ...(onRetry === undefined ? {} : { onRetry }),
+        ...(params.abortSignal === undefined ? {} : { signal: params.abortSignal }),
+      },
     );
   };
   agent.generate = wrapped;
@@ -256,53 +265,57 @@ function armStreaming<TOOLS extends ToolSet>(
   const streamed: Generate = async (params) => {
     let stallRetries = 0;
     while (true) {
-      const controller = linkController(params.abortSignal);
-      const result = await stream({ ...params, abortSignal: controller.signal });
-      const outcome = await consumeStreamWithWatchdog(
-        result.fullStream,
-        {
-          onPart: (part) => {
-            if (part.type === 'text-delta') {
-              emitStreamEvent(onStream, { type: 'text-delta', text: part.text });
-            } else if (part.type === 'tool-call') {
-              emitStreamEvent(onStream, {
-                type: 'tool-call',
-                toolName: part.toolName,
-                input: part.input,
-              });
-            } else if (part.type === 'error') {
-              // streamText surfaces a provider failure as an `error` part (the fullStream then ends
-              // without throwing and the result promises reject with a generic NoOutputGeneratedError).
-              // Re-throw the underlying error so the retry/timeout kernel classifies it exactly as it
-              // would a generateText throw — a transient 429 stays retryable, a deadline abort a timeout.
-              throw part.error;
-            }
+      const { controller, release } = linkController(params.abortSignal);
+      try {
+        const result = await stream({ ...params, abortSignal: controller.signal });
+        const outcome = await consumeStreamWithWatchdog(
+          result.fullStream,
+          {
+            onPart: (part) => {
+              if (part.type === 'text-delta') {
+                emitStreamEvent(onStream, { type: 'text-delta', text: part.text });
+              } else if (part.type === 'tool-call') {
+                emitStreamEvent(onStream, {
+                  type: 'tool-call',
+                  toolName: part.toolName,
+                  input: part.input,
+                });
+              } else if (part.type === 'error') {
+                // streamText surfaces a provider failure as an `error` part (the fullStream then ends
+                // without throwing and the result promises reject with a generic NoOutputGeneratedError).
+                // Re-throw the underlying error so the retry/timeout kernel classifies it exactly as it
+                // would a generateText throw — a transient 429 stays retryable, a deadline abort a timeout.
+                throw part.error;
+              }
+            },
+            // The terminal submit tool-call flips the watchdog into its grace regime. It is the earliest
+            // in-stream signal that the step is answered; the SDK's own `finish` part arrives only at
+            // stream close, so keying on it alone would leave a lingering provider looking like a stall.
+            isFinish: (part) =>
+              part.type === 'finish' ||
+              (part.type === 'tool-call' && part.toolName === SUBMIT_TOOL_NAME),
+            abort: () =>
+              controller.abort(new StreamStallError(streamStallMessage(watchdog.inactivityMs))),
           },
-          // The terminal submit tool-call flips the watchdog into its grace regime. It is the earliest
-          // in-stream signal that the step is answered; the SDK's own `finish` part arrives only at
-          // stream close, so keying on it alone would leave a lingering provider looking like a stall.
-          isFinish: (part) =>
-            part.type === 'finish' ||
-            (part.type === 'tool-call' && part.toolName === SUBMIT_TOOL_NAME),
-          abort: () =>
-            controller.abort(new StreamStallError(streamStallMessage(watchdog.inactivityMs))),
-        },
-        watchdog,
-      );
-      // A clean close settles the result promises — read them back into the parity result.
-      if (outcome === 'drained') return streamResultToGenerate(result);
-      // Post-submit stall: the answer is already produced. Re-running would duplicate the step's side
-      // effects (a duplicate-PR hazard), so this is a hard failure — never a retry. (streamResultToGenerate
-      // is not called: on an unclosed stream its result promises never settle.)
-      if (outcome === 'stalled-grace') {
-        throw new StreamStallError(streamGraceMessage(watchdog.graceMs));
+          watchdog,
+        );
+        // A clean close settles the result promises — read them back into the parity result.
+        if (outcome === 'drained') return await streamResultToGenerate(result);
+        // Post-submit stall: the answer is already produced. Re-running would duplicate the step's side
+        // effects (a duplicate-PR hazard), so this is a hard failure — never a retry. (streamResultToGenerate
+        // is not called: on an unclosed stream its result promises never settle.)
+        if (outcome === 'stalled-grace') {
+          throw new StreamStallError(streamGraceMessage(watchdog.graceMs));
+        }
+        // Pre-submit stall: the abort above tore down the hung stream. Re-run once from scratch; a second
+        // stall is a hard failure rather than an unbounded loop.
+        if (stallRetries >= MAX_STREAM_STALL_RETRIES) {
+          throw new StreamStallError(streamStallMessage(watchdog.inactivityMs));
+        }
+        stallRetries += 1;
+      } finally {
+        release();
       }
-      // Pre-submit stall: the abort above tore down the hung stream. Re-run once from scratch; a second
-      // stall is a hard failure rather than an unbounded loop.
-      if (stallRetries >= MAX_STREAM_STALL_RETRIES) {
-        throw new StreamStallError(streamStallMessage(watchdog.inactivityMs));
-      }
-      stallRetries += 1;
     }
   };
   agent.generate = streamed;
@@ -343,16 +356,23 @@ const defaultStreamTimer: StreamTimerFactory = (ms) => {
 
 // An AbortController whose signal also fires when an outer caller-supplied signal does, so the watchdog
 // owns its own abort while still honoring a caller cancel. Portable — avoids AbortSignal.any, which is
-// unavailable on Node 20.0–20.2.
-function linkController(outer: AbortSignal | undefined): AbortController {
+// unavailable on Node 20.0–20.2. `release` unhooks the bridge: a caller signal is run-scoped and
+// outlives many generations, so a listener retained per stream both leaks the finished controller and
+// trips the runtime's max-listener warning on a long run.
+function linkController(outer: AbortSignal | undefined): {
+  controller: AbortController;
+  release: () => void;
+} {
   const controller = new AbortController();
-  if (outer === undefined) return controller;
+  const unlinked = { controller, release: () => {} };
+  if (outer === undefined) return unlinked;
   if (outer.aborted) {
     controller.abort(outer.reason);
-    return controller;
+    return unlinked;
   }
-  outer.addEventListener('abort', () => controller.abort(outer.reason), { once: true });
-  return controller;
+  const onAbort = () => controller.abort(outer.reason);
+  outer.addEventListener('abort', onAbort, { once: true });
+  return { controller, release: () => outer.removeEventListener('abort', onAbort) };
 }
 
 // Drive a live stream through the two-regime stall watchdog (see STREAM_INACTIVITY_MS). Each awaited
@@ -488,7 +508,9 @@ export async function callWithStepTimeout<T>(
     try {
       return await call();
     } catch (err) {
-      if (timeout !== undefined && isAbortError(err)) {
+      // A cancelled caller's abort is not a deadline breach: relabelling it would report a Ctrl-C as
+      // "the step exceeded its deadline" and hide the cancellation from the caller's error handling.
+      if (timeout !== undefined && isAbortError(err) && retry.signal?.aborted !== true) {
         throw new StepTimeoutError(stepTimeoutMessage(timeout), { cause: err });
       }
       throw err;
@@ -526,6 +548,12 @@ export type RetryOptions = {
   // Observability sink for each retry; a throw here is swallowed so it can never turn a recoverable
   // transient failure into a hard error.
   onRetry?: (info: RetryInfo) => void;
+  // The caller's cancellation signal, when one is in flight. Cancellation wins over the kernel's own
+  // bookkeeping in two places: no further retry is attempted once it aborts (a backoff window nobody
+  // is waiting for would hold the run open for up to a minute), and callWithStepTimeout stops
+  // relabelling aborts as deadline breaches. Never used to abort the call itself — the caller already
+  // passed it to the SDK, which is what actually tears the request down.
+  signal?: AbortSignal;
 };
 
 export async function callWithRetry<T>(
@@ -541,7 +569,7 @@ export async function callWithRetry<T>(
     try {
       return await call();
     } catch (err) {
-      if (attempt >= maxRetries || !isRetryable(err)) throw err;
+      if (attempt >= maxRetries || opts.signal?.aborted === true || !isRetryable(err)) throw err;
       const delay = resolveRetryDelay(err, delayMs(attempt));
       reportRetry(opts.onRetry, {
         attempt: attempt + 1,
@@ -926,19 +954,35 @@ export type SubagentRun<TOOLS extends ToolSet> = {
 async function generateOverMessages<TOOLS extends ToolSet>(
   agent: ToolLoopAgent<never, TOOLS>,
   messages: ModelMessage[],
+  signal?: AbortSignal,
 ): Promise<{ result: GenerateResult<TOOLS>; messages: ModelMessage[] }> {
-  const result = await agent.generate({ messages });
+  const result = await agent.generate({
+    messages,
+    // Key-absence preserved when unset, so a signal-free call is byte-identical to before.
+    ...(signal === undefined ? {} : { abortSignal: signal }),
+  });
   return { result, messages: [...messages, ...result.response.messages] };
 }
+
+// Cancellation for one subagent run. The signal is handed to the SDK as `abortSignal`, so aborting it
+// tears down the in-flight request (and, on the streaming path, the stream) instead of waiting the
+// generation out. It COMPOSES with the subagent's configured per-step deadline rather than replacing
+// it — see armStepTimeout. Omitted → no signal, behavior byte-identical.
+export type SubagentRunOptions = {
+  signal?: AbortSignal;
+};
 
 // Run a subagent from a fresh prompt, returning its result and a handle to continue the conversation.
 export async function runSubagent<TOOLS extends ToolSet>(
   agent: ToolLoopAgent<never, TOOLS>,
   prompt: string,
+  options: SubagentRunOptions = {},
 ): Promise<SubagentRun<TOOLS>> {
-  const { result, messages } = await generateOverMessages(agent, [
-    { role: 'user', content: prompt },
-  ]);
+  const { result, messages } = await generateOverMessages(
+    agent,
+    [{ role: 'user', content: prompt }],
+    options.signal,
+  );
   return { result, handle: { agent, messages } };
 }
 
@@ -949,11 +993,13 @@ export async function runSubagent<TOOLS extends ToolSet>(
 export async function continueSubagent<TOOLS extends ToolSet>(
   handle: SubagentHandle<TOOLS>,
   followUpPrompt: string,
+  options: SubagentRunOptions = {},
 ): Promise<SubagentRun<TOOLS>> {
-  const { result, messages } = await generateOverMessages(handle.agent, [
-    ...handle.messages,
-    { role: 'user', content: followUpPrompt },
-  ]);
+  const { result, messages } = await generateOverMessages(
+    handle.agent,
+    [...handle.messages, { role: 'user', content: followUpPrompt }],
+    options.signal,
+  );
   return { result, handle: { agent: handle.agent, messages } };
 }
 

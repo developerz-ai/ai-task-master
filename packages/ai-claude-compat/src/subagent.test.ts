@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -390,6 +391,168 @@ test('createSubagent: onRetry fires even with no configured timeout — retry vi
   const result = await agent.generate({ prompt: 'go' });
   assert.equal(result.finishReason, 'tool-calls');
   assert.equal(infos.length, 1, 'onRetry armed generate() even though no timeout was configured');
+});
+
+// --- run cancellation (signal) ---
+
+// Abort on the next macrotask, so the generate is genuinely in flight when the signal fires.
+function abortSoon(controller: AbortController): void {
+  setTimeout(() => controller.abort(), 5);
+}
+
+test('runSubagent: forwards the caller signal — aborting mid-generate rejects the run', async () => {
+  const ac = new AbortController();
+  const agent = createSubagent(
+    { model: stallingModel(), tools: {}, systemPrompt: 'sys', submit: submitTool(OutSchema) },
+    12,
+  );
+  abortSoon(ac);
+  await assert.rejects(runSubagent(agent, 'go', { signal: ac.signal }), (err: unknown) => {
+    assert.ok(err instanceof Error && err.name === 'AbortError', 'surfaces the SDK abort');
+    return true;
+  });
+});
+
+test('runSubagent: a caller signal does NOT disarm the configured per-step deadline', async () => {
+  // The signal never fires; the 40ms deadline must still abort the stalled provider. Guards the
+  // regression where any caller abortSignal made the wrapper skip timeout arming entirely.
+  const ac = new AbortController();
+  const agent = createSubagent(
+    {
+      model: stallingModel(),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      timeout: { stepMs: 40 },
+    },
+    12,
+  );
+  await assert.rejects(runSubagent(agent, 'go', { signal: ac.signal }), (err: unknown) => {
+    assert.ok(err instanceof StepTimeoutError, 'the deadline still fires with a signal present');
+    assert.match((err as Error).message, /exceeded the configured deadline \(40 ms\)/);
+    return true;
+  });
+});
+
+test('runSubagent: a caller abort is not relabelled as a deadline breach', async () => {
+  // Deadline effectively infinite, so the only abort is the caller's — it must surface as a plain
+  // abort, never a StepTimeoutError, or a Ctrl-C would be reported as a stalled provider.
+  const ac = new AbortController();
+  const agent = createSubagent(
+    {
+      model: stallingModel(),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      timeout: { stepMs: 100_000 },
+    },
+    12,
+  );
+  abortSoon(ac);
+  await assert.rejects(runSubagent(agent, 'go', { signal: ac.signal }), (err: unknown) => {
+    assert.ok(!(err instanceof StepTimeoutError), 'the caller cancel is not a deadline breach');
+    assert.ok(err instanceof Error && err.name === 'AbortError');
+    return true;
+  });
+});
+
+test('runSubagent: with no signal the generate is untouched — an unaborted run still submits', async () => {
+  const { model } = scriptedModel(() => ({ submit: JSON.stringify({ n: 3 }) }));
+  const { result } = await runSubagent(agentFor(model), 'go');
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 3 } });
+});
+
+test('continueSubagent: forwards the caller signal — aborting mid-continuation rejects', async () => {
+  let stall = false;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      if (stall) {
+        return new Promise((_resolve, reject) => {
+          opts.abortSignal?.addEventListener('abort', () =>
+            reject(new DOMException('This operation was aborted', 'AbortError')),
+          );
+        });
+      }
+      return {
+        content: [
+          { type: 'tool-call', toolCallId: 'submit-1', toolName: 'submit', input: '{"n":1}' },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { handle } = await runSubagent(agentFor(model), 'go');
+  stall = true;
+  const ac = new AbortController();
+  abortSoon(ac);
+  await assert.rejects(
+    continueSubagent(handle, 'more', { signal: ac.signal }),
+    (err: unknown) => err instanceof Error && err.name === 'AbortError',
+  );
+});
+
+test('callWithRetry: an aborted signal ends the retry loop instead of sleeping out the backoff', async () => {
+  const ac = new AbortController();
+  let calls = 0;
+  let slept = 0;
+  await assert.rejects(
+    callWithRetry(
+      async () => {
+        calls += 1;
+        ac.abort();
+        throw Object.assign(new Error('rate limited'), { statusCode: 429 });
+      },
+      {
+        signal: ac.signal,
+        sleep: async () => {
+          slept += 1;
+        },
+      },
+    ),
+    (err: unknown) => err instanceof Error && err.message === 'rate limited',
+  );
+  assert.equal(calls, 1, 'a retryable failure is not re-attempted once the caller cancelled');
+  assert.equal(slept, 0, 'no backoff window is waited out on a cancelled run');
+});
+
+test('callWithRetry: an unaborted signal leaves the retry loop untouched', async () => {
+  const ac = new AbortController();
+  let calls = 0;
+  const value = await callWithRetry(
+    async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('rate limited'), { statusCode: 429 });
+      return 'ok';
+    },
+    { signal: ac.signal, sleep: async () => {} },
+  );
+  assert.equal(value, 'ok');
+  assert.equal(calls, 2, 'the transient failure was still retried');
+});
+
+test('streaming funnel: the caller signal is unhooked once the stream drains (no listener leak)', async () => {
+  // A run-scoped signal outlives many generations; one retained bridge listener per stream leaks the
+  // finished controller and trips the runtime max-listener warning on a long run.
+  const ac = new AbortController();
+  const agent = createSubagent(
+    {
+      model: streamingSubmitModel(['hi'], JSON.stringify({ n: 1 })),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      onStream: () => {},
+    },
+    12,
+  );
+  const { result } = await runSubagent(agent, 'go', { signal: ac.signal });
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 1 } });
+  assert.equal(
+    getEventListeners(ac.signal, 'abort').length,
+    0,
+    'the stream bridge removed its abort listener',
+  );
 });
 
 // --- streaming funnel parity (slice 07) ---

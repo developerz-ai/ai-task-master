@@ -41,5 +41,5 @@ slices:
     status: not_started
     percent: 0
 evidence: []
-notes: "Decision #1 (oauth inbound-HTTP carve-out, slice 04): RFC 8252 loopback-only exception approved — allow http://127.0.0.1:PORT and http://[::1]:PORT for MCP OAuth redirects; inbound HTTP servers remain banned. Remaining 2 decisions: orchestrator agent-as-tool delete-or-wire (slice 07), templates delete-or-ship (slice 04). Raw audit reports in findings/."
+notes: "Decision #1 (oauth inbound-HTTP carve-out, slice 04): RFC 8252 loopback-only exception approved — allow http://127.0.0.1:PORT and http://[::1]:PORT for MCP OAuth redirects; inbound HTTP servers remain banned. Decision #2 (orchestrator agent-as-tool path, slice 07): DELETE — Orchestrator.build + subagent-tools.ts (~400 LOC) have zero production callers and have drifted; production uses WorkLoopOrchestrator port with direct finalizeCommit/openPr methods instead. Subagent-tools only used in tests. Remaining 1 decision: templates delete-or-ship (slice 04). Raw audit reports in findings/."
 last_updated: 2026-07-23

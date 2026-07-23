@@ -228,6 +228,10 @@ Attaches OpenRouter's server-side `web_search` tool to Worker generate calls. **
 - `true` — enabled on **all** Worker calls.
 - `false` — **never** enabled.
 
+### OpenRouter endpoints only
+
+This is the OpenRouter-native **server** tool, carried in the `openrouter` provider namespace. It attaches **only when the base URL targets OpenRouter** (the default when `baseURL` is unset, or a real `openrouter.ai` / `.openrouter.ai` host). On any other OpenAI-compatible endpoint — z.ai, kimi, a vLLM gateway — the provider receives a tool schema it does not understand and rejects the whole request (observed: `tools[0].type:type is illegal` on z.ai, which blocked a CI-fix session), so it is gated off there regardless of this setting. Web search still works off OpenRouter through the provider-agnostic DuckDuckGo `webSearch` **function** tool, which is always in the tool set; only this server tool is endpoint-gated.
+
 ### Domain filters
 
 To restrict which sites `web_search` may draw from, use the **object form** instead of a bare boolean. `enabled` occupies the same tri-state axis (omit it for the CI-fix-only default, `true` for all Worker calls, `false` for never); `allowedDomains` / `excludedDomains` map onto OpenRouter's `allowed_domains` / `excluded_domains` and ride the server-tool payload whenever web_search is enabled:

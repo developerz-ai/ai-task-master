@@ -12,6 +12,9 @@ export type StartArgs = {
   autoMerge?: boolean;
   // Force-merge past base-branch protection via `gh pr merge --admin`. From `--admin`.
   adminMerge?: boolean;
+  // Start even though the working tree carries uncommitted changes, discarding them. From
+  // `--allow-dirty`. Without it a dirty tree at run entry is refused (workspace/dirty-tree.ts).
+  allowDirty?: boolean;
   prPerTask?: boolean;
   stylePath?: string | null;
   model?: string;
@@ -191,6 +194,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   let maxSessions: number | undefined;
   let autoMerge: boolean | undefined;
   let adminMerge: boolean | undefined;
+  let allowDirty: boolean | undefined;
   let prPerTask: boolean | undefined;
   let stylePath: string | undefined;
   let model: string | undefined;
@@ -245,6 +249,12 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
       if (inlineValue !== null) return USAGE_ERROR;
       adminMerge = true;
       i += 1;
+    } else if (flag === '--allow-dirty') {
+      // Boolean flag: discard pre-existing uncommitted work instead of refusing. Rejects
+      // inline values.
+      if (inlineValue !== null) return USAGE_ERROR;
+      allowDirty = true;
+      i += 1;
     } else if (flag === '--pr-per-task') {
       // Boolean flag rejects any inline value: `--pr-per-task=true` is a usage error,
       // not silently treated as the boolean.
@@ -286,6 +296,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   if (maxSessions !== undefined) out.maxSessions = maxSessions;
   if (autoMerge !== undefined) out.autoMerge = autoMerge;
   if (adminMerge !== undefined) out.adminMerge = adminMerge;
+  if (allowDirty !== undefined) out.allowDirty = allowDirty;
   if (prPerTask !== undefined) out.prPerTask = prPerTask;
   if (stylePath !== undefined) out.stylePath = stylePath;
   if (model !== undefined) out.model = model;

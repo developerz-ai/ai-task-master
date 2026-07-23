@@ -162,7 +162,7 @@ const HELP_TEXT = `aitm — autonomous task orchestrator
 Usage:
   aitm start "<goal>" [--criteria "..."] [--max-prs N] [--max-sessions N]
                       [--no-automerge] [--admin] [--style <path>] [--model <id>]
-                      [--concurrency N] [--branch <name>]
+                      [--concurrency N] [--branch <name>] [--allow-dirty]
   aitm resume         [same flags as start; the goal comes from .ai-task-master/]
   aitm merge-pr [--pr N] [--no-resume] [--admin]
   aitm config set <key> <value> [--project]

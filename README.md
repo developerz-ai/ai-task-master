@@ -136,6 +136,7 @@ Everything else — planning, task grouping, branch management, retries, review-
 | `--concurrency N` | 1 | Reserved: accepted and persisted, but runs are currently pinned to 1 (groups run sequentially in the single checkout). |
 | `--no-automerge` | off | Stop after each PR opens; require manual `aitm merge-pr`. |
 | `--admin` | off | Merge via `gh pr merge --admin` to override base-branch protection (requires repo-admin rights). Also accepted by `aitm merge-pr`. |
+| `--allow-dirty` | off | Start even though the working tree has uncommitted changes — they are discarded. Without it, a dirty tree at run start is refused, since aitm resets the checkout between PR groups. |
 | `--style <path>` | `CLAUDE.md` / `AGENTS.md` | Override the coding-style file fed to subagents. |
 | `--model <id>` | provider default | Pin the model (e.g. `anthropic/claude-opus-4.7`). |
 | `--criteria <text>` | — | Acceptance criteria appended to the goal. |

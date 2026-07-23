@@ -11,6 +11,7 @@
 
 import { ExecaError } from 'execa';
 import { type BranchCleanup, cleanupMergedBranches } from './branch-cleanup.ts';
+import { DirtyWorkingTree, dirtyEntries, STATE_DIR } from './dirty-tree.ts';
 import { runGit } from './git-exec.ts';
 import { taskCommitTrailer } from './task-commit-marker.ts';
 
@@ -18,6 +19,12 @@ export type Checkout = {
   groupId: string;
   branch: string;
   path: string;
+};
+
+export type InPlaceCheckoutOptions = {
+  // Skip the run-entry refusal and discard pre-existing uncommitted work like the stale
+  // between-group junk it can't be told apart from. From `aitm start --allow-dirty`.
+  allowDirty?: boolean;
 };
 
 // Restrict groupId to characters safe as a single path segment so a branch name derived from it
@@ -75,8 +82,13 @@ export class InPlaceCheckout {
   // The one group currently checked out. Single-slot: a second concurrent acquire is a wiring bug
   // (concurrency should be 1), surfaced loudly rather than silently corrupting the tree.
   private current: Checkout | null = null;
+  // Whether this run has already taken the slot once — see enterRun.
+  private entered = false;
 
-  constructor(private readonly repoRoot: string) {}
+  constructor(
+    private readonly repoRoot: string,
+    private readonly options: InPlaceCheckoutOptions = {},
+  ) {}
 
   async acquire(groupId: string, branch: string, baseBranch: string): Promise<Checkout> {
     assertSafeGroupId(groupId);
@@ -85,6 +97,7 @@ export class InPlaceCheckout {
         `in-place checkout is single-slot: group ${this.current.groupId} is still checked out (set concurrency to 1)`,
       );
     }
+    await this.enterRun();
     await this.ensureCleanTree();
     // Reuse an existing group branch (a resumed run whose committed-but-unpushed work survives on the
     // branch) rather than recreating it from base. A brand-new group starts a fresh branch off the
@@ -110,6 +123,7 @@ export class InPlaceCheckout {
         `in-place checkout is single-slot: group ${this.current.groupId} is still checked out (set concurrency to 1)`,
       );
     }
+    await this.enterRun();
     await this.ensureCleanTree();
     await runGit(['fetch', 'origin', baseBranch], { cwd: this.repoRoot });
     await runGit(['checkout', '-B', branch, `origin/${baseBranch}`], { cwd: this.repoRoot });
@@ -131,7 +145,8 @@ export class InPlaceCheckout {
     return `origin/${baseBranch}`;
   }
 
-  // Drop stale uncommitted edits before switching branches. A crashed or blocked prior group can
+  // Drop stale uncommitted edits before switching branches. Only ever aitm's own leftovers: work
+  // that predates the run is caught by enterRun and refused. A crashed or blocked prior group can
   // leave junk in the shared tree; `git checkout` would carry it onto the next group's branch
   // (contamination) or abort the switch. Two kinds of junk, both cleaned:
   //   - modified/deleted TRACKED files → `git reset --hard` restores them to HEAD. Committed work is
@@ -143,14 +158,31 @@ export class InPlaceCheckout {
   // `-x`), which covers the common case, and `-e .ai-task-master` protects it when the target repo
   // does not ignore it. Gitignored build output (node_modules/, dist/) is likewise preserved.
   private async ensureCleanTree(): Promise<void> {
-    const { stdout } = await runGit(['status', '--porcelain'], { cwd: this.repoRoot });
     // Any dirty entry EXCEPT the state dir itself means there is something to clean.
-    const dirty = stdout
-      .split('\n')
-      .some((line) => line.trim() !== '' && !line.slice(3).startsWith('.ai-task-master'));
-    if (!dirty) return;
+    if (dirtyEntries(await this.porcelain()).length === 0) return;
     await runGit(['reset', '--hard'], { cwd: this.repoRoot });
-    await runGit(['clean', '-fd', '-e', '.ai-task-master'], { cwd: this.repoRoot });
+    await runGit(['clean', '-fd', '-e', STATE_DIR], { cwd: this.repoRoot });
+  }
+
+  // Guard the FIRST slot-taking call of a run. ensureCleanTree cannot tell a user's in-progress
+  // edits from a crashed group's leftovers — both are just dirty paths — and before this run has
+  // touched the tree there is nothing it can attribute to itself: the changes may be the
+  // operator's, or a dead prior run's the operator has since built on. Refuse rather than guess;
+  // from the next call on the dirt provably IS this run's, so the auto-clean stands. The flag
+  // stays unset until the check passes, so a caller that cleans up and retries is re-checked
+  // instead of waved through.
+  private async enterRun(): Promise<void> {
+    if (this.entered) return;
+    if (!this.options.allowDirty) {
+      const entries = dirtyEntries(await this.porcelain());
+      if (entries.length > 0) throw new DirtyWorkingTree(this.repoRoot, entries);
+    }
+    this.entered = true;
+  }
+
+  private async porcelain(): Promise<string> {
+    const { stdout } = await runGit(['status', '--porcelain'], { cwd: this.repoRoot });
+    return stdout;
   }
 
   // CheckoutHome.hasTaskCommit — see the free function above for the detection logic.

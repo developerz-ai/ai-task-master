@@ -84,6 +84,7 @@ const DEFAULTS = {
   prPerTask: false,
   mergeMethod: 'squash' as const,
   adminMerge: false,
+  allowDirty: false,
   stylePath: null as string | null,
   formatCommand: null as string | null,
   verifyCommand: null as string | null,
@@ -210,6 +211,9 @@ export class ConfigLoader {
       ),
       // CLI-only (per run): not read from config files, so no project/global layer.
       adminMerge: pick(cliOverrides.adminMerge, undefined, undefined, DEFAULTS.adminMerge),
+      // CLI-only for a stronger reason than adminMerge: a checked-in project config that could set
+      // this would let an untrusted repo authorize wiping the operator's uncommitted work.
+      allowDirty: pick(cliOverrides.allowDirty, undefined, undefined, DEFAULTS.allowDirty),
       // stylePath is honored from CLI/global only — a project-set value can point at an absolute
       // path outside the repo, and AgentConfigDetector's containment check covers relative paths
       // only. Warned + stripped from project scope (see stripUntrustedProjectFields, issue #214).

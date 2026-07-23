@@ -1019,6 +1019,7 @@ function toCliOverrides(args: Extract<ParsedArgs, { kind: 'start' }>): CliOverri
     out.maxSessions = args.maxSessions === 0 ? null : args.maxSessions;
   if (args.autoMerge !== undefined) out.autoMerge = args.autoMerge;
   if (args.adminMerge !== undefined) out.adminMerge = args.adminMerge;
+  if (args.allowDirty !== undefined) out.allowDirty = args.allowDirty;
   if (args.prPerTask !== undefined) out.prPerTask = args.prPerTask;
   if (args.stylePath !== undefined) out.stylePath = args.stylePath;
   if (args.model !== undefined) out.model = args.model;

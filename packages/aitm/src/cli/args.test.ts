@@ -57,6 +57,26 @@ const startCases: Case[] = [
     expected: { kind: 'usage-error' },
   },
   {
+    name: 'start: --allow-dirty',
+    argv: ['start', 'goal', '--allow-dirty'],
+    expected: { kind: 'start', goal: 'goal', allowDirty: true },
+  },
+  {
+    name: 'start: --allow-dirty rejects inline value',
+    argv: ['start', 'goal', '--allow-dirty=true'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'start: --allow-dirty is absent unless passed (default is to refuse)',
+    argv: ['start', 'goal'],
+    expected: { kind: 'start', goal: 'goal' },
+  },
+  {
+    name: 'resume: --allow-dirty',
+    argv: ['resume', '--allow-dirty'],
+    expected: { kind: 'resume', allowDirty: true },
+  },
+  {
     name: 'start: zero is valid for numeric flag',
     argv: ['start', 'goal', '--max-sessions', '0'],
     expected: { kind: 'start', goal: 'goal', maxSessions: 0 },

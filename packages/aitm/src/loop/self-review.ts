@@ -266,6 +266,17 @@ function buildSelfReviewTask(
       verifyTail(verifyFailure),
     );
   }
+  const planned = plannedWork(group);
+  if (planned !== '') {
+    lines.push(
+      '',
+      'This group set out to deliver the work below. Check the diff AGAINST it: work that was planned',
+      'and is missing is a defect as real as a bug — a file the coding pass narrated but never wrote',
+      'leaves a PR that ships half a feature and looks green. Write what is missing.',
+      '',
+      planned,
+    );
+  }
   lines.push(
     '',
     'Change ONLY what these issues require — do not expand scope or refactor unrelated code. If the',
@@ -280,6 +291,19 @@ function buildSelfReviewTask(
     complexity: 'complex',
     done: false,
   };
+}
+
+// The group's task list, as a checklist for the omission pass. Facts only — what the group intended,
+// never the coding pass's reasoning about it: an adversarial reviewer that inherits the author's
+// rationalizations stops being adversarial. Completed and outstanding tasks are both listed, because
+// a task marked done can still have shipped nothing (the phantom-edit case this exists to catch).
+// '' when the group carries no task text, leaving the prompt byte-identical.
+function plannedWork(group: PrGroup): string {
+  const lines = group.tasks
+    .map((t) => t.text.trim())
+    .filter((text) => text !== '')
+    .map((text) => `- ${text}`);
+  return lines.length === 0 ? '' : `Planned for this group:\n${lines.join('\n')}`;
 }
 
 function uncleanReason(verifyCommand: string, out: RunCmdResult): string {

@@ -52,6 +52,34 @@ Each subagent owns exactly one phase of the lifecycle. Planning, building, and r
 
 Subagent system prompts are assembled from `CLAUDE.md` or `AGENTS.md` plus a role-specific prefix plus an `<env>` block (`envBlock` from `@developerz.ai/ai-claude-compat`: worktree cwd, platform, OS version, runtime, date). The `<env>` block is composed at the wiring site via `composeSystemPrompt` because cwd is per-worktree. `AgentConfigDetector` decides which config file to read — it drives **coding-style** only. Provider is always OpenRouter; the per-role model id comes from `ConfigLoader` (`models.planner`, `models.worker`, `models.reviewer`), so each subagent can run on a different OpenRouter-routed model.
 
+## Context carry-over
+
+A group's tasks run sequentially against the same checkout, and each one used to cold-start its own Coordinator. Timing a real run showed the cost: roughly half the wall-clock went to re-orientation — every task re-read the same dozen files (`repository.ts`, `errors.ts`, `app.ts`, `package.json`, each 4–6 times across one group) and then wrote ~40 lines. Survey cost does not shrink with task size, so paying it per task is the largest single tax on throughput.
+
+The Coordinator's conversation is now carried task→task for the life of a group (`run-loop-adapter.ts`). Only the **messages** travel: task N+1 builds a fresh agent — its own routed specialist, its own acceptance block, its own step budget — and inherits the history, the same shape the crash-resume path uses. An in-memory carry-over beats a durable transcript (it is strictly fresher), a `blocked` pass leaves the previous carry-over in place rather than dropping the group to a cold start, and nothing crosses a group boundary.
+
+Compaction still applies: the Coordinator's `prepareStep` compacts a long carried history exactly as it does a long single-task one.
+
+## Self-review reviews against intent, not just the diff
+
+The pre-PR self-review is adversarial by design, and it deliberately does **not** inherit the coding pass's conversation — a reviewer that inherits the author's rationalizations stops being adversarial. It does receive one thing beyond the diff: the group's **planned work**, as facts.
+
+That closes a real hole. A phantom edit (the coding model narrating a file instead of writing it) once shipped a PR containing its services and none of its routes; self-review passed it, because it only ever looked at the diff, and the diff was internally consistent. Work that was planned and is missing is now a defect the review pass is told to find and write — a PR that ships half a feature and looks green is the failure mode this catches.
+
+## Leaf hand-off
+
+An editor leaf used to receive nothing but its manifest entry's `purpose`, so every leaf independently re-read the files the Coordinator had *just* finished reading — four leaves, four surveys of the same set. The Coordinator now fills a `sharedContext` digest in the `submit` it was already making (no extra round-trip), and each leaf's prompt opens with it plus two harness facts: the verify command the edit must clear, and that the formatter runs after the leaf, so it must not hand-fix formatting or import order.
+
+It is a **task, not a dump**: what to change, where, the contract, and only the conventions that bear on this edit, capped so a fanout doesn't pay for preamble ×N. A leaf can still read whatever it likes — this is a head start, not a restriction. Nothing to distil → the leaf prompt is byte-identical to before.
+
+## Throughput guards
+
+Three mechanical limits, each traced to an observed waste:
+
+- **Survey budget.** A manifest pass that makes 20 tool calls without a single write gets one corrective reminder pointing at `submit`. `bash` counts as survey — the observed spiral was `cat`/`ls`/`find` plus a `bun install` probe, 40 calls deep, inside *planning*. It nudges; it never fails the pass and never forbids reading.
+- **Fanout floor.** A manifest that is small, cheap, and creates no new file runs inline in one editor pass instead of spawning N. The observed pathology was four subagent spawns — four surveys, four verify runs — to sort imports and expand a one-line `exports` field.
+- **Phantom-edit retry.** A leaf that narrates a change instead of writing it is retried once with a corrective prompt naming the failure, scoped to the unwritten paths. Only a second narration blocks. Previously the first one blocked the whole task, which is how a PR shipped its services and none of its routes.
+
 ## Schemas
 
 Inputs and outputs of every subagent are Zod-validated. Handoffs between `Orchestrator` and subagents are predictable, typed, and refuse malformed payloads at the boundary.

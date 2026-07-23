@@ -1820,3 +1820,93 @@ test('recordStepDeltas: a step with no new messages records nothing (issue #175)
   onStep({ response: { messages: [m(0)] } }); // unchanged cumulative → empty delta → no write
   assert.equal(calls, 1);
 });
+
+// ---- per-group Coordinator carry-over ---------------------------------------
+
+// Drive N runWorker calls through defaultMakeOrchestrator with a capturing workerRunner, so the
+// carry-over is asserted at the seam the production path actually uses.
+function carryOverHarness(results: Array<'ok' | 'blocked'>): {
+  orch: ReturnType<typeof defaultMakeOrchestrator>;
+  seen: Array<readonly unknown[] | undefined>;
+} {
+  const model = emptyManifestModel();
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: () => 'openai/gpt-5',
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const seen: Array<readonly unknown[] | undefined> = [];
+  let call = 0;
+  const workerRunner = async (
+    _agent: unknown,
+    workerInput: { priorHandle?: { messages: readonly unknown[] } },
+  ): Promise<WorkerResult> => {
+    seen.push(workerInput.priorHandle?.messages);
+    const kind = results[call++] ?? 'ok';
+    if (kind === 'blocked') return { kind: 'blocked', reason: 'nope' };
+    return {
+      kind: 'ok',
+      delivery: { branch: 'b', draftCommitMessage: 'm', changes: [], progressEntries: [] },
+      // A distinct message array per call, so the assertions can tell which pass was carried.
+      handle: { agent: {}, messages: [{ role: 'assistant', content: `pass-${call}` }] },
+    } as unknown as WorkerResult;
+  };
+  const orch = defaultMakeOrchestrator({
+    input: {
+      cwd: '/tmp/adapter-carryover',
+      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
+      credentials,
+      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+      github: {},
+      goal: 'g',
+      criteria: undefined,
+      branch: undefined,
+      state: {},
+    },
+    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
+    rollingContext: '',
+    state: {},
+    stepCounter: () => undefined,
+    workerRunner,
+  } as never);
+  return { orch, seen };
+}
+
+test("runWorker: a group's second task continues the first task's conversation", async () => {
+  // Half the wall-clock of a real run went to re-orientation: every task cold-started a Coordinator
+  // that re-read the same files. The second task must inherit the first's messages.
+  const { orch, seen } = carryOverHarness(['ok', 'ok']);
+  const call = { group: group('core'), checkout: { path: '/tmp/wt' }, baseBranch: 'main' };
+  await orch.runWorker(call as never);
+  await orch.runWorker(call as never);
+  assert.equal(seen[0], undefined, 'the first task of a group starts cold');
+  assert.deepEqual(seen[1], [{ role: 'assistant', content: 'pass-1' }]);
+});
+
+test('runWorker: a blocked task leaves the carry-over intact for the next one', async () => {
+  // A blocked pass has no handle. Dropping the group back to a cold start would make failure
+  // doubly expensive — the retry would re-survey everything the successful pass already read.
+  const { orch, seen } = carryOverHarness(['ok', 'blocked', 'ok']);
+  const call = { group: group('core'), checkout: { path: '/tmp/wt' }, baseBranch: 'main' };
+  await orch.runWorker(call as never);
+  await orch.runWorker(call as never);
+  await orch.runWorker(call as never);
+  assert.deepEqual(seen[1], [{ role: 'assistant', content: 'pass-1' }]);
+  assert.deepEqual(seen[2], [{ role: 'assistant', content: 'pass-1' }], 'still the last ok pass');
+});
+
+test('runWorker: carry-over never crosses group boundaries', async () => {
+  const { orch, seen } = carryOverHarness(['ok', 'ok']);
+  await orch.runWorker({
+    group: group('core'),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  await orch.runWorker({
+    group: group('api'),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  assert.equal(seen[1], undefined, 'a different group starts cold');
+});

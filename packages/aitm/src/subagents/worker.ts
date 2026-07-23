@@ -747,24 +747,46 @@ function buildManifestPrompt(input: WorkerInput): string {
   );
 }
 
-// Strip the runtime-only extras the adapter may have mounted on the Worker tool set before the
-// per-file fanout: editors never nest surveys (`explore`, issue #126), never touch durable memory
-// (`memory`, issue #118), and never manage background processes (`bashOutput`/`killBash`, issue #103)
-// — those belong to the manifest/ci-fix level. Absent → returned unchanged.
+// The editor leaf's legitimate tools: the whole WorkerTools surface, and nothing else. Deriving the
+// leaf set from an explicit allowlist — rather than destructuring named extras away — means anything
+// the adapter mounts as a runtime EXTRA is excluded BY DEFAULT, so a future MCP-sourced or liveliness
+// tool can't silently leak a capability into an editor. The extras dropped today are exactly the ones
+// that don't belong at the leaf: editors never nest surveys (`explore`, issue #126), never touch
+// durable memory (`memory`, issue #118), and never manage background processes (`bashOutput`/
+// `killBash`, issue #103) — those live at the manifest/ci-fix level. Keep this in sync with the
+// WorkerTools fields (`as const satisfies` fails the build on a stray key; a paired test asserts
+// completeness).
+export const EDITOR_TOOL_ALLOWLIST = [
+  'readFile',
+  'writeFile',
+  'editFile',
+  'multiEdit',
+  'grep',
+  'glob',
+  'bash',
+  'multiBash',
+  'webFetch',
+  'webSearch',
+  'datetime',
+] as const satisfies readonly (keyof WorkerTools)[];
+
+// Compile-time completeness: the allowlist must name EVERY WorkerTools field so today's leaf tools
+// all survive `editorToolSet`. `as const satisfies` above already rejects a stray/typo'd key; this
+// catches the other direction — adding a field to WorkerTools without allowlisting it makes this type
+// `never` and fails the build. Tuple-wrapped so the union check isn't distributed member-by-member.
+const _allowlistCoversWorkerTools: [keyof WorkerTools] extends [
+  (typeof EDITOR_TOOL_ALLOWLIST)[number],
+]
+  ? true
+  : never = true;
+
+// Byte-identical to the pre-#270 destructure for today's tool set (the same keys survive), but a
+// newly-mounted runtime tool is now excluded rather than inherited.
 export function editorToolSet(tools: WorkerTools): WorkerTools {
-  const {
-    explore: _explore,
-    memory: _memory,
-    bashOutput: _bashOutput,
-    killBash: _killBash,
-    ...rest
-  } = tools as WorkerTools & {
-    explore?: Tool<unknown, unknown>;
-    memory?: Tool<unknown, unknown>;
-    bashOutput?: Tool<unknown, unknown>;
-    killBash?: Tool<unknown, unknown>;
-  };
-  return rest as WorkerTools;
+  const allowed = new Set<string>(EDITOR_TOOL_ALLOWLIST);
+  return Object.fromEntries(
+    Object.entries(tools).filter(([key]) => allowed.has(key)),
+  ) as WorkerTools;
 }
 
 // Per-file editor result. `changed: false` marks a phantom edit — the model returned a summary but

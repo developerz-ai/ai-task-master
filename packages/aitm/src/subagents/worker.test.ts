@@ -12,6 +12,7 @@ import {
   buildPhantomRetryPrompt,
   buildTeamBrief,
   createWorkerAgent,
+  EDITOR_TOOL_ALLOWLIST,
   editorToolSet,
   FANOUT_FLOOR_FILES,
   type FileManifest,
@@ -252,6 +253,40 @@ test('editorToolSet returns a set without explore unchanged (no-op when the extr
     Object.keys(tools).sort(),
     'every original tool retained',
   );
+});
+
+test('editorToolSet excludes a runtime tool outside the allowlist by DEFAULT (issue #270)', () => {
+  const stub = (desc: string) =>
+    tool({ description: desc, inputSchema: z.object({ x: z.string() }), execute: async () => 'a' });
+  // An extra the adapter might mount later — a future MCP-sourced or liveliness tool — that no
+  // destructure line strips. The allowlist derivation drops it without anyone having to remember to.
+  const withExtras = { ...makeTools().tools, mcpFoo: stub('mcp') };
+  const stripped = editorToolSet(withExtras);
+  assert.equal('mcpFoo' in stripped, false, 'an unknown runtime tool is excluded by default');
+  assert.equal('readFile' in stripped, true, 'allowlisted tools retained');
+});
+
+test('EDITOR_TOOL_ALLOWLIST lists every WorkerTools field (allowlist is the full leaf surface, issue #270)', () => {
+  // The runtime fixture is intentionally minimal, so completeness against the *type* is enforced at
+  // compile time in worker.ts (`_allowlistCoversWorkerTools`). Here we pin the concrete list so a
+  // future edit that drops a member is visible in review, and confirm no duplicates crept in.
+  assert.deepEqual(
+    [...EDITOR_TOOL_ALLOWLIST],
+    [
+      'readFile',
+      'writeFile',
+      'editFile',
+      'multiEdit',
+      'grep',
+      'glob',
+      'bash',
+      'multiBash',
+      'webFetch',
+      'webSearch',
+      'datetime',
+    ],
+  );
+  assert.equal(new Set(EDITOR_TOOL_ALLOWLIST).size, EDITOR_TOOL_ALLOWLIST.length, 'no duplicates');
 });
 
 test('runWorker: prepends the contextBlock to the manifest (first user) message, ahead of the task text (issue #106)', async () => {

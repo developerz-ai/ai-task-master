@@ -4,11 +4,13 @@ import { type ToolSet, tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import {
+  AGENT_TOOL_DEPTH_EXCEEDED_PREFIX,
   AGENT_TOOL_ERROR_PREFIX,
   AGENT_TOOL_NO_CONCLUSION,
   AGENT_TOOL_TRUNCATION_MARKER,
   AgentToolConstructionError,
   type AgentToolSpec,
+  DEFAULT_AGENT_TOOL_MAX_DEPTH,
   DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS,
   makeAgentTool,
 } from './agent-spawn.ts';
@@ -212,4 +214,148 @@ test('makeAgentTool: two parallel execute calls return independent, uncorrupted 
   const [ra, rb] = await Promise.all([run(a, 'qa'), run(b, 'qb')]);
   assert.equal(ra, 'answer-A');
   assert.equal(rb, 'answer-B');
+});
+
+// ---- transitive subagent depth guard (issue #270) ----
+// Depth is threaded through experimental_context under a private key, so these tests exercise it the
+// only faithful way: build a real chain (an agent tool whose child invokes a nested agent tool) and
+// observe behavior — the nested delegate spawns or is refused depending on the cap.
+
+const INNER_SPEC: AgentToolSpec = {
+  name: 'inner',
+  description: 'A nested delegate mounted inside another agent tool to exercise transitive depth.',
+  systemPrompt: 'You are a nested survey.',
+};
+
+// A model that calls `toolName` with `input` on its first step. On a later step it concludes: with
+// `finalText` when given, otherwise by echoing the running prompt (which by then carries the nested
+// tool result) so a test can inspect what that nested call returned.
+function callToolThenConclude(
+  toolName: string,
+  input: string,
+  finalText?: string,
+): MockLanguageModelV3 {
+  let i = 0;
+  return new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      if (i++ === 0) {
+        return {
+          content: [{ type: 'tool-call', toolCallId: 'call-0', toolName, input }],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      return {
+        content: [{ type: 'text', text: finalText ?? JSON.stringify(opts.prompt) }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+}
+
+// Run an agent tool with a caller-supplied experimental_context (the parent's own context object).
+async function runWithContext(
+  t: { execute?: unknown },
+  prompt: string,
+  experimentalContext: unknown,
+): Promise<string> {
+  const exec = t.execute;
+  if (typeof exec !== 'function') throw new Error('tool has no execute');
+  return (await (exec as (i: { prompt: string }, o: unknown) => Promise<string>)(
+    { prompt },
+    { toolCallId: 'test', messages: [], experimental_context: experimentalContext },
+  )) as string;
+}
+
+test('makeAgentTool: the default depth cap is a single level of delegation', () => {
+  assert.equal(DEFAULT_AGENT_TOOL_MAX_DEPTH, 1);
+});
+
+test('makeAgentTool: at the default cap a nested delegate one level down is refused before it spawns', async () => {
+  const inner = textModel('INNER RAN');
+  const innerTool = makeAgentTool(INNER_SPEC, {
+    model: inner.model,
+    tools: readTools,
+    allowedTools: ['readFile', 'grep'],
+  });
+  const outer = makeAgentTool(SPEC, {
+    model: callToolThenConclude('inner', '{"prompt":"go deeper"}'),
+    tools: { ...readTools, inner: innerTool },
+    allowedTools: ['readFile', 'grep', 'inner'],
+  });
+
+  // The outer child runs at depth 1; its attempt to delegate to `inner` would be depth 2, past the
+  // cap of 1. The call is refused before spawning: inner's model never runs, and the refusal wording
+  // is delivered back into the child as an ordinary tool result (returned, not thrown).
+  const out = await run(outer, 'top-level task');
+  assert.equal(inner.lastPrompt(), undefined, 'nested delegate never spawned');
+  assert.equal(
+    out.includes(AGENT_TOOL_DEPTH_EXCEEDED_PREFIX),
+    true,
+    'refusal delivered to the child',
+  );
+});
+
+test('makeAgentTool: raising maxDepth lets the nested delegate one level down actually run', async () => {
+  const inner = textModel('INNER RAN');
+  const innerTool = makeAgentTool(INNER_SPEC, {
+    model: inner.model,
+    tools: readTools,
+    allowedTools: ['readFile', 'grep'],
+    maxDepth: 2,
+  });
+  const outer = makeAgentTool(SPEC, {
+    model: callToolThenConclude('inner', '{"prompt":"go deeper"}'),
+    tools: { ...readTools, inner: innerTool },
+    allowedTools: ['readFile', 'grep', 'inner'],
+  });
+
+  // inner's own cap is 2, so at depth 1 (1 < 2) it spawns for real and its answer flows back.
+  const out = await run(outer, 'top-level task');
+  assert.notEqual(inner.lastPrompt(), undefined, 'nested delegate spawned under the raised cap');
+  assert.equal(out.includes('INNER RAN'), true, 'nested answer reached the child');
+});
+
+test('makeAgentTool: a non-positive or non-finite maxDepth falls back to the default (guard cannot be disabled)', async () => {
+  // A literal 0 or negative cap would refuse even a top-level (depth 0) call — disabling the tool. The
+  // fallback to the default cap of 1 keeps it alive, so a top-level call must still run.
+  for (const bad of [0, -3, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const inner = textModel('INNER RAN');
+    const t = makeAgentTool(INNER_SPEC, {
+      model: inner.model,
+      tools: readTools,
+      allowedTools: ['readFile', 'grep'],
+      maxDepth: bad,
+    });
+    const out = await run(t, 'top-level');
+    assert.equal(out, 'INNER RAN', `maxDepth=${String(bad)} must fall back, not disable the tool`);
+  }
+});
+
+test('makeAgentTool: a spawned child preserves the caller context, riding depth alongside it', async () => {
+  let seen: unknown;
+  const spy = tool({
+    description: 'records the context it is invoked with',
+    inputSchema: z.object({ q: z.string() }),
+    execute: async (_input, options) => {
+      seen = options.experimental_context;
+      return 'ok';
+    },
+  });
+  const outer = makeAgentTool(SPEC, {
+    model: callToolThenConclude('spy', '{"q":"1"}', 'DONE'),
+    tools: { ...readTools, spy },
+    allowedTools: ['readFile', 'grep', 'spy'],
+  });
+
+  const out = await runWithContext(outer, 'top', { marker: 'PARENT' });
+  assert.equal(out, 'DONE');
+  // The child's tools still see the caller's own context field — depth was merged in, not swapped out.
+  assert.equal(
+    typeof seen === 'object' && seen !== null ? (seen as { marker?: unknown }).marker : undefined,
+    'PARENT',
+  );
 });

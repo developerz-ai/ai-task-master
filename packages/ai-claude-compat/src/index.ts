@@ -3,6 +3,7 @@
 // .claude/ skills + agents loading.
 
 export {
+  AGENT_TOOL_DEPTH_EXCEEDED_PREFIX,
   AGENT_TOOL_ERROR_PREFIX,
   AGENT_TOOL_NO_CONCLUSION,
   AGENT_TOOL_TRUNCATION_MARKER,
@@ -10,6 +11,7 @@ export {
   type AgentToolInput,
   type AgentToolOptions,
   type AgentToolSpec,
+  DEFAULT_AGENT_TOOL_MAX_DEPTH,
   DEFAULT_AGENT_TOOL_MAX_OUTPUT_CHARS,
   DEFAULT_AGENT_TOOL_MAX_STEPS,
   makeAgentTool,

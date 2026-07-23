@@ -142,11 +142,11 @@ export class ConfigLoader {
       throw new Error(
         baseURLSource === 'profile'
           ? `Active profile "${active?.name}" sets a baseURL (${baseURL}) but no API key of its own, ` +
-            'and any top-level openrouterApiKey belongs to a different provider (it would be rejected ' +
-            `by that endpoint). Set the profile's key: \`aitm profile set ${active?.name} openrouterApiKey <key>\`.`
+              'and any top-level openrouterApiKey belongs to a different provider (it would be rejected ' +
+              `by that endpoint). Set the profile's key: \`aitm profile set ${active?.name} openrouterApiKey <key>\`.`
           : 'No OpenRouter API key found. Set OPENROUTER_API_KEY env, add ' +
-            '"openrouterApiKey" to the user-owned ~/.aitm.json (a project config.json is ignored ' +
-            'for credentials), or create a profile with `aitm profile add <name> --api-key <key>`.',
+              '"openrouterApiKey" to the user-owned ~/.aitm.json (a project config.json is ignored ' +
+              'for credentials), or create a profile with `aitm profile add <name> --api-key <key>`.',
       );
     }
 

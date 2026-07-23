@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { execa } from 'execa';
 import { makeTempRepo, type TempRepo } from '../testing/temp-repo.ts';
-import { cleanupMergedBranches, cleanupSummary } from './branch-cleanup.ts';
+import { branchCleanupMessage, cleanupMergedBranches, cleanupSummary } from './branch-cleanup.ts';
 
 // A repo on `main` with one commit and a bare origin, so remote deletion is exercised for real
 // rather than mocked — the whole point of this module is what it does to actual refs.
@@ -67,8 +67,13 @@ test('cleanupMergedBranches: deletes a merged branch locally and on origin', asy
     });
 
     assert.deepEqual(result.deleted, ['aitm/G1']);
+    assert.deepEqual(result.remoteDeleted, ['aitm/G1'], 'remote deletion is recorded, not assumed');
     assert.deepEqual(await branches(repo.path), ['main']);
     assert.deepEqual(await remoteBranches(remote), ['main']);
+    assert.equal(
+      branchCleanupMessage('aitm/G1', result),
+      'deleted merged branch aitm/G1 (local + origin)',
+    );
   } finally {
     await cleanup();
   }
@@ -151,7 +156,7 @@ test('cleanupMergedBranches: an empty list is a no-op', async () => {
       baseBranch: 'main',
       mergedBranches: [],
     });
-    assert.deepEqual(result, { deleted: [], kept: [] });
+    assert.deepEqual(result, { deleted: [], remoteDeleted: [], kept: [] });
     assert.deepEqual(await branches(repo.path), ['main']);
   } finally {
     await cleanup();
@@ -174,10 +179,61 @@ test('cleanupMergedBranches: a branch that will not delete is reported kept, not
   }
 });
 
+test('cleanupMergedBranches: a repo with no origin records no remote deletion', async () => {
+  // The message must not claim "origin" when there was no remote to delete from.
+  const repo = await makeTempRepo();
+  try {
+    await execa('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: repo.path });
+    await execa('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: repo.path });
+    await execa('git', ['checkout', '-b', 'aitm/G1'], { cwd: repo.path });
+    await execa('git', ['commit', '--allow-empty', '-m', 'work'], { cwd: repo.path });
+    await execa('git', ['checkout', 'main'], { cwd: repo.path });
+
+    const result = await cleanupMergedBranches({
+      cwd: repo.path,
+      baseBranch: 'main',
+      mergedBranches: ['aitm/G1'],
+    });
+
+    assert.deepEqual(result.deleted, ['aitm/G1']);
+    assert.deepEqual(result.remoteDeleted, [], 'no origin → nothing recorded as remote-deleted');
+    assert.equal(
+      branchCleanupMessage('aitm/G1', result),
+      'deleted merged branch aitm/G1 (local; origin already gone or none)',
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('branchCleanupMessage: never claims origin unless the remote delete really happened', () => {
+  assert.equal(
+    branchCleanupMessage('b', { deleted: ['b'], remoteDeleted: ['b'], kept: [] }),
+    'deleted merged branch b (local + origin)',
+  );
+  assert.equal(
+    branchCleanupMessage('b', { deleted: ['b'], remoteDeleted: [], kept: [] }),
+    'deleted merged branch b (local; origin already gone or none)',
+  );
+  assert.equal(
+    branchCleanupMessage('b', { deleted: [], remoteDeleted: ['b'], kept: [] }),
+    'deleted merged branch b on origin; local delete failed (branch kept)',
+  );
+  assert.equal(
+    branchCleanupMessage('b', { deleted: [], remoteDeleted: [], kept: ['b'] }),
+    'merged branch b left in place (delete failed)',
+  );
+});
+
 test('cleanupSummary: says what happened, and says nothing when nothing did', () => {
-  assert.equal(cleanupSummary({ deleted: [], kept: [] }), '');
+  assert.equal(cleanupSummary({ deleted: [], remoteDeleted: [], kept: [] }), '');
   assert.match(
-    cleanupSummary({ switchedTo: 'main', deleted: ['aitm/G1', 'aitm/G2'], kept: [] }),
+    cleanupSummary({
+      switchedTo: 'main',
+      deleted: ['aitm/G1', 'aitm/G2'],
+      remoteDeleted: [],
+      kept: [],
+    }),
     /back on main — deleted 2 merged branch\(es\): aitm\/G1, aitm\/G2/,
   );
 });

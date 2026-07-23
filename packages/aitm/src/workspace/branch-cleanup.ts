@@ -24,7 +24,12 @@ import { runGit } from './git-exec.ts';
 export type BranchCleanup = {
   // The branch HEAD ended on, when this moved it. Undefined when it was already elsewhere.
   switchedTo?: string;
+  // Branches whose LOCAL ref was deleted.
   deleted: string[];
+  // Branches whose deletion on `origin` succeeded. A subset of what was attempted: a remote that had
+  // already removed the branch (GitHub auto-delete), or a repo with no origin, is not counted here —
+  // so a caller can report "local + origin" only when the branch is actually in this list.
+  remoteDeleted: string[];
   // Branches left in place, with why — a blocked group's branch still holds the only copy of its work.
   kept: string[];
 };
@@ -52,7 +57,7 @@ async function currentBranch(cwd: string): Promise<string | undefined> {
 // here must report itself and change nothing else about the run's outcome.
 export async function cleanupMergedBranches(input: CleanupInput): Promise<BranchCleanup> {
   const { cwd, baseBranch, mergedBranches } = input;
-  const result: BranchCleanup = { deleted: [], kept: [] };
+  const result: BranchCleanup = { deleted: [], remoteDeleted: [], kept: [] };
   if (mergedBranches.length === 0) return result;
 
   const head = await currentBranch(cwd);
@@ -69,8 +74,12 @@ export async function cleanupMergedBranches(input: CleanupInput): Promise<Branch
   }
   for (const branch of mergedBranches) {
     if (input.deleteRemote !== false) {
-      // Already gone (GitHub auto-delete) or never pushed — either way there is nothing to report.
-      await runGit(['push', 'origin', '--delete', branch], { cwd }).catch(() => undefined);
+      // Best-effort — a remote that already removed the branch (GitHub auto-delete) or a repo with no
+      // origin fails here, and is simply not recorded as a remote deletion.
+      const pushed = await runGit(['push', 'origin', '--delete', branch], { cwd })
+        .then(() => true)
+        .catch(() => false);
+      if (pushed) result.remoteDeleted.push(branch);
     }
     try {
       await runGit(['branch', '-D', branch], { cwd });
@@ -80,6 +89,22 @@ export async function cleanupMergedBranches(input: CleanupInput): Promise<Branch
     }
   }
   return result;
+}
+
+// Where a single branch's deletion actually landed, phrased for a per-group log line. Never claims
+// origin unless the remote delete really succeeded — a branch GitHub already auto-deleted, or one in
+// a repo with no origin, reports "local only", and a branch that could not be deleted at all reports
+// "kept". Exported so the work loop's per-group message is built from the concrete result.
+export function branchCleanupMessage(branch: string, cleanup: BranchCleanup): string {
+  if (cleanup.deleted.includes(branch)) {
+    return cleanup.remoteDeleted.includes(branch)
+      ? `deleted merged branch ${branch} (local + origin)`
+      : `deleted merged branch ${branch} (local; origin already gone or none)`;
+  }
+  if (cleanup.remoteDeleted.includes(branch)) {
+    return `deleted merged branch ${branch} on origin; local delete failed (branch kept)`;
+  }
+  return `merged branch ${branch} left in place (delete failed)`;
 }
 
 // One human line, or '' when there was nothing to tidy. Silence is correct for a run that opened no

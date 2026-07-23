@@ -9,5 +9,8 @@
 const TRAILER_KEY = 'Aitm-Task-Id';
 
 export function taskCommitTrailer(taskId: string): string {
+  if (taskId.includes('\n')) {
+    throw new Error(`invalid taskId: contains newline`);
+  }
   return `${TRAILER_KEY}: ${taskId}`;
 }

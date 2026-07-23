@@ -9,3 +9,11 @@ test('taskCommitTrailer: formats a stable, greppable Aitm-Task-Id trailer', () =
 test('taskCommitTrailer: distinct task ids produce distinct trailers', () => {
   assert.notEqual(taskCommitTrailer('t1'), taskCommitTrailer('t2'));
 });
+
+test('taskCommitTrailer: rejects task ids containing newlines', () => {
+  assert.throws(() => taskCommitTrailer('t1\nmalicious'), /contains newline/);
+});
+
+test('taskCommitTrailer: rejects task ids with multiple newlines', () => {
+  assert.throws(() => taskCommitTrailer('multi\nline\nid'), /contains newline/);
+});

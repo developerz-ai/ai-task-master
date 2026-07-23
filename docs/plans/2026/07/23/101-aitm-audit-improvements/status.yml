@@ -41,5 +41,5 @@ slices:
     status: not_started
     percent: 0
 evidence: []
-notes: "3 owner decisions gate parts of the plan: oauth inbound-HTTP carve-out (slice 04), orchestrator agent-as-tool delete-or-wire (slice 07), templates delete-or-ship (slice 04). Raw audit reports in findings/."
+notes: "Decision #1 (oauth inbound-HTTP carve-out, slice 04): RFC 8252 loopback-only exception approved — allow http://127.0.0.1:PORT and http://[::1]:PORT for MCP OAuth redirects; inbound HTTP servers remain banned. Remaining 2 decisions: orchestrator agent-as-tool delete-or-wire (slice 07), templates delete-or-ship (slice 04). Raw audit reports in findings/."
 last_updated: 2026-07-23

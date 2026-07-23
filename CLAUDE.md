@@ -81,7 +81,7 @@ Do not add, do not stub, do not leave TODOs for:
 - Mailbox / inbox features
 - Exposing `aitm` itself as an MCP server — never. `aitm` is **only an MCP client**: it
   can connect to external MCP servers and consume their tools (`mcpServers` in config).
-- Webhooks or any inbound HTTP
+- Webhooks or any inbound HTTP — **exception:** loopback-only OAuth redirects per RFC 8252 (http://127.0.0.1:PORT or http://[::1]:PORT) for native app OAuth flows are permitted for MCP server authentication; remote inbound servers remain banned.
 - Docker, devcontainers, or any containerization
 
 If a change pulls in any of these, stop and surface it instead of implementing.

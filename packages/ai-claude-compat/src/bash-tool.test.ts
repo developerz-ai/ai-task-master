@@ -238,6 +238,21 @@ test('bashTool: a command our timer signal-kills at the deadline is flagged time
   assert.equal(out.timedOut, true, 'a signal-terminated command at the deadline is a timeout');
 });
 
+test("bashTool: execa's own timedOut flag is honored even without our timer or signal evidence (issue #269)", async () => {
+  // Rejects at 10ms, well before the 100ms local timer fires (which is then cleared) — so our
+  // `timedOut` flag stays false and no signal is present. Only execa's own `err.timedOut` remains,
+  // and it must still flag the result: the `|| err.timedOut === true` fallback branch.
+  const out = await run<{ command: string }, BashOutput>(
+    bashTool({
+      cwd: '/w',
+      exec: rejectAfterExec(10, fakeExecaError({ exitCode: 1, timedOut: true })),
+      defaultTimeoutMs: 100,
+    }),
+    { command: 'sleep 5' },
+  );
+  assert.equal(out.timedOut, true, "execa's own timeout report is honored on its own");
+});
+
 type MultiOut = {
   results: Array<{ command: string; stdout: string; exitCode: number }>;
   exitCode: number;

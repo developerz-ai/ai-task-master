@@ -299,12 +299,9 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
 // Shared plain-text rendering for a single command result (issue #127): stdout, a `stderr:` section
 // only when stderr is non-empty, an `exit code: N` line only when non-zero, and `(no output)` when
 // nothing ran to show (empty stdout+stderr on a clean exit).
-function renderBashSection(o: {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  timedOut?: boolean;
-}): string {
+function renderBashSection(
+  o: Pick<BashOutput, 'stdout' | 'stderr' | 'exitCode' | 'timedOut'>,
+): string {
   const parts: string[] = [];
   if (o.stdout !== '') parts.push(o.stdout);
   if (o.stderr !== '') parts.push(`stderr:\n${o.stderr}`);

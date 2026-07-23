@@ -196,7 +196,7 @@ export type WorkLoopDeps = {
   // to the cyan [aitm] console stream so the operator sees the loop driving each group
   // (working → pr-open → waiting-ci → …). Optional — tests and older callers omit it. The RunStep
   // stamps the phase + N/M step counter into the line (claudetm parity); harnessProgress renders it.
-  progress?: (message: string, step?: RunStep) => void;
+  progress?: (message: string, step?: RunStep, opts?: { milestone?: boolean }) => void;
   // Resolve the N/M step counter for a group/task, injected by the adapter (it owns the plan totals
   // + prPerTask). Optional — omitted → the phase word still shows, without a counter.
   stepCounter?: StepCounterFn;
@@ -675,9 +675,12 @@ export class WorkLoop {
         const reason = next === 'blocked' && ctx.blockedReason ? ` (${ctx.blockedReason})` : '';
         const timing =
           next === 'merged' ? ` — done in ${this.groupElapsedLabel(ctx.group.id)}` : '';
+        // A merge is the one success worth spotting in a wall of stage lines — render it as a
+        // green ★ milestone.
         this.deps.progress?.(
           `group ${ctx.group.id}: ${stage} → ${next}${reason}${timing}`,
           this.stepFor(ctx.group.id, phaseForStage(next)),
+          next === 'merged' ? { milestone: true } : undefined,
         );
       }
       ctx.group = { ...ctx.group, stage: next };
@@ -757,6 +760,9 @@ export class WorkLoop {
       adminMerge: this.deps.adminMerge ?? false,
       ...(this.deps.prContext ? { prContext: this.deps.prContext } : {}),
       ...(this.deps.sleep ? { sleep: this.deps.sleep } : {}),
+      ...(this.deps.progress
+        ? { progress: (message: string) => this.deps.progress?.(message) }
+        : {}),
     };
   }
 
@@ -1025,6 +1031,7 @@ export class WorkLoop {
       this.deps.progress?.(
         `group ${group.id}: merged — done in ${this.groupElapsedLabel(group.id)}`,
         this.stepFor(group.id, 'merged'),
+        { milestone: true },
       );
     }
   }

@@ -12,19 +12,22 @@ import {
 } from './prompts/role-guidance.ts';
 import { buildEditorRolePrompt, buildRolePrompt } from './role-prompt.ts';
 
-test('buildRolePrompt weaves the always-on contracts, role guidance, step budget, style and env', () => {
+test('buildRolePrompt weaves the always-on contracts, role guidance, style and env', () => {
   const prompt = buildRolePrompt({
     style: '# coding style digest',
     roleGuidance: 'You are the Worker.',
     cwd: '/tmp/does-not-exist-checkout',
-    maxSteps: 30,
     modelId: 'anthropic/claude-sonnet-4',
   });
   assert.ok(prompt.includes(HARNESS_CONTRACT_TEXT), 'harness contract present');
   assert.ok(prompt.includes(COMMUNICATION_CONTRACT_TEXT), 'communication contract present');
   assert.ok(prompt.includes(AUTONOMY_CONTRACT_TEXT), 'autonomy contract present');
   assert.match(prompt, /You are the Worker\./, 'role guidance present');
-  assert.match(prompt, /budget of 30 tool steps/, 'step-budget reminder interpolates the cap');
+  assert.doesNotMatch(
+    prompt,
+    /budget of/,
+    'no step-budget reminder — agents run until they submit',
+  );
   assert.match(prompt, /# coding style digest/, 'style digest present');
   assert.match(prompt, /<env>/, 'env block present');
   assert.match(prompt, /anthropic\/claude-sonnet-4/, 'self-id present when a modelId is supplied');
@@ -35,7 +38,6 @@ test('buildRolePrompt renders blocks in canonical order (contracts first, role b
     style: 'STYLE_MARKER',
     roleGuidance: 'ROLE_MARKER',
     cwd: '/tmp/does-not-exist-checkout',
-    maxSteps: 20,
     modelId: 'prov/model-x',
   });
   const idx = (needle: string) => prompt.indexOf(needle);
@@ -52,7 +54,6 @@ test('buildRolePrompt omits the self-id block when no modelId is supplied (take-
     style: '',
     roleGuidance: 'You are the Reviewer.',
     cwd: '/tmp/does-not-exist-checkout',
-    maxSteps: 20,
   });
   assert.ok(!/running as the model/.test(prompt), 'no self-id block without a modelId');
   assert.ok(prompt.includes(COMMUNICATION_CONTRACT_TEXT), 'contracts still present');
@@ -64,7 +65,6 @@ test('buildRolePrompt injects the memory index (with staleness framing) when mem
     style: 'S',
     roleGuidance: 'ROLE',
     cwd: '/tmp/does-not-exist-checkout',
-    maxSteps: 30,
     memoryIndex: [{ file: 'flaky.md', description: 'e2e flakes on cold cache' }],
   });
   assert.match(withMemory, /point-in-time/i, 'staleness framing present');
@@ -74,13 +74,12 @@ test('buildRolePrompt injects the memory index (with staleness framing) when mem
     style: 'S',
     roleGuidance: 'ROLE',
     cwd: '/tmp/does-not-exist-checkout',
-    maxSteps: 30,
     memoryIndex: [],
   });
   assert.ok(!/point-in-time/i.test(withoutMemory), 'no memory block when the index is empty');
 });
 
-test('buildRolePrompt: every non-leaf built-in role prompt carries the contract/<env>/step-budget frame (baked into the template, not the prose)', () => {
+test('buildRolePrompt: every non-leaf built-in role prompt carries the contract/<env> frame (baked into the template, not the prose)', () => {
   // The editor is deliberately excluded: it is a leaf (worker.ts's Layer B fanout) and renders
   // through buildEditorRolePrompt instead, which drops this frame — see the buildEditorRolePrompt
   // tests below.
@@ -93,7 +92,6 @@ test('buildRolePrompt: every non-leaf built-in role prompt carries the contract/
       style: '',
       roleGuidance,
       cwd: '/tmp/does-not-exist-checkout',
-      maxSteps: 25,
     });
     assert.ok(prompt.includes(HARNESS_CONTRACT_TEXT), `${name}: harness contract present`);
     assert.ok(
@@ -102,11 +100,7 @@ test('buildRolePrompt: every non-leaf built-in role prompt carries the contract/
     );
     assert.ok(prompt.includes(AUTONOMY_CONTRACT_TEXT), `${name}: autonomy contract present`);
     assert.match(prompt, /<env>/, `${name}: <env> block present`);
-    assert.match(
-      prompt,
-      /budget of 25 tool steps/,
-      `${name}: step-budget reminder interpolates the cap`,
-    );
+    assert.doesNotMatch(prompt, /budget of/, `${name}: no step-budget reminder`);
     assert.match(prompt, marker, `${name}: role prose flows through the sessionGuidance slot`);
   }
 });
@@ -116,20 +110,18 @@ test('buildRolePrompt omits an empty style block (no blank-line artifact)', () =
     style: '',
     roleGuidance: 'ROLE',
     cwd: '/tmp/does-not-exist-checkout',
-    maxSteps: 12,
   });
   assert.ok(!prompt.includes('\n\n\n'), 'no triple newline from the omitted style block');
 });
 
-test('buildEditorRolePrompt: lean leaf frame — role guidance, step budget, style, computed <env>; no contracts, no self-id (issue #221)', () => {
+test('buildEditorRolePrompt: lean leaf frame — role guidance, style, computed <env>; no contracts, no self-id (issue #221)', () => {
   const prompt = buildEditorRolePrompt({
     style: '# coding style digest',
     roleGuidance: EDITOR_SYSTEM_PREFIX,
     cwd: '/tmp/does-not-exist-checkout',
-    maxSteps: 15,
   });
   assert.match(prompt, /You are a leaf editor\./, 'role guidance present');
-  assert.match(prompt, /budget of 15 tool steps/, 'step-budget reminder interpolates the cap');
+  assert.doesNotMatch(prompt, /budget of/, 'no step-budget reminder on the leaf either');
   assert.match(prompt, /# coding style digest/, 'style digest present');
   assert.match(prompt, /<env>/, 'env block computed and present');
   assert.ok(!prompt.includes(HARNESS_CONTRACT_TEXT), 'no harness contract — a leaf cannot spawn');
@@ -146,7 +138,6 @@ test('buildEditorRolePrompt omits an empty style block (no blank-line artifact)'
     style: '',
     roleGuidance: EDITOR_SYSTEM_PREFIX,
     cwd: '/tmp/does-not-exist-checkout',
-    maxSteps: 15,
   });
   assert.ok(!prompt.includes('\n\n\n'), 'no triple newline from the omitted style block');
   assert.match(prompt, /You are a leaf editor\./, 'role guidance still present');
@@ -157,7 +148,6 @@ test('buildEditorRolePrompt: injects a team brief when given one, omits it other
     style: '# style',
     roleGuidance: EDITOR_SYSTEM_PREFIX,
     cwd: '/tmp/does-not-exist-checkout',
-    maxSteps: 15,
   };
   const withBrief = buildEditorRolePrompt({
     ...base,

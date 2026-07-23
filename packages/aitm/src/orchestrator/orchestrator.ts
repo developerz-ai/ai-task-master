@@ -202,12 +202,38 @@ function fenceMask(lines: readonly string[]): boolean[] {
   return mask;
 }
 
+// A heading line whose text is a canonical section name followed by MORE text on the same line —
+// `## Summary Adds cookie auth` or `## Changes### Domain`, the shape a model produces when it forgets
+// the newline between a heading and its content. Returns the canonical heading plus the trailing text
+// as a separate content line, so splitBodyBlocks then slots that text under the right section instead
+// of treating the whole run-on as an unrecognized heading (which repair used to dump as a duplicate
+// tail — the doubled PR body bug). Undefined when the line is not a canonical-prefixed run-on. The
+// boundary after the section name must be a non-letter so `## Changesets` never matches `## Changes`.
+function splitRunOnHeading(
+  line: string,
+  canonicalByKey: ReadonlyMap<string, string>,
+): string | undefined {
+  const rest = line.replace(/^#+\s*/, '');
+  const restLower = rest.toLowerCase();
+  for (const [key, heading] of canonicalByKey) {
+    if (!restLower.startsWith(key)) continue;
+    const after = rest.charAt(key.length);
+    if (after !== '' && /[a-z0-9]/i.test(after)) continue; // mid-word, not a real boundary
+    const trailing = rest
+      .slice(key.length)
+      .replace(/^[\s:;.\-–—#]+/, '')
+      .trim();
+    return trailing === '' ? heading : `${heading}\n${trailing}`;
+  }
+  return undefined;
+}
+
 // Rewrite near-miss section headings to their canonical form before the contract is checked.
 // Models reliably produce the right SECTIONS and the wrong markup — `### Changes` instead of
-// `## Changes`, a trailing colon, bold around the word. Rejecting those threw away an otherwise good
-// body and replaced it with a generated stub, which is a far worse outcome than fixing the `#`.
-// Only lines that are already headings (and outside a code fence) are touched, and only when they
-// name a required section. Exported for unit testing.
+// `## Changes`, a trailing colon, bold around the word, or the section name with its content run onto
+// the same line. Rejecting those threw away an otherwise good body and replaced it with a generated
+// stub, a far worse outcome than fixing the `#`. Only lines that are already headings (and outside a
+// code fence) are touched, and only when they name a required section. Exported for unit testing.
 export function normalizePrBodyHeadings(body: string, sections: readonly string[]): string {
   const canonical = new Map(sections.map((s) => [headingKey(s), s]));
   const lines = body.split('\n');
@@ -217,7 +243,9 @@ export function normalizePrBodyHeadings(body: string, sections: readonly string[
       if (fenced[i]) return line;
       const trimmed = line.trim();
       if (!/^#{1,6}\s+\S/.test(trimmed)) return line;
-      return canonical.get(headingKey(trimmed)) ?? line;
+      const exact = canonical.get(headingKey(trimmed));
+      if (exact !== undefined) return exact;
+      return splitRunOnHeading(trimmed, canonical) ?? line;
     })
     .join('\n');
 }
@@ -546,16 +574,19 @@ function splitBodyBlocks(body: string): Array<{ heading: string | undefined; con
   return blocks.map((b) => ({ heading: b.heading, content: b.content.join('\n').trim() }));
 }
 
-// Rebuild a body that broke the section contract, keeping everything the model wrote.
+// Rebuild a body that broke the section contract, keeping the model's prose without ever doubling it.
 //
-// The old behavior on a contract failure was to throw the whole composition away and open the PR
-// with a generated stub. Measured on a real run, that fired on 2 of 2 PRs — every body the operator
-// actually got was the stub, and paragraphs of accurate prose about the diff were discarded because
-// one heading of four was missing. Repair inverts that: the model's sections are kept verbatim,
-// sections it omitted are filled from the same deterministic material the full fallback uses, and
-// the result is emitted in the required order. Content the model wrote under a heading nobody asked
-// for is preserved at the end rather than dropped, and a preamble before the first heading is folded
-// into the first section so no prose is lost.
+// The pre-repair behavior threw the whole composition away for a generated stub — measured firing on
+// 2 of 2 PRs, discarding accurate prose over one missing heading. The first repair kept the model's
+// sections but appended content under any UNRECOGNIZED heading as a trailing block; when a model
+// mashed its content onto the heading line (`## Summary Adds cookie auth`), every section read as
+// unrecognized and the entire body was re-emitted after the deterministic fill — a doubled PR body.
+//
+// This version: normalize (which now also splits run-on headings) → slot each block under its section
+// → any block that STILL isn't a required section is folded into the running text of the section
+// before it (or the Summary when none has opened yet), never appended as a separate duplicate tail.
+// Required sections the model omitted are filled from the same deterministic material the full
+// fallback uses. The result carries every piece of the model's prose exactly once, in section order.
 //
 // Passes assertPrBodySections by construction, for any section set. Exported for unit testing.
 export function repairPrBody(
@@ -566,31 +597,37 @@ export function repairPrBody(
 ): string {
   const blocks = splitBodyBlocks(normalizePrBodyHeadings(body, sections));
   const required = new Set(sections);
+  const firstSection = sections[0];
   const owned = new Map<string, string[]>();
-  const extras: Array<{ heading: string; content: string }> = [];
-  let preamble = '';
+  // The section an unrecognized block folds into: the last required heading seen, or the first
+  // section until one opens. This keeps stray content inline in a real section rather than dumping it
+  // as a duplicate tail — the doubling bug — and never loses a word.
+  let current = firstSection;
   for (const block of blocks) {
-    if (block.heading === undefined) {
-      preamble = block.content;
-      continue;
-    }
-    if (required.has(block.heading)) {
-      const bucket = owned.get(block.heading) ?? [];
-      // A duplicated heading keeps both bodies rather than silently losing the second.
-      if (block.content !== '') bucket.push(block.content);
-      owned.set(block.heading, bucket);
-    } else if (block.content !== '' || block.heading !== '') {
-      extras.push({ heading: block.heading, content: block.content });
-    }
+    const target =
+      block.heading !== undefined && required.has(block.heading) ? block.heading : current;
+    if (block.heading !== undefined && required.has(block.heading)) current = block.heading;
+    const piece = [
+      // An unrecognized heading's own text is prose the model wrote; keep it (demoted, so it can't
+      // masquerade as a section) rather than dropping it.
+      block.heading !== undefined && !required.has(block.heading)
+        ? block.heading.replace(/^#+\s*/, '').trim()
+        : '',
+      block.content,
+    ]
+      .filter((s) => s !== '')
+      .join('\n\n');
+    if (piece === '' || target === undefined) continue;
+    const bucket = owned.get(target) ?? [];
+    bucket.push(piece);
+    owned.set(target, bucket);
   }
-  const rendered = sections.map((heading, index) => {
-    const own = (owned.get(heading) ?? []).join('\n\n').trim();
-    const lead = index === 0 && preamble !== '' ? preamble : '';
-    const content = [lead, own].filter((s) => s !== '').join('\n\n');
-    return `${heading}\n${content !== '' ? content : fallbackSectionContent(heading, group, delivery)}`;
-  });
-  const tail = extras.map((e) => `${e.heading}\n${e.content}`.trimEnd());
-  return [...rendered, ...tail].join('\n\n');
+  return sections
+    .map((heading) => {
+      const own = (owned.get(heading) ?? []).join('\n\n').trim();
+      return `${heading}\n${own !== '' ? own : fallbackSectionContent(heading, group, delivery)}`;
+    })
+    .join('\n\n');
 }
 
 // Deterministic PR composition used when the model's composePr attempts are exhausted (invalid
@@ -616,7 +653,9 @@ export function buildFallbackComposition(
 // unit-testable and documented in one place.
 export const PR_BODY_GUIDE = [
   'body: GitHub-flavored markdown with exactly these four sections, in order, each with its',
-  'heading verbatim:',
+  'heading verbatim. Put each `## ` heading on ITS OWN LINE with a blank line before the content —',
+  'never run the content onto the heading line. Keep the whole body tight: a reviewer skims it, so',
+  'no walls of text, no restating the diff line by line, no marketing.',
   `  ${PR_BODY_SECTIONS[0]}`,
   '    1-2 sentences on what changed and why.',
   `  ${PR_BODY_SECTIONS[1]}`,

@@ -927,7 +927,6 @@ test('reminderAgentSystemPrompt: block pipeline + provenance contract (issues #1
     style: '# style',
     roleGuidance: 'You are the Planner.',
     cwd: '/repo',
-    maxSteps: 20,
     modelId: 'anthropic/claude-sonnet-4',
   });
   assert.match(prompt, /# style/, 'carries the style payload');
@@ -936,7 +935,11 @@ test('reminderAgentSystemPrompt: block pipeline + provenance contract (issues #1
   // #105: the always-on behavioral contracts are woven into every main-loop subagent prompt.
   assert.ok(prompt.includes(COMMUNICATION_CONTRACT_TEXT), 'carries the communication contract');
   assert.ok(prompt.includes(AUTONOMY_CONTRACT_TEXT), 'carries the autonomy contract');
-  assert.match(prompt, /budget of 20 tool steps/, 'carries the role step-budget reminder');
+  assert.doesNotMatch(
+    prompt,
+    /budget of/,
+    'no step-budget reminder — agents run until they submit',
+  );
   assert.match(prompt, /anthropic\/claude-sonnet-4/, 'self-identifies the routed model');
 });
 

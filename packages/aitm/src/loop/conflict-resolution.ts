@@ -12,7 +12,12 @@
 import { callWithStepTimeout } from '@developerz.ai/ai-claude-compat';
 import { generateText, type LanguageModel, stepCountIs, type TimeoutConfiguration } from 'ai';
 import type { LoggerLike } from '../logger/logger.ts';
-import { type OnUsage, reportUsage, type SubagentInit } from '../subagents/factory.ts';
+import {
+  AGENT_STEP_BACKSTOP,
+  type OnUsage,
+  reportUsage,
+  type SubagentInit,
+} from '../subagents/factory.ts';
 import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import type { WorkerTools } from '../subagents/worker.ts';
 import type { ConflictResolver } from './ci-fix.ts';
@@ -33,7 +38,7 @@ export type ConflictResolverInit = {
   logger?: LoggerLike;
 };
 
-export const CONFLICT_RESOLVER_MAX_STEPS = 20;
+export const CONFLICT_RESOLVER_MAX_STEPS = AGENT_STEP_BACKSTOP;
 
 export const CONFLICT_RESOLVER_SYSTEM_PREFIX = [
   '',
@@ -77,7 +82,6 @@ export function buildConflictResolver(init: ConflictResolverInit): ConflictResol
               style: init.styleContents,
               roleGuidance: CONFLICT_RESOLVER_SYSTEM_PREFIX,
               cwd: checkoutPath,
-              maxSteps: CONFLICT_RESOLVER_MAX_STEPS,
             }),
             prompt: buildConflictPrompt(checkoutPath, baseBranch, conflictedFiles, attempt),
             stopWhen: stepCountIs(CONFLICT_RESOLVER_MAX_STEPS),

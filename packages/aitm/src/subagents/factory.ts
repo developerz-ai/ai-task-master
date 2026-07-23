@@ -38,6 +38,16 @@ export type OnUsage = (
 // 600s comfortably. Config `llmStepTimeoutMs` overrides it; the schema floor is 1000ms.
 export const DEFAULT_LLM_STEP_TIMEOUT_MS = 900_000;
 
+// Runaway backstop for a subagent's tool loop — NOT a work budget. Every subagent terminates when it
+// calls `submit` (`hasToolCall(SUBMIT_TOOL_NAME)` in createSubagent's stopWhen), so this cap only
+// fires for a pathological agent that never submits. The old per-role caps (12–30) were low enough to
+// cut real work off mid-task before it could submit; autocompaction now bounds CONTEXT, so the step
+// count no longer needs to, and quality comes first — an agent runs until it is actually done. Set far
+// above any real task (a legitimate single-task loop is tens of steps, not hundreds) so it never binds
+// in practice while still stopping an infinite loop from burning tokens without end. The per-step
+// wall-clock deadline (DEFAULT_LLM_STEP_TIMEOUT_MS) is the orthogonal per-step guard and is unaffected.
+export const AGENT_STEP_BACKSTOP = 1000;
+
 export type SubagentInit<TTools extends ToolSet = ToolSet> = {
   model: LanguageModel;
   tools: TTools;

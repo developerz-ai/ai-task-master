@@ -35,7 +35,6 @@ import type { PrGroup } from '../state/schema.ts';
 import type { SubagentInit } from '../subagents/factory.ts';
 import {
   createReviewerAgent,
-  REVIEWER_MAX_STEPS,
   REVIEWER_SYSTEM_PREFIX,
   type ReviewerResult,
   type ReviewerTools,
@@ -45,7 +44,6 @@ import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
   runWorker,
-  WORKER_MAX_STEPS,
   WORKER_SYSTEM_PREFIX,
   type WorkerInput,
   type WorkerResult,
@@ -346,7 +344,6 @@ async function runReviewerThreads(
       style: input.subagents.styleContents,
       roleGuidance: REVIEWER_SYSTEM_PREFIX,
       cwd: input.checkoutPath,
-      maxSteps: REVIEWER_MAX_STEPS,
     }),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
     ...(input.subagents.onReviewerStepFinish
@@ -411,7 +408,6 @@ async function runWorkerCiFix(
       style: input.subagents.styleContents,
       roleGuidance: WORKER_SYSTEM_PREFIX,
       cwd: input.checkoutPath,
-      maxSteps: WORKER_MAX_STEPS,
     }),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
     ...(input.subagents.onWorkerStepFinish

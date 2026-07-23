@@ -9,17 +9,16 @@ import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
 import type { GithubToolInput, GithubToolOutput, ReviewerTools } from '../subagents/reviewer.ts';
-import {
-  type BashInput,
-  type BashOutput,
-  type FileManifest,
-  type ReadFileInput,
-  type ReadFileOutput,
-  WORKER_MAX_STEPS,
-  type WorkerDelivery,
-  type WorkerTools,
-  type WriteFileInput,
-  type WriteFileOutput,
+import type {
+  BashInput,
+  BashOutput,
+  FileManifest,
+  ReadFileInput,
+  ReadFileOutput,
+  WorkerDelivery,
+  WorkerTools,
+  WriteFileInput,
+  WriteFileOutput,
 } from '../subagents/worker.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
@@ -247,7 +246,7 @@ test('resolveMaxSteps: null / 0 / negative fall back to DEFAULT_MAX_STEPS', () =
   assert.equal(resolveMaxSteps(-3), DEFAULT_MAX_STEPS);
 });
 
-test("build: the Worker subagent tool keeps its own fixed step-budget regardless of the orchestrator's maxSteps (decoupled)", async () => {
+test("build: the Worker subagent tool carries no step-budget reminder, whatever the orchestrator's maxSteps", async () => {
   const manifest: FileManifest = {
     files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
     draftCommitMessage: 'feat: x',
@@ -281,8 +280,9 @@ test("build: the Worker subagent tool keeps its own fixed step-budget regardless
     },
   });
   const { provider } = recordingProvider(model);
-  // An orchestrator maxSteps wildly different from WORKER_MAX_STEPS — if the two were coupled, the
-  // Worker's system prompt would report this number instead of its own fixed budget.
+  // An orchestrator maxSteps wildly different from any role cap — the Worker's prompt must carry no
+  // step-budget number at all (agents run until they submit; see AGENT_STEP_BACKSTOP), so neither
+  // the orchestrator's value nor a role cap can leak into it.
   const o = new Orchestrator({
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
@@ -294,8 +294,7 @@ test("build: the Worker subagent tool keeps its own fixed step-budget regardless
   const workerExec = agent.tools.worker.execute;
   if (typeof workerExec !== 'function') throw new Error('no worker execute');
   await workerExec({}, { toolCallId: 'tc', messages: [] });
-  assert.match(sentSystem, new RegExp(`hard budget of ${WORKER_MAX_STEPS} tool steps`));
-  assert.doesNotMatch(sentSystem, /hard budget of 3 tool steps/);
+  assert.doesNotMatch(sentSystem, /hard budget of/, 'no step-budget reminder in the worker prompt');
 });
 
 test('Orchestrator is constructible', () => {
@@ -1514,11 +1513,21 @@ test('repairPrBody: prose before the first heading is folded in, never dropped',
   assert.match(repaired, /An intro the model wrote first\./);
 });
 
-test('repairPrBody: an unrequested section is preserved at the end', () => {
+test('repairPrBody: an unrequested section is folded in, not appended as a duplicate tail', () => {
+  // An unrecognized heading's content is kept — folded into the section before it — rather than
+  // re-emitted as a trailing block. The trailing-block behavior was the doubled-PR-body bug: a model
+  // that mashed content onto every heading line made every section read as "unrecognized", so the
+  // whole body was dumped after the deterministic fill. Content is preserved once, never duplicated.
   const body = ['## Summary', 's', '## Risks', 'this ships behind a flag'].join('\n');
   const repaired = repairPrBody(body, PR_BODY_SECTIONS, baseGroup(), baseDelivery());
   assert.doesNotThrow(() => assertPrBodySections(repaired, PR_BODY_SECTIONS));
-  assert.match(repaired, /## Risks\nthis ships behind a flag/);
+  assert.match(repaired, /this ships behind a flag/, 'the extra content survives');
+  // "Risks" folds into a required section; the body has exactly the required `## `-level headings.
+  const h2 = repaired
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^## \S/.test(l));
+  assert.deepEqual(h2, [...PR_BODY_SECTIONS]);
 });
 
 test('repairPrBody: an empty section gets generated content, never a bare heading', () => {
@@ -1614,4 +1623,31 @@ test('repairPrBody: a fenced ## line stays inside its section, never splits it',
   const fencedIdx = repaired.indexOf('+## Testing');
   assert.ok(changesIdx < fencedIdx && fencedIdx < testingIdx, 'fenced heading stays in Changes');
   assert.match(repaired, /## Testing\nthe real testing note/);
+});
+
+test('repairPrBody: a body with content mashed onto every heading line is not doubled (PR #6 regression)', () => {
+  // Observed on a real run: glm-5.2 ran each section's content onto its heading line
+  // (`## Summary Adds cookie auth`, `## Changes### Domain`). Every heading then read as unrecognized,
+  // and the old repair re-emitted the whole body after the deterministic fill — a doubled PR body
+  // with the generated stub AND the model's prose. The run-on split now recovers the real sections.
+  const body = [
+    '## Summary Adds full cookie-based session authentication with argon2id.',
+    '## Changes### Domain & DB- add User and Session types- add users/sessions tables',
+    '## Testing All changes verified via bun test.',
+    '## Evidence bun test — all unit tests pass.',
+  ].join('\n');
+  const repaired = repairPrBody(body, PR_BODY_SECTIONS, baseGroup(), baseDelivery());
+  assert.doesNotThrow(() => assertPrBodySections(repaired, PR_BODY_SECTIONS));
+  // Each required heading appears exactly once — no duplicate, no generated-stub cruft.
+  for (const heading of PR_BODY_SECTIONS) {
+    const count = repaired.split('\n').filter((l) => l.trim() === heading).length;
+    assert.equal(count, 1, `${heading} appears exactly once, got ${count}`);
+  }
+  assert.doesNotMatch(repaired, /Auto-generated composition/, 'no fallback stub leaked in');
+  assert.match(
+    repaired,
+    /Adds full cookie-based session authentication/,
+    "the model's summary survives",
+  );
+  assert.match(repaired, /add User and Session types/, "the model's changes survive under Changes");
 });

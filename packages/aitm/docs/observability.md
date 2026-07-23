@@ -26,3 +26,12 @@ secret.
 - Reporting never affects the run's exit code: any SDK/init failure degrades silently to a no-op.
 
 Only error events are sent — no performance tracing (`tracesSampleRate: 0`).
+
+## Console progress stream
+
+Live run narration goes to **stderr** (structured status to stdout), so piping stdout stays clean. Each harness line carries a cyan `[aitm HH:MM:SS]` prefix (`step-progress.ts`); subagent lines get their own colored bracket. Color is TTY-gated and honors `NO_COLOR`; the same lines are teed to `.ai-task-master/progress.md` as plain markdown.
+
+Two lines are shaped to stand out or inform:
+
+- **Merged milestone.** A group merging is the event the operator waits for, so its transition renders as a green-bold line led by a ★ — spottable in a wall of cyan stage lines. Everything else stays cyan. Non-TTY/`NO_COLOR` sinks still get the ★, just without ANSI.
+- **CI summary.** When CI settles, one line lists the checks and their marks — `group g1: CI success — bun (test + lint) ✓, CodeRabbit ✓` — printed once, not per poll (the poll loop itself is silent). See `github-integration.md`.

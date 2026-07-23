@@ -21,7 +21,12 @@
 // addressing-reviews loop terminate instead of re-processing a replied-but-unresolved thread.
 
 import { CiFailed } from '../github/errors.ts';
-import { type CiResult, defaultSleep, type Sleep } from '../github/github-client.ts';
+import {
+  type CheckSummary,
+  type CiResult,
+  defaultSleep,
+  type Sleep,
+} from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { GroupStage, PrGroup, RunState } from '../state/schema.ts';
 import { REVIEW_COMMENTS_GRACE } from './constants.ts';
@@ -101,6 +106,9 @@ export type StageDeps = {
   // Threaded from `--admin`. Default false: a timeout blocks rather than merging a PR whose CI never
   // finished. Only affects the timeout path — a real CI failure still routes to the fix loop.
   adminMerge?: boolean;
+  // Harness narration sink (the WorkLoop's progress tee). Optional — without it CI settles silently,
+  // as before. Used for the one-line "CI settled" check summary.
+  progress?: (message: string) => void;
 };
 
 export type StageHandler = (deps: StageDeps, group: PrGroup) => Promise<StageHandlerResult>;
@@ -134,7 +142,12 @@ export const handlePrOpen: StageHandler = async (deps, group) => {
 export const handleWaitingCi: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'waiting-ci');
   try {
-    const { state } = await deps.github.waitForChecks(pr);
+    const result = await deps.github.waitForChecks(pr);
+    const { state } = result;
+    // One line, once, when CI settles — the checks and their final buckets, so the operator sees
+    // WHAT passed/failed without watching GitHub or reading a poll spam.
+    const summary = formatCheckSummary(result.checks);
+    if (summary !== '') deps.progress?.(`group ${group.id}: CI ${state} — ${summary}`);
     if (state !== 'success') return 'ci-failed';
     // Review bots (CodeRabbit) post their comments a little *after* CI completes rather than as a
     // blocking status check. Give them a grace window to land before waiting-reviews reads the
@@ -150,6 +163,20 @@ export const handleWaitingCi: StageHandler = async (deps, group) => {
 // waiting-reviews: not-yet-addressed unresolved threads → address them; none → merge. Subtracting
 // the addressed set (not just checking listUnresolvedThreads) is what terminates the loop: a thread
 // the Reviewer replied to but left unresolved would otherwise route back here forever.
+// A one-line rendering of the settled checks: `bun (test+lint) ✓, integration ✓, CodeRabbit ✗`.
+// '' when there were no checks (nothing worth a line). A ✓ for the pass/skipping buckets, ✗ for
+// fail/cancel, · for anything else gh reports. Exported for unit testing.
+export function formatCheckSummary(checks: CheckSummary[] | undefined): string {
+  if (checks === undefined || checks.length === 0) return '';
+  return checks.map((c) => `${c.name} ${checkMark(c.bucket)}`).join(', ');
+}
+
+function checkMark(bucket: string): string {
+  if (bucket === 'pass' || bucket === 'skipping') return '✓';
+  if (bucket === 'fail' || bucket === 'cancel') return '✗';
+  return '·';
+}
+
 export const handleWaitingReviews: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'waiting-reviews');
   const fresh = await freshThreads(deps, pr);

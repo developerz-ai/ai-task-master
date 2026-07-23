@@ -24,7 +24,12 @@ import {
 import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
-import { appendReminderBlock, prependContextBlock, type SubagentInit } from './factory.ts';
+import {
+  AGENT_STEP_BACKSTOP,
+  appendReminderBlock,
+  prependContextBlock,
+  type SubagentInit,
+} from './factory.ts';
 import { render } from './prompts/templates.ts';
 import type { WorkerTools } from './worker.ts';
 
@@ -107,7 +112,7 @@ export const REVIEWER_SYSTEM_PREFIX = [
 
 // Reviewer step budget — single-sourced so the step-budget reminder (issue #105) and the actual
 // createSubagent cap stay in lockstep.
-export const REVIEWER_MAX_STEPS = 20;
+export const REVIEWER_MAX_STEPS = AGENT_STEP_BACKSTOP;
 
 // Module-private link from agent to its init so runReviewer can drive bash commits with the
 // same tools without exposing them on the public agent surface (worker uses the same pattern).

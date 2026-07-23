@@ -20,7 +20,12 @@ import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../p
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
 import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
-import { appendReminderBlock, prependContextBlock, type SubagentInit } from './factory.ts';
+import {
+  AGENT_STEP_BACKSTOP,
+  appendReminderBlock,
+  prependContextBlock,
+  type SubagentInit,
+} from './factory.ts';
 
 export type PlannerAgent = ToolLoopAgent<never, PlannerTools>;
 
@@ -49,6 +54,10 @@ export type PlannerInput = {
   // Optional trailing `<system-reminder>` (the run's Step N/M position) appended to the END of the
   // first user message, kept out of the cacheable leading prefix (slice 04 §4). Unset → nothing added.
   progressBlock?: string;
+  // Optional pre-planning repo survey gathered in parallel by scouts (planner-scouts.ts). Injected
+  // before the "survey the repo yourself" instruction so the Planner starts from a map and spends its
+  // own steps on structure, not discovery. Empty/absent → the plain single-planner prompt, unchanged.
+  surveyBrief?: string;
 };
 
 export type PlannerResult =
@@ -62,7 +71,7 @@ export { PLANNER_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 
 // Planner step budget — single-sourced so the step-budget reminder (issue #105) and the actual
 // createSubagent cap can never drift apart.
-export const PLANNER_MAX_STEPS = 20;
+export const PLANNER_MAX_STEPS = AGENT_STEP_BACKSTOP;
 
 // Link a Planner agent back to its init so runPlanner can reach the optional onUsage sink (#114)
 // without threading it through PlannerInput — mirrors the worker/reviewer WeakMap pattern.
@@ -127,7 +136,15 @@ function buildUserPrompt(input: PlannerInput): string {
     lines.push(`Acceptance criteria: ${input.criteria}`);
   }
   lines.push(`maxPrs: ${input.maxPrs}`);
-  lines.push('Survey the repo with the read-only tools, then call submit with the Plan.');
+  const brief = input.surveyBrief?.trim();
+  if (brief) {
+    lines.push('', brief, '');
+    lines.push(
+      'Use the survey above as your starting map, then confirm and fill gaps with the read-only tools before you submit the Plan.',
+    );
+  } else {
+    lines.push('Survey the repo with the read-only tools, then call submit with the Plan.');
+  }
   return appendReminderBlock(
     prependContextBlock(input.contextBlock, lines.join('\n')),
     input.progressBlock,

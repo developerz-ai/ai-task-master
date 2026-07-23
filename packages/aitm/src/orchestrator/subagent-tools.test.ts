@@ -7,24 +7,21 @@ import type { Role } from '../credentials/credentials.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
-import { PLANNER_MAX_STEPS } from '../subagents/planner.ts';
 import type {
   GithubToolInput,
   GithubToolOutput,
   ReviewerTools,
   ThreadResolutionOutput,
 } from '../subagents/reviewer.ts';
-import { REVIEWER_MAX_STEPS } from '../subagents/reviewer.ts';
-import {
-  type BashInput,
-  type BashOutput,
-  type FileManifest,
-  type ReadFileInput,
-  type ReadFileOutput,
-  WORKER_MAX_STEPS,
-  type WorkerTools,
-  type WriteFileInput,
-  type WriteFileOutput,
+import type {
+  BashInput,
+  BashOutput,
+  FileManifest,
+  ReadFileInput,
+  ReadFileOutput,
+  WorkerTools,
+  WriteFileInput,
+  WriteFileOutput,
 } from '../subagents/worker.ts';
 import {
   type ModelProvider,
@@ -478,9 +475,9 @@ test('worker tool: forwards timeout so a stalled Worker step surfaces a deadline
 
 // The direct WorkLoop spawn path is asserted in run-loop-adapter.test.ts's reminderAgentSystemPrompt
 // tests; these three prove the orchestrator-as-tool path builds an equivalent prompt for each
-// role — same contract blocks, an <env> block, and the role's own fixed step-budget number, not a
-// value borrowed from another role or the orchestrator's own maxSteps.
-test('planner tool: system prompt carries the harness contract, <env>, and the Planner step-budget (orchestrator-path parity)', async () => {
+// role — same contract blocks and an <env> block. No step-budget reminder: agents run until they
+// submit (see AGENT_STEP_BACKSTOP), so no cap number is interpolated into the prompt.
+test('planner tool: system prompt carries the harness contract, <env>, and no step-budget reminder (orchestrator-path parity)', async () => {
   let sent = '';
   const model = new MockLanguageModelV3({
     doGenerate: async (opts) => {
@@ -501,10 +498,10 @@ test('planner tool: system prompt carries the harness contract, <env>, and the P
   await exec({ goal: 'g', maxPrs: 3 }, { toolCallId: 'tc', messages: [] });
   assert.match(sent, /Harness contract:/);
   assert.match(sent, /<env>/);
-  assert.match(sent, new RegExp(`hard budget of ${PLANNER_MAX_STEPS} tool steps`));
+  assert.doesNotMatch(sent, /hard budget of/, 'no step-budget reminder');
 });
 
-test('worker tool: system prompt carries the harness contract, <env>, and the Worker step-budget (orchestrator-path parity)', async () => {
+test('worker tool: system prompt carries the harness contract, <env>, and no step-budget reminder (orchestrator-path parity)', async () => {
   const manifest: FileManifest = {
     files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
     draftCommitMessage: 'feat: x',
@@ -539,10 +536,10 @@ test('worker tool: system prompt carries the harness contract, <env>, and the Wo
   await exec({}, { toolCallId: 'tc', messages: [] });
   assert.match(sent, /Harness contract:/);
   assert.match(sent, /<env>/);
-  assert.match(sent, new RegExp(`hard budget of ${WORKER_MAX_STEPS} tool steps`));
+  assert.doesNotMatch(sent, /hard budget of/, 'no step-budget reminder');
 });
 
-test('reviewer tool: system prompt carries the harness contract, <env>, and the Reviewer step-budget (orchestrator-path parity)', async () => {
+test('reviewer tool: system prompt carries the harness contract, <env>, and no step-budget reminder (orchestrator-path parity)', async () => {
   let sent = '';
   const model = new MockLanguageModelV3({
     doGenerate: async (opts) => {
@@ -566,7 +563,7 @@ test('reviewer tool: system prompt carries the harness contract, <env>, and the 
   await exec({}, { toolCallId: 'tc', messages: [] });
   assert.match(sent, /Harness contract:/);
   assert.match(sent, /<env>/);
-  assert.match(sent, new RegExp(`hard budget of ${REVIEWER_MAX_STEPS} tool steps`));
+  assert.doesNotMatch(sent, /hard budget of/, 'no step-budget reminder');
 });
 
 test('worker tool: omits the format step when formatCommand is unset (no config leaks in)', async () => {

@@ -33,7 +33,6 @@ import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
   runWorker,
-  WORKER_MAX_STEPS,
   type WorkerInput,
   type WorkerResult,
   type WorkerTools,
@@ -219,7 +218,6 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
       style: subagents.styleContents,
       roleGuidance: SELF_REVIEW_SYSTEM_PREFIX,
       cwd: checkoutPath,
-      maxSteps: WORKER_MAX_STEPS,
       modelId: subagents.credentials.modelIdForCapability('coding'),
       ...(subagents.memoryIndex ? { memoryIndex: subagents.memoryIndex } : {}),
     }),

@@ -21,8 +21,6 @@ export type RolePromptInput = {
   roleGuidance: string;
   // Checkout cwd for the <env> block.
   cwd: string;
-  // The role's effective step budget, surfaced as the step-budget reminder so exhaustion isn't silent.
-  maxSteps: number;
   // Resolved model id for the self-identification block. Omitted → no selfId block (e.g. the editor,
   // which holds only a model handle, not a resolved id).
   modelId?: string;
@@ -33,13 +31,12 @@ export type RolePromptInput = {
 };
 
 // Compute the impure `<env>` block from the checkout cwd, then hand every slot to the role-prompt
-// template. The template owns canonical order, the always-on contract blocks, and the step-budget
-// reminder — this function only supplies values.
+// template. The template owns canonical order and the always-on contract blocks — this function only
+// supplies values.
 export function buildRolePrompt(input: RolePromptInput): string {
   const env = envBlock({ cwd: input.cwd, isGitRepo: detectGitRepo(input.cwd) });
   return render('role-prompt', {
     roleGuidance: input.roleGuidance,
-    maxSteps: input.maxSteps,
     style: input.style,
     env,
     ...(input.modelId !== undefined ? { modelId: input.modelId } : {}),
@@ -55,8 +52,6 @@ export type EditorRolePromptInput = {
   roleGuidance: string;
   // Checkout cwd for the <env> block.
   cwd: string;
-  // The editor's step budget (EDITOR_MAX_STEPS).
-  maxSteps: number;
   // Optional shared team brief (task + full manifest + rolling context) injected when the fanout splits
   // across multiple leaves. Empty/absent → no brief, so a lone editor's prompt stays byte-identical.
   teamBrief?: string;
@@ -71,7 +66,6 @@ export function buildEditorRolePrompt(input: EditorRolePromptInput): string {
   const env = envBlock({ cwd: input.cwd, isGitRepo: detectGitRepo(input.cwd) });
   return render('editor-prompt', {
     roleGuidance: input.roleGuidance,
-    maxSteps: input.maxSteps,
     style: input.style,
     env,
     ...(input.teamBrief ? { teamBrief: input.teamBrief } : {}),

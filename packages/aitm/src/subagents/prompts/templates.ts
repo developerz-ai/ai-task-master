@@ -16,7 +16,6 @@ import {
   type PromptBlock,
   renderPromptBlocks,
   selfIdBlock,
-  stepBudgetLine,
   toolResultTrustBlock,
 } from '@developerz.ai/ai-claude-compat';
 import { data, instruction, renderSlot } from './slots.ts';
@@ -56,16 +55,15 @@ function specialistGuidance(slots: SpecialistGuidanceSlots): string {
   ].join('\n');
 }
 
-// Role system-prompt frame: the always-on contract blocks + self-id + the role's own guidance (with its
-// step-budget reminder) + style + `<env>` + memory, rendered in the #105 canonical block order. Every
-// built-in role (planner / worker / editor / reviewer, and the take-over/ci-fix/conflict flows) renders
-// through this one template behind buildRolePrompt — the contract blocks and step-budget are the
-// template's job, so no call path can drop them. The role's prose is a slot, not a per-role template.
+// Role system-prompt frame: the always-on contract blocks + self-id + the role's own guidance + style +
+// `<env>` + memory, rendered in the #105 canonical block order. Every built-in role (planner / worker /
+// editor / reviewer, and the take-over/ci-fix/conflict flows) renders through this one template behind
+// buildRolePrompt — the contract blocks are the template's job, so no call path can drop them. The
+// role's prose is a slot, not a per-role template. No step-budget reminder: an agent runs until it
+// submits (see AGENT_STEP_BACKSTOP), so telling it to ration steps only rushed it against quality.
 export type RolePromptSlots = {
   // The role's own session guidance — a `*_SYSTEM_PREFIX` prose const. Trusted, verbatim.
   readonly roleGuidance: string;
-  // The role's effective step budget; interpolated into the baked-in step-budget reminder.
-  readonly maxSteps: number;
   // Coding-style digest (StyleDistiller output, which leads with the repo's own CLAUDE.md verbatim).
   // Trusted, verbatim: aitm runs against a repo the operator chose, and that repo's style guide is
   // authoritative for the code written in it. Empty → the style block is omitted.
@@ -88,7 +86,7 @@ function rolePrompt(slots: RolePromptSlots): string {
     ...(slots.modelId ? [selfIdBlock(slots.modelId, slots.knowledgeCutoff)] : []),
     {
       kind: 'sessionGuidance',
-      text: `${slots.roleGuidance}\n\n${stepBudgetLine(slots.maxSteps)}`,
+      text: slots.roleGuidance,
     },
     { kind: 'style', text: slots.style },
     { kind: 'env', text: slots.env },
@@ -111,8 +109,6 @@ function rolePrompt(slots: RolePromptSlots): string {
 export type EditorPromptSlots = {
   // EDITOR_SYSTEM_PREFIX. Trusted, verbatim.
   readonly roleGuidance: string;
-  // The editor's step budget; interpolated into the baked-in step-budget reminder.
-  readonly maxSteps: number;
   // Coding-style digest, already capped by the caller. Trusted, verbatim. Empty → the style block is
   // omitted.
   readonly style: string;
@@ -124,7 +120,7 @@ export type EditorPromptSlots = {
 };
 
 function editorPrompt(slots: EditorPromptSlots): string {
-  const guidance = `${slots.roleGuidance}\n\n${stepBudgetLine(slots.maxSteps)}`;
+  const guidance = slots.roleGuidance;
   return renderPromptBlocks([
     toolResultTrustBlock(),
     {

@@ -19,9 +19,14 @@ const REASONING_MAX = 200;
 const CYAN_BOLD = '\x1b[36m\x1b[1m';
 const ORANGE_BOLD = '\x1b[38;5;208m\x1b[1m';
 const BLUE_BOLD = '\x1b[34m\x1b[1m';
+const GREEN_BOLD = '\x1b[32m\x1b[1m';
 const MAGENTA = '\x1b[35m';
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
+
+// Prepended to a milestone line (a group merging) so the one event the operator is waiting for is
+// scannable in a wall of cyan stage lines. A star, per request; single-width so it never misaligns.
+const MILESTONE_STAR = '★';
 
 // Structural slice of the SDK's StepResult that progress rendering needs. Kept structural so the
 // same handler satisfies both ToolLoopAgent's `onStepFinish` and generateText's.
@@ -387,13 +392,23 @@ export function createLiveStreamRenderer(
 // One cyan orchestrator line: what the harness is doing to drive/keep the agents in check
 // (stage starts, PR numbers, fix passes, retries). The optional RunStep stamps the phase + N/M
 // step into the bracket so every harness line names the state and position the run is on.
+// `milestone` marks a success worth spotting at a glance (a group merged): the [aitm] prefix goes
+// green, a ★ leads the line, and the message itself is green too. Everything else stays the cyan
+// default. Non-TTY sinks (files, NO_COLOR) still get the ★ but no ANSI.
 export function harnessProgress(
   message: string,
   step?: RunStep,
   sink: ProgressSink = defaultSink(),
+  opts?: { milestone?: boolean },
 ): void {
   try {
     const tag = step ? formatStepTag(step) : '';
+    if (opts?.milestone) {
+      const body = clip(`${MILESTONE_STAR} ${message}`);
+      const text = sink.color ? `${GREEN_BOLD}${body}${RESET}` : body;
+      sink.write(`${prefix('aitm', sink, GREEN_BOLD, tag)} ${text}\n`);
+      return;
+    }
     sink.write(`${prefix('aitm', sink, CYAN_BOLD, tag)} ${clip(message)}\n`);
   } catch {
     // observability must never break the run

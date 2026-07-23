@@ -108,7 +108,16 @@ export const CHECKS_EMPTY_GRACE_MS = 60_000;
 // getFailedCiLogs(pr) rather than relying on these names.
 export type CiState = 'success' | 'failure' | 'pending';
 export type FailedCheck = { name: string; status: 'failure' | 'cancelled' };
-export type CiResult = { state: CiState; failedChecks: FailedCheck[] };
+// One settled check: its name and gh's bucket ('pass' | 'fail' | 'skipping' | 'cancel' | …). Carried
+// so the caller can print ONE summary line of what CI showed when it settled, without re-querying.
+export type CheckSummary = { name: string; bucket: string };
+export type CiResult = {
+  state: CiState;
+  failedChecks: FailedCheck[];
+  // The final check rows at settle time, for a one-time summary. Optional so existing stubs/callers
+  // that only branch on `state`/`failedChecks` stay valid.
+  checks?: CheckSummary[];
+};
 
 export class GitHubClient {
   // Capability matrix — docs/github-integration.md §"Capabilities".
@@ -245,13 +254,18 @@ export class GitHubClient {
       }
       const status = aggregateChecks(rows);
       if (status === 'failure' || status === 'cancelled') {
-        return { state: 'failure', failedChecks: collectFailedChecks(rows) };
+        return {
+          state: 'failure',
+          failedChecks: collectFailedChecks(rows),
+          checks: summarize(rows),
+        };
       }
-      if (status !== 'pending') return { state: 'success', failedChecks: [] };
+      if (status !== 'pending')
+        return { state: 'success', failedChecks: [], checks: summarize(rows) };
       // An empty check set aggregates to pending: CI still hasn't registered. Once it has stayed
       // empty past the grace, the PR genuinely has no checks configured and is mergeable.
       if (rows.length === 0 && emptyWaited >= CHECKS_EMPTY_GRACE_MS) {
-        return { state: 'success', failedChecks: [] };
+        return { state: 'success', failedChecks: [], checks: [] };
       }
       if (waited >= CHECKS_TIMEOUT_MS) {
         throw new CiFailed(`PR #${pr} checks still pending after ${Math.round(waited / 1000)}s`);
@@ -547,11 +561,38 @@ export class GitHubClient {
       cwd: this.cwd,
     });
     if (r.exitCode === 0) return;
+    // Idempotent: merging an already-merged PR is not a failure — the desired end state is already
+    // true. This happens on a resume that re-drives the merge stage after a crash between mergePr
+    // succeeding on GitHub and state.json persisting 'merged'. Confirm against the PR's REAL state
+    // rather than gh's message wording, which "already merged" phrases differently across versions
+    // (and which can read as "not mergeable", the same words a genuine conflict uses). Checked before
+    // the conflict branch so an already-merged PR is never misreported as a conflict.
+    if (await this.isMerged(pr)) return;
     const combined = `${r.stderr}\n${r.stdout}`;
     if (/merge conflict|not mergeable|conflict/i.test(combined)) {
       throw new MergeConflict(`Merge conflict on PR #${pr}: ${r.stderr.trim() || r.stdout.trim()}`);
     }
     throw new Error(`gh pr merge failed: ${r.stderr.trim() || r.stdout.trim()}`);
+  }
+
+  // Whether the PR is already in the terminal MERGED state. Best-effort: a failed/unparseable state
+  // query returns false, so a real merge failure still surfaces rather than being swallowed.
+  private async isMerged(pr: number): Promise<boolean> {
+    const r = await this.runCmd('gh', ['pr', 'view', String(pr), '--json', 'state'], {
+      cwd: this.cwd,
+    });
+    if (r.exitCode !== 0) return false;
+    try {
+      const parsed: unknown = JSON.parse(r.stdout);
+      return (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        'state' in parsed &&
+        (parsed as { state: unknown }).state === 'MERGED'
+      );
+    } catch {
+      return false;
+    }
   }
 
   async authStatus(): Promise<{ ok: boolean; scopes: string[] }> {
@@ -696,6 +737,19 @@ function aggregateChecks(rows: CheckRow[]): CheckStatus {
     if (status === 'pending') pending = true;
   }
   return pending ? 'pending' : 'success';
+}
+
+// The settled rows as {name, bucket} for a one-line CI summary. Dedupes by name (gh can list a matrix
+// job's shards separately) keeping the first, so the summary reads one line per named check.
+function summarize(rows: CheckRow[]): CheckSummary[] {
+  const seen = new Set<string>();
+  const out: CheckSummary[] = [];
+  for (const row of rows) {
+    if (seen.has(row.name)) continue;
+    seen.add(row.name);
+    out.push({ name: row.name, bucket: row.bucket });
+  }
+  return out;
 }
 
 function collectFailedChecks(rows: CheckRow[]): FailedCheck[] {

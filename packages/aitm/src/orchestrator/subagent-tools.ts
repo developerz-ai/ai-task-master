@@ -21,7 +21,6 @@ import type { PrGroup } from '../state/schema.ts';
 import type { OnUsage, SubagentInit } from '../subagents/factory.ts';
 import {
   createPlannerAgent,
-  PLANNER_MAX_STEPS,
   PLANNER_SYSTEM_PREFIX,
   type PlannerResult,
   type PlannerTools,
@@ -29,7 +28,6 @@ import {
 } from '../subagents/planner.ts';
 import {
   createReviewerAgent,
-  REVIEWER_MAX_STEPS,
   REVIEWER_SYSTEM_PREFIX,
   type ReviewerResult,
   type ReviewerTools,
@@ -39,7 +37,6 @@ import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
   runWorker,
-  WORKER_MAX_STEPS,
   WORKER_SYSTEM_PREFIX,
   type WorkerResult,
   type WorkerTools,
@@ -115,7 +112,6 @@ export function makePlannerTool(deps: PlannerToolDeps): Tool<PlannerToolInput, P
           style: deps.styleContents,
           roleGuidance: PLANNER_SYSTEM_PREFIX,
           cwd: deps.checkoutPath,
-          maxSteps: PLANNER_MAX_STEPS,
         }),
       });
       return runPlanner(agent, {
@@ -142,7 +138,6 @@ export function makeWorkerTool(deps: WorkerToolDeps): Tool<EmptyInput, WorkerRes
           style: deps.styleContents,
           roleGuidance: WORKER_SYSTEM_PREFIX,
           cwd: deps.checkoutPath,
-          maxSteps: WORKER_MAX_STEPS,
         }),
         // Same optional Worker config the direct run-loop path forwards — conditionally spread so an
         // unset dep never overrides a factory default under exactOptionalPropertyTypes.
@@ -177,7 +172,6 @@ export function makeReviewerTool(deps: ReviewerToolDeps): Tool<EmptyInput, Revie
           style: deps.styleContents,
           roleGuidance: REVIEWER_SYSTEM_PREFIX,
           cwd: deps.checkoutPath,
-          maxSteps: REVIEWER_MAX_STEPS,
         }),
       });
       return runReviewer(agent, {

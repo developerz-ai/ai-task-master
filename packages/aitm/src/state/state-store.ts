@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { ZodError } from 'zod';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { type PlanMarkdownGroup, renderPlanMarkdown } from '../plan/plan-markdown.ts';
+import { acquireRunLock, RUN_LOCK_FILE, type RunLockHandle } from './run-lock.ts';
 import { type GroupStage, type RunState, RunStateSchema, type Task } from './schema.ts';
 import { TranscriptStore } from './transcript-store.ts';
 
@@ -39,6 +40,13 @@ export class StateStore {
   private cached: RunState | null = null;
 
   constructor(private readonly stateDir: string) {}
+
+  // Exclusive hold on this state dir for the lifetime of a run (see run-lock.ts). Taken at run
+  // entry and released in a finally, so a second `aitm` over the same dir fails fast instead of
+  // racing this store's write-behind cache.
+  async acquireRunLock(): Promise<RunLockHandle> {
+    return acquireRunLock(this.stateDir);
+  }
 
   async init(initial: RunState): Promise<void> {
     const validated = RunStateSchema.parse(initial);
@@ -150,7 +158,9 @@ export class StateStore {
       throw err;
     }
     for (const entry of entries) {
-      if (entry === LOGS_DIR || entry === MEMORY_DIR) continue;
+      // run.lock is not this run's output but its claim on the dir — the holder releases it, and
+      // deleting it here would let a peer start on top of a run that is still finishing.
+      if (entry === LOGS_DIR || entry === MEMORY_DIR || entry === RUN_LOCK_FILE) continue;
       await rm(this.path(entry), { recursive: true, force: true });
     }
   }

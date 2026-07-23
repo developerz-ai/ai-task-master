@@ -4,12 +4,12 @@ status: in_progress        # not_started | in_progress | blocked | complete | su
 created_by: sebi
 worked_by: "sebi"          # executor fills with their git user.name on pickup
 owner: sebi
-percent: 2
-current_focus: "01-data-safety-state — step 1 (dirty-tree run-entry guard) landed"
+percent: 4
+current_focus: "01-data-safety-state — steps 1-2 (dirty-tree guard, run lock) landed"
 slices:
   - file: 01-data-safety-state.md
     status: in_progress
-    percent: 12
+    percent: 25
   - file: 02-config-trust-secrets.md
     status: not_started
     percent: 0
@@ -41,5 +41,5 @@ slices:
     status: not_started
     percent: 0
 evidence: []
-notes: "Decision #1 (oauth inbound-HTTP carve-out, slice 04): RFC 8252 loopback-only exception approved — allow http://127.0.0.1:PORT and http://[::1]:PORT for MCP OAuth redirects; remote inbound HTTP servers remain banned. Decision #2 (orchestrator agent-as-tool path, slice 07): DELETE — Orchestrator.build + subagent-tools.ts (~400 LOC) have zero production callers and have drifted; production uses WorkLoopOrchestrator port with direct finalizeCommit/openPr methods instead. Subagent-tools only used in tests. Decision #3 (templates, slice 04): DELETE HTML files, KEEP inline getDefaultHtml — src/templates/*.html are dead assets (never copied to dist because tsconfig.build.json only includes src/**/*.ts); inline fallback already correct. Decision #4 (dirty-tree guard, slice 01 step 1): REFUSE at run entry, opt out with `--allow-dirty` (CLI-only, never a config-file key) which restores the old discard-and-clean behaviour; no auto-stash — the refusal message points at `git stash -u` instead, so aitm never owns a stash the operator did not ask for. The refusal is typed (DirtyWorkingTree) and aborts the whole run rather than blocking each group. Raw audit reports in findings/."
+notes: "Decision #1 (oauth inbound-HTTP carve-out, slice 04): RFC 8252 loopback-only exception approved — allow http://127.0.0.1:PORT and http://[::1]:PORT for MCP OAuth redirects; remote inbound HTTP servers remain banned. Decision #2 (orchestrator agent-as-tool path, slice 07): DELETE — Orchestrator.build + subagent-tools.ts (~400 LOC) have zero production callers and have drifted; production uses WorkLoopOrchestrator port with direct finalizeCommit/openPr methods instead. Subagent-tools only used in tests. Decision #3 (templates, slice 04): DELETE HTML files, KEEP inline getDefaultHtml — src/templates/*.html are dead assets (never copied to dist because tsconfig.build.json only includes src/**/*.ts); inline fallback already correct. Decision #4 (dirty-tree guard, slice 01 step 1): REFUSE at run entry, opt out with `--allow-dirty` (CLI-only, never a config-file key) which restores the old discard-and-clean behaviour; no auto-stash — the refusal message points at `git stash -u` instead, so aitm never owns a stash the operator did not ask for. The refusal is typed (DirtyWorkingTree) and aborts the whole run rather than blocking each group. Decision #5 (run lock, slice 01 step 2): exclusive .ai-task-master/run.lock via open(wx) carrying {pid, host, startedAt, token}; acquired at run entry in runStart (covers resume) and runMergePr, released in try/finally. Stale locks are reclaimed automatically only when the recorded host is this machine AND kill(pid, 0) reports ESRCH — a holder on another host, or one that answers EPERM, is never stolen; no heartbeat (a crash-proof lock nobody can clear is worse than the race). release() only unlinks its own token, and cleanupOnSuccess() exempts run.lock so the holder alone drops it. Raw audit reports in findings/."
 last_updated: 2026-07-23

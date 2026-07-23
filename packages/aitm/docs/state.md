@@ -13,6 +13,7 @@ All run state lives in `.ai-task-master/` at the target repo root (mirrors the o
   progress.md
   context.md
   config.snapshot.json
+  run.lock
   logs/
     run-{timestamp}.log
   memory/
@@ -34,6 +35,7 @@ All run state lives in `.ai-task-master/` at the target repo root (mirrors the o
 | `progress.md` | `Worker` | Per-task notes, what changed and why. |
 | `context.md` | run-loop adapter | Rolling per-group digest fed back into later Workers' prompts (issue #123). After each PR opens, one deterministic block is appended — `PR #N — <title> (group <id>, branch <branch>)` then the group's change lines and progress entries. FIFO-capped at 8 KB: oldest whole blocks drop first, a block is never split (multi-line summary/progress text is flattened so a block can never contain the blank-line block separator). Appends are serialized, so the concurrent group batch (WorkLoop's `Promise.all`) cannot lose a digest to a read-modify-write race. Persisted failure-tolerantly (a write error is warned, never fails the PR-open path). |
 | `config.snapshot.json` | `ConfigLoader` | Frozen `ResolvedConfig` for this run, so resume reproduces exact behavior. |
+| `run.lock` | `StateStore` (via `run-lock.ts`) | Exclusive claim on this state dir, created with `wx` at run entry (`aitm start`/`resume`/`merge-pr`) and released when the command returns. A second invocation here refuses with the holder's pid instead of racing `state.json`. A lock left by a killed run is taken over automatically when its pid is gone **and** it was recorded on this host; a lock from another host is never stolen — delete it by hand. Survives `cleanupOnSuccess()` (the holder releases it), not `aitm clean`. |
 | `logs/run-{timestamp}.log` | `Logger` | Per-run structured log. |
 | `memory/` | `Worker` (via the `memory` tool), `Planner` (reads) | Durable per-repo memory (issue #118): one-fact-per-file markdown memories + a `MEMORY.md` index (one line each). Survives `cleanupOnSuccess()` alongside `logs/`, so cross-run knowledge (flaky checks, real verify commands, build quirks) persists. The index is injected into Planner + Worker prompts as an advisory, point-in-time block; the path is handed out by `StateStore.memoryDir()`, and nothing is scaffolded until the first write. Git-excluded (per-clone, never committed). |
 | `downloads/` | `GitHubClient`, `Worker` | Files pulled from outside the repo — CI log archives, review-comment JSON, any fixtures Worker fetches. Never committed. |

@@ -3,6 +3,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { makeTempRepo } from '../testing/temp-repo.ts';
+import { RunLockHeld } from './run-lock.ts';
 import { type RunState, RunStateSchema } from './schema.ts';
 import { StateStore } from './state-store.ts';
 
@@ -562,6 +563,40 @@ test('deleteAll on a missing state dir returns false and touches nothing', async
   try {
     const store = new StateStore(join(repo.path, '.ai-task-master'));
     assert.equal(await store.deleteAll(), false);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('acquireRunLock: a second store over one dir fails fast while the first holds it', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const held = await new StateStore(dir).acquireRunLock();
+    await assert.rejects(() => new StateStore(dir).acquireRunLock(), RunLockHeld);
+    await held.release();
+    // Released: the peer that was refused can now take the dir.
+    const next = await new StateStore(dir).acquireRunLock();
+    await next.release();
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('cleanupOnSuccess keeps run.lock — the holding run releases it, not cleanup', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    const lock = await store.acquireRunLock();
+    await store.init(baseState());
+    await store.writeContext('ctx');
+
+    await store.cleanupOnSuccess();
+
+    assert.deepEqual((await readdir(dir)).sort(), ['logs', 'run.lock']);
+    await lock.release();
+    assert.deepEqual((await readdir(dir)).sort(), ['logs']);
   } finally {
     await repo.cleanup();
   }

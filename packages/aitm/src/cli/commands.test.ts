@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { acquireRunLock } from '../state/run-lock.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type {
@@ -145,6 +146,64 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
       await readFile(join(repo.path, '.ai-task-master', 'config.snapshot.json'), 'utf8'),
     ) as { openrouterApiKey: string };
     assert.match(snapshot.openrouterApiKey, /<from env>/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: releases the run lock when the run ends', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const result = await runStart(
+      { kind: 'start', goal: 'add jwt auth' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    await assert.rejects(
+      () => readFile(join(repo.path, '.ai-task-master', 'run.lock'), 'utf8'),
+      /ENOENT/,
+      'lock released so the next run can start',
+    );
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: another run holds the state dir → exit 1, loop never runs', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await acquireRunLock(join(repo.path, '.ai-task-master'));
+    let loopCalls = 0;
+    const result = await runStart(
+      { kind: 'start', goal: 'add jwt auth' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async () => {
+          loopCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /another aitm run holds/);
+    assert.equal(loopCalls, 0, 'no work started against a locked state dir');
+    // The refusal must leave the holder's lock alone.
+    assert.ok(await readFile(join(repo.path, '.ai-task-master', 'run.lock'), 'utf8'));
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -955,6 +1014,36 @@ test('runMergePr: happy path with --pr override', async () => {
     assert.equal(captured?.pr, 99);
     assert.equal(captured?.resume, true);
     assert.equal(captured?.styleDigest, STUB_DIGEST, 'resolved digest threaded to merge flow');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: another run holds the state dir → exit 1, flow never runs', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    await acquireRunLock(join(repo.path, '.ai-task-master'));
+    let flowCalls = 0;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 99 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async () => {
+          flowCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /another aitm run holds/);
+    assert.equal(flowCalls, 0, 'no merge flow against a locked state dir');
   } finally {
     await repo.cleanup();
     await home.cleanup();

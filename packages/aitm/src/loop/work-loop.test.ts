@@ -12,6 +12,7 @@ import type { SelfReviewResult } from './self-review.ts';
 import type { StageWorkResult } from './stage-handlers.ts';
 import {
   alreadyCommittedDelivery,
+  type BudgetStatus,
   type CheckoutHome,
   ciFixFailedError,
   describeError,
@@ -435,18 +436,30 @@ test('run: a crossed cost/token ceiling stops before the next group and blocks w
 test('run: an abort during the pending budget lookup reports cancelled, not blocked (issue #190)', async () => {
   const controller = new AbortController();
   const ready = makeGraph([twoTaskGroup()], { completeAfter: 1 });
+  // Model the real ordering: budget() is genuinely in flight (pending) when the SIGINT lands.
+  let lookupStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    lookupStarted = resolve;
+  });
+  let releaseBudget!: (status: BudgetStatus) => void;
+  const pending = new Promise<BudgetStatus>((resolve) => {
+    releaseBudget = resolve;
+  });
   const loop = new WorkLoop(
     makeDeps({
       graph: ready.graph,
       signal: controller.signal,
-      budget: async () => {
-        // SIGINT arrives while the ledger lookup is in flight.
-        controller.abort();
-        return { exceeded: true, reason: 'ceiling reached' };
+      budget: () => {
+        lookupStarted();
+        return pending;
       },
     }),
   );
-  const result = await loop.run();
+  const runResult = loop.run();
+  await started; // the ledger lookup is now in flight
+  controller.abort(); // SIGINT arrives while it is still pending
+  releaseBudget({ exceeded: true, reason: 'ceiling reached' });
+  const result = await runResult;
   // Cancellation (exit 2) wins over the budget block (exit 1); nothing is dispatched.
   assert.equal(result.kind, 'cancelled');
   assert.equal(ready.readyCalls, 0, 'no group was dispatched');

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -101,6 +102,66 @@ test('run-lock: holder pid gone on this host → lock taken over', async () => {
     const handle = await acquireRunLock(tmp.path, { ...DEAD, token: 'fresh' });
     assert.equal((await readLock(tmp.path)).token, 'fresh');
     await handle.release();
+  } finally {
+    await tmp.cleanup();
+  }
+});
+
+test('run-lock: two runs declaring the same holder dead → exactly one takes over', async () => {
+  const tmp = await tempDir();
+  try {
+    await acquireRunLock(tmp.path, { pid: 4242, token: 'crashed' });
+    const settled = await Promise.allSettled([
+      acquireRunLock(tmp.path, { ...DEAD, token: 'a' }),
+      acquireRunLock(tmp.path, { ...DEAD, token: 'b' }),
+    ]);
+
+    const won = settled.filter((r) => r.status === 'fulfilled');
+    assert.equal(won.length, 1, `expected one winner, got ${won.length}`);
+    for (const r of settled) {
+      if (r.status === 'rejected') assert.ok(r.reason instanceof RunLockHeld);
+    }
+    // release() only unlinks its own token, so a lock that disappears is proof the file on disk
+    // belongs to the winner rather than to a loser that clobbered it.
+    await won[0].value.release();
+    await assert.rejects(() => readLock(tmp.path), /ENOENT/);
+  } finally {
+    await tmp.cleanup();
+  }
+});
+
+test('run-lock: debris replaced after we judged it dead → refused, and the new lock survives', async () => {
+  const tmp = await tempDir();
+  try {
+    await acquireRunLock(tmp.path, { pid: 4242, token: 'crashed' });
+    const peer: RunLockHolder = {
+      pid: process.pid,
+      host: hostname(),
+      startedAt: '2026-07-23T00:00:00.000Z',
+      token: 'peer',
+    };
+    // The liveness probe is the last thing to run before we act on our verdict — a peer that
+    // reclaims the dir in that window must not have its lock deleted out from under it.
+    const raced = {
+      isProcessAlive: (): boolean => {
+        writeFileSync(runLockPath(tmp.path), `${JSON.stringify(peer)}\n`);
+        return false;
+      },
+    };
+
+    await assert.rejects(() => acquireRunLock(tmp.path, { ...raced, token: 'late' }), RunLockHeld);
+    assert.equal((await readLock(tmp.path)).token, 'peer');
+  } finally {
+    await tmp.cleanup();
+  }
+});
+
+test('run-lock: takeover leaves no reclaim bookkeeping behind', async () => {
+  const tmp = await tempDir();
+  try {
+    await acquireRunLock(tmp.path, { pid: 4242, token: 'crashed' });
+    await acquireRunLock(tmp.path, { ...DEAD, token: 'fresh' });
+    assert.deepEqual(await readdir(tmp.path), ['run.lock']);
   } finally {
     await tmp.cleanup();
   }

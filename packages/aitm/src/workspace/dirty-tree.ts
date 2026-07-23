@@ -12,11 +12,15 @@
 // work: neither dirt to refuse over nor junk to delete.
 export const STATE_DIR = '.ai-task-master';
 
-// Porcelain v1 rows (`XY PATH`) for work aitm did not put there.
+// Porcelain v1 rows (`XY PATH`) for work aitm did not put there. The state-dir test is on a path
+// boundary, not a prefix: `.ai-task-master-backup/` is a user's directory that happens to share a
+// name stem, and excusing it would silently disarm the guard for the repo that needs it most.
 export function dirtyEntries(porcelain: string): string[] {
-  return porcelain
-    .split('\n')
-    .filter((line) => line.trim() !== '' && !line.slice(3).startsWith(STATE_DIR));
+  return porcelain.split('\n').filter((line) => {
+    if (line.trim() === '') return false;
+    const path = line.slice(3);
+    return path !== STATE_DIR && !path.startsWith(`${STATE_DIR}/`);
+  });
 }
 
 // Enough rows to recognize the work, few enough to stay readable when a whole build output is

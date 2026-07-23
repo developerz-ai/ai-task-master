@@ -21,6 +21,17 @@ test('dirty-tree: state-dir-only tree → clean, so a run may start', () => {
   assert.deepEqual(dirtyEntries('?? .ai-task-master/\n'), []);
 });
 
+test('dirty-tree: paths that merely share the state dir name stem → still dirt', () => {
+  // Prefix-matching these away would disarm the guard for the one repo that keeps a backup of it.
+  const porcelain =
+    '?? .ai-task-master-backup/\n?? .ai-task-master.bak\n M .ai-task-masterx/a.ts\n';
+  assert.deepEqual(dirtyEntries(porcelain), [
+    '?? .ai-task-master-backup/',
+    '?? .ai-task-master.bak',
+    ' M .ai-task-masterx/a.ts',
+  ]);
+});
+
 test('dirty-tree: DirtyWorkingTree message → names the repo, lists entries, offers every way out', () => {
   const err = new DirtyWorkingTree('/repo', [' M src/a.ts', '?? scratch.txt']);
 

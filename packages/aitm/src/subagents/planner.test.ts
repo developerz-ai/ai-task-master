@@ -263,6 +263,66 @@ test('runPlanner: prepends the contextBlock to the first user message, ahead of 
   );
 });
 
+test('runPlanner: injects the survey brief as a starting map, ahead of "confirm and fill gaps"', async () => {
+  let sent = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      sent = JSON.stringify(opts.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-brief',
+            toolName: 'submit',
+            input: JSON.stringify(basicPlan(1)),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const result = await runPlanner(agent, {
+    goal: 'ship it',
+    styleContents: '',
+    maxPrs: 5,
+    surveyBrief: 'Repo survey (gathered in parallel)\n## architecture\nMONOREPO-FACT',
+  });
+  assert.equal(result.kind, 'ok');
+  assert.match(sent, /MONOREPO-FACT/, 'the scout brief reached the planner prompt');
+  assert.match(sent, /starting map/, 'the brief is framed as a starting map');
+  // Without a brief the plain "survey the repo yourself" instruction is used instead.
+  let plain = '';
+  const model2 = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      plain = JSON.stringify(opts.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 's',
+            toolName: 'submit',
+            input: JSON.stringify(basicPlan(1)),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const agent2 = createPlannerAgent({
+    model: model2,
+    tools: {},
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
+  await runPlanner(agent2, { goal: 'ship it', styleContents: '', maxPrs: 5 });
+  assert.match(plain, /Survey the repo with the read-only tools/);
+  assert.doesNotMatch(plain, /starting map/);
+});
+
 test('runPlanner: appends the progressBlock to the END of the first user message, after the task text (slice 04 §4)', async () => {
   let sent = '';
   const model = new MockLanguageModelV3({

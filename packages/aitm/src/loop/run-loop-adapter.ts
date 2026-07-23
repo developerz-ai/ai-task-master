@@ -92,6 +92,7 @@ import type {
   TranscriptTarget,
 } from '../state/transcript-store.ts';
 import { buildExploreTool } from '../subagents/explore.ts';
+import type { OnUsage } from '../subagents/factory.ts';
 import { buildMemoryTool, type MemoryToolInput } from '../subagents/memory-tool.ts';
 import {
   createPlannerAgent,
@@ -101,6 +102,14 @@ import {
   type PlannerTools,
   runPlanner,
 } from '../subagents/planner.ts';
+import {
+  createScoutRunner,
+  SCOUT_LENSES,
+  SCOUT_SYSTEM_PREFIX,
+  shouldSurveyInParallel,
+  surveyRepoInParallel,
+  synthesizeSurveyBrief,
+} from '../subagents/planner-scouts.ts';
 import {
   createReviewerAgent,
   type GithubToolInput,
@@ -829,6 +838,19 @@ export async function remoteBranchNames(cwd: string): Promise<Set<string>> {
   }
 }
 
+// Count of git-tracked files — a cheap proxy for "how much codebase the Planner must survey", used to
+// gate the parallel scout sweep (planner-scouts.ts). Tracked files exclude node_modules/dist by
+// construction (gitignored), so no vendor filter is needed. A non-repo or a git failure returns 0,
+// which reads as "small" and skips the sweep — the safe default, since scouts only ever ADD cost.
+export async function countTrackedFiles(cwd: string): Promise<number> {
+  try {
+    const result = await runGit(['ls-files'], { cwd });
+    return result.stdout.split('\n').filter((line) => line.trim() !== '').length;
+  } catch {
+    return 0;
+  }
+}
+
 // `<sha>\trefs/heads/<branch>` lines → branch names, skipping blank lines and any non-heads ref git
 // prints. Exported for unit testing — it is the half of remoteBranchNames that has no process in it.
 export function parseRemoteHeads(stdout: string): string[] {
@@ -839,6 +861,57 @@ export function parseRemoteHeads(stdout: string): string[] {
     if (ref?.startsWith(prefix) && ref.length > prefix.length) names.push(ref.slice(prefix.length));
   }
   return names;
+}
+
+// Run the parallel scout survey before planning, returning the synthesized brief — or undefined when
+// the repo is below the size floor (scouts would be pure added cost) or the sweep produced nothing.
+// Best-effort throughout: a git or scout failure degrades to no brief, never blocks the planner.
+async function surveyRepoForPlanner(params: {
+  input: RunLoopInput;
+  style: string;
+  plannerModelId: string;
+  plannerUsage?: OnUsage;
+  mcp: McpClientManager;
+  fetchHtmlAvailable: boolean;
+}): Promise<string | undefined> {
+  const { input, style, plannerModelId, plannerUsage, mcp, fetchHtmlAvailable } = params;
+  const fileCount = await countTrackedFiles(input.cwd);
+  if (!shouldSurveyInParallel(fileCount)) return undefined;
+  harnessProgress(
+    `survey: ${SCOUT_LENSES.length} scouts sweeping ${fileCount} tracked files in parallel`,
+    { phase: 'planning' },
+  );
+  const runScout = createScoutRunner({
+    model: input.credentials.modelFor('planner'),
+    tools: applyHooks(
+      resolvePlannerTools(
+        mcp.toolsForRole('planner'),
+        input.cwd,
+        fetchHtmlAvailable,
+        buildExploreFor(input, input.cwd),
+      ),
+      input,
+      input.cwd,
+    ),
+    systemPrompt: reminderAgentSystemPrompt({
+      style,
+      roleGuidance: SCOUT_SYSTEM_PREFIX,
+      cwd: input.cwd,
+      modelId: plannerModelId,
+    }),
+    timeout: { stepMs: input.resolved.llmStepTimeoutMs },
+    ...(plannerUsage ? { onUsage: plannerUsage } : {}),
+  });
+  const ctx = {
+    goal: input.goal,
+    ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
+  };
+  const findings = await surveyRepoInParallel(SCOUT_LENSES, ctx, runScout).catch(() => []);
+  harnessProgress(`survey: ${findings.length}/${SCOUT_LENSES.length} scouts reported`, {
+    phase: 'planning',
+  });
+  const brief = synthesizeSurveyBrief(findings);
+  return brief === '' ? undefined : brief;
 }
 
 async function defaultPlanGroups(
@@ -900,6 +973,20 @@ async function defaultPlanGroups(
       ? { onStream: createLiveStreamRenderer(plannerLabel, plannerTag, plannerHeartbeatSink) }
       : {}),
   });
+  // Parallel pre-planning survey (planner-scouts.ts): on a big enough repo, a pool of read-only
+  // scouts sweeps distinct lenses concurrently and hands the Planner a map, so its own steps go to
+  // structure instead of discovery. Gated on tracked-file count — below the floor the sequential
+  // survey is already fast and scouts would be pure added cost, so this returns undefined and the
+  // Planner prompt is byte-identical. Best-effort: a failed sweep degrades to no brief, never blocks.
+  const surveyBrief = await surveyRepoForPlanner({
+    input,
+    style,
+    plannerModelId,
+    ...(plannerUsage ? { plannerUsage } : {}),
+    mcp,
+    fetchHtmlAvailable,
+  });
+
   const stopPlannerHeartbeat = startHeartbeat(plannerLabel, plannerHeartbeatSink);
   let result: PlannerResult;
   try {
@@ -912,6 +999,7 @@ async function defaultPlanGroups(
       // reminder carries the phase only (`Phase: planning`).
       progressBlock: runProgressReminder({ phase: 'planning' }),
       ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
+      ...(surveyBrief !== undefined ? { surveyBrief } : {}),
     });
   } finally {
     stopPlannerHeartbeat();

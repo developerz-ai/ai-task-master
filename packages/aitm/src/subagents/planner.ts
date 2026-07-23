@@ -54,6 +54,10 @@ export type PlannerInput = {
   // Optional trailing `<system-reminder>` (the run's Step N/M position) appended to the END of the
   // first user message, kept out of the cacheable leading prefix (slice 04 §4). Unset → nothing added.
   progressBlock?: string;
+  // Optional pre-planning repo survey gathered in parallel by scouts (planner-scouts.ts). Injected
+  // before the "survey the repo yourself" instruction so the Planner starts from a map and spends its
+  // own steps on structure, not discovery. Empty/absent → the plain single-planner prompt, unchanged.
+  surveyBrief?: string;
 };
 
 export type PlannerResult =
@@ -132,7 +136,15 @@ function buildUserPrompt(input: PlannerInput): string {
     lines.push(`Acceptance criteria: ${input.criteria}`);
   }
   lines.push(`maxPrs: ${input.maxPrs}`);
-  lines.push('Survey the repo with the read-only tools, then call submit with the Plan.');
+  const brief = input.surveyBrief?.trim();
+  if (brief) {
+    lines.push('', brief, '');
+    lines.push(
+      'Use the survey above as your starting map, then confirm and fill gaps with the read-only tools before you submit the Plan.',
+    );
+  } else {
+    lines.push('Survey the repo with the read-only tools, then call submit with the Plan.');
+  }
   return appendReminderBlock(
     prependContextBlock(input.contextBlock, lines.join('\n')),
     input.progressBlock,

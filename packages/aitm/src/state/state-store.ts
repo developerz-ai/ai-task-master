@@ -278,11 +278,14 @@ function formatZodError(err: ZodError): string {
 }
 
 // Read a state file, or null when it does not exist. A missing goal.txt is the ordinary
-// "never started here" case, not an error.
+// "never started here" case; anything else (EACCES, an I/O fault, a directory where a file should
+// be) is a real failure and must reach the caller — swallowing it would report "nothing to resume"
+// for a run that exists and cannot be read, and would make runResume's error branch unreachable.
 async function readFileOrNull(path: string): Promise<string | null> {
   try {
     return await readFile(path, 'utf8');
-  } catch {
-    return null;
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
   }
 }

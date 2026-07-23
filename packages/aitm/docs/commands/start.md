@@ -154,7 +154,7 @@ The PR block lists every group that opened a PR, read from persisted state rathe
 
 ## Resuming
 
-`aitm resume` continues the run this directory already started. It takes every `start` flag, but no goal — the goal (and criteria) come from `.ai-task-master/goal.txt`, so a resumed run can never drift onto a subtly different goal than the one its plan was built for. Retyping the goal is exactly how that drift happens.
+`aitm resume` continues the run this directory already started. It takes every `start` flag, but no goal — the goal comes from `.ai-task-master/goal.txt` and the criteria from `.ai-task-master/criteria.txt`, so a resumed run can never drift onto a subtly different goal than the one its plan was built for. Retyping the goal is exactly how that drift happens.
 
 ```sh
 aitm resume                 # continue where the last run stopped

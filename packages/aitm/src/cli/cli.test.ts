@@ -592,7 +592,13 @@ test('main: --version prints the installed version and exits 0', async () => {
     const out: string[] = [];
     const code = await main(argv, { stdout: (c) => out.push(c) });
     assert.equal(code, 0, argv.join(' '));
-    assert.match(out.join(''), /^\d+\.\d+\.\d+\n$/, `expected a semver line, got ${out.join('')}`);
+    // Prerelease/build metadata is valid semver and readVersion prints it verbatim, so the
+    // assertion must not reject `1.4.0-rc.1` or `1.4.0+build.7`.
+    assert.match(
+      out.join(''),
+      /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*\n$/,
+      `expected a semver line, got ${out.join('')}`,
+    );
   }
 });
 

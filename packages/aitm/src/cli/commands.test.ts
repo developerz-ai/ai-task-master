@@ -1823,3 +1823,38 @@ test('runResume: a directory that never started says so, and does not run the lo
     await home.cleanup();
   }
 });
+
+test('runResume: an unreadable state dir reports the real failure, not "nothing to resume"', async () => {
+  // Swallowing every read error would report "nothing to resume" for a run that exists and cannot
+  // be read — and would make this error branch unreachable. Only ENOENT means never-started.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    await mkdir(dir, { recursive: true });
+    // A directory where goal.txt should be: readFile fails with EISDIR, not ENOENT.
+    await mkdir(join(dir, 'goal.txt'), { recursive: true });
+    let loopCalls = 0;
+    const result = await runResume(
+      { kind: 'resume' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async () => {
+          loopCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /Failed to read the persisted goal/);
+    assert.doesNotMatch(result.message ?? '', /Nothing to resume/);
+    assert.equal(loopCalls, 0);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});

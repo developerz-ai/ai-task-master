@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
-import { type OAuthConfig, type OAuthOptions, performOAuthFlow } from './oauth.ts';
+import {
+  LOOPBACK_HOST,
+  loopbackCallbackUrl,
+  type OAuthConfig,
+  type OAuthOptions,
+  performOAuthFlow,
+} from './oauth.ts';
 
 test('generateState produces cryptographically random values', () => {
   const states = new Set<string>();
@@ -25,6 +31,15 @@ test('OAuthConfig has correct structure', () => {
   assert.strictEqual(config.type, 'http');
   assert.strictEqual(config.url, 'https://test.com');
   assert.strictEqual(config.headers.Authorization, 'Bearer test-token');
+});
+
+test('loopback host is the IPv4 literal, not localhost', () => {
+  assert.strictEqual(LOOPBACK_HOST, '127.0.0.1');
+});
+
+test('default callback URL uses the loopback IP literal', () => {
+  assert.strictEqual(loopbackCallbackUrl(8787), 'http://127.0.0.1:8787/callback');
+  assert.match(loopbackCallbackUrl(9000), /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
 });
 
 test('performOAuthFlow constructs valid authorization URL', async () => {
@@ -56,7 +71,7 @@ test('OAuthOptions has correct structure', () => {
     clientId: 'test-client',
     clientSecret: 'test-secret',
     scope: 'read write',
-    callbackUrl: 'http://localhost:8787/callback',
+    callbackUrl: 'http://127.0.0.1:8787/callback',
     port: 8787,
     timeout: 30000,
   };
@@ -66,7 +81,7 @@ test('OAuthOptions has correct structure', () => {
   assert.strictEqual(options.clientId, 'test-client');
   assert.strictEqual(options.clientSecret, 'test-secret');
   assert.strictEqual(options.scope, 'read write');
-  assert.strictEqual(options.callbackUrl, 'http://localhost:8787/callback');
+  assert.strictEqual(options.callbackUrl, 'http://127.0.0.1:8787/callback');
   assert.strictEqual(options.port, 8787);
   assert.strictEqual(options.timeout, 30000);
 });

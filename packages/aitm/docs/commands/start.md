@@ -4,16 +4,45 @@ Kick off an autonomous work session against a goal. With automerge on (default) 
 
 ## Signature
 
-```
+```text
 aitm start "<goal>"
   [--criteria "..."]
   [--max-prs N]            # default 5
   [--max-sessions N]       # default unlimited
+  [--max-fix-attempts N]   # default 3 — CI-fix passes per PR group before it blocks
+  [--concurrency N]        # default 1 — PR groups worked in parallel
   [--no-automerge]         # default: automerge on
+  [--admin]                # merge past base-branch protection (gh pr merge --admin)
   [--style <path>]         # default: detected CLAUDE.md or AGENTS.md
   [--model <id>]           # default: provider default
   [--branch <name>]        # default: aitm/<group-id>
 ```
+
+`--max-fix-attempts` and `--concurrency` override the persisted `maxCiFixAttempts` / `concurrency`
+config keys for this run; `--no-automerge`, `--style`, and `--model` likewise override their config
+counterparts. `--admin` is **CLI-only** — a per-run force-merge with no config-file key. The many
+run settings that have **no** flag at all (e.g. `verifyCommand`, `selfReview`, `webSearch`) are
+documented in [config.md](../config.md).
+
+### `--max-fix-attempts`
+
+Caps how many CI-fix passes a PR group gets before it blocks for a human instead of looping on an
+unfixable red PR. Overrides the `maxCiFixAttempts` config key for this run (default `3`). Each
+attempt is a coding-tier fix session plus a remote CI round-trip, so it is a direct cost/patience
+knob. See [config.md](../config.md#maxcifixattempts).
+
+### `--concurrency`
+
+How many PR groups may have a Worker running at the same time (default `1`, sequential). Overrides
+the `concurrency` config key for this run. See
+[config.md](../config.md#concurrency-and-editorconcurrency).
+
+### `--admin`
+
+Merge with `gh pr merge --admin` to land a green PR past a base-branch protection rule that would
+otherwise block a solo-authored merge. It overrides the *policy* only — it never skips CI or merges
+failing checks (those still route to the CI-fix loop). Needed when running aitm against a repo whose
+`main` requires an approving review. See the repo `CLAUDE.md` §"Branch protection".
 
 ### `--branch`
 

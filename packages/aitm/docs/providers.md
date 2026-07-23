@@ -24,6 +24,71 @@ support OpenAI-style function/tool calling.** OpenRouter, z.ai GLM, and OpenAI a
 Each config key works in project config (`./.ai-task-master/config.json`), global
 (`~/.aitm.json`), or env. Precedence: project > global > **active profile** > env.
 
+## Routing controls
+
+On OpenRouter (where one model id can be served by several upstream providers) two config keys
+steer *which* provider serves a request and *what happens when one is down*. Both are
+provider-shaped, so they also live in a [profile](#profiles-switch-providers-in-one-command) and
+resolve project > global > profile. Neither sends anything unless set — with both unset, requests
+are byte-identical to today.
+
+### `providerRouting`
+
+Maps onto OpenRouter's `provider.*` routing object. One value applies to every role.
+
+| Field | Type | Effect |
+| --- | --- | --- |
+| `order` | string[] | Try these providers first, in order (e.g. `["anthropic", "openai"]`). |
+| `allowFallbacks` | boolean | Allow providers outside `order`/`only` when the preferred ones fail. |
+| `requireParameters` | boolean | Only route to providers that support every request parameter (see below). |
+| `sort` | `price \| throughput \| latency` | Sort the eligible provider pool by this axis. |
+| `only` | string[] | Restrict routing to exactly these providers. |
+| `ignore` | string[] | Never route to these providers. |
+
+```jsonc
+// ~/.aitm.json (or ./.ai-task-master/config.json, or a profile)
+{
+  "providerRouting": {
+    "sort": "throughput",
+    "requireParameters": true,
+    "ignore": ["deepinfra"]
+  }
+}
+```
+
+> **Recommendation: set `requireParameters: true`.** aitm sends structured-output and
+> reasoning parameters (`tools`, `reasoning`) that not every upstream provider honors. Without
+> `requireParameters`, OpenRouter may route to a provider that silently drops one, producing an
+> empty manifest or a missing plan. With it, only providers that support the sent parameters are
+> eligible.
+>
+> **Caveat:** `requireParameters`, `only`, and a strict `order` **narrow the provider pool**. If
+> the narrowed pool is empty (or all its members are rate-limited/down) the request fails rather
+> than falling back — keep `allowFallbacks` on, or the pool wide enough, on free/low-quota tiers.
+
+**Permanent `amazon-bedrock` exclusion.** aitm **always** unions `amazon-bedrock` into
+`provider.ignore`, whatever you configure. Bedrock rejects the AI SDK's structured-output
+`output_config.format`, which randomly broke Planner/Worker/Reviewer on free models routed there.
+This is baked in (`credentials.ts`) and cannot be re-enabled; your own `ignore` entries are added
+on top and de-duplicated.
+
+### `fallbackModels`
+
+Per-capability alternate model ids OpenRouter fails over to on a provider/model outage. They are
+sent as OpenRouter's top-level `models` fallback array (the alternates only); the primary stays the
+resolved `models.<tier>` id. OpenRouter tries the primary first, then each id in this array in
+order. Keyed by the same capability tiers as `models`.
+
+```jsonc
+{
+  "models":         { "coding": "anthropic/claude-sonnet-4" },
+  "fallbackModels": { "coding": ["openai/gpt-5", "google/gemini-2.5-pro"] }
+}
+```
+
+Use it against single-model outages and free-tier saturation: if the `coding` primary is
+unavailable, the request retries the listed ids in order before failing the step.
+
 ## Profiles: switch providers in one command
 
 Setting the three knobs by hand every time you change provider is tedious. **Profiles** bundle

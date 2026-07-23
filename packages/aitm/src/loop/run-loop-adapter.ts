@@ -556,6 +556,10 @@ export type OrchestratorBridgeCtx = {
   // The run's single background-process handle (issue #103). Threaded into the worker/reviewer tool
   // resolvers so `bash({ run_in_background: true })` backgrounds and bashOutput/killBash are mounted.
   background: BackgroundTools;
+  // Test seam (issue #189): override the Worker subagent runner so a test can deterministically
+  // capture the worker input the bridge builds — chiefly that the resolved `editorConcurrency` cap
+  // is threaded through. Omitted in production, where it defaults to the real runWorkerSubagent.
+  workerRunner?: typeof runWorkerSubagent;
 };
 
 export type RunLoopAdapterSeams = {
@@ -898,6 +902,7 @@ export function selfReviewVerifyCommand(
 
 export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
   const { input, mcp, rollingContext, fetchHtmlAvailable, state, stepCounter, background } = ctx;
+  const workerRunner = ctx.workerRunner ?? runWorkerSubagent;
   // Rolling context accumulates across groups within a run (issue #123): seeded from what a resumed
   // run already persisted (ctx.rollingContext), grown by openPr after each PR, and read LIVE by the
   // worker + ci-fix bridges — so group N+1 plans against group N's digest. Appends are serialized so
@@ -1240,7 +1245,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const stopWorkerHeartbeat = startHeartbeat(workerAgentLabel, workerHeartbeatSink);
       let result: Awaited<ReturnType<typeof runWorkerSubagent>>;
       try {
-        result = await runWorkerSubagent(agent, {
+        result = await workerRunner(agent, {
           group,
           ...(task ? { task } : {}),
           checkoutPath: checkout.path,

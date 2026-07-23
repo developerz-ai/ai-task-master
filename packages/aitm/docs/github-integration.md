@@ -19,6 +19,14 @@
 
 All methods return typed results. JSON is parsed through Zod schemas. Errors are domain errors (`PrNotFound`, `ReviewThreadStale`, `CiFailed`, etc.) — never raw stderr strings.
 
+## Idempotent merge
+
+`mergePr` is idempotent on an already-merged PR. A resume can re-drive the merge stage after a crash in the window between `gh pr merge` succeeding on GitHub and `state.json` persisting `merged`; running `gh pr merge` again then exits non-zero. Rather than trust gh's version-varying wording (which phrases "already merged" as "not mergeable", the same words a real conflict uses), a non-zero merge exit confirms the PR's real state via `gh pr view --json state` — `MERGED` → success (the desired end state is already true), anything else → the existing conflict/generic handling. The state check is best-effort, so a genuine merge failure still surfaces.
+
+## CI check summary
+
+Polling is silent per-iteration (exponential backoff, no line-per-poll spam). When CI **settles**, `waitForChecks` carries the final check rows on `CiResult.checks`, and the loop prints one summary line — `group g1: CI success — bun (test + lint) ✓, CodeRabbit ✓` — so the operator sees what passed/failed without watching GitHub. A ✓ for pass/skipping, ✗ for fail/cancel; no checks configured → no line.
+
 ## Rate limits
 
 GraphQL queries are batched per PR (threads + comments fetched in one request). CI status polling uses exponential backoff: 1s start, doubling, 60s cap.

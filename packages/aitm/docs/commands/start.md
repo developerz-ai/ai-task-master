@@ -82,6 +82,12 @@ Checked by `CLI` before launching `WorkLoop`.
 | 3 | `gh` CLI authenticated. | `CLI` |
 | 4 | Clean git working tree — warn otherwise, do not block. | `CLI` |
 
+## Resume vs. supersede
+
+`aitm start` is idempotent for an **unfinished** run: re-running it in a directory whose `state.json` holds an in-progress run resumes at the exact lifecycle point (the runId, plan, and per-group stage are preserved). If the typed goal differs from the persisted one, a notice says `start` continues the old run and points at `aitm clean` to start over — it does not re-plan the new text onto an in-progress run.
+
+A **finished** run is different: it is superseded. Re-running `aitm start "<new goal>"` where a prior run already merged every group (or reached `success`) used to silently resume that completed run — nothing left to do, 0 LLM calls, the old PR list reprinted, and the new goal never planned. It now starts fresh: re-init, re-plan the new goal, with a notice. `aitm resume` short-circuits a finished run first (exit 0, "already complete — nothing to resume"), so re-planning a finished goal never happens and the supersede stays a `start`-only concern. "Finished" = status `success`, or a non-empty plan whose every group is `merged`; a blocked/failed run stays resumable.
+
 ## Flow
 
 1. `CLI` parses args, validates preconditions, persists run options to `state.json.options` (`autoMerge`, `maxPrs`, `maxSessions`, `stylePath`).
@@ -135,8 +141,8 @@ Titles are conventional-commit style, ≤72 chars. Section headings are configur
 
 The section contract used to be all-or-nothing: a body missing one heading was discarded and the PR opened with a generated stub instead. On a real five-group run that fired on **2 of 2** PRs — every body the operator actually got was the stub, and paragraphs of accurate prose about the diff were thrown away over a single absent heading. Two layers now stand between a near-miss and that outcome:
 
-1. **Normalization.** Models get the sections right and the markup wrong. `### Changes`, `## Changes:`, `## **Changes**` are all rewritten to the canonical heading before the contract is checked, so a body that is right in substance passes without even a retry. Only heading lines are touched — prose mentioning a section name cannot fabricate one.
-2. **Repair.** If retries still leave the contract broken, the model's title and sections are **kept**, the missing sections are filled from the same deterministic material the stub used, and everything is emitted in the required order. Prose before the first heading is folded into the first section, and a section nobody asked for is preserved at the end. Nothing the model wrote is dropped.
+1. **Normalization.** Models get the sections right and the markup wrong. `### Changes`, `## Changes:`, `## **Changes**` are all rewritten to the canonical heading before the contract is checked — as is a *run-on* heading, where the model puts the content on the heading line itself (`## Summary Adds cookie auth`, `## Changes### Domain`), which is split into the heading plus a content line. A word-boundary guard means `## Changesets` never matches `## Changes`. Only heading lines are touched — prose mentioning a section name cannot fabricate one, and a `## …` quoted inside a code fence is content, not a heading.
+2. **Repair.** If retries still leave the contract broken, the model's title and sections are **kept**, the missing sections are filled from the same deterministic material the stub used, and everything is emitted in the required order. Content the model wrote under an unrecognized heading folds into the section before it — never appended as a separate trailing block. That trailing-block behavior was a real bug: a model that ran content onto *every* heading line made every section read as unrecognized, so the whole body was re-emitted after the deterministic fill, producing a **doubled** PR body. Now every word survives exactly once, in section order.
 
 The full generated fallback now only happens when the model never produced a schema-valid composition at all. The progress line tells you which path ran (`PR composition repaired: …` vs `PR composition fell back to generated title/body: …`).
 

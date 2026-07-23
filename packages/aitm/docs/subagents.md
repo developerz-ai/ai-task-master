@@ -83,6 +83,12 @@ An editor leaf used to receive nothing but its manifest entry's `purpose`, so ev
 
 It is a **task, not a dump**: what to change, where, the contract, and only the conventions that bear on this edit, capped so a fanout doesn't pay for preamble ×N. A leaf can still read whatever it likes — this is a head start, not a restriction. Nothing to distil → the leaf prompt is byte-identical to before.
 
+## No step budget — agents run until they submit
+
+Every subagent terminates when it calls `submit` (`createSubagent` pairs `stepCountIs` with `hasToolCall(submit)` in its `stopWhen`). The per-role step counts (planner 20, worker 30, editor 12, reviewer 20) were never the finish line — only a runaway guard — and at those low values they fired *before* an agent finished exploring, cutting real work off mid-task. Autocompaction now bounds **context**, so the step count no longer needs to. All roles share one high `AGENT_STEP_BACKSTOP` (1000): far above any real task, so it never binds in practice, while still stopping a pathological non-terminating loop. The per-step wall-clock deadline (`llmStepTimeoutMs`) is the orthogonal per-step guard. No prompt tells an agent to ration steps — that only rushed it against quality.
+
+Editor leaves are the one exception to "terminate on submit": a leaf has no `submit` tool, so it ends on a plain text response or the backstop. A leaf that keeps calling tools without finishing is exactly the runaway the backstop catches.
+
 ## Throughput guards
 
 Three mechanical limits, each traced to an observed waste:
@@ -90,6 +96,12 @@ Three mechanical limits, each traced to an observed waste:
 - **Survey budget.** A manifest pass that makes 20 tool calls without a single write gets one corrective reminder pointing at `submit`. `bash` counts as survey — the observed spiral was `cat`/`ls`/`find` plus a `bun install` probe, 40 calls deep, inside *planning*. It nudges; it never fails the pass and never forbids reading.
 - **Fanout floor.** A manifest that is small, cheap, and creates no new file runs inline in one editor pass instead of spawning N. The observed pathology was four subagent spawns — four surveys, four verify runs — to sort imports and expand a one-line `exports` field.
 - **Phantom-edit retry.** A leaf that narrates a change instead of writing it is retried once with a corrective prompt naming the failure, scoped to the unwritten paths. Only a second narration blocks. Previously the first one blocked the whole task, which is how a PR shipped its services and none of its routes.
+
+## Parallel scout survey before planning
+
+The Planner is a single agent that surveys the repo one grep/read at a time before it can plan — measured at ~8 minutes on a real run, most of it discovery. On a big enough repo (gated on tracked-file count, `SCOUT_REPO_FILE_FLOOR`), a pool of read-only **scouts** first sweeps distinct lenses — architecture, domain + data, conventions + tests, integration points — **concurrently**, and their findings are synthesized into one brief the Planner reads up front, so its own steps go to structure instead of discovery (`planner-scouts.ts`). It is the planning-side analogue of the editor fanout.
+
+Deliberately discerning about cost — parallelism isn't free. Below the file floor the sequential survey is already fast and scouts would be pure added LLM calls, so the survey is skipped and the Planner prompt stays byte-identical. Planning is the *only* phase that benefits: coding-style distillation and specialist generation are each already a single LLM call over pre-gathered inputs, so parallelizing them would split one call into many for no gain. Best-effort throughout — a git failure, a below-floor repo, or a dead scout drops to no brief and the plain single-planner path, never blocking; one dead lens drops just itself, like a failed editor leaf.
 
 ## Schemas
 

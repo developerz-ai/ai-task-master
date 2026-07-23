@@ -9,6 +9,7 @@ import { readFile as fsReadFile } from 'node:fs/promises';
 import { type Tool, tool } from 'ai';
 import { z } from 'zod';
 import { atomicWriteFile } from './atomic-write.ts';
+import { findFuzzyMatch, isDisproportionateMatch } from './edit-replacers.ts';
 import { type FileStateTracker, hashContent } from './file-state.ts';
 import type { FileToolInit } from './fs-tools.ts';
 import { resolveInside } from './safe-path.ts';
@@ -131,20 +132,66 @@ export function applyEdit(content: string, edit: EditSpec): { next: string; coun
   if (edit.oldString === edit.newString) {
     throw new Error('oldString and newString are identical — the edit would change nothing');
   }
-  const occurrences = content.split(edit.oldString).length - 1;
-  if (occurrences === 0) {
+  // Exact match always wins (byte-identical to the pre-#268 path).
+  if (content.split(edit.oldString).length - 1 >= 1) {
+    return replaceSpan(content, edit.oldString, edit.newString, edit.replaceAll ?? false);
+  }
+  // Exact miss — fall back to a guarded fuzzy match (issue #268). The ladder runs only on zero exact
+  // hits. A whitespace-only `oldString` is never fuzzed: its trimmed form matches every blank line and
+  // would yield an empty span that `replaceSpan` would splice between every character. The located
+  // span is refused if it is disproportionately larger than `oldString`, or if the chosen matcher
+  // found more than one candidate without `replaceAll` — the same uniqueness contract as the exact
+  // path — so fuzzy never clobbers.
+  const fuzzy = edit.oldString.trim() === '' ? undefined : findFuzzyMatch(content, edit.oldString);
+  if (fuzzy === undefined) {
     throw new Error(`oldString not found: ${preview(edit.oldString)}`);
   }
-  if (occurrences > 1 && !edit.replaceAll) {
+  const spans = fuzzy.spans;
+  if (spans.some((span) => isDisproportionateMatch(span, edit.oldString))) {
     throw new Error(
-      `oldString is not unique (${occurrences} matches): ${preview(edit.oldString)} — add surrounding context or pass replaceAll`,
+      `fuzzy match refused — the located span is much larger than oldString (${preview(edit.oldString)}); re-read the file and pass the exact text to replace`,
     );
   }
-  if (edit.replaceAll) {
-    return { next: content.split(edit.oldString).join(edit.newString), count: occurrences };
+  const replaceAll = edit.replaceAll ?? false;
+  if (spans.length > 1) {
+    if (!replaceAll) {
+      throw new Error(
+        `oldString is not unique (${spans.length} fuzzy matches): ${preview(edit.oldString)} — add surrounding context or pass replaceAll`,
+      );
+    }
+    // `replaceAll` across fuzzy candidates is only safe when they are identically formatted: replacing
+    // differently-spaced spans would clobber lines the model never spelled out. Refuse loudly rather
+    // than mass-replace heterogeneous text or silently leave some candidates untouched.
+    if (new Set(spans).size > 1) {
+      throw new Error(
+        `fuzzy replaceAll refused — the ${spans.length} matches are not identically formatted: ${preview(edit.oldString)} — use exact strings or edit them individually`,
+      );
+    }
   }
-  const at = content.indexOf(edit.oldString);
-  const next = content.slice(0, at) + edit.newString + content.slice(at + edit.oldString.length);
+  // One unique span, or several identically-formatted ones under replaceAll — reuse the exact-path
+  // replacement on the located literal text (which re-counts and honors the uniqueness rule too).
+  return replaceSpan(content, spans[0] ?? '', edit.newString, replaceAll);
+}
+
+// Apply a replacement of an exact `target` span under the uniqueness contract: >1 occurrence
+// without `replaceAll` is rejected. Shared by the exact and fuzzy-fallback paths of `applyEdit`.
+function replaceSpan(
+  content: string,
+  target: string,
+  newString: string,
+  replaceAll: boolean,
+): { next: string; count: number } {
+  const occurrences = content.split(target).length - 1;
+  if (occurrences > 1 && !replaceAll) {
+    throw new Error(
+      `oldString is not unique (${occurrences} matches): ${preview(target)} — add surrounding context or pass replaceAll`,
+    );
+  }
+  if (replaceAll) {
+    return { next: content.split(target).join(newString), count: occurrences };
+  }
+  const at = content.indexOf(target);
+  const next = content.slice(0, at) + newString + content.slice(at + target.length);
   return { next, count: 1 };
 }
 

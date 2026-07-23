@@ -1252,6 +1252,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           progressBlock: runProgressReminder(workerStepTag),
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
+          // Bound the editor fanout at the resolved cap (issue #189). Always a number (config default
+          // 4), so passed unconditionally — with the default it equals EDITOR_CONCURRENCY_DEFAULT, so
+          // behavior is unchanged until an operator sets `editorConcurrency`.
+          editorConcurrency: input.resolved.editorConcurrency,
           // Resume (issue #108): continue the interrupted conversation from its retained messages
           // instead of cold-starting, reusing the #107 priorHandle continuation seam.
           ...(resumeMessages ? { priorHandle: { agent, messages: resumeMessages } } : {}),

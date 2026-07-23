@@ -154,8 +154,8 @@ export type WorkerInput = {
   // run is already cancelled (cleanup #2, plan 02-signal-cancellation-cleanup).
   signal?: AbortSignal;
   // Optional cap on how many editor leaves run concurrently in the fanout pool. Unset →
-  // EDITOR_CONCURRENCY_DEFAULT. The config/CLI wiring that populates it lands with the
-  // `editorConcurrency` setting; until then the default holds (slice 05, editor team fanout).
+  // EDITOR_CONCURRENCY_DEFAULT. Populated from the resolved `editorConcurrency` config key by the
+  // run-loop adapter (issue #189); still optional so direct callers/tests may omit it.
   editorConcurrency?: number;
 };
 

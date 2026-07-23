@@ -19,6 +19,7 @@ import {
 import type { ToolSet } from 'ai';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
+import { execa } from 'execa';
 import { z } from 'zod';
 import type { RunLoopInput } from '../cli/commands.ts';
 import { Credentials } from '../credentials/credentials.ts';
@@ -31,6 +32,7 @@ import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import { type TranscriptRecorder, TranscriptStore } from '../state/transcript-store.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
+import { makeTempRepo } from '../testing/temp-repo.ts';
 import {
   type AdapterStatePort,
   activeToolNames,
@@ -899,6 +901,126 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
     rolesSeen.includes('worker'),
     'buildCompactionStep queried the worker-tier model id → the worker received compaction wiring',
   );
+});
+
+test('defaultMakeOrchestrator.runWorker: threads resolved.editorConcurrency into the fanout cap (issue #189)', async () => {
+  // Four files across four directories → four editor leaves. With the resolved cap at 2, a correctly
+  // wired adapter passes editorConcurrency=2 into the worker input, so at most two leaves run at once.
+  // Before #189 the config value never reached the worker and the fanout fell back to
+  // EDITOR_CONCURRENCY_DEFAULT (4) — all four leaves would run concurrently and peak would be 4.
+  const usage = {
+    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+    outputTokens: { total: 1, text: 1, reasoning: undefined },
+    totalTokens: 2,
+  };
+  const manifest = {
+    files: [
+      { path: 'a/f.ts', kind: 'create', purpose: 'a' },
+      { path: 'b/f.ts', kind: 'create', purpose: 'b' },
+      { path: 'c/f.ts', kind: 'create', purpose: 'c' },
+      { path: 'd/f.ts', kind: 'create', purpose: 'd' },
+    ],
+    draftCommitMessage: 'feat: four dirs',
+  };
+  let resolveBarrier!: () => void;
+  const barrier = new Promise<void>((r) => {
+    resolveBarrier = r;
+  });
+  let active = 0;
+  let peak = 0;
+  let editorCalls = 0;
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage,
+          warnings: [],
+        };
+      }
+      editorCalls++;
+      active++;
+      peak = Math.max(peak, active);
+      await barrier;
+      active--;
+      return {
+        content: [{ type: 'text', text: `edited #${idx}` }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage,
+        warnings: [],
+      };
+    },
+  });
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: () => 'openai/gpt-5',
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const mcp = {
+    toolsForRole: () => ({}),
+    toolSurfaceForRole: () => ({ direct: {}, deferred: {} }),
+  };
+  // A real git repo: the worker runs `git checkout -B <branch>` before the fanout, so a bare tempdir
+  // would throw there and the fanout would never launch. One commit gives `checkout -B` a HEAD.
+  const repo = await makeTempRepo();
+  await execa('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: repo.path });
+  const input = {
+    cwd: repo.path,
+    resolved: {
+      openrouterApiKey: 'sk-or-test',
+      maxSessions: null,
+      editorConcurrency: 2,
+      llmStepTimeoutMs: 900_000,
+    },
+    credentials,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    github: {},
+    goal: 'g',
+    criteria: undefined,
+    branch: undefined,
+    state: {},
+  };
+  try {
+    const orch = defaultMakeOrchestrator({
+      input,
+      mcp,
+      rollingContext: '',
+      state: {},
+      stepCounter: () => undefined,
+    } as never);
+    const run = orch.runWorker({
+      group: group('core'),
+      checkout: { path: repo.path },
+      baseBranch: 'main',
+    } as never);
+    // Let the first batch launch. The manifest agent and the pre-fanout `git checkout -B` are real
+    // async work (subprocess), so poll in real time — not microtasks — until the leaves start; the
+    // barrier holds them so no more than the cap is ever in flight.
+    for (let i = 0; i < 300 && editorCalls < 2; i++) {
+      await new Promise<void>((r) => setTimeout(r, 10));
+    }
+    // Give any (incorrectly unbounded) extra leaves a chance to start before asserting the peak.
+    await new Promise<void>((r) => setTimeout(r, 30));
+    assert.ok(editorCalls >= 2, 'the fanout launched its first batch');
+    assert.equal(peak, 2, 'at most editorConcurrency=2 editor leaves run at once');
+    resolveBarrier();
+    await run.catch(() => undefined); // a downstream commit may fail; the concurrency cap is the assertion
+    assert.equal(peak, 2, 'the resolved cap held across the whole fanout');
+  } finally {
+    resolveBarrier();
+    await repo.cleanup();
+  }
 });
 
 test('defaultMakeOrchestrator.runWorker: resuming a recordingFailed transcript still resumes, but warns (issue #220)', async () => {

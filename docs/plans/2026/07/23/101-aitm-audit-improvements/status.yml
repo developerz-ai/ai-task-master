@@ -1,11 +1,11 @@
 plan: 101-aitm-audit-improvements
 title: aitm audit — fixes & improvements
-status: not_started        # not_started | in_progress | blocked | complete | superseded
+status: in_progress        # not_started | in_progress | blocked | complete | superseded
 created_by: sebi
-worked_by: ""              # executor fills with their git user.name on pickup
+worked_by: "sebi"          # executor fills with their git user.name on pickup
 owner: sebi
-percent: 0
-current_focus: ""
+percent: 1
+current_focus: "03-cancellation-resources — step 1 (compat signal support) landed"
 slices:
   - file: 01-data-safety-state.md
     status: not_started
@@ -14,8 +14,8 @@ slices:
     status: not_started
     percent: 0
   - file: 03-cancellation-resources.md
-    status: not_started
-    percent: 0
+    status: in_progress
+    percent: 15
   - file: 04-mcp-oauth.md
     status: not_started
     percent: 0

@@ -8,6 +8,10 @@
 // registry keeps the pids, escalates SIGTERM → SIGKILL after a grace period, and installs a
 // last-resort synchronous SIGKILL on process exit.
 
+// The package's one sleep primitive lives beside the CI poller that needed it abortable; the grace
+// poll below borrows it so there is a single timer implementation to keep leak-free — and, as a
+// side effect, the grace poll costs no wall-clock under the test-runner fast path.
+import { defaultSleep } from '../github/github-client.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 
 // `process.kill(pid, 0)` is the liveness probe — signal 0 delivers nothing and throws ESRCH when the
@@ -88,7 +92,7 @@ export class StdioProcessRegistry {
     let remaining = targets.filter((t) => this.isAlive(t.pid));
     let waited = 0;
     while (remaining.length > 0 && waited < this.graceMs) {
-      await sleep(POLL_INTERVAL_MS);
+      await defaultSleep(POLL_INTERVAL_MS);
       waited += POLL_INTERVAL_MS;
       remaining = remaining.filter((t) => this.isAlive(t.pid));
     }
@@ -140,8 +144,4 @@ function isPermissionError(err: unknown): boolean {
     'code' in err &&
     (err as { code: unknown }).code === 'EPERM'
   );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

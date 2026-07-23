@@ -1141,7 +1141,7 @@ test('listUnresolvedThreads breaks on non-advancing cursor in thread comments', 
 });
 
 // defaultSleep short-circuits to a microtask under a test runner (NODE_TEST_CONTEXT under
-// `node --test`, NODE_ENV=test under `bun test`), so un-injected grace/poll waits don't burn real
+// `node --test`, or explicit AITM_INSTANT_SLEEP=1), so un-injected grace/poll waits don't burn real
 // minutes in CI. Production, with neither signal, keeps the real timer. A 1-hour ask must return
 // effectively instantly here, under either runtime.
 test('defaultSleep: instant under the test runner', async () => {
@@ -1149,4 +1149,88 @@ test('defaultSleep: instant under the test runner', async () => {
   const start = Date.now();
   await defaultSleep(60 * 60_000);
   assert.ok(Date.now() - start < 250, 'defaultSleep must not wait real time in tests');
+});
+
+const INSTANT_SLEEP_ENV = ['AITM_INSTANT_SLEEP', 'NODE_TEST_CONTEXT'] as const;
+
+// The cancellation path only exists behind the instant-sleep short circuit, so these cases have to
+// run with every instant-sleep signal unset — and put them back, or the rest of the file waits out
+// real grace periods.
+async function withRealTimers(fn: () => Promise<void>): Promise<void> {
+  const saved = INSTANT_SLEEP_ENV.map((key) => [key, process.env[key]] as const);
+  for (const key of INSTANT_SLEEP_ENV) delete process.env[key];
+  try {
+    assert.equal(isInstantSleepEnabled(), false, 'precondition: real timers, not the fast path');
+    await fn();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+// Both leaks are observed through the signal's own removeEventListener: the timer path calls it
+// exactly once (listener dropped), and the abort path never does — `{ once: true }` detaches the
+// listener internally, so a later call could only come from a timer that outlived the abort.
+function countRemovals(signal: AbortSignal): () => number {
+  let removals = 0;
+  const real = signal.removeEventListener.bind(signal);
+  signal.removeEventListener = (type, listener, options): void => {
+    removals += 1;
+    real(type, listener, options);
+  };
+  return () => removals;
+}
+
+const realDelay = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+test('defaultSleep: aborted mid-sleep → resolves without waiting out the delay', async () => {
+  await withRealTimers(async () => {
+    const controller = new AbortController();
+    const start = Date.now();
+    const sleeping = defaultSleep(60 * 60_000, controller.signal);
+    controller.abort();
+    await sleeping;
+    assert.ok(Date.now() - start < 1000, 'an aborted sleep must not wait out its delay');
+  });
+});
+
+test('defaultSleep: aborted mid-sleep → clears the timer, which never fires late', async () => {
+  await withRealTimers(async () => {
+    const controller = new AbortController();
+    const removals = countRemovals(controller.signal);
+    const sleeping = defaultSleep(20, controller.signal);
+    controller.abort();
+    await sleeping;
+    await realDelay(120);
+    assert.equal(removals(), 0, 'the cleared timer never ran its callback');
+  });
+});
+
+test('defaultSleep: delay elapsed → removes its abort listener', async () => {
+  await withRealTimers(async () => {
+    const controller = new AbortController();
+    const removals = countRemovals(controller.signal);
+    await defaultSleep(5, controller.signal);
+    assert.equal(removals(), 1, 'the listener is dropped once the sleep settles');
+    controller.abort();
+    assert.equal(removals(), 1, 'aborting a settled sleep is inert');
+  });
+});
+
+test('defaultSleep: already-aborted signal → resolves immediately, arms nothing', async () => {
+  await withRealTimers(async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const removals = countRemovals(controller.signal);
+    const start = Date.now();
+    await defaultSleep(60 * 60_000, controller.signal);
+    assert.ok(Date.now() - start < 1000, 'an already-aborted signal skips the wait');
+    await realDelay(50);
+    assert.equal(removals(), 0, 'no timer and no listener were ever armed');
+  });
 });

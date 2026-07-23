@@ -59,25 +59,38 @@ export const defaultRunCmd: RunCmd = async (file, args, options) => {
 };
 
 // Sleep DI — tests inject a recording stub so backoff is asserted without real timers.
-export type Sleep = (ms: number) => Promise<void>;
+// The optional signal makes a wait cancellable; stubs that ignore it stay assignable.
+export type Sleep = (ms: number, signal?: AbortSignal) => Promise<void>;
 
 // Real grace/poll waits (REVIEW_COMMENTS_GRACE 2min, CHECKS_START_WAIT_MS 60s, backoff…) are correct in
 // the released CLI but would make the test suite crawl. So defaultSleep collapses to a microtask
-// under a test runner, detected portably across both: `node --test` sets NODE_TEST_CONTEXT in every
-// test child; `bun test` sets NODE_ENV=test (an explicit AITM_INSTANT_SLEEP override also works).
-// Tests that assert timing/backoff still inject their own recording Sleep and bypass this; this only
-// shortcuts the un-injected grace/poll waits that would otherwise burn real minutes in CI.
+// under a test runner, detected via: AITM_INSTANT_SLEEP=1 (explicit, for any context), or
+// NODE_TEST_CONTEXT (set by `node --test`). Tests that assert timing/backoff still inject their own
+// recording Sleep and bypass this; this only shortcuts the un-injected grace/poll waits that would
+// otherwise burn real minutes in CI.
 export const isInstantSleepEnabled = (): boolean =>
-  process.env.AITM_INSTANT_SLEEP === '1' ||
-  process.env.NODE_ENV === 'test' ||
-  process.env.NODE_TEST_CONTEXT !== undefined;
+  process.env.AITM_INSTANT_SLEEP === '1' || process.env.NODE_TEST_CONTEXT !== undefined;
 
-export const defaultSleep: Sleep = (ms) =>
-  isInstantSleepEnabled()
-    ? Promise.resolve()
-    : new Promise((resolve) => {
-        setTimeout(resolve, ms);
-      });
+// The single sleep primitive of the package (mcp/stdio-process-registry.ts polls through it too).
+// An abort *resolves* the wait early instead of rejecting: the poll loops own the cancellation shape
+// — they re-check `signal.aborted` at the top of each iteration and decide what a cancelled run
+// returns — whereas a rejecting sleep would force every backoff/grace site into a try/catch just to
+// tell "cancelled" from a real failure. Both settle paths clear the timer and drop the abort listener,
+// so a 120-min `waitForChecks` leaves nothing behind on the signal (pattern: worker.ts runEditorFanout).
+export const defaultSleep: Sleep = (ms, signal) => {
+  if (isInstantSleepEnabled() || signal?.aborted === true) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+};
 
 // GraphQL pagination bounds: GitHub caps at 100 nodes/page; these bounds prevent infinite loops
 // on broken pagination (non-advancing cursor, infinite pages) while allowing very large PRs.

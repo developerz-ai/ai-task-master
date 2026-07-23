@@ -14,7 +14,7 @@ import {
   AgentConfigDetector,
   type DetectOptions,
 } from '../agent-config/agent-config-detector.ts';
-import { StyleDistiller } from '../agent-config/coding-style.ts';
+import { composeStyleGuide, StyleDistiller } from '../agent-config/coding-style.ts';
 import { ConfigLoader } from '../config/config-loader.ts';
 import { ConfigWriter } from '../config/config-writer.ts';
 import { type AddProfileInput, ProfileManager } from '../config/profiles.ts';
@@ -221,6 +221,21 @@ export function autoMergeNotice(autoMerge: boolean): string | null {
 function cacheHitPct(usage: RoleUsage): string {
   if (usage.inputTokens === 0) return '0%';
   return `${Math.round((usage.cachedInputTokens / usage.inputTokens) * 100)}%`;
+}
+
+// The end-of-run PR block: one line per group that opened a PR, with the number, the group title,
+// and the URL to click. Printed on every outcome — a merged run, a run parked at awaiting-pr, and a
+// blocked one all leave PRs the operator wants to open. '' when the run opened none, so a plan-only
+// or nothing-to-ship run prints no empty header. Falls back to the bare number for a legacy state
+// written before prUrl was persisted. Exported for tests.
+export function prLinksBlock(groups: readonly PrGroup[]): string {
+  const withPr = groups.filter((g) => g.pr !== null);
+  if (withPr.length === 0) return '';
+  const lines = withPr.map((g) => {
+    const target = g.prUrl ?? `#${g.pr}`;
+    return `  #${g.pr}  ${g.title} — ${target}`;
+  });
+  return `Pull requests:\n${lines.join('\n')}\n`;
 }
 
 // One end-of-run token/cost summary line (issue #114): overall tokens + per-role breakdown, with the
@@ -452,14 +467,26 @@ export async function runStart(
     return { code: 1, message: errMsg(err) };
   }
 
+  const stdout = ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk));
+
   // Flush per-run usage/cost accounting (issue #114): persist totals + one summary line to the
   // stdout sink. Fire-and-forget — a tracker or state error must never change the run's outcome.
   try {
     const totals = await usage.totals();
     await state.update((s) => ({ ...s, usage: totals }));
-    (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(usageSummaryLine(totals));
+    stdout(usageSummaryLine(totals));
   } catch {
     // observability must never break the run
+  }
+
+  // Every PR this run opened, with its URL — the first thing an operator wants when the run stops,
+  // whatever the outcome. Read from persisted state (not the result) so it covers groups that opened
+  // a PR before a later group blocked. Fire-and-forget, like the usage line.
+  try {
+    const block = prLinksBlock((await state.read()).prGroups);
+    if (block !== '') stdout(block);
+  } catch {
+    // reporting must never break the run
   }
 
   // Persist the first awaiting-pr number into state so `aitm merge-pr` (with no --pr)
@@ -987,18 +1014,19 @@ function redactConfigKeys(file: ConfigFile): ConfigFile {
 
 const defaultAuthStatus: AuthStatusFn = (cwd) => new GitHubClient(cwd).authStatus();
 
-// Resolve the coding-style digest fed to subagent prompts: reuse the cached digest when present,
-// otherwise distill it once (smart-tier model) and cache it so resume reuses it. Never blocks the
-// run — an unreadable cache, a distill failure, or a cache-write failure all degrade to the raw
-// AgentConfig.contents. StyleDistiller.distill already degrades internally; the guards here cover
-// the surrounding cache IO so a flaky style step can't halt planning or merging.
+// Resolve the coding-style guide fed to subagent prompts: the project's CLAUDE.md/AGENTS.md verbatim
+// plus a distilled digest of the repo's other signals (composeStyleGuide). Only the digest half is
+// distilled and cached — the verbatim half is re-read from AgentConfig every run, so an edit to
+// CLAUDE.md takes effect immediately instead of being pinned by a stale cache. Never blocks the run:
+// an unreadable cache, a distill failure, or a cache-write failure all degrade to the verbatim file
+// alone. StyleDistiller.distill already degrades internally; the guards here cover the cache IO.
 async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
   const { cwd, credentials, agentConfig, state } = input;
   try {
     const cached = await state.readCodingStyle();
     if (cached !== null && cached.trim() !== '') {
       harnessProgress('coding style: using cached digest');
-      return cached;
+      return composeStyleGuide(agentConfig, cached);
     }
   } catch {
     // Unreadable cache (non-ENOENT) — distill fresh rather than block the run.
@@ -1019,7 +1047,7 @@ async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
     digest = await distiller.distill({ config: agentConfig, repoRoot: cwd });
   } catch {
     harnessProgress('coding style: distillation unavailable — using the raw style file');
-    return agentConfig.contents;
+    return composeStyleGuide(agentConfig, '');
   }
   harnessProgress('coding style: guide ready');
   try {
@@ -1027,7 +1055,7 @@ async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
   } catch {
     // Cache write failed — use the in-memory digest; a later resume re-distills.
   }
-  return digest;
+  return composeStyleGuide(agentConfig, digest);
 }
 
 // Default loop seam — production wiring of Planner → PlanGraph → InPlaceCheckout → WorkLoop with

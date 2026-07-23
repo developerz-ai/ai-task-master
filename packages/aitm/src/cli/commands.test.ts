@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import type { PrGroup } from '../state/schema.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type {
   CommandExit,
@@ -13,6 +14,7 @@ import type {
 } from './commands.ts';
 import {
   autoMergeNotice,
+  prLinksBlock,
   runClean,
   runConfig,
   runMergePr,
@@ -848,7 +850,11 @@ test('runStart: default resolveStyle reuses cached coding-style.md (no LLM call)
       },
     );
     assert.equal(result.code, 0, result.message);
-    assert.equal(captured?.styleDigest, cached, 'cached digest reused and threaded to runLoop');
+    const style = captured?.styleDigest ?? '';
+    assert.match(style, /cached digest/, 'cached digest reused, no LLM call');
+    // The verbatim half is re-composed every run, so a CLAUDE.md edit is never pinned by the cache.
+    const claudeMd = await readFile(join(repo.path, 'CLAUDE.md'), 'utf8');
+    assert.ok(style.includes(claudeMd.trim()), 'CLAUDE.md still reaches prompts verbatim');
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -1680,4 +1686,49 @@ test('runClean with an approving confirm deletes the state dir', async () => {
   } finally {
     await cleanup();
   }
+});
+
+// ---- prLinksBlock --------------------------------------------------------
+
+function prGroupFixture(over: Partial<PrGroup> = {}): PrGroup {
+  return {
+    id: 'g1',
+    title: 'Todo CRUD API',
+    tasks: [],
+    dependsOn: [],
+    branch: 'aitm/g1-todo-crud-api',
+    pr: null,
+    status: 'pending',
+    stage: 'pending',
+    ...over,
+  };
+}
+
+test('prLinksBlock: lists every opened PR with its title and clickable URL', () => {
+  const block = prLinksBlock([
+    prGroupFixture({ pr: 12, prUrl: 'https://github.com/o/r/pull/12' }),
+    prGroupFixture({
+      id: 'g2',
+      title: 'Session cookie auth',
+      pr: 13,
+      prUrl: 'https://github.com/o/r/pull/13',
+    }),
+  ]);
+  assert.match(block, /^Pull requests:\n/);
+  assert.match(block, /#12 {2}Todo CRUD API — https:\/\/github\.com\/o\/r\/pull\/12/);
+  assert.match(block, /#13 {2}Session cookie auth — https:\/\/github\.com\/o\/r\/pull\/13/);
+});
+
+test('prLinksBlock: groups without a PR are skipped, and no PRs prints nothing', () => {
+  assert.equal(prLinksBlock([prGroupFixture()]), '');
+  assert.equal(prLinksBlock([]), '');
+  const block = prLinksBlock([
+    prGroupFixture(),
+    prGroupFixture({ id: 'g2', pr: 7, prUrl: 'https://github.com/o/r/pull/7' }),
+  ]);
+  assert.equal(block.split('\n').filter((l) => l.trim() !== '').length, 2);
+});
+
+test('prLinksBlock: legacy state without a persisted URL still reports the number', () => {
+  assert.match(prLinksBlock([prGroupFixture({ pr: 9 })]), /#9 {2}Todo CRUD API — #9/);
 });

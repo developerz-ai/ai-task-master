@@ -10,6 +10,7 @@
 // docs/runtime.md (uses execa, never Bun.$)
 
 import { ExecaError } from 'execa';
+import { type BranchCleanup, cleanupMergedBranches } from './branch-cleanup.ts';
 import { runGit } from './git-exec.ts';
 import { taskCommitTrailer } from './task-commit-marker.ts';
 
@@ -155,6 +156,21 @@ export class InPlaceCheckout {
   // CheckoutHome.hasTaskCommit — see the free function above for the detection logic.
   async hasTaskCommit(branch: string, taskId: string): Promise<boolean> {
     return hasTaskCommit(this.repoRoot, branch, taskId);
+  }
+
+  // Retire a group's branch the moment its PR merges: drop it on origin and locally, moving HEAD to
+  // the base first if that branch is the one checked out (the last group of a run always is).
+  // Best-effort — the merge already happened, so nothing here may change the run's outcome.
+  async discardBranch(branch: string, baseBranch: string): Promise<BranchCleanup> {
+    const cleanup = await cleanupMergedBranches({
+      cwd: this.repoRoot,
+      baseBranch,
+      mergedBranches: [branch],
+    });
+    // The slot's record must not outlive the branch it names, or a later release/active() would
+    // report a ref that no longer exists.
+    if (this.current?.branch === branch && cleanup.deleted.includes(branch)) this.current = null;
+    return cleanup;
   }
 
   async release(groupId: string): Promise<void> {

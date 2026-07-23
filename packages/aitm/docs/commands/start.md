@@ -131,6 +131,15 @@ demonstrated, and what was checked then thrown away — or "Nothing was run to v
 
 Titles are conventional-commit style, ≤72 chars. Section headings are configurable per repo via `prBodySections` (see `../config.md`).
 
+### When the model gets the shape wrong
+
+The section contract used to be all-or-nothing: a body missing one heading was discarded and the PR opened with a generated stub instead. On a real five-group run that fired on **2 of 2** PRs — every body the operator actually got was the stub, and paragraphs of accurate prose about the diff were thrown away over a single absent heading. Two layers now stand between a near-miss and that outcome:
+
+1. **Normalization.** Models get the sections right and the markup wrong. `### Changes`, `## Changes:`, `## **Changes**` are all rewritten to the canonical heading before the contract is checked, so a body that is right in substance passes without even a retry. Only heading lines are touched — prose mentioning a section name cannot fabricate one.
+2. **Repair.** If retries still leave the contract broken, the model's title and sections are **kept**, the missing sections are filled from the same deterministic material the stub used, and everything is emitted in the required order. Prose before the first heading is folded into the first section, and a section nobody asked for is preserved at the end. Nothing the model wrote is dropped.
+
+The full generated fallback now only happens when the model never produced a schema-valid composition at all. The progress line tells you which path ran (`PR composition repaired: …` vs `PR composition fell back to generated title/body: …`).
+
 ## Acceptance checks
 
 Every PR group carries an `acceptance` check from the plan: the command to run or the behaviour to observe that proves the group done (`bun test src/auth passes and POST /login sets a session cookie`). It is required — a plan whose group arrives without one fails schema validation and goes back to the Planner — and it travels with the group: into the Coordinator's brief, into the pre-PR self-review, and into the PR body's Evidence section. A group is not done because the model says so; it is done when its check holds.

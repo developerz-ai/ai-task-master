@@ -112,6 +112,15 @@ async function fileExistsAt(cwd: string, branch: string, path: string): Promise<
   }
 }
 
+async function localBranchExists(cwd: string, branch: string): Promise<boolean> {
+  try {
+    await execa('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 test('concurrent-groups: two ready groups share one checkout with no branch/tree/state contamination', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   try {
@@ -156,6 +165,8 @@ test('concurrent-groups: two ready groups share one checkout with no branch/tree
     const prNumberFor: Record<string, number> = { 'group-a': PR_A, 'group-b': PR_B };
     let groupAThreadResolved = false;
     const mergedPrs: number[] = [];
+    // group branch → tip SHA at the moment its PR merged (before the branch was deleted).
+    const tipAtMerge: Record<string, string> = {};
 
     const orchestrator: WorkLoopOrchestrator = {
       // Simulates the Worker: writes one file named for the group and commits it. Mirrors
@@ -237,6 +248,11 @@ test('concurrent-groups: two ready groups share one checkout with no branch/tree
       },
       mergePr: async (pr) => {
         mergedPrs.push(pr);
+        // The branch is deleted the instant its PR merges, so capture its tip HERE — the commits
+        // survive in the object store and every isolation assertion below resolves them by SHA.
+        const branch = pr === PR_A ? 'aitm/group-a' : 'aitm/group-b';
+        const { stdout } = await execa('git', ['rev-parse', branch], { cwd: repo.path });
+        tipAtMerge[branch] = stdout.trim();
       },
     };
 
@@ -256,20 +272,36 @@ test('concurrent-groups: two ready groups share one checkout with no branch/tree
     const result = await loop.run();
     assert.equal(result.kind, 'success', `expected success, got: ${JSON.stringify(result)}`);
 
+    // The group branches are deleted the moment each PR merges; every isolation check below
+    // resolves the tip SHA captured at merge time, which outlives the ref in the object store.
+    const tipA = tipAtMerge['aitm/group-a'];
+    const tipB = tipAtMerge['aitm/group-b'];
+    assert.ok(tipA && tipB, 'both group tips were captured at merge time');
+    assert.equal(
+      await localBranchExists(repo.path, 'aitm/group-a'),
+      false,
+      'group-a branch deleted',
+    );
+    assert.equal(
+      await localBranchExists(repo.path, 'aitm/group-b'),
+      false,
+      'group-b branch deleted',
+    );
+
     // ── 1. Each group committed only its own files to its own branch ──────────────────────────
-    const filesOnA = await branchFiles(repo.path, defaultBranch, 'aitm/group-a');
-    const filesOnB = await branchFiles(repo.path, defaultBranch, 'aitm/group-b');
+    const filesOnA = await branchFiles(repo.path, defaultBranch, tipA);
+    const filesOnB = await branchFiles(repo.path, defaultBranch, tipB);
     assert.ok(filesOnA.includes('group-a.ts'), `group-a.ts missing from aitm/group-a: ${filesOnA}`);
     assert.ok(!filesOnA.includes('group-b.ts'), `group-b.ts leaked onto aitm/group-a: ${filesOnA}`);
     assert.ok(filesOnB.includes('group-b.ts'), `group-b.ts missing from aitm/group-b: ${filesOnB}`);
     assert.ok(!filesOnB.includes('group-a.ts'), `group-a.ts leaked onto aitm/group-b: ${filesOnB}`);
     assert.equal(
-      await fileExistsAt(repo.path, 'aitm/group-b', 'group-a.ts'),
+      await fileExistsAt(repo.path, tipB, 'group-a.ts'),
       false,
       'aitm/group-b tree must not contain group-a.ts',
     );
     assert.equal(
-      await fileExistsAt(repo.path, 'aitm/group-a', 'group-b.ts'),
+      await fileExistsAt(repo.path, tipA, 'group-b.ts'),
       false,
       'aitm/group-a tree must not contain group-b.ts',
     );
@@ -278,7 +310,7 @@ test('concurrent-groups: two ready groups share one checkout with no branch/tree
     // group A left scratch.txt dirty (stray-from-group-a, uncommitted); group B's checkout
     // acquisition must have reset it away before branching, so group B never saw — let alone
     // committed — that stray edit.
-    const scratchOnB = await showFile(repo.path, 'aitm/group-b:scratch.txt');
+    const scratchOnB = await showFile(repo.path, `${tipB}:scratch.txt`);
     assert.equal(
       scratchOnB,
       'original',
@@ -313,7 +345,7 @@ test('concurrent-groups: two ready groups share one checkout with no branch/tree
     );
     const { stdout: fixLog } = await execa(
       'git',
-      ['log', '--pretty=%s', 'aitm/group-a', '--', 'review-fix.ts'],
+      ['log', '--pretty=%s', tipA, '--', 'review-fix.ts'],
       { cwd: repo.path },
     );
     assert.match(fixLog, new RegExp(`address review thread on PR #${PR_A}`));

@@ -91,6 +91,11 @@ type ToolCallLog = {
 // `phantomOncePaths` lists paths that report clean on their FIRST status query and dirty on every
 // later one — a leaf that narrated the edit, then actually wrote it when the corrective retry told
 // it what it had done.
+// `preDirtyPaths` seeds the FIRST bare `git status --porcelain` (the self-review pre-planning
+// snapshot) so those paths look inherited-dirty; the inline-edit inference must then still fan out.
+// `preSnapshotFails` makes that first bare status exit non-zero, so dirtyPaths returns undefined and
+// the inference is disabled. Both only affect the first bare call — the later post-pass cleanup guard
+// stays clean (exit 0, empty) so neither triggers a reset.
 function makeTools(
   opts: {
     bashExitCode?: number;
@@ -98,6 +103,8 @@ function makeTools(
     cleanStatusPaths?: string[];
     phantomOncePaths?: string[];
     strayEdits?: boolean;
+    preDirtyPaths?: string[];
+    preSnapshotFails?: boolean;
   } = {},
 ): {
   tools: WorkerTools;
@@ -105,6 +112,7 @@ function makeTools(
 } {
   const calls: ToolCallLog = { reads: [], writes: [], bashes: [], statuses: [] };
   const statusQueries = new Map<string, number>();
+  let bareStatusCount = 0;
   const tools: WorkerTools = {
     readFile: tool<ReadFileInput, ReadFileOutput>({
       description: 'read a file from the checkout',
@@ -132,6 +140,19 @@ function makeTools(
           // per-file verification. Reports the tree dirty only when the test simulates stray edits;
           // never recorded in `bashes` so the clean no-op path stays byte-identical.
           if (path === '') {
+            bareStatusCount += 1;
+            // The FIRST bare status is the self-review pre-planning snapshot; drive it from the
+            // pre-* opts. Every later bare call is the post-pass cleanup guard and stays clean.
+            if (bareStatusCount === 1 && opts.preSnapshotFails) {
+              return { stdout: '', stderr: 'fatal: not a git repository', exitCode: 128 };
+            }
+            if (bareStatusCount === 1 && opts.preDirtyPaths && opts.preDirtyPaths.length > 0) {
+              return {
+                stdout: opts.preDirtyPaths.map((p) => ` M ${p}`).join('\n'),
+                stderr: '',
+                exitCode: 0,
+              };
+            }
             return {
               stdout: opts.strayEdits ? ' M stray.md\n?? stray-new.ts\n' : '',
               stderr: '',
@@ -2681,4 +2702,103 @@ test('buildManifestPrompt: the Coordinator is asked for the leaf hand-off digest
   await runWorker(agent, baseInput());
   assert.match(sent, /sharedContext/);
   assert.match(sent, /they can read the rest themselves/);
+});
+
+test('runWorker: a self-review pass whose planner already edited every file skips the fanout', async () => {
+  // The waste this closes, measured on a real run: the self-review Coordinator fixed a bug and wrote
+  // its regression test with its own tools, submitted a manifest without `applied`, and the harness
+  // fanned two editors out over finished work — ~70s for a net zero-line diff, one leaf reverting and
+  // restoring a file just to re-prove a test it had not written.
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/TodoItem.tsx', kind: 'modify', purpose: 'clear the draft in cancel()' },
+      { path: 'test/TodoItem.test.tsx', kind: 'modify', purpose: 'Escape+blur regression test' },
+    ],
+    draftCommitMessage: 'fix: escape-cancel resurrects the draft',
+  };
+  const { tools, calls } = makeTools();
+  // Only the manifest reply is scripted — an editor turn would have no model response to consume.
+  const model = makeWorkerModel(manifest, []);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), inlineEditsExpected: true });
+
+  assert.equal(result.kind, 'ok');
+  if (result.kind !== 'ok') return;
+  // Summaries come from the manifest's own `purpose`, which is the inline path's signature — the
+  // fanout path harvests editor text instead.
+  assert.deepEqual(result.delivery.changes, [
+    { path: 'src/TodoItem.tsx', kind: 'modify', summary: 'clear the draft in cancel()' },
+    { path: 'test/TodoItem.test.tsx', kind: 'modify', summary: 'Escape+blur regression test' },
+  ]);
+  assert.equal(calls.writes.length, 0, 'no editor leaf wrote anything');
+});
+
+test('runWorker: the inline inference is off for a normal task, which still fans out', async () => {
+  // The normal path must keep planning and editing as distinct phases — a Coordinator that merely
+  // looked at files does not get its manifest treated as executed.
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  const { tools } = makeTools();
+  const model = makeWorkerModel(manifest, ['created a']);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+
+  assert.equal(result.kind, 'ok');
+  if (result.kind !== 'ok') return;
+  assert.equal(result.delivery.changes[0]?.summary, 'created a', 'the editor produced the summary');
+});
+
+test('runWorker: a planned file dirty BEFORE planning does not fool the inline skip — fanout runs', async () => {
+  // The hole the pre-snapshot closes: a file inherited dirty (dirty before AND after) would pass the
+  // "not dirty before" test and look newly edited, skipping the fanout on work this pass never did.
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/TodoItem.tsx', kind: 'modify', purpose: 'fix a' },
+      { path: 'test/TodoItem.test.tsx', kind: 'modify', purpose: 'test a' },
+    ],
+    draftCommitMessage: 'fix: a',
+  };
+  // src/TodoItem.tsx was already dirty when the task started; the editors must still run. The
+  // fanout's summaries come from the editor text; the inline skip would use the manifest `purpose`
+  // ('fix a'), so the summary source is the discriminator.
+  const { tools } = makeTools({ preDirtyPaths: ['src/TodoItem.tsx'] });
+  const model = makeWorkerModel(manifest, ['edited TodoItem', 'edited its test']);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), inlineEditsExpected: true });
+
+  assert.equal(result.kind, 'ok');
+  if (result.kind !== 'ok') return;
+  const summaries = result.delivery.changes.map((c) => c.summary);
+  assert.ok(
+    summaries.includes('edited TodoItem'),
+    `fanout summaries expected, got inline purposes: ${JSON.stringify(summaries)}`,
+  );
+});
+
+test('runWorker: a failed pre-planning snapshot disables the inline skip — fanout runs', async () => {
+  // An unavailable baseline (git status errors) must NOT be read as an empty baseline; that would
+  // make every inherited-dirty file look newly edited. A missing snapshot disables the inference.
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'modify', purpose: 'fix a' }],
+    draftCommitMessage: 'fix: a',
+  };
+  const { tools } = makeTools({ preSnapshotFails: true });
+  const model = makeWorkerModel(manifest, ['edited a']);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), inlineEditsExpected: true });
+
+  assert.equal(result.kind, 'ok');
+  if (result.kind !== 'ok') return;
+  // Editor-produced summary ('edited a'), not the manifest purpose ('fix a') the inline skip uses.
+  assert.equal(
+    result.delivery.changes[0]?.summary,
+    'edited a',
+    'the fanout ran; summary from editor',
+  );
 });

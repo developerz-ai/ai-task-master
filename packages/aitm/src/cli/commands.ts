@@ -35,9 +35,11 @@ import {
 } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { type ModelLimitsLookup, ModelLimitsRegistry } from '../openrouter/model-limits.ts';
+import { OpenRouterReferenceCatalog } from '../openrouter/reference-catalog.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import type { CleanArgs, ParsedArgs } from './args.ts';
+import { type BannerEntry, modelBanner } from './model-banner.ts';
 
 export type CommandExit = { code: 0 | 1 | 2; message?: string };
 
@@ -139,6 +141,10 @@ export type StartCtx = {
   // Abort handle threaded into the run loop (→ RunLoopInput.signal). The CLI wires it to
   // SIGINT/SIGTERM; the adapter closes MCP on abort. Tests drive it directly.
   signal?: AbortSignal;
+  // The startup model banner (window + price per configured model). Defaults to resolving it through
+  // the run's ModelLimitsRegistry, which fetches the provider catalog. Injected so tests that assert
+  // on stdout don't depend on a network round-trip whose success changes what gets printed.
+  modelBanner?: () => Promise<string>;
 };
 
 // Minimal slice of GitHubClient used during the take-over precondition path (branch
@@ -223,16 +229,66 @@ function cacheHitPct(usage: RoleUsage): string {
   return `${Math.round((usage.cachedInputTokens / usage.inputTokens) * 100)}%`;
 }
 
+// Resolve every configured capability model through the registry and format the startup banner.
+// `forModel` throws ModelNotFound for a model the catalog omits entirely — that is itself worth
+// showing (as "window unknown"), so it degrades to an undefined entry instead of propagating.
+export async function startupModelBanner(
+  limits: ModelLimitsLookup,
+  resolved: Pick<ResolvedConfig, 'models' | 'activeProfile' | 'baseURL'>,
+): Promise<string> {
+  // One catalog load for the whole banner. Without this each forModel would retry the fetch (preload
+  // clears its promise on failure by design), turning an unreachable catalog into one failed request
+  // per capability.
+  try {
+    await limits.preload();
+  } catch {
+    return '';
+  }
+  const entries: BannerEntry[] = [];
+  for (const [capability, modelId] of Object.entries(resolved.models)) {
+    if (typeof modelId !== 'string' || modelId === '') continue;
+    try {
+      entries.push({ capability, modelId, limits: await limits.forModel(modelId) });
+    } catch {
+      entries.push({ capability, modelId, limits: undefined });
+    }
+  }
+  // Nothing resolved at all means the catalog told us nothing, not that the models are limitless —
+  // a table of "window unknown" would be noise, and worse, would read as a finding.
+  if (!entries.some((e) => e.limits !== undefined)) return '';
+  const where = [resolved.activeProfile, resolved.baseURL].filter(
+    (s): s is string => s !== undefined && s !== '',
+  );
+  return modelBanner(entries, where.length > 0 ? where.join(' · ') : 'default provider');
+}
+
+// The `…/pull/` prefix shared by every PR on one repo, recovered from any group that did persist a
+// URL. A run resumed across an aitm upgrade holds a mix: groups finished by the old binary carry no
+// prUrl, groups finished by the new one do — and printing `#1  title — #1` for the former is a
+// non-link that says nothing. One sibling's URL is enough to reconstruct all of them, with no extra
+// `gh` call. Undefined when no group has a URL to learn from.
+function pullUrlPrefix(groups: readonly PrGroup[]): string | undefined {
+  for (const group of groups) {
+    const url = group.prUrl;
+    if (url === undefined) continue;
+    const cut = url.lastIndexOf('/pull/');
+    if (cut !== -1) return url.slice(0, cut + '/pull/'.length);
+  }
+  return undefined;
+}
+
 // The end-of-run PR block: one line per group that opened a PR, with the number, the group title,
 // and the URL to click. Printed on every outcome — a merged run, a run parked at awaiting-pr, and a
 // blocked one all leave PRs the operator wants to open. '' when the run opened none, so a plan-only
-// or nothing-to-ship run prints no empty header. Falls back to the bare number for a legacy state
-// written before prUrl was persisted. Exported for tests.
+// or nothing-to-ship run prints no empty header. A group with no persisted prUrl borrows a sibling's
+// repo prefix, and only falls back to the bare number when nothing in the run knows the repo URL.
+// Exported for tests.
 export function prLinksBlock(groups: readonly PrGroup[]): string {
   const withPr = groups.filter((g) => g.pr !== null);
   if (withPr.length === 0) return '';
+  const prefix = pullUrlPrefix(withPr);
   const lines = withPr.map((g) => {
-    const target = g.prUrl ?? `#${g.pr}`;
+    const target = g.prUrl ?? (prefix !== undefined ? `${prefix}${g.pr}` : `#${g.pr}`);
     return `  #${g.pr}  ${g.title} — ${target}`;
   });
   return `Pull requests:\n${lines.join('\n')}\n`;
@@ -245,7 +301,12 @@ export function prLinksBlock(groups: readonly PrGroup[]): string {
 // ever reported one. Exported for tests.
 export function usageSummaryLine(totals: UsageTotals): string {
   const { overall } = totals;
-  const cost = overall.costUsd === null ? 'cost unknown' : `$${overall.costUsd.toFixed(4)}`;
+  // A reference-priced total is what this work costs at OpenRouter list rates, not what the
+  // configured endpoint charged — on a flat subscription those are different numbers, and printing
+  // the estimate unlabelled would read as a bill.
+  const estimateNote = totals.costEstimated ? ' est. at OpenRouter list rates' : '';
+  const cost =
+    overall.costUsd === null ? 'cost unknown' : `$${overall.costUsd.toFixed(4)}${estimateNote}`;
   const discount =
     overall.cacheDiscountUsd !== null
       ? `, $${overall.cacheDiscountUsd.toFixed(4)} cache discount`
@@ -421,8 +482,20 @@ export async function runStart(
   // once. The tracker's onUsage sinks are bound in the adapter; totals flush after the loop.
   const modelLimits = new ModelLimitsRegistry(
     new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL),
+    new OpenRouterReferenceCatalog(),
   );
   const usage = new UsageTracker(modelLimits);
+
+  // Print the resolved window + price per model before any tokens are spent. A provider that
+  // publishes no context window disables autocompaction for the whole run, and one that publishes no
+  // pricing reduces the end-of-run summary to `cost unknown` — both used to surface only after the
+  // fact, if at all. Best-effort: a catalog that won't load must not stop the run.
+  try {
+    const banner = await (ctx.modelBanner ?? (() => startupModelBanner(modelLimits, resolved)))();
+    if (banner !== '') (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(banner);
+  } catch {
+    // diagnostics must never break the run
+  }
 
   // Coding-style digest (plan slice 01): distilled once from AgentConfig + repo signals and cached
   // in the state dir, reused on resume. Threaded into the loop so planner/worker/reviewer prompts

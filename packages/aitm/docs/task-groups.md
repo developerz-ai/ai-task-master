@@ -58,7 +58,21 @@ The title slug is what makes a branch list readable: `aitm/g1` says nothing next
 
 `--branch <name>` still overrides: a single-group plan uses the requested name verbatim, and a multi-group plan prefixes each group as `<requested>/<id>-<slug>`.
 
-Branches are deleted after merge (squash strategy).
+Names are assigned **once, at plan acceptance**, and persisted in `state.json`. A resumed run reuses what state already holds and never re-derives them — so a plan written by an older build keeps that build's naming for its whole life, however new the binary driving it.
+
+### Deletion after merge
+
+When a group's PR merges, its branch is retired immediately — on `origin` and locally:
+
+| Step | Detail |
+| --- | --- |
+| When | Right after the `merged` state write, per group (`WorkLoop.discardMergedBranch`) |
+| What | `git push origin --delete <branch>`, then `git branch -D <branch>` |
+| HEAD | Moved to the base branch first when it is standing on the branch being deleted — which the last group of a run always is |
+
+`-D`, not `-d`: aitm squash-merges, so a landed branch is not an ancestor of the base and git's own merged-check would refuse every one of them. The authority for "this landed" is the run state — aitm opened the PR and aitm merged it — not the commit graph.
+
+Only branches whose group actually merged are touched. A blocked group's branch holds the only copy of its work and is always kept. Every step is best-effort: the merge is already durable, so a git failure here is cosmetic and never turns a merged group into a failed one (a remote branch already removed by GitHub's "automatically delete head branches" is the expected case, not an error).
 
 ## Cross-links
 

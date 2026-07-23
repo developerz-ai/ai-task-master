@@ -179,6 +179,12 @@ export type WorkerInput = {
   // EDITOR_CONCURRENCY_DEFAULT. Populated from the resolved `editorConcurrency` config key by the
   // run-loop adapter (issue #189); still optional so direct callers/tests may omit it.
   editorConcurrency?: number;
+  // Set by the self-review pass, the one caller whose Coordinator is expected to fix what it finds
+  // with its own tools mid-review rather than delegate. When set, a manifest whose every file was
+  // edited during planning is treated as `applied` even without the flag, so the fanout does not
+  // re-do finished work. Off everywhere else: the normal worker path must keep planning and editing
+  // as distinct phases. See planAndEdit.
+  inlineEditsExpected?: boolean;
 };
 
 // Per-file outcome from the parallel editor fanout. Useful to the Orchestrator
@@ -472,6 +478,17 @@ async function planAndEdit(
   input: WorkerInput,
   branch: string,
 ): Promise<PlanEditResult> {
+  // Self-review takes a pre-planning snapshot to power the inline-edit inference, and that snapshot
+  // must be on the group branch the planner then edits — so in that mode alone, check out first. The
+  // normal path defers its checkout until it knows there is work to commit (byte-identical to before
+  // this inference existed). `undefined` from dirtyPaths means the snapshot could not be taken, which
+  // disables the inference rather than guessing — an empty baseline would make inherited-dirty files
+  // look newly edited and wrongly skip the fanout.
+  const takeSnapshot = input.inlineEditsExpected === true;
+  if (takeSnapshot) await checkoutBranch(requireExec(init.tools.bash), input, branch);
+  const dirtyBefore = takeSnapshot
+    ? await dirtyPaths(init.tools.bash, input.checkoutPath)
+    : EMPTY_PATHS;
   const { submitted, handle } = await planManifest(agent, input, init.onUsage);
   if (!submitted.ok) {
     // Only after the schema-retry kernel exhausts. A model that never submits gets the same
@@ -493,15 +510,35 @@ async function planAndEdit(
     }
     return { kind: 'blocked', reason: EMPTY_MANIFEST_REASON };
   }
+  // There is work to commit. Check out the group branch now (a no-op when self-review already did it
+  // above) so both the inline and fanout paths observe and land on the same branch — a `checkout -B`
+  // after the writes would carry uncommitted edits onto the wrong branch (audit 02). A no-changes or
+  // empty manifest returned above without ever switching, keeping the normal path byte-identical.
+  await checkoutBranch(requireExec(init.tools.bash), input, branch);
   // Inline-edit path: the Coordinator declared `applied` — it wrote every planned change to disk
   // itself during planning (opencode-style: the agent decides when to delegate; the harness honors "I
-  // did it myself"). The work-loop's acquire already checked out the group branch, so inline edits
-  // landed there directly; checkoutBranch is a harmless no-op when already on it. Each planned file is
-  // phantom-guarded (git status) so a claimed `applied` with nothing on disk blocks rather than an
-  // empty commit — the same discipline the fanout path enforces per editor. Summary comes from each
-  // entry's `purpose` (the Coordinator's own description); there are no editor texts to harvest.
-  if (manifest.applied) {
-    await checkoutBranch(requireExec(init.tools.bash), input, branch);
+  // did it myself"). The branch is checked out (just above), so inline edits landed there directly.
+  // Each planned file is phantom-guarded (git status) so a claimed `applied` with nothing on disk
+  // blocks rather than an empty commit — the same discipline the fanout path enforces per editor.
+  // Summary comes from each entry's `purpose` (the Coordinator's own description); there are no
+  // editor texts to harvest.
+  // `applied` is what the Coordinator DECLARED; the working tree is what it actually DID, and the two
+  // diverge in practice. Measured on a real run: the self-review pass edited every file it planned
+  // with its own tools, submitted a manifest without the flag, and the harness fanned out two editors
+  // onto work that was already on disk — one of them spent its turn reverting and restoring a file
+  // just to re-prove a test it had not written, for a net zero-line diff. When every planned file is
+  // already modified, the plan is already executed by definition, and re-running it can only
+  // re-derive or damage it.
+  const appliedInline =
+    manifest.applied ||
+    (input.inlineEditsExpected === true &&
+      (await everyPlannedFileTouched(init.tools.bash, input, manifest.files, dirtyBefore)));
+  if (appliedInline) {
+    if (!manifest.applied) {
+      harnessProgress(
+        `group ${input.group.id}: every planned file is already edited — skipping the editor fanout`,
+      );
+    }
     const changes: FileChange[] = [];
     const unchanged: string[] = [];
     for (const file of manifest.files) {
@@ -516,11 +553,6 @@ async function planAndEdit(
     }
     return { kind: 'ok', changes, draftCommitMessage: manifest.draftCommitMessage, handle };
   }
-  // Create/switch the group branch BEFORE the editor fanout writes any file, so every edit lands on
-  // the group branch from the start rather than on whatever branch is currently checked out. Under
-  // the shared single checkout (worktrees removed), a `checkout -B` after the writes would otherwise
-  // carry this group's — or a concurrent group's — uncommitted edits onto the wrong branch (audit 02).
-  await checkoutBranch(requireExec(init.tools.bash), input, branch);
   const outcomes = await runEditorFanout(init, manifest, input);
   const changes: FileChange[] = [];
   const unchanged: string[] = [];
@@ -736,6 +768,65 @@ export function editorToolSet(tools: WorkerTools): WorkerTools {
 // never wrote the file — so planAndEdit drops it and fails the pass instead of recording a FileChange
 // the committed diff can't back.
 type EditorOutcome = { changed: true; change: FileChange } | { changed: false; path: string };
+
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
+
+// Paths already dirty in the working tree, as a set. Taken BEFORE planning so the inline-edit
+// inference can tell "the Coordinator just wrote this" from "this was already dirty when the task
+// started". Never throws — but a status that won't run returns `undefined`, NOT an empty set: an
+// empty baseline is the dangerous case, because a file that was inherited-dirty (dirty before AND
+// after) would then pass the "not dirty before" test and look newly edited, skipping the fanout on
+// work the pass never did. `undefined` disables the inference entirely (see everyPlannedFileTouched).
+async function dirtyPaths(
+  bash: WorkerTools['bash'],
+  checkoutPath: string,
+): Promise<ReadonlySet<string> | undefined> {
+  try {
+    const exec = requireExec(bash);
+    const out = await exec(
+      {
+        command: `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain`,
+        description: 'snapshot the working tree before planning',
+      },
+      { toolCallId: `worker-status-pre-${Date.now()}`, messages: [] },
+    );
+    if (isAsyncIterable(out) || out.exitCode !== 0) return undefined;
+    return new Set(
+      out.stdout
+        .split('\n')
+        .map((line) => line.slice(3).trim())
+        .filter((path) => path !== ''),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+// True when EVERY planned file was edited DURING planning — the signature of a Coordinator that did
+// the work inline and never declared `applied`. Two conditions, both required:
+//
+//   - dirty now: the change is really on disk, not merely described;
+//   - not dirty before: it is this pass's work, not leftovers the task inherited.
+//
+// The second is what makes this safe to act on. Dirtiness alone would mean a task that starts with a
+// modified file could skip the fanout and commit nothing of its own. And it is all-or-nothing: a
+// partially-edited manifest still fans out, so a leaf with real work left is never skipped because a
+// sibling's file happened to be finished.
+async function everyPlannedFileTouched(
+  bash: WorkerTools['bash'],
+  input: WorkerInput,
+  files: readonly FileManifestEntry[],
+  dirtyBefore: ReadonlySet<string> | undefined,
+): Promise<boolean> {
+  // No trustworthy pre-planning baseline → cannot tell new edits from inherited dirt → do not skip.
+  if (dirtyBefore === undefined) return false;
+  if (files.length === 0) return false;
+  for (const file of files) {
+    if (dirtyBefore.has(file.path)) return false;
+    if (!(await editorTouchedPath(bash, input.checkoutPath, file.path))) return false;
+  }
+  return true;
+}
 
 // A manifest entry's grouping key: its immediate parent directory (POSIX manifest paths), or '.' for a
 // repo-root file. Files under the same directory are cohesive, so they land on one leaf rather than

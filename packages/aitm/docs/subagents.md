@@ -66,6 +66,17 @@ The pre-PR self-review is adversarial by design, and it deliberately does **not*
 
 That closes a real hole. A phantom edit (the coding model narrating a file instead of writing it) once shipped a PR containing its services and none of its routes; self-review passed it, because it only ever looked at the diff, and the diff was internally consistent. Work that was planned and is missing is now a defect the review pass is told to find and write — a PR that ships half a feature and looks green is the failure mode this catches.
 
+### The review pass does not fan out over its own edits
+
+A reviewer fixes what it finds as it finds it: it reads the diff, spots the bug, and edits. Its manifest therefore describes work that is **already on disk**, and fanning editor leaves out over it makes them re-derive finished changes. Observed on a real run: two editors, ~70 seconds, a net **zero-line** diff — one leaf spent its turn `sed`-reverting and restoring a file to re-prove a regression test it had not written, while the other argued with a stale `git status` before concluding the fix was already there and running `git add`.
+
+The `applied` flag on the manifest already existed for this; the review pass simply never set it. Rather than depend on a model remembering a flag, the self-review Worker runs with `inlineEditsExpected`, and its manifest is treated as applied when **every** planned file was edited during planning. Two conditions, both required:
+
+- **dirty now** — the change is really on disk, not merely described;
+- **not dirty before** — it is this pass's work, not dirt the task inherited (the tree is snapshotted before planning).
+
+It is all-or-nothing: a partially-edited manifest still fans out, so a leaf with real work left is never skipped because a sibling's file happened to be finished. And it is scoped to the review pass — the normal coding path keeps planning and editing as distinct phases, and skips the extra `git status` entirely.
+
 ## Leaf hand-off
 
 An editor leaf used to receive nothing but its manifest entry's `purpose`, so every leaf independently re-read the files the Coordinator had *just* finished reading — four leaves, four surveys of the same set. The Coordinator now fills a `sharedContext` digest in the `submit` it was already making (no extra round-trip), and each leaf's prompt opens with it plus two harness facts: the verify command the edit must clear, and that the formatter runs after the leaf, so it must not hand-fix formatting or import order.

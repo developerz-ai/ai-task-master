@@ -149,3 +149,123 @@ test('a failed load is not cached — a later preload() retries and succeeds', a
   assert.equal(limits.contextLength, 200_000);
   assert.equal(calls, 2, 'exactly one retry after the initial failure');
 });
+
+// ---- reference-catalog fill (provider → OpenRouter list → unknown) --------
+
+function stubCatalog(models: OpenRouterModel[]): { listModels: () => Promise<OpenRouterModel[]> } {
+  return { listModels: async () => models };
+}
+
+test('ModelLimitsRegistry: a provider publishing nothing gets both window and price from the reference', () => {
+  // The z.ai coding endpoint, measured: its /models returns { id, object, created, owned_by } only.
+  // Before this, that meant no window (Compactor permanently inert) and no price (cost unknown).
+  return (async () => {
+    const registry = new ModelLimitsRegistry(
+      stubCatalog([{ id: 'glm-5.2' }]),
+      stubCatalog([
+        {
+          id: 'z-ai/glm-5.2',
+          context_length: 1_048_576,
+          pricing: { prompt: '0.0000008', completion: '0.0000025', input_cache_read: '0.00000015' },
+        },
+      ]),
+    );
+    const limits = await registry.forModel('glm-5.2');
+    assert.equal(limits.contextLength, 1_048_576);
+    assert.equal(limits.contextSource, 'reference');
+    assert.equal(limits.promptUsdPerToken, 0.0000008);
+    assert.equal(limits.pricingSource, 'reference');
+  })();
+});
+
+test('ModelLimitsRegistry: the provider wins on every field it publishes itself', async () => {
+  const registry = new ModelLimitsRegistry(
+    stubCatalog([
+      {
+        id: 'm',
+        context_length: 111,
+        pricing: { prompt: '0.000001', completion: '0.000002' },
+      },
+    ]),
+    stubCatalog([{ id: 'x/m', context_length: 999, pricing: { prompt: '9', completion: '9' } }]),
+  );
+  const limits = await registry.forModel('m');
+  assert.equal(limits.contextLength, 111);
+  assert.equal(limits.promptUsdPerToken, 0.000001);
+  assert.equal(limits.contextSource, 'provider');
+  assert.equal(limits.pricingSource, 'provider');
+});
+
+test('ModelLimitsRegistry: a partially-published catalog keeps its window and borrows only the price', async () => {
+  // kimi's endpoint, measured: context_length yes, pricing no.
+  const registry = new ModelLimitsRegistry(
+    stubCatalog([{ id: 'k3', context_length: 262_144 }]),
+    stubCatalog([
+      {
+        id: 'moonshotai/kimi-k3',
+        context_length: 1_048_576,
+        pricing: { prompt: '0.000003', completion: '0.000015' },
+      },
+    ]),
+  );
+  const limits = await registry.forModel('k3');
+  assert.equal(limits.contextLength, 262_144, "the provider's own window is authoritative");
+  assert.equal(limits.contextSource, 'provider');
+  assert.equal(limits.completionUsdPerToken, 0.000015);
+  assert.equal(limits.pricingSource, 'reference');
+});
+
+test('ModelLimitsRegistry: pricing is taken as a whole sheet, never half from each source', async () => {
+  // A provider prompt rate paired with an OpenRouter completion rate describes no real price list.
+  const registry = new ModelLimitsRegistry(
+    stubCatalog([{ id: 'm', pricing: { prompt: '0.000001' } }]),
+    stubCatalog([{ id: 'x/m', pricing: { prompt: '0.000008', completion: '0.000009' } }]),
+  );
+  const limits = await registry.forModel('m');
+  assert.equal(limits.promptUsdPerToken, 0.000008);
+  assert.equal(limits.completionUsdPerToken, 0.000009);
+  assert.equal(limits.pricingSource, 'reference');
+});
+
+test('ModelLimitsRegistry: an unreachable reference catalog degrades to unknown, never throws', async () => {
+  // The reference book is an enhancement; a third-party outage must not take a run down with it.
+  const registry = new ModelLimitsRegistry(stubCatalog([{ id: 'm' }]), {
+    listModels: async () => {
+      throw new Error('network down');
+    },
+  });
+  const limits = await registry.forModel('m');
+  assert.equal(limits.contextLength, undefined);
+  assert.equal(limits.promptUsdPerToken, undefined);
+  assert.equal(limits.pricingSource, undefined);
+});
+
+test('ModelLimitsRegistry: with nothing missing the reference is never fetched', async () => {
+  // A native OpenRouter profile must pay no extra request.
+  let fetched = 0;
+  const registry = new ModelLimitsRegistry(
+    stubCatalog([{ id: 'm', context_length: 10, pricing: { prompt: '0.1', completion: '0.2' } }]),
+    {
+      listModels: async () => {
+        fetched += 1;
+        return [];
+      },
+    },
+  );
+  await registry.forModel('m');
+  assert.equal(fetched, 0);
+});
+
+test('ModelLimitsRegistry: constructed without a reference it behaves exactly as before', async () => {
+  const registry = new ModelLimitsRegistry(stubCatalog([{ id: 'm' }]));
+  const limits = await registry.forModel('m');
+  assert.deepEqual(limits, { modelId: 'm' });
+});
+
+test('ModelLimitsRegistry.all: every catalog model, resolved — the banner input', async () => {
+  const registry = new ModelLimitsRegistry(
+    stubCatalog([{ id: 'a' }, { id: 'b', context_length: 5 }]),
+  );
+  const all = await registry.all();
+  assert.deepEqual(all.map((l) => l.modelId).sort(), ['a', 'b']);
+});

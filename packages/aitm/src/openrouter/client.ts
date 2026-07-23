@@ -11,37 +11,51 @@
 
 import { z } from 'zod';
 
-const positiveInt = z.number().int().positive();
+// Catalogs distinguish "absent" from "explicitly null", and both mean the same thing here: no value.
+// Treating them differently is not academic — OpenRouter ships `top_provider.max_completion_tokens:
+// null` for models that publish no output cap (moonshotai/kimi-k3 among them), and a plain
+// `.optional()` rejects null, which fails the whole entry and makes parseModelCatalog DROP the model.
+// A dropped model has no window and no price, so it silently loses both autocompaction and costing.
+const positiveInt = z
+  .number()
+  .int()
+  .positive()
+  .nullish()
+  .transform((v) => v ?? undefined);
+const priceString = z
+  .string()
+  .nullish()
+  .transform((v) => v ?? undefined);
 
 export const OpenRouterModelSchema = z
   .object({
     id: z.string(),
     name: z.string().optional(),
     // OpenRouter's spelling. Absent on plain OpenAI-compatible gateways — see contextLengthOf.
-    context_length: positiveInt.optional(),
+    context_length: positiveInt,
     // OpenRouter repeats the window per routed provider; used when the top-level field is missing.
     top_provider: z
       .object({
-        context_length: positiveInt.optional(),
-        max_completion_tokens: positiveInt.optional(),
+        context_length: positiveInt,
+        max_completion_tokens: positiveInt,
       })
       .optional(),
     // The most the model may EMIT in one reply. Input and output share the context window, so this
     // is the part of the window that must stay free — see usableInputTokens in ../compaction.
-    max_completion_tokens: positiveInt.optional(),
+    max_completion_tokens: positiveInt,
     // vLLM / llama.cpp-style gateways.
-    max_model_len: positiveInt.optional(),
+    max_model_len: positiveInt,
     // Some OpenAI-compatible gateways (and Azure-style catalogs).
-    context_window: positiveInt.optional(),
+    context_window: positiveInt,
     // Per-token USD as decimal strings. `input_cache_read`/`input_cache_write` price cached prompt
     // tokens (issue #114): a cached run's input bills at ~10% of `prompt`, so flat-rate math would
     // overstate cost ~10x and hide caching's dollar effect. Absent fields degrade to flat pricing.
     pricing: z
       .object({
-        prompt: z.string().optional(),
-        completion: z.string().optional(),
-        input_cache_read: z.string().optional(),
-        input_cache_write: z.string().optional(),
+        prompt: priceString,
+        completion: priceString,
+        input_cache_read: priceString,
+        input_cache_write: priceString,
       })
       .optional(),
   })

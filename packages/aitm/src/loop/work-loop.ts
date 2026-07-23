@@ -20,6 +20,7 @@ import { formatDuration, type RunStep } from '../observability/step-progress.ts'
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../state/schema.ts';
 import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
+import { type BranchCleanup, branchCleanupMessage } from '../workspace/branch-cleanup.ts';
 import { perTaskBranch } from '../workspace/branch-name.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
@@ -128,6 +129,12 @@ export type CheckoutHome = {
   // (test stubs) always re-runs the Worker, byte-identical to pre-fix behavior for everything
   // outside that narrow crash window.
   hasTaskCommit?(branch: string, taskId: string): Promise<boolean>;
+  // Retire a group branch whose PR has merged: delete it on origin and locally, moving HEAD off it
+  // first when it is the one checked out. Called once per group, right after the merge — otherwise a
+  // finished run leaves every group branch behind and parks the operator on the last one. Returns the
+  // concrete cleanup result so the caller reports what actually happened (a remote delete is
+  // best-effort). Optional: a home without it (test stubs) simply skips the tidy-up.
+  discardBranch?(branch: string, baseBranch: string): Promise<BranchCleanup>;
 };
 
 export type WorkLoopState = {
@@ -846,6 +853,8 @@ export class WorkLoop {
     const write = () => this.markStatus(ctx.group.id, statusForStage(to), { stage: to });
     if (to === 'merged') {
       await this.persistAfterSideEffect(this.mergedOutcome(ctx), write);
+      // A nothing-to-ship group reaches 'merged' with no PR and never pushed a branch worth removing.
+      if (ctx.group.pr !== null) await this.discardMergedBranch(ctx.group.id, ctx.group.branch);
       return;
     }
     if (from === 'pr-open') {
@@ -853,6 +862,24 @@ export class WorkLoop {
       return;
     }
     await write();
+  }
+
+  // Tidy the merged group's branch away, locally and on origin. Strictly after the state write: the
+  // merge is already durable, so a git failure here is cosmetic and must never surface as a failed
+  // group. A group that merged with no PR (nothing to ship) never pushed a branch worth removing.
+  // Delete a group's branch once its PR has merged. `groupId`/`branch` are passed explicitly because
+  // the two call sites hold the merged state differently — persistStageAfter has it on ctx.group,
+  // openAndMaybeMerge (prPerTask) has only the just-opened pr — and neither can rely on the in-memory
+  // group's `pr` field being current.
+  private async discardMergedBranch(groupId: string, branch: string | null): Promise<void> {
+    if (branch === null || !this.deps.home.discardBranch) return;
+    try {
+      const baseBranch = await this.deps.github.defaultBranch();
+      const cleanup = await this.deps.home.discardBranch(branch, baseBranch);
+      this.deps.progress?.(`group ${groupId}: ${branchCleanupMessage(branch, cleanup)}`);
+    } catch {
+      // best-effort tidy-up
+    }
   }
 
   private mergedOutcome(ctx: StageCtx): GroupOutcome {
@@ -968,7 +995,11 @@ export class WorkLoop {
       this.markStatus(group.id, final ? 'merged' : 'in-progress'),
     );
     this.outcomes.push({ groupId: group.id, status: 'merged', pr: pr.number });
+    // Delete the branch only after the group's FINAL task merges. In prPerTask mode every task shares
+    // one branch, reset to base between tasks (resetToBase) — deleting it after an intermediate task
+    // would pull the ground out from under the next one. A non-final task keeps it.
     if (final) {
+      await this.discardMergedBranch(group.id, group.branch);
       this.deps.progress?.(
         `group ${group.id}: merged — done in ${this.groupElapsedLabel(group.id)}`,
         this.stepFor(group.id, 'merged'),

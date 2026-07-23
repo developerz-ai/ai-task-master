@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { OpenRouterClient, OpenRouterModelSchema } from './client.ts';
+import {
+  contextLengthOf,
+  maxOutputTokensOf,
+  OpenRouterClient,
+  type OpenRouterModel,
+  OpenRouterModelSchema,
+} from './client.ts';
 
 const realFetch = globalThis.fetch;
 
@@ -91,9 +97,66 @@ test('listModels throws with status and body excerpt on non-200', async () => {
   );
 });
 
-test('listModels surfaces Zod parse errors when response shape is wrong', async () => {
-  globalThis.fetch = async () =>
-    new Response(JSON.stringify({ data: [{ id: 'x' }] }), { status: 200 });
+test('listModels surfaces Zod parse errors when the envelope shape is wrong', async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ models: [] }), { status: 200 });
   const c = new OpenRouterClient('sk-or-test');
   await assert.rejects(() => c.listModels());
+});
+
+test('listModels keeps a model that publishes no context window', async () => {
+  // A plain OpenAI-compatible /models — no context_length, no pricing. Rejecting the catalog here
+  // would cost the run both autocompaction and cost accounting for every other model in it.
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ data: [{ id: 'glm-5.2' }] }), { status: 200 });
+  const models = await new OpenRouterClient('sk-or-test').listModels();
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ['glm-5.2'],
+  );
+  assert.equal(contextLengthOf(models[0] as OpenRouterModel), undefined);
+});
+
+test('listModels drops a malformed entry instead of failing the catalog', async () => {
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ data: [{ noId: true }, { id: 'kept', context_length: 128000 }] }),
+      { status: 200 },
+    );
+  const models = await new OpenRouterClient('sk-or-test').listModels();
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ['kept'],
+  );
+});
+
+test('contextLengthOf: accepts the spellings other OpenAI-compatible catalogs use', () => {
+  const of = (raw: unknown): number | undefined =>
+    contextLengthOf(OpenRouterModelSchema.parse(raw));
+  assert.equal(of({ id: 'a', context_length: 200000 }), 200000);
+  assert.equal(of({ id: 'b', top_provider: { context_length: 128000 } }), 128000);
+  assert.equal(of({ id: 'c', max_model_len: 32768 }), 32768);
+  assert.equal(of({ id: 'd', context_window: 8192 }), 8192);
+  assert.equal(of({ id: 'e' }), undefined);
+});
+
+test('maxOutputTokensOf: reads the reply budget the Compactor reserves', () => {
+  const of = (raw: unknown): number | undefined =>
+    maxOutputTokensOf(OpenRouterModelSchema.parse(raw));
+  assert.equal(of({ id: 'a', max_completion_tokens: 64_000 }), 64_000);
+  assert.equal(of({ id: 'b', top_provider: { max_completion_tokens: 8_192 } }), 8_192);
+  assert.equal(
+    of({ id: 'c', max_completion_tokens: 4_096, top_provider: { max_completion_tokens: 8_192 } }),
+    4_096,
+    'the top-level field wins',
+  );
+  assert.equal(of({ id: 'd' }), undefined, 'a catalog that publishes none');
+});
+
+test('contextLengthOf: the top-level field wins over the per-provider one', () => {
+  const model = OpenRouterModelSchema.parse({
+    id: 'a',
+    context_length: 200000,
+    top_provider: { context_length: 64000 },
+  });
+  assert.equal(contextLengthOf(model), 200000);
 });

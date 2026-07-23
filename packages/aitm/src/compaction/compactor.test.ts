@@ -8,6 +8,7 @@ import {
   effectiveInputTokens,
   type LiveContextSize,
   safeStringify,
+  usableInputTokens,
 } from './compactor.ts';
 
 // The usage-grounded live-context size fed to shouldCompact. `estimatedInputTokens` is the char
@@ -41,9 +42,15 @@ function stallingModel(): MockLanguageModelV3 {
   });
 }
 
-function stubLimits(contextLength: number, modelId = 'openai/gpt-5'): ModelLimitsLookup {
+// A catalog stub. `maxOutputTokens` left undefined means "the catalog published none", which makes
+// the reserve the full RESERVE_CEILING (20k) — so a 100k window is usable up to 80k.
+function stubLimits(contextLength: number, maxOutputTokens?: number): ModelLimitsLookup {
   return {
-    forModel: async (id: string): Promise<ModelLimits> => ({ modelId: id, contextLength }),
+    forModel: async (id: string): Promise<ModelLimits> => ({
+      modelId: id,
+      contextLength,
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    }),
     preload: async () => {},
   } satisfies ModelLimitsLookup;
 }
@@ -83,22 +90,69 @@ test('Compactor is constructible', () => {
   assert.ok(c instanceof Compactor);
 });
 
-test('shouldCompact returns skip just below the 0.7 default threshold', async () => {
+test('shouldCompact returns skip just below the usable budget', async () => {
   const c = new Compactor({
     summarizer: new MockLanguageModelV3(),
     limits: stubLimits(100_000),
   });
-  const decision = await c.shouldCompact('openai/gpt-5', estimated(69_999));
+  const decision = await c.shouldCompact('openai/gpt-5', estimated(79_999));
   assert.deepEqual(decision, { kind: 'skip' });
 });
 
-test('shouldCompact returns compact at exactly the 0.7 default threshold', async () => {
+test('shouldCompact returns compact at exactly the usable budget (window minus reply reserve)', async () => {
   const c = new Compactor({
     summarizer: new MockLanguageModelV3(),
     limits: stubLimits(100_000),
   });
-  const decision = await c.shouldCompact('openai/gpt-5', estimated(70_000));
+  const decision = await c.shouldCompact('openai/gpt-5', estimated(80_000));
   assert.deepEqual(decision, { kind: 'compact', keepLastSteps: 6, contextLength: 100_000 });
+});
+
+test('shouldCompact: a small max-output model reserves only what it can emit', async () => {
+  // The model can emit at most 4k, so 96k of a 100k window can hold conversation — reserving the
+  // full 20k ceiling would strand 16k for a reply that cannot exceed 4k.
+  const c = new Compactor({
+    summarizer: new MockLanguageModelV3(),
+    limits: stubLimits(100_000, 4_000),
+  });
+  assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(95_999)), { kind: 'skip' });
+  assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(96_000)), {
+    kind: 'compact',
+    keepLastSteps: 6,
+    contextLength: 100_000,
+  });
+});
+
+test('shouldCompact: a large max-output model still reserves only the ceiling', async () => {
+  // A 64k output budget is a ceiling the reply almost never reaches; holding all of it back would
+  // strand a third of the window. The reserve stays at 20k.
+  const c = new Compactor({
+    summarizer: new MockLanguageModelV3(),
+    limits: stubLimits(200_000, 64_000),
+  });
+  assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(180_000)), {
+    kind: 'compact',
+    keepLastSteps: 6,
+    contextLength: 200_000,
+  });
+});
+
+test('shouldCompact: skips a window too small to hold a reply plus any history', async () => {
+  // 8k window, 20k reserve → nothing to compact into; summarizing every step would burn calls and
+  // never bring the conversation under budget.
+  const c = new Compactor({
+    summarizer: new MockLanguageModelV3(),
+    limits: stubLimits(8_000),
+  });
+  assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(7_000)), { kind: 'skip' });
+});
+
+test('usableInputTokens: window minus the reserve, floored at zero', () => {
+  assert.equal(usableInputTokens(100_000, undefined), 80_000);
+  assert.equal(usableInputTokens(100_000, 4_000), 96_000);
+  assert.equal(usableInputTokens(200_000, 64_000), 180_000);
+  assert.equal(usableInputTokens(100_000, undefined, 50_000), 50_000, 'an override wins');
+  assert.equal(usableInputTokens(8_000, undefined), 0, 'never negative');
 });
 
 test('shouldCompact returns compact above the threshold and carries keepLastSteps override', async () => {
@@ -131,11 +185,11 @@ test('shouldCompact skips when liveInputTokens is negative or non-finite', async
   }
 });
 
-test('shouldCompact honors a custom threshold', async () => {
+test('shouldCompact honors a reserve override', async () => {
   const c = new Compactor({
     summarizer: new MockLanguageModelV3(),
     limits: stubLimits(100_000),
-    threshold: 0.5,
+    reserveTokens: 50_000,
   });
   assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(49_999)), { kind: 'skip' });
   assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(50_000)), {
@@ -160,12 +214,12 @@ test('effectiveInputTokens: floors at the estimate when the reported figure unde
   assert.equal(effectiveInputTokens(grounded(100, 50, 900)), 900);
 });
 
-test('shouldCompact: usage-grounded tokens cross the threshold when the char estimate alone stays under', async () => {
+test('shouldCompact: usage-grounded tokens cross the budget when the char estimate alone stays under', async () => {
   const c = new Compactor({ summarizer: new MockLanguageModelV3(), limits: stubLimits(100_000) });
-  // Estimate 60k is below the 70k trigger, but the provider counted 68k for the last call and 5k of
-  // messages were appended since → grounded 73k ≥ 70k → compact (the char estimate alone missed the
+  // Estimate 60k is below the 80k budget, but the provider counted 78k for the last call and 5k of
+  // messages were appended since → grounded 83k ≥ 80k → compact (the char estimate alone missed the
   // system prompt + tool schemas the provider billed).
-  assert.deepEqual(await c.shouldCompact('openai/gpt-5', grounded(68_000, 5_000, 60_000)), {
+  assert.deepEqual(await c.shouldCompact('openai/gpt-5', grounded(78_000, 5_000, 60_000)), {
     kind: 'compact',
     keepLastSteps: 6,
     contextLength: 100_000,
@@ -178,9 +232,9 @@ test('shouldCompact: usage-grounded tokens cross the threshold when the char est
 
 test('shouldCompact: a post-compaction under-report is floored by the estimate → still compacts', async () => {
   const c = new Compactor({ summarizer: new MockLanguageModelV3(), limits: stubLimits(100_000) });
-  // The last (compacted) call reported a tiny 5k input, but the reverted live array estimates 80k ≥
-  // 70k → the estimate floor forces the compaction the small reported figure would otherwise skip.
-  assert.deepEqual(await c.shouldCompact('openai/gpt-5', grounded(5_000, 500, 80_000)), {
+  // The last (compacted) call reported a tiny 5k input, but the reverted live array estimates 85k ≥
+  // 80k → the estimate floor forces the compaction the small reported figure would otherwise skip.
+  assert.deepEqual(await c.shouldCompact('openai/gpt-5', grounded(5_000, 500, 85_000)), {
     kind: 'compact',
     keepLastSteps: 6,
     contextLength: 100_000,

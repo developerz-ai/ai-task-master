@@ -108,7 +108,15 @@ export const UsageTotalsSchema = z.object({
   overall: RoleUsageSchema,
 });
 
+// Bumped whenever the persisted shape changes in a way a schema default cannot absorb; each bump
+// gets a step in state/migrations.ts keyed by the version it reads. v1 is the first versioned shape:
+// structured PrGroup.tasks and PrGroup.stage, neither of which v0 (unversioned) state.json carried.
+export const CURRENT_SCHEMA_VERSION = 1;
+
 export const RunStateSchema = z.object({
+  // Stamped on every write, checked on every read: state from a newer aitm is refused, not coerced.
+  // A file with no version at all is v0 — migrations.ts lifts it before this schema sees it.
+  schemaVersion: z.literal(CURRENT_SCHEMA_VERSION).default(CURRENT_SCHEMA_VERSION),
   status: RunStatusSchema,
   prGroups: z.array(PrGroupSchema),
   currentGroupIndex: z.number().int().nonnegative(),

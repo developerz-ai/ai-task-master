@@ -81,7 +81,14 @@ function makeRunLoop(
     const planGroup: PrGroup = {
       id: 'hello',
       title: 'add hello',
-      tasks: ['create hello.ts with a simple export'],
+      tasks: [
+        {
+          id: 'hello',
+          text: 'create hello.ts with a simple export',
+          complexity: 'normal',
+          done: false,
+        },
+      ],
       dependsOn: [],
       branch: 'aitm/hello',
       pr: null,

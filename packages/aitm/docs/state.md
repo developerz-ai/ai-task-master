@@ -45,6 +45,7 @@ All run state lives in `.ai-task-master/` at the target repo root (mirrors the o
 
 | Field | Type | Notes |
 | --- | --- | --- |
+| `schemaVersion` | `number` | Shape of this file. Stamped on every write, lifted on every read. See [Schema versions](#schema-versions). |
 | `status` | `planning \| working \| awaiting-pr \| reviewing \| blocked \| success \| failed` | Single source of truth for `WorkLoop`. |
 | `prGroups` | `PrGroup[]` | Planner output. See sub-schema. |
 | `currentGroupIndex` | `number` | Index into `prGroups`. |
@@ -69,10 +70,22 @@ All run state lives in `.ai-task-master/` at the target repo root (mirrors the o
 | --- | --- | --- |
 | `id` | `string` | Stable slug derived from the group title. |
 | `title` | `string` | Short label, used as branch suffix and PR title prefix. |
-| `tasks` | `string[]` | Ordered task descriptions. |
+| `tasks` | `Task[]` | Ordered tasks: `{ id, text, complexity, done }`. Was a bare `string[]` in v0. |
 | `branch` | `string \| null` | Set when `Worker` checks out the branch. |
 | `pr` | `number \| null` | Set when `Worker` opens the PR. |
 | `status` | `pending \| in-progress \| awaiting-pr \| merged \| blocked` | Per-group status. |
+| `stage` | `pending \| working \| pr-open \| waiting-ci \| ci-failed \| waiting-reviews \| addressing-reviews \| ready-to-merge \| merged \| blocked` | Persisted position in the PR lifecycle, so a resumed run picks up mid-PR. Added in v1. |
+
+## Schema versions
+
+`state.json` carries a `schemaVersion`. `state/migrations.ts` lifts a file to `CURRENT_SCHEMA_VERSION` before `RunStateSchema` validates it, running one step per version from a table keyed by the version each step reads. A persisted-shape change that a schema default cannot absorb bumps the constant and adds one row — it does not add another read-time coercion to `StateStore`.
+
+| Version | Shape |
+| --- | --- |
+| v0 | No `schemaVersion`. `prGroups[].tasks` is a bare `string[]`; `PrGroup` has no `stage`. |
+| v1 | Structured `PrGroup.tasks` (`Task[]`), and `PrGroup.stage`. The v0 → v1 step gives each string task a slug id (`task-<n>` when the text has no slug characters), `complexity: normal`, `done: false`, and infers a missing stage from the group: `merged` → `merged`, `blocked` → `blocked` (a halted group must never become runnable again), an open `pr` → `waiting-ci`, otherwise `pending`. An explicit `stage` always wins. |
+
+A file whose version is **newer than this build** — or is not a version at all — is refused with `UnsupportedSchemaVersion`, never rewritten. That refusal deliberately does not read as a corrupt-state error (its message does not start with the state-file path), because `runStart` treats corrupt state as safe to force-init over: a run written by a newer `aitm` would otherwise be destroyed over a version gap. Upgrade `aitm`, or discard the run with `aitm clean`.
 
 ## Lifecycle
 

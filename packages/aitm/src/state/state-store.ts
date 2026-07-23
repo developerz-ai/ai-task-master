@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import { ZodError } from 'zod';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { type PlanMarkdownGroup, renderPlanMarkdown } from '../plan/plan-markdown.ts';
+import { migrateState } from './migrations.ts';
 import { acquireRunLock, RUN_LOCK_FILE, type RunLockHandle } from './run-lock.ts';
-import { type GroupStage, type RunState, RunStateSchema, type Task } from './schema.ts';
+import { type RunState, RunStateSchema } from './schema.ts';
 import { TranscriptStore } from './transcript-store.ts';
 
 const STATE_FILE = 'state.json';
@@ -240,70 +241,17 @@ export class StateStore {
   }
 }
 
+// UnsupportedSchemaVersion is deliberately re-thrown bare: unlike a schema or JSON fault, its message
+// must not start with `${path}:`, the prefix callers read as "corrupt state, safe to discard".
 function parseState(value: unknown, path: string): RunState {
   try {
-    return RunStateSchema.parse(coerceLegacyStage(coerceLegacyTasks(value)));
+    return RunStateSchema.parse(migrateState(value, path));
   } catch (err) {
     if (err instanceof ZodError) {
       throw new Error(`${path}: ${formatZodError(err)}`);
     }
     throw err;
   }
-}
-
-// Legacy state.json (pre Task[] migration) stored prGroups[].tasks as a bare string[].
-// There's no migration framework, so coerce on read: a string task becomes a structured
-// Task with a slug id, default complexity, and not-done. Idempotent — structured tasks
-// (and any non-legacy shape) pass through untouched for RunStateSchema.parse to validate.
-function coerceLegacyTasks(value: unknown): unknown {
-  if (!isRecord(value) || !Array.isArray(value.prGroups)) return value;
-  const prGroups = value.prGroups.map((group) => {
-    if (!isRecord(group) || !Array.isArray(group.tasks)) return group;
-    const tasks = group.tasks.map((task, index) =>
-      typeof task === 'string' ? legacyTask(task, index) : task,
-    );
-    return { ...group, tasks };
-  });
-  return { ...value, prGroups };
-}
-
-function legacyTask(text: string, index: number): Task {
-  return { id: slugify(text) || `task-${index + 1}`, text, complexity: 'normal', done: false };
-}
-
-// Legacy state.json (pre stage-machine) had no PrGroup.stage. Infer one on read so a paused run
-// resumes at the right lifecycle point instead of restarting: a merged group stays merged, a group
-// with an open PR resumes at waiting-ci, everything else starts at pending. The schema's
-// default('pending') alone would discard the status/pr signal a non-pending group needs.
-function coerceLegacyStage(value: unknown): unknown {
-  if (!isRecord(value) || !Array.isArray(value.prGroups)) return value;
-  const prGroups = value.prGroups.map((group) => {
-    if (!isRecord(group) || 'stage' in group) return group;
-    return { ...group, stage: inferStage(group) };
-  });
-  return { ...value, prGroups };
-}
-
-function inferStage(group: Record<string, unknown>): GroupStage {
-  if (group.status === 'merged') return 'merged';
-  // A legacy terminal `blocked` group must stay blocked — otherwise it falls through to
-  // 'waiting-ci'/'pending' and becomes runnable again on resume, re-entering work it was halted on.
-  if (group.status === 'blocked') return 'blocked';
-  if (group.pr != null) return 'waiting-ci';
-  return 'pending';
-}
-
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60)
-    .replace(/-+$/, '');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function ensureTrailingNewline(s: string): string {

@@ -49,8 +49,16 @@ import {
   type SubagentHandle,
   type SubmittedOutput,
   submittedOutput,
+  wrapReminder,
 } from '@developerz.ai/ai-claude-compat';
-import { generateText, stepCountIs, type Tool, type ToolLoopAgent, tool } from 'ai';
+import {
+  generateText,
+  stepCountIs,
+  type Tool,
+  type ToolLoopAgent,
+  type ToolLoopAgentSettings,
+  tool,
+} from 'ai';
 import { z } from 'zod';
 import type { LoggerLike } from '../logger/logger.ts';
 import { harnessProgress } from '../observability/step-progress.ts';
@@ -113,6 +121,20 @@ export const FileManifestSchema = z.object({
   // (git status), so a claimed `applied` with nothing on disk still surfaces as `blocked` rather than
   // producing an empty commit. Absent/false → fan out as usual.
   applied: z.boolean().optional(),
+  // The ground the Coordinator already covered, handed forward to the editor leaves. A leaf's whole
+  // brief used to be its entry's `purpose`, so every leaf re-surveyed the exact files the Coordinator
+  // had just finished reading (observed: four leaves each re-read repository.ts / todo.ts / errors.ts
+  // / biome.json / package.json). The Coordinator holds that knowledge at submit time, so it costs no
+  // extra round-trip to carry it here. Distilled, never dumped: it is paid ×N across the fanout, so
+  // it is capped at LEAF_CONTEXT_MAX and asked for as a task briefing (what to change, where, which
+  // contract), not a context dump. Absent → leaf prompts are byte-identical to before.
+  sharedContext: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Brief your editor leaves in 3-5 sentences: the conventions, file:line landmarks and contracts you already established that bear on THESE edits. Omit anything that would not change what a leaf types — leaves can still read the repo themselves.',
+    ),
 });
 export type FileManifest = z.infer<typeof FileManifestSchema>;
 
@@ -207,6 +229,39 @@ export const EDITOR_MAX_STEPS = 12;
 export const MAX_FILES_PER_EDITOR = 6;
 export const EDITOR_CONCURRENCY_DEFAULT = 4;
 
+// Mechanical floor under the fanout decision. WORKER_SYSTEM_PREFIX already tells the Coordinator to
+// fan out only at scale, but prose is not a constraint: an observed run spawned four editors for four
+// one-line edits (`db.test.ts (1), package.json #1 (1), index.ts (1), package.json #2 (1)`) — four
+// agent spin-ups, four repo surveys, four leaf prompts, for work one leaf finishes in a single step.
+// A leaf's fixed cost dominates trivial work, so below this floor the whole manifest runs inline in
+// ONE editor pass. Only manifest data available at the decision point feeds the predicate:
+//   - FANOUT_FLOOR_FILES (4): at/below MAX_FILES_PER_EDITOR, so the collapsed leaf still respects the
+//     per-leaf cap. 4 is the observed pathological width; a 5+ file slice keeps fanning out.
+//   - FANOUT_FLOOR_PURPOSE_CHARS (240): the Coordinator's own prose across the WHOLE manifest. It
+//     writes a clause for a one-line edit ("expand the exports field") and a paragraph for a real
+//     module, so total purpose length is the cheapest honest proxy for how much work it planned.
+//     240 over up-to-4 files is ~60 chars each — one short sentence apiece.
+//   - a `create` entry is never trivial: writing a new file from nothing is real code, so any create
+//     in the manifest keeps the fanout regardless of the other two signals.
+export const FANOUT_FLOOR_FILES = 4;
+export const FANOUT_FLOOR_PURPOSE_CHARS = 240;
+
+// Survey budget for the manifest-planning pass. Observed: one pass burned 12 minutes on ~40 read-only
+// tool calls (readFile/glob/grep + `bash cat/ls/find`) before submitting a manifest for ONE file;
+// another ran `bun install`, deleted node_modules and reinstalled — all while *planning*. Planning is
+// not the phase that needs certainty; the editor leaves read the files they edit anyway. So once this
+// many tool calls run without a single write, the pass gets one corrective reminder to submit with
+// what it already knows. 20 is deliberately generous: a genuinely broad survey of an unfamiliar repo
+// lands around 10-15 calls, so 20 clears real work while still catching the 40-call spiral at half
+// its cost. It never fails the pass — it nudges, and the model finishes on its own terms.
+export const MANIFEST_SURVEY_BUDGET = 20;
+
+// Tool names that count as a WRITE for the survey budget. Everything else — including `bash` — counts
+// as survey: the observed waste was `bash cat/ls/find` and `bun install` probing, and a Coordinator
+// that genuinely edits inline reaches for writeFile/editFile/multiEdit (WORKER_SYSTEM_PREFIX's INLINE
+// path), so classifying bash as survey is what makes the budget bite where it should.
+const MANIFEST_WRITE_TOOLS: ReadonlySet<string> = new Set(['writeFile', 'editFile', 'multiEdit']);
+
 // Module-private link from a Worker agent back to its init, so runWorker can spawn editor
 // sub-agents with the same model + tool handles without exposing them on the public surface.
 const workerInitRegistry = new WeakMap<WorkerAgent, SubagentInit<WorkerTools>>();
@@ -223,7 +278,9 @@ export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent 
         execute: async (manifest) => manifest,
       }),
       ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
-      ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
+      // The survey budget composes ONTO the caller's prepareStep (compaction, deferred-tool
+      // activation) rather than replacing it — one prepareStep slot, several policies.
+      prepareStep: withSurveyBudget(init.prepareStep),
       ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
       ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
       ...(init.onStepFinish ? { onStepFinish: init.onStepFinish } : {}),
@@ -235,6 +292,61 @@ export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent 
   );
   workerInitRegistry.set(agent, init);
   return agent;
+}
+
+type WorkerPrepareStep = NonNullable<ToolLoopAgentSettings<never, WorkerTools>['prepareStep']>;
+
+// How many tool calls the manifest pass has made since its last write. Resets to zero on any write, so
+// a Coordinator taking the INLINE path (survey → write → survey → write) never accumulates a streak —
+// only an unbroken run of pure surveying does.
+export function readOnlyStreak(
+  steps: ReadonlyArray<{ toolCalls: ReadonlyArray<{ toolName: string }> }>,
+): number {
+  let streak = 0;
+  for (const step of steps) {
+    for (const call of step.toolCalls) {
+      if (MANIFEST_WRITE_TOOLS.has(call.toolName)) streak = 0;
+      else streak++;
+    }
+  }
+  return streak;
+}
+
+// The nudge itself. Names the number so the model can see the budget is a measurement, not a mood, and
+// points at the one action that ends the pass. Deliberately not a prohibition: the model may keep
+// reading if it truly must — a hard stop here would trade a slow manifest for a wrong one.
+export function surveyBudgetReminder(streak: number): string {
+  return wrapReminder(
+    [
+      `You have made ${streak} read-only tool calls in a row without writing anything.`,
+      'This is the planning phase, not the implementation phase — the editors you fan out re-read the',
+      'files they own anyway. Call `submit` now with the manifest you can already justify: the files to',
+      'create/modify/delete, each with its purpose, and `sharedContext` briefing your leaves on what you',
+      'have already established. If a file is genuinely uncertain, say so in its purpose rather than',
+      'reading more.',
+    ].join(' '),
+  );
+}
+
+// Compose the survey budget onto the caller's prepareStep. Once the pass crosses MANIFEST_SURVEY_BUDGET
+// read-only calls it appends ONE corrective user message to that step's request; the SDK does not
+// persist a prepareStep `messages` override across steps, so this is a single nudge rather than a
+// standing instruction — which is the intent. It re-arms after the model writes something, so a long
+// pass that surveys, writes, then spirals again gets nudged again.
+function withSurveyBudget(base: WorkerPrepareStep | undefined): WorkerPrepareStep {
+  let armed = true;
+  return async (options) => {
+    const result = await base?.(options);
+    const streak = readOnlyStreak(options.steps);
+    if (streak === 0) armed = true;
+    if (!armed || streak < MANIFEST_SURVEY_BUDGET) return result;
+    armed = false;
+    const messages = result?.messages ?? options.messages;
+    return {
+      ...(result ?? {}),
+      messages: [...messages, { role: 'user', content: surveyBudgetReminder(streak) }],
+    };
+  };
 }
 
 // The empty-manifest guidance (surfaced as a `blocked`). Extracted so the first pass and the
@@ -263,6 +375,10 @@ const ROLLING_CONTEXT_MAX = 4000;
 // truncating it mid-rule is how a leaf ends up violating the house rules it was handed. The digest
 // half tails it and is what gets cut when a repo ships an unusually long style file.
 const EDITOR_STYLE_MAX = 6000;
+// The Coordinator's hand-off digest is paid once per leaf, so it is capped far tighter than the style
+// guide: ~800 chars is the "four sentences a colleague gives you before you start" the field asks for.
+// A leaf buried in preamble writes worse code and costs ×N; anything longer, the leaf can go read.
+const LEAF_CONTEXT_MAX = 800;
 
 const TRUNCATION_MARKER = ' […truncated]';
 
@@ -405,7 +521,7 @@ async function planAndEdit(
   // the shared single checkout (worktrees removed), a `checkout -B` after the writes would otherwise
   // carry this group's — or a concurrent group's — uncommitted edits onto the wrong branch (audit 02).
   await checkoutBranch(requireExec(init.tools.bash), input, branch);
-  const outcomes = await runEditorFanout(init, manifest.files, input);
+  const outcomes = await runEditorFanout(init, manifest, input);
   const changes: FileChange[] = [];
   const unchanged: string[] = [];
   for (const outcome of outcomes) {
@@ -468,7 +584,31 @@ async function commitWithVerify(
 
   let started = Date.now();
   let out = await runVerify(exec, input);
-  logVerify(input, out, Date.now() - started, out.exitCode !== 0);
+
+  // Formatter-first repair. A failed verify used to go straight to the model, which meant formatting
+  // diagnostics — import order, a `"exports"` field wanting expansion — were handed to an LLM that
+  // spawned a leaf per file to hand-edit them. `biome check --write` (or whatever formatCommand is)
+  // fixes that whole class in milliseconds, deterministically. So re-run the formatter first and
+  // re-verify; only what survives is worth a model fix pass. The formatter already ran before this
+  // verify, but the fanout's edits are exactly what it needs to see — and it is idempotent, so on a
+  // genuinely non-formatting failure this costs one no-op format plus one re-verify.
+  const formatRepair = out.exitCode !== 0 && input.formatCommand !== undefined;
+  logVerify(input, out, Date.now() - started, {
+    formatRetryFollowed: formatRepair,
+    fixPassFollowed: out.exitCode !== 0 && !formatRepair,
+  });
+  if (formatRepair) {
+    await runFormat(exec, input);
+    started = Date.now();
+    out = await runVerify(exec, input);
+    harnessProgress(
+      `group ${input.group.id}: verify failed → formatted → re-verified (exit ${out.exitCode})`,
+    );
+    logVerify(input, out, Date.now() - started, {
+      formatRetryFollowed: false,
+      fixPassFollowed: out.exitCode !== 0,
+    });
+  }
 
   let extraChanges: FileChange[] = [];
   if (out.exitCode !== 0) {
@@ -488,7 +628,10 @@ async function commitWithVerify(
     await runFormat(exec, input);
     started = Date.now();
     out = await runVerify(exec, input);
-    logVerify(input, out, Date.now() - started, false);
+    logVerify(input, out, Date.now() - started, {
+      formatRetryFollowed: false,
+      fixPassFollowed: false,
+    });
     if (out.exitCode !== 0) {
       return { kind: 'blocked', reason: verifyBlockedReason(input.verifyCommand ?? '', out) };
     }
@@ -560,6 +703,7 @@ function buildManifestPrompt(input: WorkerInput): string {
   lines.push(
     '',
     'Survey the repo, then call submit with the FileManifest.',
+    'Include `sharedContext`: 3-5 sentences handing your editor leaves the ground you just covered — the conventions, the file:line landmarks, and the contract their edits must satisfy. Only what changes what they type; they can read the rest themselves.',
     'If the task genuinely requires no code changes (verification-only, or the change is already in place), submit an empty `files` list with `noChangesNeeded` explaining why — never invent edits to have something to commit.',
   );
   return appendReminderBlock(
@@ -637,6 +781,22 @@ export function labelEditorGroups(groups: readonly FileManifestEntry[][]): Edito
     seen.set(base, n);
     return { label: `${base} #${n}`, files };
   });
+}
+
+// Is this manifest too small to be worth fanning out? See FANOUT_FLOOR_FILES for the constants and
+// why these three signals. A one-file manifest is already a single leaf, so the floor has nothing to
+// collapse there and returns false — that path stays byte-identical.
+export function belowFanoutFloor(files: readonly FileManifestEntry[]): boolean {
+  if (files.length <= 1 || files.length > FANOUT_FLOOR_FILES) return false;
+  if (files.some((file) => file.kind === 'create')) return false;
+  const purposeChars = files.reduce((total, file) => total + file.purpose.trim().length, 0);
+  return purposeChars <= FANOUT_FLOOR_PURPOSE_CHARS;
+}
+
+// Stream label for the collapsed leaf. editorGroupLabel would name it after the FIRST entry's
+// directory, which is a lie once the collapsed set spans directories — the whole point of the floor.
+function collapsedLeafLabel(files: readonly FileManifestEntry[]): string {
+  return `${files.length} small changes`;
 }
 
 // The fanout roster line (issue #131): `auth/ (2), login.ts (1)` — one entry per leaf, in fanout
@@ -729,9 +889,10 @@ export function buildTeamBrief(input: WorkerInput, files: readonly FileManifestE
 // per-group results are flattened back to one outcome per manifest entry for planAndEdit.
 async function runEditorFanout(
   init: SubagentInit<WorkerTools>,
-  files: FileManifestEntry[],
+  manifest: FileManifest,
   input: WorkerInput,
 ): Promise<EditorOutcome[]> {
+  const files = manifest.files;
   const controller = new AbortController();
   const outer = input.signal;
   const onOuterAbort = (): void => controller.abort(outer?.reason);
@@ -739,7 +900,15 @@ async function runEditorFanout(
     if (outer.aborted) controller.abort(outer.reason);
     else outer.addEventListener('abort', onOuterAbort, { once: true });
   }
-  const leaves = labelEditorGroups(groupManifestByDir(files, MAX_FILES_PER_EDITOR));
+  const collapse = belowFanoutFloor(files);
+  if (collapse) {
+    harnessProgress(
+      `group ${input.group.id}: manifest below the fanout floor (${files.length} small changes) — running them in one pass`,
+    );
+  }
+  const leaves = collapse
+    ? [{ label: collapsedLeafLabel(files), files: [...files] }]
+    : labelEditorGroups(groupManifestByDir(files, MAX_FILES_PER_EDITOR));
   // A team brief only makes sense once the work is actually split across leaves; a lone leaf already
   // sees its whole assignment in its own prompt, and injecting nothing keeps that path byte-identical.
   // The roster/per-editor-outcome lines gate on the same condition (issue #131) — a lone leaf stays
@@ -754,7 +923,7 @@ async function runEditorFanout(
   }
   try {
     const perLeaf = await runPool(leaves, concurrency, (leaf) =>
-      runEditor(init, leaf, input, controller.signal, teamBrief)
+      runEditor(init, leaf, input, controller.signal, teamBrief, manifest.sharedContext)
         .then((outcomes) => {
           if (isTeam) {
             harnessProgress(
@@ -774,14 +943,58 @@ async function runEditorFanout(
   }
 }
 
+// One leaf, with exactly one retry for phantom edits. A leaf that narrates ("I updated the routes")
+// without calling a write tool used to block the WHOLE task — an observed run shipped a PR with its
+// services and none of its routes for that reason. Blocking is too blunt for a failure the model can
+// usually fix once it is told plainly what happened, so the unwritten files get one corrective pass.
+// Exactly one: a second narration after being told "you wrote nothing" is a real capability failure,
+// and retrying it again would just burn a leaf's worth of tokens before blocking anyway.
 async function runEditor(
   init: SubagentInit<WorkerTools>,
   leaf: EditorLeaf,
   input: WorkerInput,
   signal: AbortSignal,
   teamBrief: string,
+  sharedContext: string | undefined,
 ): Promise<EditorOutcome[]> {
   const group = leaf.files;
+  const summary = await runEditorPass(
+    init,
+    leaf,
+    input,
+    signal,
+    teamBrief,
+    buildEditorPrompt(group, input, sharedContext),
+  );
+  const outcomes = await verifyEditorOutcomes(init, input, group, summary);
+  const phantoms = group.filter((file) => outcomes.some((o) => !o.changed && o.path === file.path));
+  if (phantoms.length === 0) return outcomes;
+
+  harnessProgress(
+    `group ${input.group.id}: ${leaf.label} narrated ${phantoms.length === 1 ? 'an edit' : `${phantoms.length} edits`} without writing — retrying once`,
+  );
+  const retrySummary = await runEditorPass(
+    init,
+    leaf,
+    input,
+    signal,
+    teamBrief,
+    buildPhantomRetryPrompt(phantoms, input, sharedContext),
+  );
+  const retried = await verifyEditorOutcomes(init, input, phantoms, retrySummary || summary);
+  const byPath = new Map(retried.map((o) => [o.changed ? o.change.path : o.path, o]));
+  return outcomes.map((o) => (o.changed ? o : (byPath.get(o.path) ?? o)));
+}
+
+// One generateText call for a leaf, returning its one-line summary ('' when it said nothing).
+async function runEditorPass(
+  init: SubagentInit<WorkerTools>,
+  leaf: EditorLeaf,
+  input: WorkerInput,
+  signal: AbortSignal,
+  teamBrief: string,
+  prompt: string,
+): Promise<string> {
   // Per-editor label (issue #131): each leaf gets its own onStepFinish instance, tagged with the
   // already-disambiguated label naming what it owns, rather than every leaf sharing one anonymous
   // "editor" stream line — chunked-directory leaves no longer collide on that tag.
@@ -799,7 +1012,7 @@ async function runEditor(
           // Empty for a lone leaf → the slot is omitted and the system prompt is byte-identical to today.
           ...(teamBrief ? { teamBrief } : {}),
         }),
-        prompt: buildEditorPrompt(group, input),
+        prompt,
         stopWhen: stepCountIs(EDITOR_MAX_STEPS),
         abortSignal: signal,
         // web_search (issue #112) rides providerOptions.openrouter when the adapter enabled it for
@@ -816,20 +1029,30 @@ async function runEditor(
   );
   reportUsage(init.onUsage, result); // per-leaf editor pass, recorded under the worker role (#114)
   const firstLine = result.text.trim().split('\n')[0];
-  const summary = firstLine && firstLine.length > 0 ? firstLine : '';
-  // One leaf now owns a directory-cohesive group, so confirm EACH planned file diverged on disk before
-  // recording its change: a weak model can narrate an edit ("edited x") — or write two of its three
-  // files and narrate the third — without calling writeFile/editFile, and every unwritten path must
-  // surface as a phantom rather than a FileChange the committed diff can't back (audit 05).
+  return firstLine && firstLine.length > 0 ? firstLine : '';
+}
+
+// Confirm EACH planned file diverged on disk before recording its change: a weak model can narrate an
+// edit ("edited x") — or write two of its three files and narrate the third — without calling
+// writeFile/editFile, and every unwritten path must surface as a phantom rather than a FileChange the
+// committed diff can't back (audit 05).
+async function verifyEditorOutcomes(
+  init: SubagentInit<WorkerTools>,
+  input: WorkerInput,
+  group: readonly FileManifestEntry[],
+  summary: string,
+): Promise<EditorOutcome[]> {
   const outcomes: EditorOutcome[] = [];
   for (const file of group) {
     if (await editorTouchedPath(init.tools.bash, input.checkoutPath, file.path)) {
-      const change: FileChange = {
-        path: file.path,
-        kind: file.kind,
-        summary: summary || `${file.kind} ${file.path}`,
-      };
-      outcomes.push({ changed: true, change });
+      outcomes.push({
+        changed: true,
+        change: {
+          path: file.path,
+          kind: file.kind,
+          summary: summary || `${file.kind} ${file.path}`,
+        },
+      });
     } else {
       outcomes.push({ changed: false, path: file.path });
     }
@@ -862,12 +1085,46 @@ async function editorTouchedPath(
   return out.stdout.trim().length > 0;
 }
 
-function buildEditorPrompt(group: readonly FileManifestEntry[], input: WorkerInput): string {
+// The head of a leaf's prompt: the ground the Coordinator already covered, plus the harness facts a
+// leaf otherwise rediscovers or gets wrong. Everything here is data that already exists at this point
+// — no extra model round-trip — and each line changes what the leaf types:
+//   - `sharedContext`: the Coordinator's own hand-off digest (conventions, landmarks, contracts), so a
+//     leaf does not re-survey the files the Coordinator just finished reading.
+//   - the verify command: the bar the edit has to clear, which the leaf would otherwise only learn
+//     about after the gate fails and a fix pass is spent on it.
+//   - the format command: the harness runs it after the fanout, so hand-fixing import order or
+//     whitespace is wasted work (an observed run spent four leaves doing exactly that).
+// All three absent → empty, and the leaf prompt is byte-identical to the pre-hand-off shape.
+function buildLeafContext(input: WorkerInput, sharedContext: string | undefined): string[] {
+  const lines: string[] = [];
+  if (sharedContext?.trim()) {
+    lines.push(
+      'What the coordinator already established:',
+      capText(sharedContext, LEAF_CONTEXT_MAX),
+    );
+  }
+  if (input.verifyCommand) {
+    lines.push(`Your change must survive \`${capText(input.verifyCommand, MANIFEST_FIELD_MAX)}\`.`);
+  }
+  if (input.formatCommand) {
+    lines.push(
+      `\`${capText(input.formatCommand, MANIFEST_FIELD_MAX)}\` runs after you — do not hand-fix formatting or import order.`,
+    );
+  }
+  return lines.length > 0 ? [...lines, ''] : lines;
+}
+
+function buildEditorPrompt(
+  group: readonly FileManifestEntry[],
+  input: WorkerInput,
+  sharedContext?: string,
+): string {
+  const head = [`Checkout: ${input.checkoutPath}`, ...buildLeafContext(input, sharedContext)];
   const [first, ...rest] = group;
   // A single-file group is byte-identical to the pre-team per-file prompt (the common case).
   if (first && rest.length === 0) {
     return [
-      `Checkout: ${input.checkoutPath}`,
+      ...head,
       `File: ${first.path}`,
       `Change kind: ${first.kind}`,
       `Purpose: ${capText(first.purpose, MANIFEST_FIELD_MAX)}`,
@@ -875,7 +1132,7 @@ function buildEditorPrompt(group: readonly FileManifestEntry[], input: WorkerInp
       'Make the change. Reply with a one-line summary.',
     ].join('\n');
   }
-  const lines = [`Checkout: ${input.checkoutPath}`, `You own these ${group.length} files:`, ''];
+  const lines = [...head, `You own these ${group.length} files:`, ''];
   for (const file of group) {
     lines.push(
       `File: ${file.path}`,
@@ -885,6 +1142,35 @@ function buildEditorPrompt(group: readonly FileManifestEntry[], input: WorkerInp
     );
   }
   lines.push('Make each change. Reply with a one-line summary.');
+  return lines.join('\n');
+}
+
+// The single corrective retry for a leaf that narrated instead of writing. It names the failure
+// explicitly rather than re-issuing the original brief: the model already believes it did the work, so
+// repeating the request unchanged tends to produce the same narration. Scoped to the unwritten files
+// only — whatever the leaf really did write stays committed as-is.
+export function buildPhantomRetryPrompt(
+  phantoms: readonly FileManifestEntry[],
+  input: WorkerInput,
+  sharedContext?: string,
+): string {
+  const lines = [
+    `Checkout: ${input.checkoutPath}`,
+    ...buildLeafContext(input, sharedContext),
+    `You described ${phantoms.length === 1 ? 'this change' : 'these changes'} but wrote nothing — the file${
+      phantoms.length === 1 ? ' is' : 's are'
+    } unchanged on disk. Make the edit now with the write/edit tool; do not reply with a description of it.`,
+    '',
+  ];
+  for (const file of phantoms) {
+    lines.push(
+      `File: ${file.path}`,
+      `Change kind: ${file.kind}`,
+      `Purpose: ${capText(file.purpose, MANIFEST_FIELD_MAX)}`,
+      '',
+    );
+  }
+  lines.push('Reply with a one-line summary only after the write tool has returned.');
   return lines.join('\n');
 }
 
@@ -1029,17 +1315,19 @@ async function runVerify(
   return out;
 }
 
+// One event per verify invocation, naming what the harness did about it: re-ran the formatter and
+// re-verified (the cheap deterministic repair), spent the one bounded model fix pass, or neither.
 function logVerify(
   input: WorkerInput,
   out: BashOutput,
   durationMs: number,
-  fixPassFollowed: boolean,
+  followed: { formatRetryFollowed: boolean; fixPassFollowed: boolean },
 ): void {
   input.logger?.info('worker: verify', {
     command: input.verifyCommand,
     exitCode: out.exitCode,
     durationMs,
-    fixPassFollowed,
+    ...followed,
   });
 }
 

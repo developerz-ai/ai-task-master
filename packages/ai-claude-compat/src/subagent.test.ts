@@ -33,6 +33,9 @@ import {
 } from './subagent.ts';
 
 const OutSchema = z.object({ n: z.number() });
+// A payload whose text field can carry braces and quotes — the shape that proves the balanced-object
+// scan is string-aware rather than counting braces blindly.
+const LooseSchema = z.object({ n: z.number(), note: z.string() });
 
 function emptyUsage() {
   return {
@@ -1301,4 +1304,82 @@ test('formatSubmitIssues: renders "path: message", joined', () => {
   const r = OutSchema.safeParse({ n: 'x' });
   assert.equal(r.success, false);
   if (!r.success) assert.match(formatSubmitIssues(r.error.issues), /n: /);
+});
+
+// The envelope shapes that used to reach the caller as an undiagnosable
+// `<root>: expected object, received string`. On the Planner/Worker/Reviewer surfaces that is not a
+// degraded result — they have no fallback, so a missed envelope blocks a PR group outright.
+
+test('submittedOutput: salvages a DOUBLE-encoded JSON submit', () => {
+  const inner = JSON.stringify({ n: 7 });
+  const result = {
+    steps: [{ toolCalls: [{ toolName: SUBMIT_TOOL_NAME, input: JSON.stringify(inner) }] }],
+  };
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 7 } });
+});
+
+test('submittedOutput: salvages a fence with no newline before the close', () => {
+  // The strict anchored form required `\n``` `; this shape missed and read as a plain string.
+  const result = {
+    steps: [{ toolCalls: [{ toolName: SUBMIT_TOOL_NAME, input: '```json\n{"n": 7}```' }] }],
+  };
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 7 } });
+});
+
+test('submittedOutput: salvages a fenced submit followed by prose', () => {
+  const result = {
+    steps: [
+      {
+        toolCalls: [
+          {
+            toolName: SUBMIT_TOOL_NAME,
+            input: '```json\n{"n": 7}\n```\nHope that helps!',
+          },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 7 } });
+});
+
+test('submittedOutput: salvages an object embedded in narration', () => {
+  const result = {
+    steps: [
+      {
+        toolCalls: [{ toolName: SUBMIT_TOOL_NAME, input: 'Here is the answer:\n{"n": 7}\nDone.' }],
+      },
+    ],
+  };
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 7 } });
+});
+
+test('submittedOutput: a brace inside a string value cannot truncate the salvage', () => {
+  // Why the scan is string- and escape-aware: a PR body full of prose and braces would otherwise
+  // end the object early and salvage a fragment.
+  const payload = JSON.stringify({ n: 7, note: 'a } brace and a \\" quote' });
+  const result = {
+    steps: [{ toolCalls: [{ toolName: SUBMIT_TOOL_NAME, input: `text before ${payload} after` }] }],
+  };
+  const out = submittedOutput(result, LooseSchema);
+  assert.equal(out.ok, true);
+  if (out.ok) assert.equal(out.value.note, 'a } brace and a \\" quote');
+});
+
+test('submittedOutput: recovery never widens the schema — a parsed but invalid payload stays invalid', () => {
+  const result = {
+    steps: [{ toolCalls: [{ toolName: SUBMIT_TOOL_NAME, input: '```json\n{"n": "nope"}\n```' }] }],
+  };
+  const out = submittedOutput(result, OutSchema);
+  assert.equal(out.ok, false);
+  if (!out.ok && out.reason === 'invalid') assert.equal(out.issues[0]?.path[0], 'n');
+  else assert.fail(`expected invalid, got ${JSON.stringify(out)}`);
+});
+
+test('submittedOutput: pure prose is still invalid, not salvaged', () => {
+  const result = {
+    steps: [{ toolCalls: [{ toolName: SUBMIT_TOOL_NAME, input: 'I could not do it, sorry.' }] }],
+  };
+  const out = submittedOutput(result, OutSchema);
+  assert.equal(out.ok, false);
+  if (!out.ok) assert.equal(out.reason, 'invalid');
 });

@@ -293,3 +293,58 @@ test('runSelfReviewSession: a group without an acceptance check leaves the task 
   assert.ok(task);
   assert.doesNotMatch(task.text, /Acceptance check/);
 });
+
+test("self-review checks the diff against the group's planned work (the missing-routes case)", async () => {
+  // A phantom edit once shipped a PR with its services and no routes: the coding pass narrated the
+  // file instead of writing it, and self-review passed the diff because it only ever looked at the
+  // diff. Reviewing against intent is what catches work that was planned and never landed.
+  let captured: WorkerInput | null = null;
+  await runSelfReviewSession(
+    baseInput({
+      group: baseGroup({
+        tasks: [
+          {
+            id: 'g-1',
+            text: 'Add the todo repository and services',
+            complexity: 'normal',
+            done: true,
+          },
+          {
+            id: 'g-2',
+            text: 'Add POST /todos and DELETE /todos/:id routes',
+            complexity: 'normal',
+            done: true,
+          },
+        ],
+      }),
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  const text = captured?.task?.text ?? '';
+  assert.match(text, /Planned for this group:/);
+  assert.match(text, /- Add POST \/todos and DELETE \/todos\/:id routes/);
+  assert.match(text, /planned\s+and is missing is a defect/);
+  // Facts only — the checklist must not invite the reviewer to trust the coding pass's reasoning.
+  assert.doesNotMatch(text, /the implementer (?:said|believed|reported)/i);
+});
+
+test('self-review: a group with no task text adds no planned-work block', async () => {
+  let captured: WorkerInput | null = null;
+  await runSelfReviewSession(
+    baseInput({
+      group: baseGroup({ tasks: [] }),
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  assert.doesNotMatch(captured?.task?.text ?? '', /Planned for this group/);
+});

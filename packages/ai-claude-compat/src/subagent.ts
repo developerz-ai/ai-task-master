@@ -753,18 +753,93 @@ export function submittedOutput<OUTPUT>(
   return { ok: false, reason: 'invalid', issues: parsed.error.issues };
 }
 
-// Parse a submit payload that arrived as a JSON string, tolerating a single ```-fenced wrapper (the
-// two dominant weak-model fumble shapes). `{ parsed: false }` when it isn't valid JSON, so the caller
-// keeps the raw-value validation issues. See issue #185.
+// How many nested JSON-string envelopes to peel. A model that double-encodes once will occasionally
+// do it twice; past three the payload is not an envelope problem, it is a confused model.
+const MAX_JSON_PEELS = 3;
+
+// Parse a submit payload that arrived as a JSON string instead of the object the schema expects.
+//
+// This is not a rare fumble: `ai@6`'s parseToolCall records an invalid tool call rather than dropping
+// it (`input = parsedInput.success ? parsedInput.value : toolCall.input`), so a double-encoded
+// `arguments` yields a STRING sitting in `steps[].toolCalls[].input`, and every submit surface then
+// reports the same undiagnosable `<root>: expected object, received string`. On the Planner, Worker
+// manifest, and Reviewer that is not a degraded PR body — those have no fallback, so a missed
+// envelope blocks the group outright. Hence: peel nested envelopes, tolerate a forgiving code fence
+// (the strict `^```…\n…\n```$` form missed a fence with no trailing newline, and any fence followed
+// by prose), and as a last resort take the first balanced `{…}` region out of a narrated answer.
+//
+// Recovery is always upstream of validation, never instead of it: the caller re-validates whatever
+// comes back, so nothing here can widen what the schema accepts. `{ parsed: false }` keeps the
+// caller's raw-value issues. See issue #185.
 function salvageJsonString(raw: string): { parsed: true; value: unknown } | { parsed: false } {
-  const trimmed = raw.trim();
-  const fenced = /^```[^\n]*\n([\s\S]*?)\n```$/.exec(trimmed);
-  const body = (fenced ? (fenced[1] ?? '') : trimmed).trim();
+  let current: unknown = raw;
+  for (let peel = 0; peel < MAX_JSON_PEELS; peel += 1) {
+    if (typeof current !== 'string') return { parsed: true, value: current };
+    const next = parseJsonish(current);
+    if (!next.parsed) return peel === 0 ? { parsed: false } : { parsed: true, value: current };
+    current = next.value;
+  }
+  return { parsed: true, value: current };
+}
+
+// One layer: strip a code fence if present, parse as JSON, else pull the first balanced object out
+// of surrounding narration.
+function parseJsonish(raw: string): { parsed: true; value: unknown } | { parsed: false } {
+  const body = stripCodeFence(raw.trim());
   try {
     return { parsed: true, value: JSON.parse(body) };
   } catch {
-    return { parsed: false };
+    const embedded = firstBalancedObject(body);
+    if (embedded === null) return { parsed: false };
+    try {
+      return { parsed: true, value: JSON.parse(embedded) };
+    } catch {
+      return { parsed: false };
+    }
   }
+}
+
+// Drop a leading ```/```json fence and everything from the closing fence onward. Forgiving where the
+// strict anchored form was not: no trailing newline before the close, and prose after it.
+function stripCodeFence(text: string): string {
+  const opened = /^```[^\n]*\n/.exec(text);
+  if (!opened) return text;
+  const rest = text.slice(opened[0].length);
+  const closed = rest.indexOf('```');
+  return (closed === -1 ? rest : rest.slice(0, closed)).trim();
+}
+
+// The first brace-balanced `{…}` region, so `Here is the composition:\n{…}\nHope that helps` still
+// yields the object. String- and escape-aware: a `}` inside a JSON string value cannot end the scan,
+// which is what makes this safe on a PR body full of prose and braces. null when there is none.
+function firstBalancedObject(text: string): string | null {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
 }
 
 // Human-readable one-line rendering of Zod issues, for a caller's blocked/error/wontfix reason

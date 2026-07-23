@@ -1041,6 +1041,17 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // persisted (a crash falls back to a cold start — durable transcripts are #108).
   const ciFixHandles = new Map<string, SubagentHandle<WorkerTools>>();
 
+  // Per-group Coordinator conversation, carried task→task for the life of the group. Timing a real
+  // run showed roughly half the wall-clock going to re-orientation: every task in a group cold-started
+  // a Coordinator that re-read the same dozen files (`repository.ts`, `errors.ts`, `app.ts`,
+  // `package.json` … each 4-6 times across one group), then wrote ~40 lines. Survey cost does not
+  // shrink with task size, so paying it per task is the single largest tax on throughput.
+  //
+  // Only the MESSAGES are carried, never the agent: task N+1 builds a fresh agent (its own routed
+  // specialist, its own acceptance block, its own step budget) and inherits the history — the same
+  // shape the crash-resume path uses. Not persisted; a crash falls back to the transcript resume.
+  const workerHandles = new Map<string, ModelMessage[]>();
+
   // One Compactor per run: summarize-and-continue when a subagent's context window fills, instead
   // of dying on a provider overflow on the "really big PRs" runs aitm exists for (issue #102). The
   // summarizer is the fast tier; model-limits come from the OpenRouter catalog (lazy, cached; a
@@ -1226,7 +1237,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // Transcript (issue #108): resume from an interrupted 'working' transcript for this group if one
       // exists — looked up BEFORE we begin the new one so it can't self-resume — then record this run.
       const store = state.transcripts?.();
-      const resumeMessages = await resumeMessagesFor(store, group.id, 'working');
+      // In-memory carry-over wins over the durable transcript, same precedence as the CI-fix path: a
+      // handle from earlier in THIS run is strictly fresher than a resumed one from a prior process.
+      const carried = workerHandles.get(group.id);
+      const resumeMessages = carried ?? (await resumeMessagesFor(store, group.id, 'working'));
       const recorder = await beginTranscript(store, { group: group.id, stage: 'working' });
       // Regular Worker: web_search only when explicitly enabled (webSearch: true).
       const providerOptions = webSearchProviderOptions(input.resolved.webSearch, false);
@@ -1345,6 +1359,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       } finally {
         stopWorkerHeartbeat();
       }
+      // Carry this task's conversation to the group's next task. Only an `ok` result has a handle —
+      // a blocked/no-changes pass leaves the previous carry-over in place rather than dropping the
+      // group back to a cold start.
+      if (result.kind === 'ok') workerHandles.set(group.id, [...result.handle.messages]);
       await recorder?.end(runEndOutcome(result.kind));
       return result;
     },

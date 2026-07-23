@@ -28,6 +28,7 @@ import {
   COMPOSE_PR_MAX_RETRIES,
   compositionOutcome,
   DEFAULT_MAX_STEPS,
+  describeSubmitPayload,
   type GhClient,
   ORCHESTRATOR_ROLE_PREFIX,
   Orchestrator,
@@ -36,8 +37,12 @@ import {
   PR_BODY_SECTIONS,
   prBodyGuideFor,
   type RunCmd,
+  recoverComposition,
   resolveMaxSteps,
   resolvePrBodySections,
+  SUBMIT_PAYLOAD_PREVIEW_CHARS,
+  submitToolInput,
+  submittedComposition,
   truncateAtWord,
 } from './orchestrator.ts';
 import type { ModelProvider } from './subagent-tools.ts';
@@ -1041,6 +1046,238 @@ test('composePr falls back when every retry omits a required section', async () 
   await o.openPr(baseGroup(), baseDelivery(), 'main');
   assert.equal(count(), COMPOSE_PR_MAX_RETRIES + 1);
   assert.doesNotThrow(() => assertPrBodySections(createCalls[0]?.body ?? ''));
+});
+
+// --- submit-envelope recovery (a composed answer arriving as a JSON string) ---
+//
+// ai@6's parseToolCall records a schema-invalid `submit` call with `input` set to whatever JSON.parse
+// of the raw arguments yielded — a STRING when the model double-encoded its payload. Zod then reports
+// `<root>: Invalid input: expected object, received string` and a perfectly good composition was being
+// discarded. The compat package's submittedOutput salvages the two simplest shapes; these cover the
+// residual ones observed in production, which render with the identical error text.
+//
+// `modelSubmitting` / `sequenceModel` JSON.stringify their value, so passing a *string* reproduces the
+// wire shape exactly: the tool arguments are a JSON string literal wrapping the real payload.
+
+// A composition the composer would produce, plus its plain JSON encoding.
+const RECOVERABLE = { title: 'feat: core — add a', body: COMPLIANT_BODY };
+const RECOVERABLE_JSON = JSON.stringify(RECOVERABLE);
+
+async function openPrWith(model: MockLanguageModelV3): Promise<{
+  createCalls: CreatePrInput[];
+  progress: string[];
+}> {
+  const { provider } = recordingProvider(model);
+  const createCalls: CreatePrInput[] = [];
+  const progress: string[] = [];
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: {
+      createPr: async (input) => {
+        createCalls.push(input);
+        return basePr(input.head);
+      },
+    },
+    onProgress: (m) => progress.push(m),
+  });
+  await o.openPr(baseGroup(), baseDelivery(), 'main');
+  return { createCalls, progress };
+}
+
+test('composePr recovers a composition double-wrapped as a JSON string, without spending a retry', async () => {
+  // The reported failure: `<root>: Invalid input: expected object, received string`. One extra encoding
+  // layer past what the compat salvage unwraps — the model's answer is intact, only its envelope is
+  // wrong, so the PR must open with the COMPOSED prose on the first generation, not the fallback.
+  const { model, count } = sequenceModel([JSON.stringify(RECOVERABLE_JSON)]);
+  const { createCalls, progress } = await openPrWith(model);
+  assert.equal(count(), 1, 'the recovered composition costs no corrective retry');
+  assert.equal(createCalls[0]?.title, RECOVERABLE.title);
+  assert.equal(createCalls[0]?.body, RECOVERABLE.body);
+  assert.deepEqual(progress, [], 'no fallback is announced');
+});
+
+test('composePr recovers a ```-fenced composition whose fence is followed by prose', async () => {
+  const fenced = `\`\`\`json\n${RECOVERABLE_JSON}\n\`\`\`\nHope that works!`;
+  const { model, count } = sequenceModel([fenced]);
+  const { createCalls, progress } = await openPrWith(model);
+  assert.equal(count(), 1);
+  assert.equal(createCalls[0]?.title, RECOVERABLE.title);
+  assert.deepEqual(progress, []);
+});
+
+test('composePr recovers a composition embedded in a prose submit payload', async () => {
+  const { model, count } = sequenceModel([`Here is the composition:\n${RECOVERABLE_JSON}`]);
+  const { createCalls, progress } = await openPrWith(model);
+  assert.equal(count(), 1);
+  assert.equal(createCalls[0]?.body, RECOVERABLE.body);
+  assert.deepEqual(progress, []);
+});
+
+test('composePr still falls back when a string payload parses but is schema-invalid', async () => {
+  // The envelope unwraps cleanly, the composition inside does not validate (title > 72). Recovery must
+  // not rescue it: the corrective retries run and the deterministic fallback opens the PR.
+  const overLong = JSON.stringify({ title: 'x'.repeat(80), body: COMPLIANT_BODY });
+  const { model, count } = sequenceModel([JSON.stringify(overLong)]);
+  const { createCalls, progress } = await openPrWith(model);
+  assert.equal(
+    count(),
+    COMPOSE_PR_MAX_RETRIES + 1,
+    'a malformed submission still burns its retries',
+  );
+  assert.equal(createCalls[0]?.title, 'feat: Core');
+  assert.ok(progress.some((m) => m.includes('PR composition fell back to generated title/body')));
+});
+
+test('composePr still falls back when the submit payload is prose, and the notice quotes it', async () => {
+  const { model, count } = sequenceModel(['I could not compose this pull request.']);
+  const { createCalls, progress } = await openPrWith(model);
+  assert.equal(count(), COMPOSE_PR_MAX_RETRIES + 1);
+  assert.equal(createCalls[0]?.title, 'feat: Core');
+  const notice = progress.find((m) => m.includes('fell back')) ?? '';
+  assert.match(notice, /expected object, received string/, 'the schema verdict is kept');
+  assert.match(notice, /submitted string \(\d+ chars\)/, 'the payload kind and size are named');
+  assert.match(notice, /I could not compose this pull request\./, 'the payload itself is quoted');
+});
+
+test('composePr leaves a well-typed object submission on exactly its old path', async () => {
+  // The control: an ordinary submission never touches the recovery boundary — one generation, composed
+  // title and body verbatim, no notice.
+  const { model, count } = sequenceModel([RECOVERABLE]);
+  const { createCalls, progress } = await openPrWith(model);
+  assert.equal(count(), 1);
+  assert.deepEqual(createCalls[0], {
+    title: RECOVERABLE.title,
+    body: RECOVERABLE.body,
+    base: 'main',
+    head: 'aitm/core',
+  });
+  assert.deepEqual(progress, []);
+});
+
+function stepsWith(input: unknown) {
+  return { steps: [{ toolCalls: [{ toolName: 'submit', input }] }] };
+}
+
+test('submitToolInput: returns the raw submit input, undefined when the model never submitted', () => {
+  assert.equal(submitToolInput(stepsWith('"{}"')), '"{}"');
+  assert.deepEqual(submitToolInput(stepsWith({ title: 't' })), { title: 't' });
+  assert.equal(submitToolInput({ steps: [{ toolCalls: [] }] }), undefined);
+  assert.equal(
+    submitToolInput({ steps: [{ toolCalls: [{ toolName: 'other', input: 'x' }] }] }),
+    undefined,
+  );
+});
+
+test('recoverComposition: peels nested JSON-string envelopes up to the bound', () => {
+  assert.deepEqual(recoverComposition(RECOVERABLE_JSON), RECOVERABLE);
+  assert.deepEqual(recoverComposition(JSON.stringify(RECOVERABLE_JSON)), RECOVERABLE);
+  assert.deepEqual(
+    recoverComposition(JSON.stringify(JSON.stringify(RECOVERABLE_JSON))),
+    RECOVERABLE,
+  );
+  // A fourth layer is past MAX_JSON_PEELS — bounded, never an unbounded unwrap loop.
+  assert.equal(
+    recoverComposition(JSON.stringify(JSON.stringify(JSON.stringify(RECOVERABLE_JSON)))),
+    undefined,
+  );
+});
+
+test('recoverComposition: unwraps a ```-fenced payload with or without a trailing newline', () => {
+  assert.deepEqual(recoverComposition(`\`\`\`json\n${RECOVERABLE_JSON}\n\`\`\``), RECOVERABLE);
+  assert.deepEqual(recoverComposition(`\`\`\`json\n${RECOVERABLE_JSON}\`\`\``), RECOVERABLE);
+  assert.deepEqual(recoverComposition(`\`\`\`\n${RECOVERABLE_JSON}\n\`\`\`\ndone!`), RECOVERABLE);
+});
+
+test('recoverComposition: extracts a JSON object embedded in narration', () => {
+  assert.deepEqual(recoverComposition(`Here you go:\n${RECOVERABLE_JSON}\nThanks!`), RECOVERABLE);
+});
+
+test('recoverComposition: braces inside the body string do not truncate the object', () => {
+  const braced = {
+    title: 'feat: core',
+    body: `${COMPLIANT_BODY}\n\nSee \`fn() { return "}"; }\`.`,
+  };
+  const recovered = recoverComposition(JSON.stringify(JSON.stringify(braced)));
+  assert.deepEqual(recovered, braced);
+});
+
+test('recoverComposition: prose, non-strings, and schema-invalid payloads stay unrecovered', () => {
+  assert.equal(recoverComposition('I could not compose this'), undefined);
+  assert.equal(recoverComposition(''), undefined);
+  assert.equal(recoverComposition(undefined), undefined);
+  assert.equal(recoverComposition({ title: 't', body: 'b' }), undefined, 'objects are not re-read');
+  assert.equal(
+    recoverComposition(JSON.stringify(JSON.stringify({ title: 'x'.repeat(80), body: 'b' }))),
+    undefined,
+    'a parsing envelope around an invalid composition is still rejected',
+  );
+  assert.equal(
+    recoverComposition(JSON.stringify(JSON.stringify({ title: 'only a title' }))),
+    undefined,
+    'a missing field is not filled in',
+  );
+});
+
+test('submittedComposition: a valid object submission and a no-submission are passed through', () => {
+  assert.deepEqual(submittedComposition(stepsWith(RECOVERABLE)), { ok: true, value: RECOVERABLE });
+  assert.deepEqual(submittedComposition({ steps: [{ toolCalls: [] }] }), {
+    ok: false,
+    reason: 'no-submission',
+  });
+});
+
+test('submittedComposition: a string envelope is recovered, a genuinely bad payload stays invalid', () => {
+  assert.deepEqual(submittedComposition(stepsWith(JSON.stringify(RECOVERABLE_JSON))), {
+    ok: true,
+    value: RECOVERABLE,
+  });
+  const bad = submittedComposition(stepsWith('nothing json about this'));
+  assert.equal(bad.ok, false);
+  if (bad.ok) throw new Error('unreachable');
+  assert.equal(bad.reason, 'invalid');
+});
+
+test('describeSubmitPayload: names the payload kind and size, truncating a long one', () => {
+  assert.equal(describeSubmitPayload(undefined), '', 'no payload → no suffix');
+  assert.match(
+    describeSubmitPayload('prose here'),
+    /^; submitted string \(10 chars\): prose here$/,
+  );
+  // Newlines are collapsed so the notice stays one line.
+  assert.match(describeSubmitPayload('a\nb'), /: a b$/);
+  const long = describeSubmitPayload('x'.repeat(SUBMIT_PAYLOAD_PREVIEW_CHARS + 50));
+  assert.ok(long.endsWith('…'), 'an over-long payload is truncated');
+  assert.ok(!long.includes('x'.repeat(SUBMIT_PAYLOAD_PREVIEW_CHARS + 1)));
+  assert.match(
+    describeSubmitPayload({ title: 't' }),
+    /^; submitted object \(\d+ chars\): \{"title/,
+  );
+});
+
+test('compositionOutcome: the schema-failure reason quotes the offending payload when given', () => {
+  const parsed = z.object({ title: z.string() }).safeParse('a string, not an object');
+  if (parsed.success) throw new Error('expected a validation failure');
+  const withPayload = compositionOutcome(
+    { ok: false, reason: 'invalid', issues: parsed.error.issues },
+    PR_BODY_SECTIONS,
+    'a string, not an object',
+  );
+  assert.equal(withPayload.ok, false);
+  if (withPayload.ok) throw new Error('unreachable');
+  assert.match(withPayload.reason, /failed schema validation/);
+  assert.match(withPayload.reason, /submitted string \(23 chars\): a string, not an object/);
+  // The model-facing correction already restates the issues — it must not grow the payload echo.
+  assert.doesNotMatch(withPayload.correction, /submitted string/);
+});
+
+test('compositionOutcome: a no-submission reason is never decorated with a payload', () => {
+  const outcome = compositionOutcome({ ok: false, reason: 'no-submission' }, PR_BODY_SECTIONS, 'x');
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) throw new Error('unreachable');
+  assert.doesNotMatch(outcome.reason, /submitted string/);
 });
 
 test('compositionOutcome: valid submission with a compliant body → ok', () => {

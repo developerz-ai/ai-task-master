@@ -12,7 +12,7 @@ export const PlannedTaskSchema = z.object({
   description: z
     .string()
     .describe(
-      'Verb-first imperative, 5-12 words, one action, checkable: "Add retry with backoff to fetchUser".',
+      'Verb-first, checkable, and a whole slice of behaviour WITH its tests — normally several files, ~100-400 lines. Never one task per file, never a verification step: "Add todo CRUD repository, services, and routes with unit tests".',
     ),
   // Mirrors Task.complexity in src/state/schema.ts — kept in sync so Planner
   // output maps onto persisted PrGroup.tasks without a separate field.
@@ -29,6 +29,14 @@ export type PlannedTask = z.infer<typeof PlannedTaskSchema>;
 // cheaper than a run full of `aitm/g2-implement-the-crud-endpoints-for` branches.
 const MAX_TITLE_CHARS = 48;
 
+// A group with no tasks is a PR with nothing in it, and past ~5 tasks the group was almost certainly
+// split by file rather than by behaviour — the exact shape that makes every task pay a full repo
+// survey to write ~40 lines. Both bounds are cheap to enforce: a violation is a Zod issue the
+// schema-retry loop re-asks with, one extra Planner turn against a whole run of undersized PRs.
+// The cap applies to what Planner SUBMITS; capGroups may later fold an overflow remainder task onto
+// the last kept group, which is constructed in TypeScript and never re-parsed.
+const MAX_TASKS_PER_GROUP = 5;
+
 export const PlannedGroupSchema = z.object({
   id: z.string(),
   title: z
@@ -38,7 +46,13 @@ export const PlannedGroupSchema = z.object({
     .describe(
       'Branch name + PR subject: 2-5 word noun phrase naming the capability delivered, no trailing period, no "feat:" prefix. E.g. "Todo CRUD API".',
     ),
-  tasks: z.array(PlannedTaskSchema),
+  tasks: z
+    .array(PlannedTaskSchema)
+    .min(1)
+    .max(MAX_TASKS_PER_GROUP)
+    .describe(
+      'The 1-5 disjoint behaviour slices this PR is built from. No two may cover the same work, and none may be a verification step. Too many? MERGE them into bigger slices — never drop work, and never split a slice per file.',
+    ),
   // REQUIRED, not optional: this is the only thing that separates "the model says it is done" from
   // "something demonstrated it", and it is what the Worker builds against and the pre-PR self-review
   // judges against. A group that arrives without one fails validation and routes to the schema-retry

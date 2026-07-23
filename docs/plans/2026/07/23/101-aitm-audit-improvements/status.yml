@@ -1,0 +1,45 @@
+plan: 101-aitm-audit-improvements
+title: aitm audit — fixes & improvements
+status: not_started        # not_started | in_progress | blocked | complete | superseded
+created_by: sebi
+worked_by: ""              # executor fills with their git user.name on pickup
+owner: sebi
+percent: 0
+current_focus: ""
+slices:
+  - file: 01-data-safety-state.md
+    status: not_started
+    percent: 0
+  - file: 02-config-trust-secrets.md
+    status: not_started
+    percent: 0
+  - file: 03-cancellation-resources.md
+    status: not_started
+    percent: 0
+  - file: 04-mcp-oauth.md
+    status: not_started
+    percent: 0
+  - file: 05-loop-flows.md
+    status: not_started
+    percent: 0
+  - file: 06-github-client.md
+    status: not_started
+    percent: 0
+  - file: 07-subagents-orchestrator.md
+    status: not_started
+    percent: 0
+  - file: 08-compaction-observability.md
+    status: not_started
+    percent: 0
+  - file: 09-cli-config-ux.md
+    status: not_started
+    percent: 0
+  - file: 10-architecture-refactors.md
+    status: not_started
+    percent: 0
+  - file: 11-tests-ci-docs.md
+    status: not_started
+    percent: 0
+evidence: []
+notes: "3 owner decisions gate parts of the plan: oauth inbound-HTTP carve-out (slice 04), orchestrator agent-as-tool delete-or-wire (slice 07), templates delete-or-ship (slice 04). Raw audit reports in findings/."
+last_updated: 2026-07-23

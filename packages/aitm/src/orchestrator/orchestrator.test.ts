@@ -1561,3 +1561,57 @@ test('compositionOutcome: a section-contract failure still carries the body forw
   if (outcome.ok) return;
   assert.equal(outcome.submitted?.body, '## Summary\ns');
 });
+
+test('normalizePrBodyHeadings: a heading quoted inside a code fence is left untouched', () => {
+  // This project's own docs PR quotes `## Testing` inside a fenced block; that must not be rewritten
+  // or promoted to a real section.
+  const body = ['## Summary', 's', '```md', '## Changes', 'not a real heading', '```'].join('\n');
+  const out = normalizePrBodyHeadings(body, PR_BODY_SECTIONS);
+  assert.match(out, /```md\n## Changes\nnot a real heading\n```/, 'fenced heading is verbatim');
+});
+
+test('assertPrBodySections: a fenced ## line does not satisfy the section contract', () => {
+  // A body whose only "Changes" is inside a code block is genuinely missing the section.
+  const body = [
+    '## Summary',
+    's',
+    '```',
+    '## Changes',
+    '```',
+    '## Testing',
+    't',
+    '## Evidence',
+    'e',
+  ].join('\n');
+  assert.throws(
+    () => assertPrBodySections(body, PR_BODY_SECTIONS),
+    /missing or misordered: ## Changes/,
+  );
+});
+
+test('repairPrBody: a fenced ## line stays inside its section, never splits it', () => {
+  // The Changes section legitimately contains a diff that quotes `## Testing`; splitBodyBlocks must
+  // keep that fragment in Changes rather than routing it into the real Testing bucket.
+  const body = [
+    '## Summary',
+    's',
+    '## Changes',
+    'Rewrote the docs, e.g.:',
+    '```diff',
+    '+## Testing',
+    '+run bun test',
+    '```',
+    '## Testing',
+    'the real testing note',
+    '## Evidence',
+    'e',
+  ].join('\n');
+  const repaired = repairPrBody(body, PR_BODY_SECTIONS, baseGroup(), baseDelivery());
+  assert.doesNotThrow(() => assertPrBodySections(repaired, PR_BODY_SECTIONS));
+  // The quoted diff stays under Changes; the real Testing content is the one the model wrote.
+  const changesIdx = repaired.indexOf('## Changes');
+  const testingIdx = repaired.indexOf('## Testing');
+  const fencedIdx = repaired.indexOf('+## Testing');
+  assert.ok(changesIdx < fencedIdx && fencedIdx < testingIdx, 'fenced heading stays in Changes');
+  assert.match(repaired, /## Testing\nthe real testing note/);
+});

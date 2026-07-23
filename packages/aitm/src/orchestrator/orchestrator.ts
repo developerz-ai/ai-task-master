@@ -180,17 +180,41 @@ function headingKey(line: string): string {
     .toLowerCase();
 }
 
+// Per-line "is this inside a fenced code block" mask. Every scanner that looks for `## …` headings
+// consults it, because a model body routinely QUOTES a heading inside a fence — a diff or file
+// snippet containing `## Testing` (very plausible when a PR touches markdown, as this project's own
+// docs do). Without fence-awareness that quoted line reads as a real section boundary, splitting a
+// section short or routing a fragment into the wrong bucket, and repairPrBody would still pass
+// assertPrBodySections by construction — so the corruption is silent, not loud. The fence marker
+// line itself is masked as inside so it is never mistaken for content that matters. Both ``` and ~~~
+// fences (3+ chars) are recognized.
+function fenceMask(lines: readonly string[]): boolean[] {
+  const mask: boolean[] = [];
+  let inFence = false;
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      mask.push(true);
+      inFence = !inFence;
+    } else {
+      mask.push(inFence);
+    }
+  }
+  return mask;
+}
+
 // Rewrite near-miss section headings to their canonical form before the contract is checked.
 // Models reliably produce the right SECTIONS and the wrong markup — `### Changes` instead of
 // `## Changes`, a trailing colon, bold around the word. Rejecting those threw away an otherwise good
 // body and replaced it with a generated stub, which is a far worse outcome than fixing the `#`.
-// Only lines that are already headings are touched, and only when they name a required section.
-// Exported for unit testing.
+// Only lines that are already headings (and outside a code fence) are touched, and only when they
+// name a required section. Exported for unit testing.
 export function normalizePrBodyHeadings(body: string, sections: readonly string[]): string {
   const canonical = new Map(sections.map((s) => [headingKey(s), s]));
-  return body
-    .split('\n')
-    .map((line) => {
+  const lines = body.split('\n');
+  const fenced = fenceMask(lines);
+  return lines
+    .map((line, i) => {
+      if (fenced[i]) return line;
       const trimmed = line.trim();
       if (!/^#{1,6}\s+\S/.test(trimmed)) return line;
       return canonical.get(headingKey(trimmed)) ?? line;
@@ -206,9 +230,10 @@ export function assertPrBodySections(
   body: string,
   sections: readonly string[] = PR_BODY_SECTIONS,
 ): void {
-  const headingLines = body
-    .split('\n')
-    .map((line) => line.trim())
+  const lines = body.split('\n');
+  const fenced = fenceMask(lines);
+  const headingLines = lines
+    .map((line, i) => (fenced[i] ? '' : line.trim()))
     .filter((line) => line.startsWith('## '));
   let cursor = -1;
   for (const heading of sections) {
@@ -504,14 +529,18 @@ function fallbackChangeList(changes: WorkerDelivery['changes']): string {
 }
 
 // Split a body at its `## …` heading lines. The first block carries no heading when the body opens
-// with prose; every later block is one heading plus everything until the next heading.
+// with prose; every later block is one heading plus everything until the next heading. A `## …` line
+// inside a code fence is content, not a boundary — otherwise a quoted heading would fragment the
+// real section around it.
 function splitBodyBlocks(body: string): Array<{ heading: string | undefined; content: string }> {
   const blocks: Array<{ heading: string | undefined; content: string[] }> = [
     { heading: undefined, content: [] },
   ];
-  for (const line of body.split('\n')) {
+  const lines = body.split('\n');
+  const fenced = fenceMask(lines);
+  for (const [i, line] of lines.entries()) {
     const trimmed = line.trim();
-    if (/^##\s+\S/.test(trimmed)) blocks.push({ heading: trimmed, content: [] });
+    if (!fenced[i] && /^##\s+\S/.test(trimmed)) blocks.push({ heading: trimmed, content: [] });
     else blocks[blocks.length - 1]?.content.push(line);
   }
   return blocks.map((b) => ({ heading: b.heading, content: b.content.join('\n').trim() }));

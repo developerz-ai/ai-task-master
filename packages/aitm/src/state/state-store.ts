@@ -84,6 +84,17 @@ export class StateStore {
     }
   }
 
+  // The goal (and criteria) a previous `aitm start` persisted, or null when this directory has never
+  // been started. `aitm resume` reads it so an operator never has to retype the original goal
+  // verbatim to continue a run — retyping it differently would silently start a different run
+  // against the same state.
+  async readGoal(): Promise<{ goal: string; criteria?: string } | null> {
+    const goal = (await readFileOrNull(this.path(GOAL_FILE)))?.trim();
+    if (goal === undefined || goal === '') return null;
+    const criteria = (await readFileOrNull(this.path(CRITERIA_FILE)))?.trim();
+    return criteria ? { goal, criteria } : { goal };
+  }
+
   // Render the PR groups through plan-markdown so plan.md carries per-task checkbox state
   // ([ ] / [x]) — the on-disk source of truth claudetm parity expects.
   async writePlan(groups: readonly PlanMarkdownGroup[]): Promise<void> {
@@ -264,4 +275,14 @@ function isNotFound(err: unknown): boolean {
 
 function formatZodError(err: ZodError): string {
   return err.issues.map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ');
+}
+
+// Read a state file, or null when it does not exist. A missing goal.txt is the ordinary
+// "never started here" case, not an error.
+async function readFileOrNull(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch {
+    return null;
+  }
 }

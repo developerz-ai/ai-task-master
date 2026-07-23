@@ -57,6 +57,8 @@ aitm start "migrate Mongo → Postgres" --no-automerge
 aitm merge-pr
 ```
 
+Interrupted? `aitm resume` picks the run back up — it reads the goal from `.ai-task-master/`, so you never retype it (and never accidentally resume onto a slightly different goal than the plan was built for). `aitm --version` tells you which build you're on.
+
 ## 🎯 Use cases
 
 | Scenario | What you type | What aitm does |
@@ -117,7 +119,7 @@ same lifecycle lines are also appended to `.ai-task-master/progress.md`.
 
 ## 🧩 Two-command philosophy
 
-`start` and `merge-pr` are the only user-facing commands.
+`start` and `merge-pr` are the commands that do the work; `resume` continues an interrupted `start`.
 
 - 🟢 With automerge on (default): `start` runs the whole loop end-to-end.
 - 🟡 With `--no-automerge`: `start` stops after each PR opens; you call `aitm merge-pr` once you're happy.

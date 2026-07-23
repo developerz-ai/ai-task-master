@@ -584,3 +584,22 @@ test('installSignalHandlers: second SIGTERM force-exits 143', () => {
   assert.throws(() => fake.fire('SIGTERM'), /forced-exit:143/);
   assert.deepEqual(fake.exits, [143]);
 });
+
+test('main: --version prints the installed version and exits 0', async () => {
+  // The question an operator asks right after an upgrade. It used to fall through to usage + exit 2,
+  // which is how you end up debugging a build you are not running.
+  for (const argv of [['--version'], ['-v'], ['version']]) {
+    const out: string[] = [];
+    const code = await main(argv, { stdout: (c) => out.push(c) });
+    assert.equal(code, 0, argv.join(' '));
+    assert.match(out.join(''), /^\d+\.\d+\.\d+\n$/, `expected a semver line, got ${out.join('')}`);
+  }
+});
+
+test('main: the usage text advertises resume and version', async () => {
+  const out: string[] = [];
+  await main(['help'], { stdout: (c) => out.push(c) });
+  const help = out.join('');
+  assert.match(help, /aitm resume/);
+  assert.match(help, /aitm version \| --version \| -v/);
+});

@@ -69,17 +69,22 @@ export type McpLoginArgs = {
   timeout?: number;
 };
 
+export type ResumeArgs = Omit<StartArgs, 'kind' | 'goal'> & { kind: 'resume' };
+
 export type ParsedArgs =
   | StartArgs
+  | ResumeArgs
   | MergePrArgs
   | ConfigArgs
   | ProfileArgs
   | CleanArgs
   | McpLoginArgs
   | { kind: 'help' }
+  | { kind: 'version' }
   | { kind: 'usage-error' };
 
 const HELP: ParsedArgs = { kind: 'help' };
+const VERSION: ParsedArgs = { kind: 'version' };
 // Malformed input (bad flag value, unknown flag, missing required arg): distinct from
 // explicitly-requested help so the CLI can exit nonzero and print to stderr instead of
 // masking a CI-wrapper typo behind exit 0.
@@ -89,9 +94,14 @@ export function parseArgs(argv: ReadonlyArray<string>): ParsedArgs {
   const [command, ...rest] = argv;
   if (command === undefined) return HELP;
   if (command === 'help' || command === '--help' || command === '-h') return HELP;
+  // `aitm --version` used to fall through to usage + exit 2, so the one question an operator asks
+  // after an upgrade — "which build am I actually running?" — had no answer from the CLI.
+  if (command === 'version' || command === '--version' || command === '-v') return VERSION;
   switch (command) {
     case 'start':
       return parseStart(rest);
+    case 'resume':
+      return parseResume(rest);
     case 'merge-pr':
       return parseMergePr(rest);
     case 'config':
@@ -163,6 +173,15 @@ function parseMcpLogin(args: ReadonlyArray<string>): ParsedArgs {
   if (timeout !== undefined) result.timeout = timeout;
 
   return result;
+}
+
+// `aitm resume` takes every `start` flag but no goal — the goal comes from the state dir, so a
+// resumed run can never drift onto a subtly different goal than the one its plan was built for.
+function parseResume(args: ReadonlyArray<string>): ParsedArgs {
+  const parsed = parseStart(['<resume>', ...args]);
+  if (parsed.kind !== 'start') return parsed;
+  const { kind: _kind, goal: _goal, ...flags } = parsed;
+  return { kind: 'resume', ...flags };
 }
 
 function parseStart(args: ReadonlyArray<string>): ParsedArgs {

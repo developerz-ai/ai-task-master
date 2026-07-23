@@ -672,3 +672,28 @@ test('mcp-login: invalid timeout is usage error', () => {
     kind: 'usage-error',
   });
 });
+
+test('parseArgs: version flags', () => {
+  for (const argv of [['version'], ['--version'], ['-v']]) {
+    assert.deepEqual(parseArgs(argv), { kind: 'version' }, argv.join(' '));
+  }
+});
+
+test('parseArgs: resume takes every start flag but no goal', () => {
+  // The goal comes from the state dir on purpose — retyping it is how a resumed run drifts onto a
+  // subtly different goal than the one its plan was built for.
+  assert.deepEqual(parseArgs(['resume']), { kind: 'resume' });
+  assert.deepEqual(parseArgs(['resume', '--admin', '--max-prs', '3']), {
+    kind: 'resume',
+    adminMerge: true,
+    maxPrs: 3,
+  });
+});
+
+test('parseArgs: resume rejects a positional goal', () => {
+  assert.deepEqual(parseArgs(['resume', 'some goal']), { kind: 'usage-error' });
+});
+
+test('parseArgs: resume rejects a bad flag value like start does', () => {
+  assert.deepEqual(parseArgs(['resume', '--max-prs', 'nope']), { kind: 'usage-error' });
+});

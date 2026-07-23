@@ -1,8 +1,9 @@
 // OAuth 2.0 authorization code flow for MCP servers.
-// Spawns a temporary localhost HTTP server to capture the OAuth callback,
+// Spawns a temporary loopback HTTP server to capture the OAuth callback,
 // exchanges the authorization code for an access token, and returns the
 // authenticated server configuration. Cross-runtime: Bun, Node ≥20, Deno ≥1.40.
-// Refs: RFC 8252 §3.1 (localhost redirect), MCP OAuth 2.1 spec.
+// Refs: RFC 8252 §7.3 (loopback redirect), §8.3 (IP literal, never `localhost`),
+// MCP OAuth 2.1 spec.
 
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -13,6 +14,15 @@ const DEFAULT_TIMEOUT = 30000;
 const DEFAULT_PORT = 8787;
 const PORT_RANGE = { min: 8787, max: 9000 };
 const STATE_LENGTH = 32;
+const CALLBACK_PATH = '/callback';
+
+// RFC 8252 §8.3: bind and redirect to the IP literal. `localhost` resolves via
+// DNS and can point somewhere other than the loopback interface.
+export const LOOPBACK_HOST = '127.0.0.1';
+
+export function loopbackCallbackUrl(port: number): string {
+  return `http://${LOOPBACK_HOST}:${port}${CALLBACK_PATH}`;
+}
 
 type Transport = 'http' | 'sse';
 
@@ -74,7 +84,7 @@ async function findAvailablePort(start: number, end: number): Promise<number> {
       }
 
       const server = net.createServer();
-      server.listen(port, 'localhost', () => {
+      server.listen(port, LOOPBACK_HOST, () => {
         server.once('close', () => resolve(port));
         server.close();
       });
@@ -184,14 +194,14 @@ class NodeServer implements ServerImpl {
 
     return new Promise((resolve, reject) => {
       this.server = http.createServer(async (req, res) => {
-        const requestUrl = new url.URL(req.url || '', `http://localhost:${port}`);
+        const requestUrl = new url.URL(req.url || '', `http://${LOOPBACK_HOST}:${port}`);
         const response = await this.handleRequest(requestUrl, port);
 
         res.writeHead(response.status, response.headers);
         res.end(response.body);
       });
 
-      this.server.listen(port, 'localhost', () => resolve(port));
+      this.server.listen(port, LOOPBACK_HOST, () => resolve(port));
       this.server.on('error', reject);
     });
   }
@@ -272,8 +282,8 @@ export async function performOAuthFlow(options: OAuthOptions): Promise<OAuthConf
   const port = options.port ?? (await findAvailablePort(DEFAULT_PORT, PORT_RANGE.max));
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
   const state = generateState();
-  const callbackPath = '/callback';
-  const callbackUrl = options.callbackUrl ?? `http://localhost:${port}${callbackPath}`;
+  const callbackPath = CALLBACK_PATH;
+  const callbackUrl = options.callbackUrl ?? loopbackCallbackUrl(port);
 
   const successHtml = await loadHtmlTemplate('success');
   const errorHtml = await loadHtmlTemplate('error');

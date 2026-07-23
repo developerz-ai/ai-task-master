@@ -1066,6 +1066,46 @@ test('webSearchProviderOptions: unset → CI-fix only; true → all Worker calls
   assert.equal(webSearchProviderOptions(false, false), undefined, 'false → regular off');
 });
 
+test('webSearchProviderOptions: object form gates via `enabled` and threads domain filters (issue #195)', () => {
+  const params = (po: ReturnType<typeof webSearchProviderOptions>) => {
+    const t = (po?.openrouter?.tools ?? [])[0];
+    return t?.type === 'openrouter:web_search' ? t.parameters : undefined;
+  };
+  // `enabled` occupies the same tri-state axis as the bare boolean.
+  assert.notEqual(
+    params(webSearchProviderOptions({ enabled: true }, false)),
+    undefined,
+    'enabled:true → regular on',
+  );
+  assert.equal(
+    webSearchProviderOptions({ enabled: false }, true),
+    undefined,
+    'enabled:false → CI-fix off',
+  );
+  assert.notEqual(
+    params(webSearchProviderOptions({}, true)),
+    undefined,
+    'enabled unset → CI-fix on',
+  );
+  assert.equal(webSearchProviderOptions({}, false), undefined, 'enabled unset → regular off');
+  // Domain filters reach the server-tool payload when enabled.
+  const p = params(
+    webSearchProviderOptions(
+      { enabled: true, allowedDomains: ['docs.rs'], excludedDomains: ['spam.example'] },
+      false,
+    ),
+  );
+  assert.deepEqual(p?.allowed_domains, ['docs.rs']);
+  assert.deepEqual(p?.excluded_domains, ['spam.example']);
+  // Domains on a disabled config never attach.
+  assert.equal(
+    webSearchProviderOptions({ enabled: false, allowedDomains: ['docs.rs'] }, true),
+    undefined,
+  );
+  // A bare boolean carries no domain parameters (back-compat).
+  assert.deepEqual(params(webSearchProviderOptions(true, false)), {});
+});
+
 test('selfReviewVerifyCommand: configured wins; TS repo falls back to typecheck; else undefined', async () => {
   // Configured command is used verbatim, no detection.
   assert.equal(selfReviewVerifyCommand('bun test', '/nope'), 'bun test');

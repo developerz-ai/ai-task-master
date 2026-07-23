@@ -129,11 +129,21 @@ test('ProfileSchema also carries reasoningEffort (issue #125)', () => {
   assert.equal(parsed.reasoningEffort?.coding, 'low');
 });
 
-test('ConfigFileSchema accepts a boolean webSearch and rejects non-booleans (issue #112)', () => {
+test('ConfigFileSchema accepts a boolean or object webSearch (issues #112, #195)', () => {
   assert.equal(ConfigFileSchema.parse({ webSearch: true }).webSearch, true);
   assert.equal(ConfigFileSchema.parse({ webSearch: false }).webSearch, false);
   assert.equal(ConfigFileSchema.parse({}).webSearch, undefined);
+  // Object form with domain filters (#195).
+  assert.deepEqual(
+    ConfigFileSchema.parse({
+      webSearch: { enabled: true, allowedDomains: ['docs.rs'], excludedDomains: ['spam.example'] },
+    }).webSearch,
+    { enabled: true, allowedDomains: ['docs.rs'], excludedDomains: ['spam.example'] },
+  );
+  assert.deepEqual(ConfigFileSchema.parse({ webSearch: {} }).webSearch, {});
+  // Still rejects a value that is neither boolean nor a well-formed object.
   assert.throws(() => ConfigFileSchema.parse({ webSearch: 'yes' }));
+  assert.throws(() => ConfigFileSchema.parse({ webSearch: { allowedDomains: 'docs.rs' } }));
 });
 
 test('ConfigFileSchema accepts formatCommand + verifyCommand as strings (issue #122)', () => {

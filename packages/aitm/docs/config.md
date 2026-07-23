@@ -92,6 +92,8 @@ code-execution surfaces). Keys absent from a file fall through per the
 | `maxPrs` | int > 0 | `5` | project + global, CLI `--max-prs` | Cap on PR groups opened in one run. |
 | `maxSessions` | int > 0 or `null` | `null` (unlimited) | project + global, CLI `--max-sessions` | Cap on work sessions before the run stops. |
 | `maxCiFixAttempts` | int > 0 | `3` | project + global, CLI `--max-fix-attempts` | CI-fix passes per PR group before it blocks. See [maxCiFixAttempts](#maxcifixattempts). |
+| `maxCostUsd` | number > 0 | unset (no ceiling) | project + global | Run-level cost ceiling; stops opening new PR groups when crossed. See [maxCostUsd and maxTotalTokens](#maxcostusd-and-maxtotaltokens). |
+| `maxTotalTokens` | int > 0 | unset (no ceiling) | project + global | Run-level token ceiling; stops opening new PR groups when crossed. See [maxCostUsd and maxTotalTokens](#maxcostusd-and-maxtotaltokens). |
 | `llmStepTimeoutMs` | int ≥ 1000 | `900000` (15 min) | project + global | Per-step LLM request deadline. See [llmStepTimeoutMs](#llmsteptimeoutms). |
 | `concurrency` | int > 0 | `1` | project + global, CLI `--concurrency` | PR groups worked in parallel. See [concurrency and editorConcurrency](#concurrency-and-editorconcurrency). |
 | `editorConcurrency` | int ≥ 1 | `4` | project + global | Editor files fanned out per Worker. See [concurrency and editorConcurrency](#concurrency-and-editorconcurrency). |
@@ -186,6 +188,24 @@ The first time any test or lint runs against a Worker's diff is otherwise on Git
 ## maxCiFixAttempts
 
 Default `3`. Bounds the `waiting-ci ⇄ ci-failed` recovery loop: after a PR group's CI goes red, aitm runs a fix session and re-pushes, up to this many times, before it **blocks for a human** rather than burning sessions on an unfixable red PR. Each attempt is a full coding-tier fix pass plus a remote CI round-trip, so this is a direct cost/patience knob on flaky or genuinely-broken PRs. Set higher for tolerant repos, lower to fail fast. Also settable per run with `aitm start --max-fix-attempts N`.
+
+## maxCostUsd and maxTotalTokens
+
+Unattended-run guardrails. Neither is set by default, so a run is unbounded and byte-identical to before unless you opt in.
+
+- `maxTotalTokens` — the run's cumulative input + output tokens across every subagent.
+- `maxCostUsd` — the run's cumulative priced cost in US dollars.
+
+The work loop consults the live usage ledger **once before dispatching the next batch of PR groups** — so a crossed ceiling stops the run *between* batches (never mid-commit, never abandoning work in flight). The run then blocks with a budget reason (exit 1) and opens no further PRs. With `concurrency` greater than one, the sibling groups already started in the *current* batch keep running to completion after the ceiling is crossed; only the next batch is never dispatched.
+
+```jsonc
+{
+  "maxTotalTokens": 2000000,   // stop before the next group once the run has spent 2M tokens
+  "maxCostUsd": 5.0            // …or once priced cost reaches $5
+}
+```
+
+Set either, or both (whichever trips first stops the run). This is a **guardrail, not a hard cap**: cost is priced at ledger-flush and the check runs at batch boundaries, so groups already in flight in the current batch can carry the totals past the ceiling before the next check sees it. Cost enforcement is also skipped for any run whose model has **no known price** (the ledger reports tokens but `null` cost) — use `maxTotalTokens` when running on an unpriced/self-hosted model. Project/global config only — not a CLI flag.
 
 ## llmStepTimeoutMs
 

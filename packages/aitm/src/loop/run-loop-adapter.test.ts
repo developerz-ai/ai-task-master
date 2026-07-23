@@ -16,7 +16,7 @@ import {
   SUBMIT_TOOL_NAME,
   SYSTEM_REMINDER_CONTRACT,
 } from '@developerz.ai/ai-claude-compat';
-import type { ToolSet } from 'ai';
+import type { LanguageModelUsage, ToolSet } from 'ai';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
@@ -26,6 +26,8 @@ import { GitHubClient } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
 import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
+import { UsageTracker } from '../observability/usage-tracker.ts';
+import { type ModelLimitsLookup, ModelNotFound } from '../openrouter/model-limits.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
@@ -44,6 +46,7 @@ import {
   harnessContextBlock,
   localEditTools,
   localReadTools,
+  makeBudgetCheck,
   mcpTool,
   mountDeferredTools,
   type PlanGroupsOutcome,
@@ -1355,6 +1358,62 @@ test('webSearchProviderOptions: object form gates via `enabled` and threads doma
   );
   // A bare boolean carries no domain parameters (back-compat).
   assert.deepEqual(params(webSearchProviderOptions(true, false)), {});
+});
+
+test('makeBudgetCheck: no check without a ceiling or tracker; enforces token + cost ceilings (issue #190)', async () => {
+  const noPricing: ModelLimitsLookup = {
+    preload: async () => {},
+    forModel: async (id) => {
+      throw new ModelNotFound(id);
+    },
+  };
+  const priced: ModelLimitsLookup = {
+    preload: async () => {},
+    forModel: async (id) => ({
+      modelId: id,
+      promptUsdPerToken: 0.001,
+      completionUsdPerToken: 0.002,
+    }),
+  };
+  const usage = (input: number, output: number): LanguageModelUsage => ({
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: input + output,
+  });
+  const run = async (
+    tracker: UsageTracker | undefined,
+    cost: number | undefined,
+    tokens: number | undefined,
+  ) => {
+    const check = makeBudgetCheck(tracker, cost, tokens);
+    if (!check) throw new Error('expected a budget check');
+    return check();
+  };
+
+  // No ceiling → no check; no tracker → no check.
+  assert.equal(makeBudgetCheck(new UsageTracker(noPricing), undefined, undefined), undefined);
+  assert.equal(makeBudgetCheck(undefined, 1, 1000), undefined);
+
+  // Token ceiling: 600 + 500 = 1100 ≥ 1000 → exceeded (pricing irrelevant).
+  const t1 = new UsageTracker(noPricing);
+  t1.record('worker', 'm', usage(600, 500));
+  const s1 = await run(t1, undefined, 1000);
+  assert.equal(s1.exceeded, true);
+  if (s1.exceeded) assert.match(s1.reason, /token ceiling/);
+  // Under the token ceiling → not exceeded.
+  assert.equal((await run(t1, undefined, 5000)).exceeded, false);
+
+  // Cost ceiling: 600*0.001 + 500*0.002 = $1.60 ≥ $1.00 → exceeded.
+  const t2 = new UsageTracker(priced);
+  t2.record('worker', 'm', usage(600, 500));
+  const s2 = await run(t2, 1.0, undefined);
+  assert.equal(s2.exceeded, true);
+  if (s2.exceeded) assert.match(s2.reason, /cost ceiling/);
+
+  // Cost unknown (unpriced model) → the cost ceiling cannot fire.
+  const t3 = new UsageTracker(noPricing);
+  t3.record('worker', 'm', usage(600, 500));
+  assert.equal((await run(t3, 0.0001, undefined)).exceeded, false);
 });
 
 test('selfReviewVerifyCommand: configured wins; TS repo falls back to typecheck; else undefined', async () => {

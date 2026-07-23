@@ -277,6 +277,14 @@ export class ConfigLoader {
       ...((project?.webSearch ?? global?.webSearch) !== undefined
         ? { webSearch: project?.webSearch ?? global?.webSearch }
         : {}),
+      // Run-level cost/token ceilings (issue #190), project > global. Omitted when unset so the
+      // adapter builds no budget check and the run is byte-identical.
+      ...((project?.maxCostUsd ?? global?.maxCostUsd) !== undefined
+        ? { maxCostUsd: project?.maxCostUsd ?? global?.maxCostUsd }
+        : {}),
+      ...((project?.maxTotalTokens ?? global?.maxTotalTokens) !== undefined
+        ? { maxTotalTokens: project?.maxTotalTokens ?? global?.maxTotalTokens }
+        : {}),
       ...(prBodySections !== undefined ? { prBodySections } : {}),
       ...(providerRouting !== undefined ? { providerRouting } : {}),
       ...(fallbackModels !== undefined ? { fallbackModels } : {}),

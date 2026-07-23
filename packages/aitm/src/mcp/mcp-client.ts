@@ -7,7 +7,8 @@
 //
 // Lifecycle: connectAll() at run start, toolsForRole() during agent build, close() on exit
 // (success / blocked / SIGINT). Failures on individual servers are logged + skipped — a
-// broken MCP server should not block the whole run.
+// broken MCP server should not block the whole run. Every stdio server's child pid is handed to
+// StdioProcessRegistry, which outlives close() as the guarantee that none of them zombie.
 
 import { experimental_createMCPClient, type MCPClient, type MCPClientConfig } from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
@@ -15,6 +16,7 @@ import type { ToolSet } from 'ai';
 import type { Role } from '../credentials/credentials.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { McpRoleAllowlist, McpRoleAllowlistValue, McpServer, McpServers } from './schema.ts';
+import { StdioProcessRegistry } from './stdio-process-registry.ts';
 
 export type TransportKind = 'stdio' | 'http' | 'sse';
 
@@ -40,6 +42,8 @@ export type McpClientInit = {
   deferToolsOver?: number;
   // Injection seam for tests — defaults to the AI SDK factory.
   createClient?: CreateMcpClient;
+  // Child-process bookkeeping for stdio servers. Injected by tests; production builds its own.
+  processes?: StdioProcessRegistry;
   logger?: LoggerLike;
 };
 
@@ -52,10 +56,13 @@ type ConnectedServer = {
 
 export class McpClientManager {
   private readonly createClient: CreateMcpClient;
+  private readonly processes: StdioProcessRegistry;
   private servers: ConnectedServer[] = [];
 
   constructor(private readonly init: McpClientInit) {
     this.createClient = init.createClient ?? experimental_createMCPClient;
+    this.processes =
+      init.processes ?? new StdioProcessRegistry(init.logger ? { logger: init.logger } : {});
   }
 
   async connectAll(): Promise<void> {
@@ -63,9 +70,10 @@ export class McpClientManager {
       // Track the client outside the try so a failure during tools() can still
       // close the spawned process / socket instead of leaking it.
       let client: MCPClient | undefined;
+      const config = buildClientConfig(name, server);
       try {
         const transport = transportKind(server);
-        client = await this.createClient(buildClientConfig(name, server));
+        client = await this.createClient(config);
         const tools = (await client.tools()) as ToolSet;
         this.servers.push({ name, transport, client, tools });
       } catch (err) {
@@ -83,6 +91,12 @@ export class McpClientManager {
           name,
           error: errorMessage(err),
         });
+      } finally {
+        // In `finally`, not the success path: a connect that dies mid-handshake has already spawned
+        // the child, and that is exactly the pid most likely to be left behind. Registering an
+        // already-dead pid is a no-op — the registry probes liveness before it signals.
+        const pid = stdioPid(config.transport);
+        if (pid !== undefined) this.processes.register(name, pid);
       }
     }
   }
@@ -130,6 +144,9 @@ export class McpClientManager {
         }
       }),
     );
+    // After the clients: a client.close() that hangs or no-ops must not decide whether the child
+    // process survives the run.
+    await this.processes.terminate();
   }
 
   connected(): Array<{ name: string; toolCount: number; transport: string }> {
@@ -165,6 +182,18 @@ function buildClientConfig(name: string, server: McpServer): MCPClientConfig {
 
 function clientNameFor(name: string): string {
   return `aitm-${name}`;
+}
+
+// The spawned child's pid, read off the SDK's stdio transport after connect. The SDK exposes no
+// accessor, so this narrows the runtime shape structurally (`in` checks, no casts) and returns
+// undefined for every non-stdio transport and for a spawn that never happened.
+function stdioPid(transport: MCPClientConfig['transport']): number | undefined {
+  if (typeof transport !== 'object' || transport === null) return undefined;
+  if (!('process' in transport)) return undefined;
+  const proc: unknown = transport.process;
+  if (typeof proc !== 'object' || proc === null || !('pid' in proc)) return undefined;
+  const pid: unknown = proc.pid;
+  return typeof pid === 'number' && pid > 0 ? pid : undefined;
 }
 
 // `mcp__<server>__<tool>`, the Claude Code namespacing convention (issue #115). Server names are

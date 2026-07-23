@@ -45,6 +45,12 @@ Same shape as Claude Code's `mcpServers` (https://code.claude.com/docs/en/mcp), 
 
 `stdio` is the default when `type` is omitted — matches Claude Code defaults.
 
+### Project-scoped stdio servers
+
+A `stdio` entry declared in a project-scoped file (`./.mcp.json`, `./.ai-task-master/config.json`) **is honored and spawned**, same as one from user-owned config. That file is where the repo's own Claude Code session already declares those servers, and refusing to run them made `aitm` useless in exactly the repos that ship them — running a checkout's tooling is the operator's decision, taken when they run `aitm start` in it.
+
+This is scoped to MCP. The other project-scope strips still apply: `openrouterApiKey`, `baseURL`, `hooks`, `formatCommand`, `verifyCommand`, and `stylePath` are honored only from `~/.aitm.json` (see `./config.md`), because those redirect the harness itself rather than adding a tool to it.
+
 ## Role allowlist
 
 Per-role allowlists scope which servers reach which subagent. Useful for sandboxing — e.g., let `Worker` see the filesystem MCP but not a payments MCP.
@@ -91,6 +97,13 @@ Activation is scoped to one subagent invocation; a fresh invocation starts fully
 3. `close()` on exit (success / blocked / SIGINT).
 
 A broken server logs and is skipped — it does not block the run.
+
+### Child processes
+
+Every `stdio` server spawns a local process, and a run must not leave one behind. `StdioProcessRegistry` (`src/mcp/stdio-process-registry.ts`) records each child's pid at connect — including a connect that fails mid-handshake, which is the pid most likely to be orphaned — and reaps them:
+
+- `close()` closes the MCP clients first, then SIGTERMs any child still alive, waits a 2s grace, and SIGKILLs whatever ignored it. The SDK's own cleanup fires a SIGTERM through an abort signal and then forgets the handle, so nothing else verifies the child actually exited.
+- A process-exit guard SIGKILLs the remainder synchronously if the run dies without reaching `close()` — the force-quit path (a second Ctrl-C, which exits via `process.exit`).
 
 ## Why client-only
 

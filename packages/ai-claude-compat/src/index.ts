@@ -94,7 +94,9 @@ export {
   AUTONOMY_CONTRACT_TEXT,
   autonomyBlock,
   COMMUNICATION_CONTRACT_TEXT,
+  CONTEXT_MANAGEMENT_TEXT,
   communicationContractBlock,
+  contextManagementBlock,
   defaultContractBlocks,
   HARNESS_CONTRACT_TEXT,
   harnessContractBlock,
@@ -107,6 +109,8 @@ export {
   renderPromptBlocks,
   selfIdBlock,
   stepBudgetLine,
+  TOOL_RESULT_TRUST_TEXT,
+  toolResultTrustBlock,
 } from './prompt-blocks.ts';
 export { resolveInside } from './safe-path.ts';
 export {

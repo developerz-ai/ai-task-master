@@ -103,8 +103,6 @@ export const REVIEWER_SYSTEM_PREFIX = [
   '',
   'Verify any claim in the comment (API, error, spec, changelog) before acting: `webFetch` a doc URL',
   '(`fetchHtml` when available); `datetime` for the current time.',
-  '',
-  'If earlier conversation was summarized, resume from the summary; do not re-decide a resolved thread.',
 ].join('\n');
 
 // Reviewer step budget — single-sourced so the step-budget reminder (issue #105) and the actual

@@ -4,6 +4,7 @@ import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
+import { render } from './prompts/templates.ts';
 import {
   createReviewerAgent,
   type GithubToolInput,
@@ -152,10 +153,18 @@ test('REVIEWER_SYSTEM_PREFIX names the three outcomes', () => {
   assert.match(REVIEWER_SYSTEM_PREFIX, /"wontfix"/);
 });
 
-test('REVIEWER_SYSTEM_PREFIX carries the compaction continuation contract (issue #102)', () => {
-  assert.match(REVIEWER_SYSTEM_PREFIX, /summarized/i);
-  assert.match(REVIEWER_SYSTEM_PREFIX, /resume from the summary/i);
-  assert.match(REVIEWER_SYSTEM_PREFIX, /do not re-decide a resolved thread/i);
+test("the Reviewer's rendered prompt carries the compaction continuation contract (issue #102)", () => {
+  // The contract moved from this role's prose into the shared contextManagement block — it is
+  // cross-cutting. Assert on what the Reviewer actually receives, not on where the sentence lives.
+  const rendered = render('role-prompt', {
+    roleGuidance: REVIEWER_SYSTEM_PREFIX,
+    maxSteps: 20,
+    style: '',
+    env: '<env>\n</env>',
+  });
+  assert.match(rendered, /summarized/i);
+  assert.match(rendered, /resume from the summary/i);
+  assert.match(rendered, /do not re-plan from scratch/i);
 });
 
 test('REVIEWER_SYSTEM_PREFIX tells the model to disagree when the comment is wrong (§2d)', () => {

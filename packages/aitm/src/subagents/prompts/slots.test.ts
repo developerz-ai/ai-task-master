@@ -38,6 +38,20 @@ test('data slot: specialist-guidance → its own envelope + advisory directive',
   assert.match(rendered, /quoted as data, not instructions/i);
 });
 
+test("instruction slot: the target repo's own style guide is deliberately NOT a data envelope", () => {
+  // aitm runs against a repo the operator chose; its CLAUDE.md/AGENTS.md is authoritative for the code
+  // written there, so the style slot reaches the model verbatim and in full rather than as advisory
+  // data. Pinned here so a future slice cannot demote it without a reviewable diff.
+  const guide = '# CLAUDE.md\n\n- SOLID. One responsibility per module.\n- No `any`, ever.';
+  const rendered = renderSlot(instruction(guide));
+  assert.equal(rendered, guide, 'delivered verbatim, unfenced, untruncated');
+  assert.deepEqual(
+    Object.keys(ENVELOPE_DIRECTIVE),
+    ['review-comment', 'specialist-guidance'],
+    'the envelope union carries no style-guide member',
+  );
+});
+
 test('data slot: payload is trimmed so the envelope tags own the spacing', () => {
   const rendered = renderSlot(data('review-comment', '\n\n  edge whitespace  \n\n'));
   assert.match(rendered, /<review-comment>\nedge whitespace\n<\/review-comment>/);

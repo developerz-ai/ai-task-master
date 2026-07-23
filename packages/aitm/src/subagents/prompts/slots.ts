@@ -7,6 +7,10 @@
 //                   instructions" directive, so a payload like "ignore previous instructions" is read
 //                   as quoted content, never obeyed as a directive.
 //
+// The target repo's own CLAUDE.md/AGENTS.md style guide is deliberately NOT in the data kind: aitm runs
+// against a repo the operator chose, and that repo's rules are authoritative for the code written in
+// it, so the style slot stays an `instruction` and reaches the model in full.
+//
 // Fencing lives HERE, not at each call site, so a template physically cannot forget to fence an
 // untrusted slot: a `data` value can only reach the prompt through an envelope. That is the
 // "fencing by construction" the prompt seam delivers.

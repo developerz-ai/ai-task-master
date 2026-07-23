@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { acquireRunLock } from '../state/run-lock.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type {
@@ -145,6 +146,64 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
       await readFile(join(repo.path, '.ai-task-master', 'config.snapshot.json'), 'utf8'),
     ) as { openrouterApiKey: string };
     assert.match(snapshot.openrouterApiKey, /<from env>/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: releases the run lock when the run ends', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const result = await runStart(
+      { kind: 'start', goal: 'add jwt auth' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    await assert.rejects(
+      () => readFile(join(repo.path, '.ai-task-master', 'run.lock'), 'utf8'),
+      /ENOENT/,
+      'lock released so the next run can start',
+    );
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: another run holds the state dir → exit 1, loop never runs', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await acquireRunLock(join(repo.path, '.ai-task-master'));
+    let loopCalls = 0;
+    const result = await runStart(
+      { kind: 'start', goal: 'add jwt auth' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async () => {
+          loopCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /another aitm run holds/);
+    assert.equal(loopCalls, 0, 'no work started against a locked state dir');
+    // The refusal must leave the holder's lock alone.
+    assert.ok(await readFile(join(repo.path, '.ai-task-master', 'run.lock'), 'utf8'));
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -758,6 +817,44 @@ test('runStart: resume (existing state.json) skips runPlanner, preserves prior p
   }
 });
 
+test('runStart: an unparseable state.json is replaced, not treated as a run to protect', async () => {
+  // StateStore.init refuses a clobber by default; a state.json too corrupt to resume is one of the
+  // two cases start is entitled to overwrite, so it must pass force rather than fail to start.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'state.json'), '{not json');
+    let plannerGoal: string | undefined;
+    const result = await runStart(
+      { kind: 'start', goal: 'add hello' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        modelBanner: async () => '',
+        runPlanner: async (input) => {
+          plannerGoal = input.goal;
+          return { kind: 'ok', groups: [] };
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(plannerGoal, 'add hello', 'the run started fresh instead of refusing');
+    const persisted = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')) as {
+      runId: string;
+    };
+    assert.ok(persisted.runId.length > 0);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('runStart: resume with empty prGroups (prior planning blocked) re-runs runPlanner', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();
@@ -898,21 +995,68 @@ test('runStart: resolveStyle failure never blocks → falls back to raw agent-co
 
 // ---- runMergePr -------------------------------------------------------------
 
-async function seedState(
-  repoPath: string,
-  patch: { currentPr?: number | null; stylePath?: string | null } = {},
-): Promise<void> {
+type SeedPatch = {
+  currentPr?: number | null;
+  stylePath?: string | null;
+  status?: RunState['status'];
+  prGroups?: readonly PrGroup[];
+  currentGroupIndex?: number;
+  sessionCount?: number;
+  runId?: string;
+};
+
+// A run caught mid-plan: group one merged, group two holding the open PR. `--no-resume` must
+// re-point `currentPr` at the taken-over PR without costing the operator any of this.
+function midPlanSeed(): SeedPatch {
+  const task = (id: string, done: boolean): PrGroup['tasks'][number] => ({
+    id,
+    text: `task ${id}`,
+    complexity: 'normal',
+    done,
+  });
+  return {
+    status: 'working',
+    currentPr: 73,
+    currentGroupIndex: 1,
+    sessionCount: 3,
+    runId: 'run-midplan',
+    prGroups: [
+      {
+        id: 'g1',
+        title: 'schema',
+        tasks: [task('t1', true)],
+        dependsOn: [],
+        branch: 'feat/schema',
+        pr: 70,
+        status: 'merged',
+        stage: 'merged',
+      },
+      {
+        id: 'g2',
+        title: 'api',
+        tasks: [task('t2', true), task('t3', false)],
+        dependsOn: ['g1'],
+        branch: 'feat/api',
+        pr: 73,
+        status: 'awaiting-pr',
+        stage: 'waiting-ci',
+      },
+    ],
+  };
+}
+
+async function seedState(repoPath: string, patch: SeedPatch = {}): Promise<void> {
   const dir = join(repoPath, '.ai-task-master');
   await mkdir(dir, { recursive: true });
   const now = new Date().toISOString();
   const state = {
-    status: 'awaiting-pr',
-    prGroups: [],
-    currentGroupIndex: 0,
+    status: patch.status ?? 'awaiting-pr',
+    prGroups: patch.prGroups ?? [],
+    currentGroupIndex: patch.currentGroupIndex ?? 0,
     currentTaskIndex: 0,
-    sessionCount: 0,
+    sessionCount: patch.sessionCount ?? 0,
     currentPr: 'currentPr' in patch ? patch.currentPr : 42,
-    runId: 'run-test',
+    runId: patch.runId ?? 'run-test',
     provider: 'openrouter',
     model: 'anthropic/claude-sonnet-4.6',
     agentConfigFile: 'CLAUDE.md',
@@ -955,6 +1099,36 @@ test('runMergePr: happy path with --pr override', async () => {
     assert.equal(captured?.pr, 99);
     assert.equal(captured?.resume, true);
     assert.equal(captured?.styleDigest, STUB_DIGEST, 'resolved digest threaded to merge flow');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: another run holds the state dir → exit 1, flow never runs', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    await acquireRunLock(join(repo.path, '.ai-task-master'));
+    let flowCalls = 0;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 99 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async () => {
+          flowCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /another aitm run holds/);
+    assert.equal(flowCalls, 0, 'no merge flow against a locked state dir');
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -1127,7 +1301,117 @@ test('runMergePr: resume false ignores stale persisted currentPr, takes over cur
     const persisted = JSON.parse(
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
     ) as { currentPr: number };
-    assert.equal(persisted.currentPr, 99, 'stale state.json overwritten with the take-over PR');
+    assert.equal(persisted.currentPr, 99, 'state.json re-pointed at the take-over PR');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: resume false on a mid-plan run → re-points currentPr, keeps the plan', async () => {
+  // `--no-resume` distrusts one field. Replacing the whole state with a synthesized take-over
+  // state would cost the operator the plan, group stages, session count and runId.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path, midPlanSeed());
+    let captured: RunMergeFlowInput | null = null;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: false, pr: 88 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async (input) => {
+          captured = input;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(captured?.pr, 88, 'take-over PR wins over the persisted currentPr');
+    const persisted = JSON.parse(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+    ) as RunState;
+    assert.equal(persisted.currentPr, 88, 'currentPr updated in place');
+    assert.deepEqual(
+      persisted.prGroups.map((g) => `${g.id}:${g.stage}:${g.pr}`),
+      ['g1:merged:70', 'g2:waiting-ci:73'],
+      'plan, group stages and per-group PRs survive --no-resume',
+    );
+    assert.equal(persisted.runId, 'run-midplan', 'runId kept → prompt-cache session stays sticky');
+    assert.equal(persisted.status, 'working');
+    assert.equal(persisted.currentGroupIndex, 1);
+    assert.equal(persisted.sessionCount, 3);
+    assert.equal(captured?.runState.runId, 'run-midplan', 'flow sees the preserved run');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: resume false with no prior state → synthesizes and persists take-over', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let prSeen: number | undefined;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: false, pr: 42 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async (input) => {
+          prSeen = input.pr;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(prSeen, 42);
+    const persisted = JSON.parse(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+    ) as RunState;
+    assert.equal(persisted.currentPr, 42);
+    assert.equal(persisted.status, 'awaiting-pr');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: resume false with unreadable state → exit 1, file untouched', async () => {
+  // Distrusting the persisted PR number is not licence to rewrite a file aitm cannot read: the
+  // operator fixes or deletes it, so whatever it holds is still theirs to recover.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'state.json'), '{ not json');
+    let flowCalls = 0;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: false, pr: 88 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async () => {
+          flowCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /unreadable/);
+    assert.equal(flowCalls, 0, 'no merge flow against unreadable state');
+    assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), '{ not json', 'file untouched');
   } finally {
     await repo.cleanup();
     await home.cleanup();

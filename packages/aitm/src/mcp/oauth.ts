@@ -46,6 +46,7 @@ export type OAuthOptions = {
   callbackUrl?: string;
   port?: number;
   timeout?: number;
+  openBrowser?: (url: string) => Promise<void>;
 };
 
 type ServerResponse = {
@@ -308,7 +309,7 @@ export async function performOAuthFlow(options: OAuthOptions): Promise<OAuthConf
 
   try {
     // Launch browser
-    await openBrowser(authUrl);
+    await (options.openBrowser ?? openBrowser)(authUrl);
 
     // Wait for callback
     const result = await server.waitForCallback(callbackPath, timeout, state);

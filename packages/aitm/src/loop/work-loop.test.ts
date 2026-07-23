@@ -6,6 +6,7 @@ import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import { renderPlanMarkdown } from '../plan/plan-markdown.ts';
 import type { PrGroup, RunState, Task } from '../state/schema.ts';
 import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
+import { DirtyWorkingTree } from '../workspace/dirty-tree.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
 import type { SelfReviewResult } from './self-review.ts';
@@ -1730,6 +1731,28 @@ test('Worker error → group marked blocked', async () => {
   assert.equal(calls.openPr.length, 0);
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((p) => p.id === 'theta')?.status, 'blocked');
+});
+
+test('runGroup: a dirty working tree aborts the run instead of blocking the group', async () => {
+  const { state, updates } = makeState([group('theta')]);
+  const releases: string[] = [];
+  const home: CheckoutHome = {
+    acquire: () => Promise.reject(new DirtyWorkingTree('/repo', [' M src/a.ts'])),
+    release: async (groupId) => {
+      releases.push(groupId);
+    },
+  };
+  const loop = new WorkLoop(makeDeps({ state, home }));
+
+  await assert.rejects(() => loop.runGroup(group('theta')), DirtyWorkingTree);
+
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(
+    last.prGroups.find((p) => p.id === 'theta')?.status,
+    'in-progress',
+    'the precondition failure must not rewrite the group as blocked',
+  );
+  assert.deepEqual(releases, [], 'a slot never taken is never released');
 });
 
 // composePr (orchestrator.ts) is total: schema-invalid or section-incomplete compositions are

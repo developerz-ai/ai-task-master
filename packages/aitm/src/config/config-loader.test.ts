@@ -104,6 +104,35 @@ test('resolve: selfReview defaults true and is project over global', async () =>
   }
 });
 
+test('resolve: allowDirty is CLI-only — no config file can authorize wiping the tree', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    assert.equal(
+      (await loader.resolve({})).allowDirty,
+      false,
+      'default: a dirty tree at run entry is refused',
+    );
+    assert.equal(
+      (await loader.resolve({ allowDirty: true })).allowDirty,
+      true,
+      '--allow-dirty opts out for this run',
+    );
+
+    await writeGlobalConfig(home.path, { allowDirty: true });
+    await writeProjectConfig(cwd.path, { allowDirty: true });
+    assert.equal(
+      (await loader.resolve({})).allowDirty,
+      false,
+      'a checked-in repo config must never disarm the guard',
+    );
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: resolveConflicts defaults true and is project over global', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

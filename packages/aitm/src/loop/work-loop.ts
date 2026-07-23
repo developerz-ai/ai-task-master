@@ -22,6 +22,7 @@ import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../stat
 import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
 import { type BranchCleanup, branchCleanupMessage } from '../workspace/branch-cleanup.ts';
 import { perTaskBranch } from '../workspace/branch-name.ts';
+import { DirtyWorkingTree } from '../workspace/dirty-tree.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
 import { Mutex } from './mutex.ts';
@@ -494,6 +495,10 @@ export class WorkLoop {
           /* swallow */
         }
       }
+      // A dirty working tree is a RUN precondition, not this group's failure: every group would
+      // refuse identically, so blocking them one by one buries the message behind N copies and
+      // rewrites plan state over work the operator was told aitm would not touch. Abort the run.
+      if (err instanceof DirtyWorkingTree) throw err;
       if (err instanceof StateWriteAfterSuccess) {
         // External side effect (openPr/mergePr) already succeeded; persist failed.
         // Keep the real outcome so a retry doesn't reopen or re-merge.

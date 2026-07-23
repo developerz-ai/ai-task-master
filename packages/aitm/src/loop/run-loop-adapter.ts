@@ -714,7 +714,9 @@ export async function runLoopAdapter(
     // concurrency is a single slot: sequential groups, no two subagents mutating the tree at once.
     // (A later task reframes concurrency as a cap.)
     const effectiveConcurrency = 1;
-    const checkout = seams.makeCheckout?.(input) ?? new InPlaceCheckout(input.cwd);
+    const checkout =
+      seams.makeCheckout?.(input) ??
+      new InPlaceCheckout(input.cwd, { allowDirty: input.resolved.allowDirty ?? false });
     const github = seams.makeGithub?.(input) ?? input.github;
     const orchestrator = await (seams.makeOrchestrator ?? defaultMakeOrchestrator)({
       input,

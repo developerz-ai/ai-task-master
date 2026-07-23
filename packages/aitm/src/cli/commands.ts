@@ -36,6 +36,7 @@ import {
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { type ModelLimitsLookup, ModelLimitsRegistry } from '../openrouter/model-limits.ts';
 import { OpenRouterReferenceCatalog } from '../openrouter/reference-catalog.ts';
+import type { RunLockHandle } from '../state/run-lock.ts';
 import type { PrGroup, RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import type { CleanArgs, ParsedArgs } from './args.ts';
@@ -408,198 +409,221 @@ export async function runStart(
 
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
-
-  // Resume detection: if a previous run left a valid state.json, skip re-init so
-  // runId and prGroups are preserved. Only fall back on expected "missing/invalid
-  // prior state" cases (ENOENT, JSON parse failure, schema mismatch); surface every
-  // other error (permissions, IO) as a hard failure rather than silently re-initing.
-  let resuming = false;
-  let existingState: RunState | null = null;
+  // One run at a time per state dir. Taken before any state is read or written and released in the
+  // finally below, so a second `aitm` invocation here fails fast instead of silently racing this
+  // run's plan, group stages and PR numbers through StateStore's write-behind cache.
+  let lock: RunLockHandle;
   try {
-    existingState = await state.read();
-    resuming = true;
-  } catch (err) {
-    if (!isMissingOrInvalidState(err, stateDir)) {
-      return { code: 1, message: `Could not read run state: ${errMsg(err)}` };
-    }
-    // No valid state.json — proceed with fresh init.
-  }
-
-  // A FINISHED run in this directory must not swallow a new `aitm start`. Without this, re-running
-  // `aitm start "<new goal>"` where a prior run already merged every group resumed that completed run
-  // (nothing left to do → 0 calls, the new goal never even planned). Supersede it with a fresh run.
-  // `aitm resume` short-circuits a completed run before reaching here, so this only affects `start`.
-  if (existingState && isRunComplete(existingState)) {
-    (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(
-      `Previous run here has finished — starting a new run for: ${args.goal}\n`,
-    );
-    existingState = null;
-    resuming = false;
-  } else if (existingState) {
-    // An UNFINISHED run is resumed as before (idempotent `start`). If the operator typed a different
-    // goal, say so plainly — `start` continues the in-progress run, it does not re-plan the new text —
-    // so a surprised user knows `aitm clean` is how to start over.
-    const persistedGoal = (await state.readGoal().catch(() => null))?.goal?.trim();
-    if (persistedGoal !== undefined && persistedGoal !== '' && persistedGoal !== args.goal.trim()) {
-      (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(
-        `Resuming the unfinished run for "${persistedGoal}" — \`aitm start\` continues it, it does not re-plan. ` +
-          `To start over for "${args.goal}", run \`aitm clean\` first.\n`,
-      );
-    }
-  }
-
-  let sessionId = existingState?.runId;
-  if (!resuming) {
-    const initial = buildInitialRunState({ resolved, agentConfig });
-    sessionId = initial.runId;
-    try {
-      await state.init(initial);
-      await state.writeGoal(args.goal, args.criteria);
-      await loader.writeSnapshot(resolved, stateDir);
-    } catch (err) {
-      return { code: 1, message: errMsg(err) };
-    }
-  }
-
-  // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Sourced from the
-  // persisted state.runId (fresh or resumed), so a resumed run reuses the same id and keeps warm.
-  // Keep-alive transport (plan slice 04b): a tuned undici dispatcher on Node, undefined elsewhere
-  // (Bun/Deno pool natively, or undici unavailable) → provider keeps its default fetch.
-  const llmFetch = await createLlmFetch();
-  const credentials = new Credentials(resolved, sessionId, llmFetch);
-
-  // Planning phase (issue #17): a one-shot step that runs the Planner once, before the loop,
-  // so `prGroups` is populated and the loop has something to iterate. Gated on whether a plan
-  // is already persisted — not merely on `resuming` — because a prior run whose planning
-  // blocked leaves a resumable state.json with empty `prGroups`; that case must re-plan rather
-  // than hand the loop an empty plan. Only runs when a `runPlanner` seam is injected; otherwise
-  // planning is handled inside the WorkLoop adapter (merged default), keeping production
-  // behaviour unchanged and this module pure dispatch.
-  const hasPersistedPlan = (existingState?.prGroups.length ?? 0) > 0;
-  if (ctx.runPlanner && !hasPersistedPlan) {
-    let plan: RunPlannerOutcome;
-    try {
-      plan = await ctx.runPlanner({
-        cwd,
-        resolved,
-        credentials,
-        agentConfig,
-        goal: args.goal,
-        criteria: args.criteria,
-      });
-    } catch (err) {
-      return { code: 1, message: errMsg(err) };
-    }
-    if (plan.kind === 'blocked') {
-      return { code: 1, message: plan.reason };
-    }
-    try {
-      await state.update((s) => ({ ...s, status: 'working', prGroups: plan.groups }));
-    } catch (err) {
-      return { code: 1, message: `Failed to persist plan: ${errMsg(err)}` };
-    }
-  }
-
-  // Per-run token/cost accounting (issue #114). One ModelLimitsRegistry for the run — shared by the
-  // tracker's pricing and the Compactor's context lookup (#102) so the catalog is fetched at most
-  // once. The tracker's onUsage sinks are bound in the adapter; totals flush after the loop.
-  const modelLimits = new ModelLimitsRegistry(
-    new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL),
-    new OpenRouterReferenceCatalog(),
-  );
-  const usage = new UsageTracker(modelLimits);
-
-  // Print the resolved window + price per model before any tokens are spent. A provider that
-  // publishes no context window disables autocompaction for the whole run, and one that publishes no
-  // pricing reduces the end-of-run summary to `cost unknown` — both used to surface only after the
-  // fact, if at all. Best-effort: a catalog that won't load must not stop the run.
-  try {
-    const banner = await (ctx.modelBanner ?? (() => startupModelBanner(modelLimits, resolved)))();
-    if (banner !== '') (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(banner);
-  } catch {
-    // diagnostics must never break the run
-  }
-
-  // Coding-style digest (plan slice 01): distilled once from AgentConfig + repo signals and cached
-  // in the state dir, reused on resume. Threaded into the loop so planner/worker/reviewer prompts
-  // carry the digest. Never blocks — a thrown seam degrades to raw AgentConfig.contents.
-  const resolveStyle = ctx.resolveStyle ?? defaultResolveStyle;
-  let styleDigest: string;
-  try {
-    styleDigest = await resolveStyle({
-      cwd,
-      credentials,
-      agentConfig,
-      state,
-      llmStepTimeoutMs: resolved.llmStepTimeoutMs,
-      usage,
-    });
-  } catch {
-    styleDigest = agentConfig.contents;
-  }
-
-  const notice = autoMergeNotice(resolved.autoMerge);
-  if (notice) (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(notice);
-
-  const runLoop = ctx.runLoop ?? defaultRunLoop;
-  let result: WorkLoopResult;
-  try {
-    result = await runLoop({
-      cwd,
-      resolved,
-      credentials,
-      agentConfig,
-      styleDigest,
-      state,
-      github,
-      goal: args.goal,
-      criteria: args.criteria,
-      branch: args.branch,
-      usage,
-      modelLimits,
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-    });
+    lock = await state.acquireRunLock();
   } catch (err) {
     return { code: 1, message: errMsg(err) };
   }
 
-  const stdout = ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk));
-
-  // Flush per-run usage/cost accounting (issue #114): persist totals + one summary line to the
-  // stdout sink. Fire-and-forget — a tracker or state error must never change the run's outcome.
   try {
-    const totals = await usage.totals();
-    await state.update((s) => ({ ...s, usage: totals }));
-    stdout(usageSummaryLine(totals));
-  } catch {
-    // observability must never break the run
-  }
+    // Resume detection: if a previous run left a valid state.json, skip re-init so
+    // runId and prGroups are preserved. Only fall back on expected "missing/invalid
+    // prior state" cases (ENOENT, JSON parse failure, schema mismatch); surface every
+    // other error (permissions, IO) as a hard failure rather than silently re-initing.
+    let resuming = false;
+    let existingState: RunState | null = null;
+    // Whether a state.json we are about to overwrite is on disk. StateStore.init refuses a clobber
+    // unless told, so the two cases that legitimately discard prior state — a file too corrupt to
+    // resume, and a finished run superseded below — have to say so; a missing file must not.
+    let discardingPriorState = false;
+    try {
+      existingState = await state.read();
+      resuming = true;
+    } catch (err) {
+      if (!isMissingOrInvalidState(err, stateDir)) {
+        return { code: 1, message: `Could not read run state: ${errMsg(err)}` };
+      }
+      // No valid state.json — proceed with fresh init.
+      discardingPriorState = !isFileNotFound(err);
+    }
 
-  // Every PR this run opened, with its URL — the first thing an operator wants when the run stops,
-  // whatever the outcome. Read from persisted state (not the result) so it covers groups that opened
-  // a PR before a later group blocked. Fire-and-forget, like the usage line.
-  try {
-    const block = prLinksBlock((await state.read()).prGroups);
-    if (block !== '') stdout(block);
-  } catch {
-    // reporting must never break the run
-  }
-
-  // Persist the first awaiting-pr number into state so `aitm merge-pr` (with no --pr)
-  // can pick it up. WorkLoop tracks per-group PR numbers but does not nominate one as
-  // "current"; that's a CLI-level concern resolved here.
-  if (result.kind === 'awaiting-pr' && result.prs.length > 0) {
-    const firstPr = result.prs[0];
-    if (firstPr !== undefined) {
-      try {
-        await state.update((s) => ({ ...s, currentPr: firstPr }));
-      } catch (err) {
-        return { code: 1, message: `Failed to persist currentPr: ${errMsg(err)}` };
+    // A FINISHED run in this directory must not swallow a new `aitm start`. Without this, re-running
+    // `aitm start "<new goal>"` where a prior run already merged every group resumed that completed run
+    // (nothing left to do → 0 calls, the new goal never even planned). Supersede it with a fresh run.
+    // `aitm resume` short-circuits a completed run before reaching here, so this only affects `start`.
+    if (existingState && isRunComplete(existingState)) {
+      (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(
+        `Previous run here has finished — starting a new run for: ${args.goal}\n`,
+      );
+      existingState = null;
+      resuming = false;
+      discardingPriorState = true;
+    } else if (existingState) {
+      // An UNFINISHED run is resumed as before (idempotent `start`). If the operator typed a different
+      // goal, say so plainly — `start` continues the in-progress run, it does not re-plan the new text —
+      // so a surprised user knows `aitm clean` is how to start over.
+      const persistedGoal = (await state.readGoal().catch(() => null))?.goal?.trim();
+      if (
+        persistedGoal !== undefined &&
+        persistedGoal !== '' &&
+        persistedGoal !== args.goal.trim()
+      ) {
+        (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(
+          `Resuming the unfinished run for "${persistedGoal}" — \`aitm start\` continues it, it does not re-plan. ` +
+            `To start over for "${args.goal}", run \`aitm clean\` first.\n`,
+        );
       }
     }
-  }
 
-  return mapResultToExit(result);
+    let sessionId = existingState?.runId;
+    if (!resuming) {
+      const initial = buildInitialRunState({ resolved, agentConfig });
+      sessionId = initial.runId;
+      try {
+        await state.init(initial, { force: discardingPriorState });
+        await state.writeGoal(args.goal, args.criteria);
+        await loader.writeSnapshot(resolved, stateDir);
+      } catch (err) {
+        return { code: 1, message: errMsg(err) };
+      }
+    }
+
+    // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Sourced from the
+    // persisted state.runId (fresh or resumed), so a resumed run reuses the same id and keeps warm.
+    // Keep-alive transport (plan slice 04b): a tuned undici dispatcher on Node, undefined elsewhere
+    // (Bun/Deno pool natively, or undici unavailable) → provider keeps its default fetch.
+    const llmFetch = await createLlmFetch();
+    const credentials = new Credentials(resolved, sessionId, llmFetch);
+
+    // Planning phase (issue #17): a one-shot step that runs the Planner once, before the loop,
+    // so `prGroups` is populated and the loop has something to iterate. Gated on whether a plan
+    // is already persisted — not merely on `resuming` — because a prior run whose planning
+    // blocked leaves a resumable state.json with empty `prGroups`; that case must re-plan rather
+    // than hand the loop an empty plan. Only runs when a `runPlanner` seam is injected; otherwise
+    // planning is handled inside the WorkLoop adapter (merged default), keeping production
+    // behaviour unchanged and this module pure dispatch.
+    const hasPersistedPlan = (existingState?.prGroups.length ?? 0) > 0;
+    if (ctx.runPlanner && !hasPersistedPlan) {
+      let plan: RunPlannerOutcome;
+      try {
+        plan = await ctx.runPlanner({
+          cwd,
+          resolved,
+          credentials,
+          agentConfig,
+          goal: args.goal,
+          criteria: args.criteria,
+        });
+      } catch (err) {
+        return { code: 1, message: errMsg(err) };
+      }
+      if (plan.kind === 'blocked') {
+        return { code: 1, message: plan.reason };
+      }
+      try {
+        await state.update((s) => ({ ...s, status: 'working', prGroups: plan.groups }));
+      } catch (err) {
+        return { code: 1, message: `Failed to persist plan: ${errMsg(err)}` };
+      }
+    }
+
+    // Per-run token/cost accounting (issue #114). One ModelLimitsRegistry for the run — shared by the
+    // tracker's pricing and the Compactor's context lookup (#102) so the catalog is fetched at most
+    // once. The tracker's onUsage sinks are bound in the adapter; totals flush after the loop.
+    const modelLimits = new ModelLimitsRegistry(
+      new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL),
+      new OpenRouterReferenceCatalog(),
+    );
+    const usage = new UsageTracker(modelLimits);
+
+    // Print the resolved window + price per model before any tokens are spent. A provider that
+    // publishes no context window disables autocompaction for the whole run, and one that publishes no
+    // pricing reduces the end-of-run summary to `cost unknown` — both used to surface only after the
+    // fact, if at all. Best-effort: a catalog that won't load must not stop the run.
+    try {
+      const banner = await (ctx.modelBanner ?? (() => startupModelBanner(modelLimits, resolved)))();
+      if (banner !== '') (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(banner);
+    } catch {
+      // diagnostics must never break the run
+    }
+
+    // Coding-style digest (plan slice 01): distilled once from AgentConfig + repo signals and cached
+    // in the state dir, reused on resume. Threaded into the loop so planner/worker/reviewer prompts
+    // carry the digest. Never blocks — a thrown seam degrades to raw AgentConfig.contents.
+    const resolveStyle = ctx.resolveStyle ?? defaultResolveStyle;
+    let styleDigest: string;
+    try {
+      styleDigest = await resolveStyle({
+        cwd,
+        credentials,
+        agentConfig,
+        state,
+        llmStepTimeoutMs: resolved.llmStepTimeoutMs,
+        usage,
+      });
+    } catch {
+      styleDigest = agentConfig.contents;
+    }
+
+    const notice = autoMergeNotice(resolved.autoMerge);
+    if (notice) (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(notice);
+
+    const runLoop = ctx.runLoop ?? defaultRunLoop;
+    let result: WorkLoopResult;
+    try {
+      result = await runLoop({
+        cwd,
+        resolved,
+        credentials,
+        agentConfig,
+        styleDigest,
+        state,
+        github,
+        goal: args.goal,
+        criteria: args.criteria,
+        branch: args.branch,
+        usage,
+        modelLimits,
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+      });
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+
+    const stdout = ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk));
+
+    // Flush per-run usage/cost accounting (issue #114): persist totals + one summary line to the
+    // stdout sink. Fire-and-forget — a tracker or state error must never change the run's outcome.
+    try {
+      const totals = await usage.totals();
+      await state.update((s) => ({ ...s, usage: totals }));
+      stdout(usageSummaryLine(totals));
+    } catch {
+      // observability must never break the run
+    }
+
+    // Every PR this run opened, with its URL — the first thing an operator wants when the run stops,
+    // whatever the outcome. Read from persisted state (not the result) so it covers groups that opened
+    // a PR before a later group blocked. Fire-and-forget, like the usage line.
+    try {
+      const block = prLinksBlock((await state.read()).prGroups);
+      if (block !== '') stdout(block);
+    } catch {
+      // reporting must never break the run
+    }
+
+    // Persist the first awaiting-pr number into state so `aitm merge-pr` (with no --pr)
+    // can pick it up. WorkLoop tracks per-group PR numbers but does not nominate one as
+    // "current"; that's a CLI-level concern resolved here.
+    if (result.kind === 'awaiting-pr' && result.prs.length > 0) {
+      const firstPr = result.prs[0];
+      if (firstPr !== undefined) {
+        try {
+          await state.update((s) => ({ ...s, currentPr: firstPr }));
+        } catch (err) {
+          return { code: 1, message: `Failed to persist currentPr: ${errMsg(err)}` };
+        }
+      }
+    }
+
+    return mapResultToExit(result);
+  } finally {
+    await lock.release();
+  }
 }
 
 // `aitm resume` — continue the run this directory already started. The goal is read from the state
@@ -675,126 +699,143 @@ export async function runMergePr(
   }
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
-  const github = ctx.github ?? new GitHubClient(cwd);
+  // One run at a time per state dir. Taken before any state is read or written and released in the
+  // finally below, so a second `aitm` invocation here fails fast instead of silently racing this
+  // run's plan, group stages and PR numbers through StateStore's write-behind cache.
+  let lock: RunLockHandle;
+  try {
+    lock = await state.acquireRunLock();
+  } catch (err) {
+    return { code: 1, message: errMsg(err) };
+  }
 
-  // Take-over flow: `aitm merge-pr` (no args, no prior state) should work against any PR
-  // the user built by hand — e.g. via Claude Code or `gh pr create`. We mirror the
-  // claude-task-master `merge_pr` pattern: try to read existing state, and if absent,
-  // synthesize a minimal one from --pr (or the current branch's PR) and persist it so
-  // subsequent calls resume.
-  let runState: RunState;
-  // `--no-resume` means don't trust a persisted `currentPr` from a prior run — always
-  // force the take-over flow so the PR comes from --pr or the current branch instead.
-  if (args.resume === false) {
-    const synth = await synthesizeTakeoverState({ args, github, resolved });
-    if (synth.kind === 'error') return synth.exit;
-    runState = synth.state;
-    try {
-      await state.init(runState);
-    } catch (initErr) {
-      return { code: 1, message: errMsg(initErr) };
-    }
-  } else {
-    try {
-      runState = await state.read();
-    } catch (err) {
-      if (!isFileNotFound(err)) {
-        return {
-          code: 1,
-          message: `Run state at ${join(stateDir, 'state.json')} is unreadable: ${errMsg(err)}. Fix or delete the file to start fresh.`,
-        };
-      }
+  try {
+    const github = ctx.github ?? new GitHubClient(cwd);
+
+    // Take-over flow: `aitm merge-pr` (no args, no prior state) should work against any PR
+    // the user built by hand — e.g. via Claude Code or `gh pr create`. We mirror the
+    // claude-task-master `merge_pr` pattern: try to read existing state, and if absent,
+    // synthesize a minimal one from --pr (or the current branch's PR) and persist it so
+    // subsequent calls resume.
+    let runState: RunState;
+    // `--no-resume` means don't trust a persisted `currentPr` from a prior run — the PR is
+    // re-resolved from --pr or the current branch instead. It does not mean the run behind that
+    // number is junk, so the take-over PR is written in place: a mid-plan run keeps its plan,
+    // group stages, options and runId rather than being replaced by a bare take-over state.
+    if (args.resume === false) {
       const synth = await synthesizeTakeoverState({ args, github, resolved });
       if (synth.kind === 'error') return synth.exit;
-      runState = synth.state;
+      const takeover = synth.state;
       try {
-        await state.init(runState);
-      } catch (initErr) {
-        return { code: 1, message: errMsg(initErr) };
+        runState = await state.update((prior) => ({ ...prior, currentPr: takeover.currentPr }));
+      } catch (err) {
+        if (!isFileNotFound(err)) return unreadableStateExit(stateDir, err);
+        runState = takeover;
+        try {
+          await state.init(runState);
+        } catch (initErr) {
+          return { code: 1, message: errMsg(initErr) };
+        }
+      }
+    } else {
+      try {
+        runState = await state.read();
+      } catch (err) {
+        if (!isFileNotFound(err)) return unreadableStateExit(stateDir, err);
+        const synth = await synthesizeTakeoverState({ args, github, resolved });
+        if (synth.kind === 'error') return synth.exit;
+        runState = synth.state;
+        try {
+          await state.init(runState);
+        } catch (initErr) {
+          return { code: 1, message: errMsg(initErr) };
+        }
       }
     }
-  }
 
-  // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Take-over reuses the
-  // resolved (or freshly synthesized) state.runId so repeat merge-pr calls share one cache session.
-  // Keep-alive transport (plan slice 04b) — see the start path; undefined off-Node keeps the default.
-  const llmFetch = await createLlmFetch();
-  const credentials = new Credentials(resolved, runState.runId, llmFetch);
+    // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Take-over reuses the
+    // resolved (or freshly synthesized) state.runId so repeat merge-pr calls share one cache session.
+    // Keep-alive transport (plan slice 04b) — see the start path; undefined off-Node keeps the default.
+    const llmFetch = await createLlmFetch();
+    const credentials = new Credentials(resolved, runState.runId, llmFetch);
 
-  const pr = args.pr ?? runState.currentPr ?? undefined;
-  if (pr === undefined) {
-    return {
-      code: 1,
-      message:
-        'No PR to merge. Pass --pr <N>, switch to the PR branch, or run `aitm start` to populate state.',
-    };
-  }
+    const pr = args.pr ?? runState.currentPr ?? undefined;
+    if (pr === undefined) {
+      return {
+        code: 1,
+        message:
+          'No PR to merge. Pass --pr <N>, switch to the PR branch, or run `aitm start` to populate state.',
+      };
+    }
 
-  const detector = new AgentConfigDetector(cwd);
-  const detectOpts = buildDetectOpts(undefined, runState.options.stylePath, homeDir);
+    const detector = new AgentConfigDetector(cwd);
+    const detectOpts = buildDetectOpts(undefined, runState.options.stylePath, homeDir);
 
-  let agentConfig: AgentConfig | null;
-  try {
-    agentConfig = await detector.detect(detectOpts);
-  } catch (err) {
-    return { code: 1, message: errMsg(err) };
-  }
-  if (!agentConfig) {
-    return {
-      code: 1,
-      message:
-        'No CLAUDE.md or AGENTS.md found in the target repo (and no stylePath in state). Add one or pass --style on `aitm start`.',
-    };
-  }
+    let agentConfig: AgentConfig | null;
+    try {
+      agentConfig = await detector.detect(detectOpts);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+    if (!agentConfig) {
+      return {
+        code: 1,
+        message:
+          'No CLAUDE.md or AGENTS.md found in the target repo (and no stylePath in state). Add one or pass --style on `aitm start`.',
+      };
+    }
 
-  const authStatus = ctx.authStatus ?? defaultAuthStatus;
-  let auth: { ok: boolean; scopes: string[] };
-  try {
-    auth = await authStatus(cwd);
-  } catch (err) {
-    return { code: 1, message: errMsg(err) };
-  }
-  if (!auth.ok) {
-    return { code: 1, message: 'gh CLI is not authenticated. Run `gh auth login`.' };
-  }
+    const authStatus = ctx.authStatus ?? defaultAuthStatus;
+    let auth: { ok: boolean; scopes: string[] };
+    try {
+      auth = await authStatus(cwd);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+    if (!auth.ok) {
+      return { code: 1, message: 'gh CLI is not authenticated. Run `gh auth login`.' };
+    }
 
-  // Same read-or-distill-or-fallback as runStart; reuses the cached digest a prior `aitm start`
-  // wrote, or distills once for a hand-built take-over PR. Never blocks the merge flow.
-  const resolveStyle = ctx.resolveStyle ?? defaultResolveStyle;
-  let styleDigest: string;
-  try {
-    styleDigest = await resolveStyle({
-      cwd,
-      credentials,
-      agentConfig,
-      state,
-      llmStepTimeoutMs: resolved.llmStepTimeoutMs,
-    });
-  } catch {
-    styleDigest = agentConfig.contents;
-  }
+    // Same read-or-distill-or-fallback as runStart; reuses the cached digest a prior `aitm start`
+    // wrote, or distills once for a hand-built take-over PR. Never blocks the merge flow.
+    const resolveStyle = ctx.resolveStyle ?? defaultResolveStyle;
+    let styleDigest: string;
+    try {
+      styleDigest = await resolveStyle({
+        cwd,
+        credentials,
+        agentConfig,
+        state,
+        llmStepTimeoutMs: resolved.llmStepTimeoutMs,
+      });
+    } catch {
+      styleDigest = agentConfig.contents;
+    }
 
-  const runMergeFlow = ctx.runMergeFlow ?? defaultRunMergeFlow;
-  let result: WorkLoopResult;
-  try {
-    result = await runMergeFlow({
-      cwd,
-      pr,
-      resume: args.resume,
-      resolved,
-      credentials,
-      agentConfig,
-      styleDigest,
-      state,
-      runState,
-      github,
-      ...(args.maxIterations !== undefined ? { maxIterations: args.maxIterations } : {}),
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-    });
-  } catch (err) {
-    return { code: 1, message: errMsg(err) };
+    const runMergeFlow = ctx.runMergeFlow ?? defaultRunMergeFlow;
+    let result: WorkLoopResult;
+    try {
+      result = await runMergeFlow({
+        cwd,
+        pr,
+        resume: args.resume,
+        resolved,
+        credentials,
+        agentConfig,
+        styleDigest,
+        state,
+        runState,
+        github,
+        ...(args.maxIterations !== undefined ? { maxIterations: args.maxIterations } : {}),
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+      });
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+    return mapResultToExit(result);
+  } finally {
+    await lock.release();
   }
-  return mapResultToExit(result);
 }
 
 export async function runConfig(
@@ -1019,6 +1060,7 @@ function toCliOverrides(args: Extract<ParsedArgs, { kind: 'start' }>): CliOverri
     out.maxSessions = args.maxSessions === 0 ? null : args.maxSessions;
   if (args.autoMerge !== undefined) out.autoMerge = args.autoMerge;
   if (args.adminMerge !== undefined) out.adminMerge = args.adminMerge;
+  if (args.allowDirty !== undefined) out.allowDirty = args.allowDirty;
   if (args.prPerTask !== undefined) out.prPerTask = args.prPerTask;
   if (args.stylePath !== undefined) out.stylePath = args.stylePath;
   if (args.model !== undefined) out.model = args.model;
@@ -1295,6 +1337,15 @@ async function synthesizeTakeoverState(input: {
     },
   };
   return { kind: 'ok', state };
+}
+
+// A state.json that is present but unreadable is never rewritten from under the operator — not
+// even by `--no-resume`, which distrusts one field, not the file. They fix or delete it.
+function unreadableStateExit(stateDir: string, err: unknown): CommandExit {
+  return {
+    code: 1,
+    message: `Run state at ${join(stateDir, 'state.json')} is unreadable: ${errMsg(err)}. Fix or delete the file to start fresh.`,
+  };
 }
 
 function isFileNotFound(err: unknown): boolean {

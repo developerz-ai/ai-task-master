@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { execa } from 'execa';
 import { makeTempRepo, type TempRepo } from '../testing/temp-repo.ts';
+import { DirtyWorkingTree } from './dirty-tree.ts';
 import { hasTaskCommit, InPlaceCheckout } from './in-place-checkout.ts';
 import { taskCommitTrailer } from './task-commit-marker.ts';
 
@@ -125,14 +126,17 @@ test('acquire reuses an existing branch (resume) instead of recreating it from b
 test('acquire cleans a dirty tree (stale tracked edit) before switching, not carrying it forward', async () => {
   const repo = await seedRepo();
   try {
-    // A tracked file committed on main, then left with an uncommitted edit — as a crashed/blocked
-    // prior group would leave behind in the shared tree.
     await writeFile(join(repo.path, 'a.txt'), 'base\n');
     await execa('git', ['add', 'a.txt'], { cwd: repo.path });
     await execa('git', ['commit', '-m', 'add a.txt'], { cwd: repo.path });
-    await writeFile(join(repo.path, 'a.txt'), 'stale worker edit\n');
 
     const home = new InPlaceCheckout(repo.path);
+    // The run enters on a clean tree; the dirt below is a crashed/blocked group's leftover, which
+    // is what the between-group clean gate exists for.
+    await home.acquire('g0', 'aitm/g0', 'main');
+    await home.release('g0');
+    await writeFile(join(repo.path, 'a.txt'), 'stale worker edit\n');
+
     await home.acquire('g1', 'aitm/g1', 'main');
 
     assert.equal(await currentBranch(repo.path), 'aitm/g1');
@@ -153,13 +157,15 @@ test('acquire cleans a dirty tree (stale tracked edit) before switching, not car
 test('acquire removes untracked leftovers from a prior group but preserves .ai-task-master state', async () => {
   const repo = await seedRepo();
   try {
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+    await home.release('g1');
     // A prior group's editors created a new file but its verify gate stayed red, so it was never
     // committed — it lingers UNTRACKED in the shared tree. And aitm's own state dir sits at the root.
     await writeFile(join(repo.path, 'leftover.ts'), 'export const leaked = 1;\n');
     await mkdir(join(repo.path, '.ai-task-master'), { recursive: true });
     await writeFile(join(repo.path, '.ai-task-master', 'state.json'), '{"keep":true}\n');
 
-    const home = new InPlaceCheckout(repo.path);
     await home.acquire('g2', 'aitm/g2', 'main');
 
     assert.equal(
@@ -191,10 +197,13 @@ test('acquire clean gate keeps a resumed branch commit while dropping stale edit
     await execa('git', ['checkout', '-b', 'aitm/g1'], { cwd: repo.path });
     await execa('git', ['commit', '--allow-empty', '-m', 'prior work'], { cwd: repo.path });
     await execa('git', ['checkout', 'main'], { cwd: repo.path });
+
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g0', 'aitm/g0', 'main');
+    await home.release('g0');
     // Stale uncommitted edit sitting on the tree when the resumed acquire runs.
     await writeFile(join(repo.path, 'a.txt'), 'stale\n');
 
-    const home = new InPlaceCheckout(repo.path);
     await home.acquire('g1', 'aitm/g1', 'main');
 
     const { stdout } = await execa('git', ['log', '-1', '--pretty=%s'], { cwd: repo.path });
@@ -202,6 +211,127 @@ test('acquire clean gate keeps a resumed branch commit while dropping stale edit
     assert.equal(await readFile(join(repo.path, 'a.txt'), 'utf8'), 'base\n', 'stale edit dropped');
   } finally {
     await repo.cleanup();
+  }
+});
+
+// ---- Run-entry dirty-tree guard -------------------------------------------
+// Between groups the dirt is aitm's own and gets cleaned (tests above). At run entry it is the
+// operator's uncommitted work, indistinguishable from that junk, so the run refuses instead.
+
+test('acquire refuses on a dirty tree at run entry, leaving the work and HEAD untouched', async () => {
+  const repo = await seedRepo();
+  try {
+    await writeFile(join(repo.path, 'a.txt'), 'committed\n');
+    await execa('git', ['add', 'a.txt'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'add a.txt'], { cwd: repo.path });
+    // The operator's in-progress work: one tracked edit, one untracked file.
+    await writeFile(join(repo.path, 'a.txt'), 'work in progress\n');
+    await writeFile(join(repo.path, 'notes.md'), '# scratch\n');
+
+    const home = new InPlaceCheckout(repo.path);
+    await assert.rejects(
+      () => home.acquire('g1', 'aitm/g1', 'main'),
+      (err: unknown) => {
+        assert.ok(
+          err instanceof DirtyWorkingTree,
+          'refusal is typed so the loop can abort the run',
+        );
+        assert.match(err.message, /a\.txt/);
+        assert.match(err.message, /notes\.md/);
+        assert.match(err.message, /--allow-dirty/);
+        return true;
+      },
+    );
+
+    assert.equal(
+      await readFile(join(repo.path, 'a.txt'), 'utf8'),
+      'work in progress\n',
+      'the tracked edit survives the refusal',
+    );
+    assert.equal(await readFile(join(repo.path, 'notes.md'), 'utf8'), '# scratch\n');
+    assert.equal(await currentBranch(repo.path), 'main', 'HEAD never moved');
+    assert.equal(home.active().length, 0, 'no slot is taken by a refused acquire');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('acquire refusal is re-checked: committing the work then retrying succeeds', async () => {
+  const repo = await seedRepo();
+  try {
+    await writeFile(join(repo.path, 'a.txt'), 'work in progress\n');
+
+    const home = new InPlaceCheckout(repo.path);
+    await assert.rejects(() => home.acquire('g1', 'aitm/g1', 'main'), DirtyWorkingTree);
+
+    await execa('git', ['add', 'a.txt'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'save my work'], { cwd: repo.path });
+
+    const wt = await home.acquire('g1', 'aitm/g1', 'main');
+    assert.equal(wt.branch, 'aitm/g1');
+    assert.equal(await readFile(join(repo.path, 'a.txt'), 'utf8'), 'work in progress\n');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('acquire with allowDirty discards pre-existing work instead of refusing', async () => {
+  const repo = await seedRepo();
+  try {
+    await writeFile(join(repo.path, 'a.txt'), 'committed\n');
+    await execa('git', ['add', 'a.txt'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'add a.txt'], { cwd: repo.path });
+    await writeFile(join(repo.path, 'a.txt'), 'work in progress\n');
+    await writeFile(join(repo.path, 'notes.md'), '# scratch\n');
+
+    const home = new InPlaceCheckout(repo.path, { allowDirty: true });
+    await home.acquire('g1', 'aitm/g1', 'main');
+
+    assert.equal(await currentBranch(repo.path), 'aitm/g1');
+    assert.equal(await readFile(join(repo.path, 'a.txt'), 'utf8'), 'committed\n');
+    const untrackedGone = await readFile(join(repo.path, 'notes.md'), 'utf8').then(
+      () => false,
+      () => true,
+    );
+    assert.ok(untrackedGone, 'the opt-out is explicit consent to lose the untracked file too');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test("acquire does not refuse over aitm's own state dir at run entry", async () => {
+  const repo = await seedRepo();
+  try {
+    // A repo that does not gitignore the state dir shows it as untracked on the very first
+    // acquire — the run's own bookkeeping must not read as the operator's work.
+    await mkdir(join(repo.path, '.ai-task-master'), { recursive: true });
+    await writeFile(join(repo.path, '.ai-task-master', 'state.json'), '{"keep":true}\n');
+
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+
+    assert.equal(await currentBranch(repo.path), 'aitm/g1');
+    assert.equal(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+      '{"keep":true}\n',
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('resetToBase refuses on a dirty tree at run entry too (the other slot-taking call)', async () => {
+  const { repo, cleanup } = await seedRepoWithOrigin();
+  try {
+    await writeFile(join(repo.path, 'notes.md'), '# scratch\n');
+
+    const home = new InPlaceCheckout(repo.path);
+    await assert.rejects(() => home.resetToBase('g1', 'aitm/g1-t1', 'main'), DirtyWorkingTree);
+
+    assert.equal(await readFile(join(repo.path, 'notes.md'), 'utf8'), '# scratch\n');
+    assert.equal(await currentBranch(repo.path), 'main');
+  } finally {
+    await cleanup();
   }
 });
 

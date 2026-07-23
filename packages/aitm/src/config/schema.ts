@@ -259,6 +259,10 @@ export type CliOverrides = {
   // Force-merge past base-branch protection via `gh pr merge --admin`. CLI-only (per run),
   // not a persisted config-file key. Default false.
   adminMerge?: boolean;
+  // Discard pre-existing uncommitted work instead of refusing to start. CLI-only (per run),
+  // deliberately not a config-file key: a checked-in repo config must never authorize wiping the
+  // operator's tree. Default false.
+  allowDirty?: boolean;
   stylePath?: string | null;
   model?: string;
   concurrency?: number;
@@ -300,6 +304,9 @@ export type ResolvedConfig = {
   // Whether merges pass `gh pr merge --admin` to override base-branch policy. CLI-only, default
   // false. Optional so existing test fixtures that build ResolvedConfig literals stay valid.
   adminMerge?: boolean;
+  // Whether a dirty working tree at run entry is discarded instead of refused. CLI-only, default
+  // false. Optional for the same fixture reason as adminMerge.
+  allowDirty?: boolean;
   stylePath: string | null;
   formatCommand: string | null;
   verifyCommand: string | null;

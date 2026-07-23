@@ -3,8 +3,9 @@ import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { makeTempRepo } from '../testing/temp-repo.ts';
+import { RunLockHeld } from './run-lock.ts';
 import { type RunState, RunStateSchema } from './schema.ts';
-import { StateStore } from './state-store.ts';
+import { StateAlreadyInitialized, StateStore } from './state-store.ts';
 
 function baseState(overrides: Partial<RunState> = {}): RunState {
   return RunStateSchema.parse({
@@ -64,6 +65,79 @@ test('init writes state.json and creates logs/ dir', async () => {
     assert.equal(written.runId, '01HFAKERUNID0000000000000');
     const logsStat = await stat(join(dir, 'logs'));
     assert.ok(logsStat.isDirectory());
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('init: refuses an existing state.json — the run already there survives untouched', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState({ status: 'working', sessionCount: 7 }));
+    const before = await readFile(join(dir, 'state.json'), 'utf8');
+
+    await assert.rejects(
+      () => store.init(baseState({ runId: '01HOTHERRUNID000000000000' })),
+      (err: unknown) => {
+        assert.ok(err instanceof StateAlreadyInitialized);
+        assert.equal(err.path, join(dir, 'state.json'));
+        assert.match(err.message, /aitm clean/);
+        return true;
+      },
+    );
+    assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), before);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('init: refuses even when the existing state.json is unparseable', async () => {
+  // Corrupt state is still the operator's to salvage — a fresh init would erase the evidence.
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'state.json'), '{not json');
+
+    await assert.rejects(() => store.init(baseState()), StateAlreadyInitialized);
+    assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), '{not json');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('init: force replaces an existing state.json', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState({ sessionCount: 7 }));
+
+    await store.init(baseState({ runId: '01HOTHERRUNID000000000000' }), { force: true });
+
+    const written = await store.read();
+    assert.equal(written.runId, '01HOTHERRUNID000000000000');
+    assert.equal(written.sessionCount, 0);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('init: a state dir whose state.json is gone accepts a fresh run without force', async () => {
+  // cleanupOnSuccess keeps logs/ and run.lock; neither is a run, so the next start is not a clobber.
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+    await store.cleanupOnSuccess();
+
+    await store.init(baseState({ runId: '01HNEXTRUNID0000000000000' }));
+
+    assert.equal((await store.read()).runId, '01HNEXTRUNID0000000000000');
   } finally {
     await repo.cleanup();
   }
@@ -562,6 +636,40 @@ test('deleteAll on a missing state dir returns false and touches nothing', async
   try {
     const store = new StateStore(join(repo.path, '.ai-task-master'));
     assert.equal(await store.deleteAll(), false);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('acquireRunLock: a second store over one dir fails fast while the first holds it', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const held = await new StateStore(dir).acquireRunLock();
+    await assert.rejects(() => new StateStore(dir).acquireRunLock(), RunLockHeld);
+    await held.release();
+    // Released: the peer that was refused can now take the dir.
+    const next = await new StateStore(dir).acquireRunLock();
+    await next.release();
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('cleanupOnSuccess keeps run.lock — the holding run releases it, not cleanup', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    const lock = await store.acquireRunLock();
+    await store.init(baseState());
+    await store.writeContext('ctx');
+
+    await store.cleanupOnSuccess();
+
+    assert.deepEqual((await readdir(dir)).sort(), ['logs', 'run.lock']);
+    await lock.release();
+    assert.deepEqual((await readdir(dir)).sort(), ['logs']);
   } finally {
     await repo.cleanup();
   }

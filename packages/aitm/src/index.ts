@@ -42,4 +42,10 @@ export {
   type WebSearchResult,
   webSearchTool,
 } from './tools/web-search.ts';
-export { branchExists, type Checkout, InPlaceCheckout } from './workspace/in-place-checkout.ts';
+export { DirtyWorkingTree, dirtyEntries } from './workspace/dirty-tree.ts';
+export {
+  branchExists,
+  type Checkout,
+  InPlaceCheckout,
+  type InPlaceCheckoutOptions,
+} from './workspace/in-place-checkout.ts';

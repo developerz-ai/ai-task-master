@@ -17,6 +17,7 @@ import {
   callWithStepTimeout,
   correctiveMessage,
   formatSubmitIssues,
+  SUBMIT_TOOL_NAME,
   type SubmittedOutput,
   submittedOutput,
 } from '@developerz.ai/ai-claude-compat';
@@ -199,7 +200,148 @@ const PrCompositionSchema = z.object({
   title: z.string().min(1).max(72),
   body: z.string().min(1),
 });
-type PrComposition = z.infer<typeof PrCompositionSchema>;
+export type PrComposition = z.infer<typeof PrCompositionSchema>;
+
+// Shape-only view of the fields read off a generateText result — mirrors the compat package's
+// internal StepsResult so these helpers never restate the SDK's deep generic result type.
+export type SubmitStepsResult = {
+  steps: ReadonlyArray<{ toolCalls: ReadonlyArray<{ toolName: string; input: unknown }> }>;
+};
+
+// The raw input of the first `submit` call, exactly as the SDK recorded it. When the model's arguments
+// fail the tool's inputSchema, ai@6's parseToolCall still records the call — with `invalid: true` and
+// `input` set to whatever `JSON.parse` of the raw arguments yielded, which for a double-encoded payload
+// is a STRING. That un-schema'd value is the evidence both the recovery and the failure notice need.
+// Undefined when the model never submitted. Exported for unit testing.
+export function submitToolInput(result: SubmitStepsResult): unknown {
+  const call = result.steps
+    .flatMap((step) => step.toolCalls)
+    .find((toolCall) => toolCall.toolName === SUBMIT_TOOL_NAME);
+  return call?.input;
+}
+
+// How many nested JSON-string layers to peel off a submit payload. A model that double-encodes usually
+// does it once; three bounds the pathological case without ever looping on a self-referential string.
+const MAX_JSON_PEELS = 3;
+
+// Recover a composition from a submit payload that arrived as a JSON *string* where the schema expects
+// an object — a well-formed answer in a badly-typed envelope. The compat package's submittedOutput
+// already unwraps the two simplest shapes (exactly one JSON layer; a strictly ```-fenced block ending
+// the string); this covers the residual ones that reach production and are indistinguishable in the
+// error text: a second encoding layer, a fence with trailing prose, and a JSON object embedded in a
+// prose turn. Nothing is trusted on shape alone — the peeled value must still satisfy
+// PrCompositionSchema in full (and, at the call site, assertPrBodySections), so a model that wrote
+// prose instead of a composition still fails and routes to the corrective retry. Exported for testing.
+export function recoverComposition(input: unknown): PrComposition | undefined {
+  if (typeof input !== 'string') return undefined;
+  let candidate: unknown = input;
+  for (let peel = 0; peel < MAX_JSON_PEELS && typeof candidate === 'string'; peel += 1) {
+    const parsed = parseJsonEnvelope(candidate);
+    if (!parsed.ok) break;
+    candidate = parsed.value;
+  }
+  const validated = PrCompositionSchema.safeParse(candidate);
+  return validated.success ? validated.data : undefined;
+}
+
+type ParsedJson = { ok: true; value: unknown } | { ok: false };
+
+// One peel: drop a code fence, parse; failing that, parse the first balanced `{…}` region so a JSON
+// object wrapped in narration ("Here is the PR: {…}") is still read.
+function parseJsonEnvelope(raw: string): ParsedJson {
+  const body = stripCodeFence(raw.trim());
+  const direct = tryJsonParse(body);
+  if (direct.ok) return direct;
+  const embedded = firstJsonObject(body);
+  return embedded === undefined ? { ok: false } : tryJsonParse(embedded);
+}
+
+function tryJsonParse(text: string): ParsedJson {
+  if (text.length === 0) return { ok: false };
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+// Strip one ```-fenced wrapper (language tag optional). Deliberately more forgiving than the compat
+// helper's anchored form: the closing fence may sit flush against the payload and anything after it is
+// dropped — both shapes weak models emit, and both currently lose an otherwise-valid composition.
+function stripCodeFence(text: string): string {
+  const fenced = /^```[^\n]*\n?([\s\S]*?)```/.exec(text);
+  return fenced === null ? text : (fenced[1] ?? '').trim();
+}
+
+// The first balanced `{…}` substring, tracking string literals and escapes so a brace inside a body
+// string can't end the region early. Undefined when there is no balanced object.
+function firstJsonObject(text: string): string | undefined {
+  const start = text.indexOf('{');
+  if (start === -1) return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = inString;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return undefined;
+}
+
+// The composition the model submitted, with the string-envelope recovery applied. The one boundary
+// where a badly-typed but well-formed answer is rescued: submittedOutput runs first (so an untouched
+// object submission takes the exact same path it always did), and only its `invalid` verdict — never
+// `no-submission`, never a valid one — is re-examined against the raw tool input. Exported for testing.
+export function submittedComposition(result: SubmitStepsResult): SubmittedOutput<PrComposition> {
+  const submitted = submittedOutput(result, PrCompositionSchema);
+  if (submitted.ok || submitted.reason === 'no-submission') return submitted;
+  const recovered = recoverComposition(submitToolInput(result));
+  return recovered === undefined ? submitted : { ok: true, value: recovered };
+}
+
+// How much of a rejected submit payload the failure notice quotes — enough to tell a double-encoded
+// envelope from prose, short enough that a whole PR body never lands in the log. The payload is the
+// composer's own model-authored PR prose, so there is nothing here a run's own logs don't already hold.
+export const SUBMIT_PAYLOAD_PREVIEW_CHARS = 180;
+
+// One-line, truncated rendering of what the model actually submitted, appended to a schema-failure
+// reason. Empty string when there is no payload, so a no-submission reason stays untouched. Exported
+// for unit testing.
+export function describeSubmitPayload(input: unknown): string {
+  if (input === undefined) return '';
+  const text = typeof input === 'string' ? input : safeStringify(input);
+  const flat = text.replace(/\s+/g, ' ').trim();
+  const preview =
+    flat.length <= SUBMIT_PAYLOAD_PREVIEW_CHARS
+      ? flat
+      : `${flat.slice(0, SUBMIT_PAYLOAD_PREVIEW_CHARS)}…`;
+  return `; submitted ${typeof input} (${text.length} chars): ${preview}`;
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
 
 // Corrective re-generations after the first composePr attempt. ≤2 → up to 3 total generations, the
 // same bound as the subagents' in-conversation schema retry (#101). Exported for unit testing.
@@ -213,14 +355,18 @@ export type ComposeAttempt =
   | { ok: true; value: PrComposition }
   | { ok: false; reason: string; correction: string };
 
+// `submittedInput` is the raw `submit` payload (submitToolInput). It is quoted, truncated, in the
+// schema-failure reason only — the corrective message the model sees already restates the issues, and a
+// missing-section failure names the heading, so neither needs the payload echoed back.
 export function compositionOutcome(
   submitted: SubmittedOutput<PrComposition>,
   sections: readonly string[],
+  submittedInput?: unknown,
 ): ComposeAttempt {
   if (!submitted.ok) {
     const reason =
       submitted.reason === 'invalid'
-        ? `orchestrator PR composition failed schema validation: ${formatSubmitIssues(submitted.issues)}`
+        ? `orchestrator PR composition failed schema validation: ${formatSubmitIssues(submitted.issues)}${describeSubmitPayload(submittedInput)}`
         : 'orchestrator did not submit a PR composition';
     return { ok: false, reason, correction: correctiveMessage(submitted) };
   }
@@ -526,6 +672,10 @@ export class Orchestrator {
     // blocks at pr-open on prose alone. A genuine transport error (StepTimeoutError from
     // callWithStepTimeout, network) still propagates — the fallback is for bad compositions, not
     // stalled requests.
+    //
+    // Reading the submission goes through submittedComposition, not submittedOutput directly, so a
+    // composition delivered as a JSON *string* is recovered rather than burned on a retry and thrown
+    // away — the observed 100% pr-open fallback rate on glm-5.2.
     const model = this.init.credentials.modelFor('orchestrator');
     const sections = this.prBodySections();
     let messages: ModelMessage[] = [{ role: 'user', content: this.buildPrPrompt(group, delivery) }];
@@ -551,7 +701,11 @@ export class Orchestrator {
         this.init.timeout,
       );
       reportUsage(this.init.onUsage, result);
-      const outcome = compositionOutcome(submittedOutput(result, PrCompositionSchema), sections);
+      const outcome = compositionOutcome(
+        submittedComposition(result),
+        sections,
+        submitToolInput(result),
+      );
       if (outcome.ok) return outcome.value;
       lastReason = outcome.reason;
       if (attempt === COMPOSE_PR_MAX_RETRIES) break;

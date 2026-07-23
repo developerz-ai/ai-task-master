@@ -44,6 +44,7 @@ import {
   exploreReadTools,
   githubThreadTool,
   harnessContextBlock,
+  isOpenRouterEndpoint,
   localEditTools,
   localReadTools,
   makeBudgetCheck,
@@ -1309,18 +1310,55 @@ test('localReadTools (planner) mounts webFetch + datetime alongside the read-onl
   assert.ok(localReadTools('/tmp/x', true).fetchHtml, 'fetchHtml mounted when available');
 });
 
+const OR = undefined; // OpenRouter endpoint (default when baseURL is unset)
+
 test('webSearchProviderOptions: unset → CI-fix only; true → all Worker calls; false → never (issue #112)', () => {
   const hasWebSearch = (po: ReturnType<typeof webSearchProviderOptions>): boolean =>
     (po?.openrouter?.tools ?? []).some((t) => t.type === 'openrouter:web_search');
   // unset (undefined): CI-fix on, regular off.
-  assert.equal(hasWebSearch(webSearchProviderOptions(undefined, true)), true, 'unset → CI-fix on');
-  assert.equal(webSearchProviderOptions(undefined, false), undefined, 'unset → regular off');
+  assert.equal(
+    hasWebSearch(webSearchProviderOptions(undefined, true, OR)),
+    true,
+    'unset → CI-fix on',
+  );
+  assert.equal(webSearchProviderOptions(undefined, false, OR), undefined, 'unset → regular off');
   // true: on for both.
-  assert.equal(hasWebSearch(webSearchProviderOptions(true, true)), true);
-  assert.equal(hasWebSearch(webSearchProviderOptions(true, false)), true, 'true → regular on');
+  assert.equal(hasWebSearch(webSearchProviderOptions(true, true, OR)), true);
+  assert.equal(hasWebSearch(webSearchProviderOptions(true, false, OR)), true, 'true → regular on');
   // false: off for both, including CI-fix.
-  assert.equal(webSearchProviderOptions(false, true), undefined, 'false → CI-fix off');
-  assert.equal(webSearchProviderOptions(false, false), undefined, 'false → regular off');
+  assert.equal(webSearchProviderOptions(false, true, OR), undefined, 'false → CI-fix off');
+  assert.equal(webSearchProviderOptions(false, false, OR), undefined, 'false → regular off');
+});
+
+test('isOpenRouterEndpoint: default and openrouter.ai are OpenRouter; other hosts are not', () => {
+  assert.equal(isOpenRouterEndpoint(undefined), true, 'unset baseURL → the default OpenRouter API');
+  assert.equal(isOpenRouterEndpoint(''), true);
+  assert.equal(isOpenRouterEndpoint('https://openrouter.ai/api/v1'), true);
+  assert.equal(isOpenRouterEndpoint('https://api.z.ai/api/coding/paas/v4'), false);
+  assert.equal(isOpenRouterEndpoint('https://api.kimi.com/coding/v1'), false);
+  assert.equal(isOpenRouterEndpoint('not a url'), false);
+});
+
+test('webSearchProviderOptions: the OpenRouter web_search server tool is NEVER attached off OpenRouter', () => {
+  // Root cause of the observed `tools[0].type:type is illegal` crash: the web_search server tool is
+  // openrouter-namespaced, and z.ai/kimi reject it outright. Even with web_search fully enabled, a
+  // non-OpenRouter endpoint must get no server tool — the DuckDuckGo function tool covers search there.
+  const zai = 'https://api.z.ai/api/coding/paas/v4';
+  assert.equal(
+    webSearchProviderOptions(true, true, zai),
+    undefined,
+    'explicit true, still gated off',
+  );
+  assert.equal(
+    webSearchProviderOptions(undefined, true, zai),
+    undefined,
+    'CI-fix default, gated off',
+  );
+  assert.equal(
+    webSearchProviderOptions({ enabled: true }, false, zai),
+    undefined,
+    'object form gated',
+  );
 });
 
 test('webSearchProviderOptions: object form gates via `enabled` and threads domain filters (issue #195)', () => {
@@ -1330,21 +1368,21 @@ test('webSearchProviderOptions: object form gates via `enabled` and threads doma
   };
   // `enabled` occupies the same tri-state axis as the bare boolean.
   assert.notEqual(
-    params(webSearchProviderOptions({ enabled: true }, false)),
+    params(webSearchProviderOptions({ enabled: true }, false, OR)),
     undefined,
     'enabled:true → regular on',
   );
   assert.equal(
-    webSearchProviderOptions({ enabled: false }, true),
+    webSearchProviderOptions({ enabled: false }, true, OR),
     undefined,
     'enabled:false → CI-fix off',
   );
   assert.notEqual(
-    params(webSearchProviderOptions({}, true)),
+    params(webSearchProviderOptions({}, true, OR)),
     undefined,
     'enabled unset → CI-fix on',
   );
-  assert.equal(webSearchProviderOptions({}, false), undefined, 'enabled unset → regular off');
+  assert.equal(webSearchProviderOptions({}, false, OR), undefined, 'enabled unset → regular off');
   // Domain filters reach the server-tool payload when enabled.
   const p = params(
     webSearchProviderOptions(

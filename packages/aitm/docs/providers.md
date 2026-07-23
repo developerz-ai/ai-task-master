@@ -181,6 +181,46 @@ OpenRouter publishes `context_length` on every entry. Other OpenAI-compatible ca
 
 A model whose catalog publishes **no** window is not compacted: `aitm` skips rather than guessing a size and truncating a conversation on a wrong number. If a long run on a custom endpoint never seems to compact, check that its `/models` response carries one of the four keys above.
 
+Explicit `null` counts as absent. OpenRouter ships `top_provider.max_completion_tokens: null` for models that publish no output cap, and a schema that accepted only *missing* would fail the entry and drop the whole model — losing its window and its price along with it.
+
+### Filling the gaps from OpenRouter's public catalog
+
+Subscription gateways routinely publish an id and nothing else. Measured on two real profiles:
+
+| endpoint | publishes |
+| --- | --- |
+| `api.z.ai/api/coding/paas/v4` | `id`, `object`, `created`, `owned_by` — no window, no pricing |
+| `api.kimi.com/coding/v1` | `context_length` — no pricing |
+
+On the first of those, autocompaction was inert for the entire run and every cost line read `cost unknown`.
+
+So whatever the configured endpoint leaves blank is filled from `https://openrouter.ai/api/v1/models`, which needs **no** API key. Resolution is per field group:
+
+```
+window   provider catalog → OpenRouter list → unknown (no compaction)
+pricing  provider catalog → OpenRouter list → unknown (cost unknown)
+```
+
+Rules that keep this honest:
+
+- **The configured provider always wins.** A partially-published catalog keeps its own window and borrows only the price.
+- **Pricing moves as a whole sheet**, never half from each source — a provider prompt rate paired with an OpenRouter completion rate describes no real price list.
+- **Model matching is exact or nothing.** `glm-5.2` → `z-ai/glm-5.2` (org-stripped), `k3` → `moonshotai/kimi-k3` (hyphen-boundary suffix). An ambiguous match yields nothing: mispricing a run is worse than not pricing it.
+- **Borrowed prices are LIST prices**, not what a subscription billed. Anything sourced this way is labelled, in the startup banner and in the end-of-run line (`$1.2345 est. at OpenRouter list rates`).
+- **The fetch is skipped** when the provider's catalog is already complete, and a failure to reach it degrades to "unknown" rather than failing the run.
+
+### Startup banner
+
+Every run prints what it resolved, before spending a token:
+
+```
+Models — z.ai · https://api.z.ai/api/coding/paas/v4
+  glm-5.2      generic, smart, coding  1.0M ctx    in $0.825/M · out $2.59/M · cached $0.153/M  (window + price from OpenRouter list — your endpoint publishes none)
+  glm-5-turbo  fast                    202.8K ctx  in $1.20/M · out $4.00/M · cached $0.240/M   (window + price from OpenRouter list — your endpoint publishes none)
+```
+
+A model with no window shows `window unknown — autocompaction off`, which is the warning that used to be invisible until a long run overflowed. When the catalog cannot be reached at all the banner is silent rather than printing a table of unknowns.
+
 ## Per-model sampling defaults
 
 A model family's usable sampling range is part of its contract, like its context window. aitm used to send **no** sampling parameters at all, so every model ran at whatever its endpoint defaulted to — and several families behave materially worse there. The symptom is not an error, it is degraded instruction-following: on a real run against `glm-5.2` at the endpoint default we saw tool arguments double-encoded as a JSON string, an editor narrating an edit instead of writing it, and an eight-minute reasoning block before the first tool call.

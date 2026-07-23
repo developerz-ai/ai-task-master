@@ -425,6 +425,29 @@ export async function runStart(
     // No valid state.json — proceed with fresh init.
   }
 
+  // A FINISHED run in this directory must not swallow a new `aitm start`. Without this, re-running
+  // `aitm start "<new goal>"` where a prior run already merged every group resumed that completed run
+  // (nothing left to do → 0 calls, the new goal never even planned). Supersede it with a fresh run.
+  // `aitm resume` short-circuits a completed run before reaching here, so this only affects `start`.
+  if (existingState && isRunComplete(existingState)) {
+    (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(
+      `Previous run here has finished — starting a new run for: ${args.goal}\n`,
+    );
+    existingState = null;
+    resuming = false;
+  } else if (existingState) {
+    // An UNFINISHED run is resumed as before (idempotent `start`). If the operator typed a different
+    // goal, say so plainly — `start` continues the in-progress run, it does not re-plan the new text —
+    // so a surprised user knows `aitm clean` is how to start over.
+    const persistedGoal = (await state.readGoal().catch(() => null))?.goal?.trim();
+    if (persistedGoal !== undefined && persistedGoal !== '' && persistedGoal !== args.goal.trim()) {
+      (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(
+        `Resuming the unfinished run for "${persistedGoal}" — \`aitm start\` continues it, it does not re-plan. ` +
+          `To start over for "${args.goal}", run \`aitm clean\` first.\n`,
+      );
+    }
+  }
+
   let sessionId = existingState?.runId;
   if (!resuming) {
     const initial = buildInitialRunState({ resolved, agentConfig });
@@ -600,6 +623,17 @@ export async function runResume(
       code: 1,
       message:
         'Nothing to resume here — no run has been started in this directory. Run `aitm start "<goal>"` first.',
+    };
+  }
+  // A completed run has nothing to resume — re-planning its finished goal would redo merged work.
+  // Say so (exit 0, not an error: the run succeeded) and point at `start` for new work. This also
+  // keeps runStart's supersede-on-complete a `start`-only concern, since resume never reaches it.
+  const resumeState = await state.read().catch(() => null);
+  if (resumeState && isRunComplete(resumeState)) {
+    return {
+      code: 0,
+      message:
+        'This run is already complete — nothing to resume. Run `aitm start "<goal>"` to begin new work.',
     };
   }
   const { kind: _kind, ...flags } = args;
@@ -1055,6 +1089,15 @@ function errMsg(err: unknown): string {
 // fresh init. ENOENT means the file is absent. StateStore.read() prefixes any JSON
 // parse or Zod schema error with the state-file path, so we match that prefix to
 // distinguish corrupt state from genuine IO/permission errors.
+// Whether a run has nothing left to do: the top-level status is 'success', or it planned at least one
+// group and every one reached 'merged'. A plan-less or partly-done run is NOT complete (empty
+// prGroups must not read as "all merged" via a vacuous every()), and a 'blocked'/'failed' run is
+// resumable, not complete — so neither trips the supersede/short-circuit. Exported for unit testing.
+export function isRunComplete(state: RunState): boolean {
+  if (state.status === 'success') return true;
+  return state.prGroups.length > 0 && state.prGroups.every((g) => g.status === 'merged');
+}
+
 function isMissingOrInvalidState(err: unknown, stateDir: string): boolean {
   if (
     typeof err === 'object' &&

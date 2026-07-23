@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import type { PrGroup } from '../state/schema.ts';
+import type { PrGroup, RunState } from '../state/schema.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type {
   CommandExit,
@@ -14,6 +14,7 @@ import type {
 } from './commands.ts';
 import {
   autoMergeNotice,
+  isRunComplete,
   prLinksBlock,
   runClean,
   runConfig,
@@ -1821,6 +1822,146 @@ test('runResume: a directory that never started says so, and does not run the lo
     assert.match(result.message ?? '', /Nothing to resume/);
     assert.match(result.message ?? '', /aitm start/);
     assert.equal(loopCalls, 0);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+// ---- isRunComplete + start-on-finished-run --------------------------------
+
+function stateWith(over: Partial<RunState>): RunState {
+  return {
+    status: 'working',
+    prGroups: [],
+    currentGroupIndex: 0,
+    currentTaskIndex: 0,
+    sessionCount: 0,
+    currentPr: null,
+    runId: 'r1',
+    provider: 'openrouter',
+    model: 'm',
+    agentConfigFile: 'CLAUDE.md',
+    createdAt: '2026-07-24T00:00:00.000Z',
+    updatedAt: '2026-07-24T00:00:00.000Z',
+    options: {
+      autoMerge: true,
+      maxPrs: 5,
+      maxSessions: null,
+      mergeMethod: 'squash',
+      stylePath: null,
+      concurrency: 1,
+    },
+    ...over,
+  } as RunState;
+}
+
+function mergedGroup(id: string): unknown {
+  return {
+    id,
+    title: `group ${id}`,
+    tasks: [{ id: `${id}-t1`, text: 't', complexity: 'normal', done: true }],
+    dependsOn: [],
+    branch: `aitm/${id}`,
+    pr: 1,
+    status: 'merged',
+    stage: 'merged',
+  };
+}
+
+test('isRunComplete: success status, or every group merged, is complete — nothing else', () => {
+  assert.equal(isRunComplete(stateWith({ status: 'success' })), true);
+  assert.equal(
+    isRunComplete(stateWith({ prGroups: [mergedGroup('g1'), mergedGroup('g2')] as never })),
+    true,
+  );
+  // A partly-merged run is NOT complete.
+  assert.equal(
+    isRunComplete(
+      stateWith({
+        prGroups: [
+          mergedGroup('g1'),
+          { ...(mergedGroup('g2') as object), status: 'pending', stage: 'pending' },
+        ] as never,
+      }),
+    ),
+    false,
+  );
+  // An empty plan must not read as "all merged" via a vacuous every().
+  assert.equal(isRunComplete(stateWith({ prGroups: [] })), false);
+  // A blocked run is resumable, not complete.
+  assert.equal(isRunComplete(stateWith({ status: 'blocked' })), false);
+});
+
+test('runStart: a finished run in the directory is superseded — the new goal is planned fresh', async () => {
+  // The reported bug: re-running `aitm start "<new goal>"` where a prior run already merged every
+  // group resumed that completed run (0 calls, new goal never planned). It must start fresh instead.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedStartState(repo.path, { prGroups: [mergedGroup('old')] });
+    await writeFile(join(repo.path, '.ai-task-master', 'goal.txt'), 'the old finished goal\n');
+    let out = '';
+    let plannerGoal: string | undefined;
+    const result = await runStart(
+      { kind: 'start', goal: 'a brand new goal' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        modelBanner: async () => '',
+        stdout: (chunk) => {
+          out += chunk;
+        },
+        runPlanner: async (input) => {
+          plannerGoal = input.goal;
+          return { kind: 'blocked', reason: 'stub — planning reached with the new goal' };
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.match(out, /starting a new run for: a brand new goal/i, 'the supersede notice printed');
+    assert.equal(
+      plannerGoal,
+      'a brand new goal',
+      'the planner ran on the NEW goal, not the old one',
+    );
+    // The fresh init rewrote goal.txt to the new goal.
+    const goalTxt = await readFile(join(repo.path, '.ai-task-master', 'goal.txt'), 'utf8');
+    assert.match(goalTxt, /a brand new goal/);
+    assert.ok(result.code === 0 || result.code === 1); // planner stub blocks; the point is it PLANNED
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runResume: a completed run reports "already complete" and does not run the loop', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedStartState(repo.path, { prGroups: [mergedGroup('g1')] });
+    await writeFile(join(repo.path, '.ai-task-master', 'goal.txt'), 'a finished goal\n');
+    let loopCalls = 0;
+    const result = await runResume(
+      { kind: 'resume' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async () => {
+          loopCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, 'a finished run is not an error');
+    assert.match(result.message ?? '', /already complete/i);
+    assert.equal(loopCalls, 0, 'the loop never ran');
   } finally {
     await repo.cleanup();
     await home.cleanup();

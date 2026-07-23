@@ -59,7 +59,8 @@ export const defaultRunCmd: RunCmd = async (file, args, options) => {
 };
 
 // Sleep DI — tests inject a recording stub so backoff is asserted without real timers.
-export type Sleep = (ms: number) => Promise<void>;
+// The optional signal makes a wait cancellable; stubs that ignore it stay assignable.
+export type Sleep = (ms: number, signal?: AbortSignal) => Promise<void>;
 
 // Real grace/poll waits (REVIEW_COMMENTS_GRACE 2min, CHECKS_START_WAIT_MS 60s, backoff…) are correct in
 // the released CLI but would make the test suite crawl. So defaultSleep collapses to a microtask
@@ -72,12 +73,26 @@ export const isInstantSleepEnabled = (): boolean =>
   process.env.NODE_ENV === 'test' ||
   process.env.NODE_TEST_CONTEXT !== undefined;
 
-export const defaultSleep: Sleep = (ms) =>
-  isInstantSleepEnabled()
-    ? Promise.resolve()
-    : new Promise((resolve) => {
-        setTimeout(resolve, ms);
-      });
+// The single sleep primitive of the package (mcp/stdio-process-registry.ts polls through it too).
+// An abort *resolves* the wait early instead of rejecting: the poll loops own the cancellation shape
+// — they re-check `signal.aborted` at the top of each iteration and decide what a cancelled run
+// returns — whereas a rejecting sleep would force every backoff/grace site into a try/catch just to
+// tell "cancelled" from a real failure. Both settle paths clear the timer and drop the abort listener,
+// so a 120-min `waitForChecks` leaves nothing behind on the signal (pattern: worker.ts runEditorFanout).
+export const defaultSleep: Sleep = (ms, signal) => {
+  if (isInstantSleepEnabled() || signal?.aborted === true) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+};
 
 // GraphQL pagination bounds: GitHub caps at 100 nodes/page; these bounds prevent infinite loops
 // on broken pagination (non-advancing cursor, infinite pages) while allowing very large PRs.

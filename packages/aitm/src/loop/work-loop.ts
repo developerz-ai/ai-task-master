@@ -703,8 +703,8 @@ export class WorkLoop {
         await this.maybeSelfReview(ctx.group, ctx.delivery, checkout, baseBranch);
         const opened = await this.deps.orchestrator.openPr(ctx.group, ctx.delivery, baseBranch);
         if (opened === 'nothing-to-ship') return null;
-        ctx.group = { ...ctx.group, pr: opened.number };
-        return opened.number;
+        ctx.group = { ...ctx.group, pr: opened.number, prUrl: opened.url };
+        return { number: opened.number, url: opened.url };
       },
       fixCi: (group) =>
         this.deps.orchestrator.runCiFix({ group, pr: prNumberOf(group), checkout, baseBranch }),
@@ -951,7 +951,11 @@ export class WorkLoop {
     const pr = opened;
     await this.persistAfterSideEffect(
       { groupId: group.id, status: 'awaiting-pr', pr: pr.number },
-      () => this.markStatus(group.id, final ? 'awaiting-pr' : 'in-progress', { pr: pr.number }),
+      () =>
+        this.markStatus(group.id, final ? 'awaiting-pr' : 'in-progress', {
+          pr: pr.number,
+          prUrl: pr.url,
+        }),
     );
 
     if (!this.deps.autoMerge) {
@@ -1093,7 +1097,9 @@ export class WorkLoop {
   private async markStatus(
     id: string,
     status: PrGroup['status'],
-    patch: Partial<Pick<PrGroup, 'branch' | 'pr' | 'stage' | 'ciFixAttempts' | 'humanNeeded'>> = {},
+    patch: Partial<
+      Pick<PrGroup, 'branch' | 'pr' | 'prUrl' | 'stage' | 'ciFixAttempts' | 'humanNeeded'>
+    > = {},
   ): Promise<void> {
     // Status transitions do not bump sessionCount — that's owned by incrementSessionCount,
     // which fires once per started group so the in-memory and persisted counters agree.

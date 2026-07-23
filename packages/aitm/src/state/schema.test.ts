@@ -218,3 +218,28 @@ test('RunStateSchema defaults options.prPerTask to false', () => {
   });
   assert.equal(parsed.options.prPerTask, false);
 });
+
+test('PrGroupSchema persists the acceptance check when the plan carried one', () => {
+  const parsed = PrGroupSchema.parse({
+    id: 'auth-routes',
+    title: 'auth routes',
+    acceptance: 'POST /login sets a session cookie',
+    tasks: [],
+    branch: null,
+    pr: null,
+    status: 'pending',
+  });
+  assert.equal(parsed.acceptance, 'POST /login sets a session cookie');
+});
+
+test('PrGroupSchema: legacy state without an acceptance check still loads', () => {
+  const parsed = PrGroupSchema.parse({
+    id: 'auth-routes',
+    title: 'auth routes',
+    tasks: [],
+    branch: null,
+    pr: null,
+    status: 'pending',
+  });
+  assert.equal(parsed.acceptance, undefined);
+});

@@ -38,8 +38,12 @@ Persisted in `state.json.prGroups`. See `./state.md` for the field-level schema 
 | Convention | Owner |
 | --- | --- |
 | Base branch | `GitHubClient.defaultBranch()` |
-| Group branch name | `aitm/<runId>/<group.id>` |
+| Group branch name | `aitm/<group.id>-<title-slug>` (`branchFor`, `src/loop/run-loop-adapter.ts`) |
 | One branch per group | `Worker` |
+
+The title slug is what makes a branch list readable: `aitm/g1` says nothing next to `aitm/g1-add-todo-crud`. It is the group title lowercased, non-alphanumerics collapsed to `-`, truncated at a word boundary (40 chars), and dropped entirely when the title only restates the id (`g1` / "G1" → `aitm/g1`, never `aitm/g1-g1`).
+
+`--branch <name>` still overrides: a single-group plan uses the requested name verbatim, and a multi-group plan prefixes each group as `<requested>/<id>-<slug>`.
 
 Branches are deleted after merge (squash strategy).
 

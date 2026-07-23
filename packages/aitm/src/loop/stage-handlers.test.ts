@@ -104,7 +104,7 @@ function makeGithub(over: Partial<StageGithub> = {}): StageGithub {
 function makeOrchestrator(over: Partial<StageOrchestrator> = {}): StageOrchestrator {
   return {
     work: async () => ({ kind: 'ok' }),
-    openPr: async () => 42,
+    openPr: async () => ({ number: 42, url: 'https://github.com/o/r/pull/42' }),
     fixCi: async () => ({ kind: 'ok' }),
     addressReviews: async () => ({ kind: 'ok' }),
     ...over,
@@ -154,7 +154,7 @@ test('handleWorking: worker blocked → blocked', async () => {
 
 // ---- pr-open -------------------------------------------------------------
 
-test('handlePrOpen: opens PR, persists number → waiting-ci', async () => {
+test('handlePrOpen: opens PR, persists number + url → waiting-ci', async () => {
   const g = group({ stage: 'pr-open' });
   const st = makeState(baseState([g]));
   let opened = 0;
@@ -163,13 +163,15 @@ test('handlePrOpen: opens PR, persists number → waiting-ci', async () => {
     orchestrator: makeOrchestrator({
       openPr: async () => {
         opened += 1;
-        return 77;
+        return { number: 77, url: 'https://github.com/o/r/pull/77' };
       },
     }),
   });
   assert.equal(await handlePrOpen(deps, g), 'waiting-ci');
   assert.equal(opened, 1);
   assert.equal(st.snapshot().prGroups[0]?.pr, 77);
+  // The URL rides along so the end-of-run summary can print a link, not a number to go look up.
+  assert.equal(st.snapshot().prGroups[0]?.prUrl, 'https://github.com/o/r/pull/77');
 });
 
 test('handlePrOpen: nothing to ship (openPr null) → merged, no PR recorded', async () => {
@@ -191,7 +193,7 @@ test('handlePrOpen: PR already open (resume) → waiting-ci, no reopen', async (
     orchestrator: makeOrchestrator({
       openPr: async () => {
         opened += 1;
-        return 1;
+        return { number: 1, url: 'https://github.com/o/r/pull/1' };
       },
     }),
   });

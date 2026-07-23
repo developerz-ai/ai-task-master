@@ -14,6 +14,58 @@ export function sanitizeBranchComponent(id: string): string {
   return s.length > 0 ? s : 'group';
 }
 
+// Longest title slug appended to a group branch. Long enough to identify the group at a glance in
+// `git branch` / the PR list, short enough that the composed ref stays readable and well under
+// git's ref length limits once a `--branch` prefix and a per-task suffix are added.
+const SLUG_MAX_CHARS = 40;
+
+// A human-readable slug of a group title, for composing `aitm/<id>-<slug>` branch names: lowercase,
+// words joined by '-', truncated at a word boundary. Returns '' when the title carries no usable
+// characters — callers fall back to the id alone rather than emitting a trailing '-'.
+export function slugifyTitle(title: string): string {
+  const words = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter((w) => w !== '');
+  const kept: string[] = [];
+  let length = 0;
+  for (const word of words) {
+    const next = length === 0 ? word.length : length + 1 + word.length;
+    if (kept.length > 0 && next > SLUG_MAX_CHARS) break;
+    kept.push(word);
+    length = next;
+  }
+  return kept.join('-').slice(0, SLUG_MAX_CHARS).replace(/-+$/, '');
+}
+
+// Resolve a run's desired branch names to names nobody has published yet. Two people running aitm
+// on the same repo toward the same goal get the same plan, hence the same `aitm/<id>-<slug>` names —
+// and force-push is allowed by default, so the second run would rewrite the first one's work on a
+// branch it believes is its own. Each desired name is checked against `taken` (the remote's branches)
+// AND against the names already handed out in this call — a run's own groups can collide with each
+// other — falling back to `<name>-2`, `-3`, … until one is free.
+//
+// Pure: the caller supplies the remote's branch set (and degrades to an empty set when the remote
+// can't be read, which yields the plain names). Returns exactly one name per input, in input order.
+export function dedupeBranchNames(
+  desired: readonly string[],
+  taken: ReadonlySet<string>,
+): string[] {
+  const used = new Set(taken);
+  const resolved: string[] = [];
+  for (const name of desired) {
+    let candidate = name;
+    for (let suffix = 2; used.has(candidate); suffix += 1) {
+      candidate = `${name}-${suffix}`;
+    }
+    used.add(candidate);
+    resolved.push(candidate);
+  }
+  return resolved;
+}
+
 // A per-task branch derived from the group branch: `<groupBranch>-<safe(taskId)>`. prPerTask +
 // autoMerge gives every task its own branch off the freshly-merged base so each task's PR carries
 // only that task's changes. A '-' separator (NOT '/') keeps it a SIBLING of the group branch rather

@@ -26,6 +26,7 @@ import { buildCompactionStep, type CompactorLike } from '../compaction/compactio
 import type { Capability } from '../config/schema.ts';
 import { defaultRunCmd, type RunCmd, type RunCmdResult } from '../github/github-client.ts';
 import type { LoggerLike } from '../logger/logger.ts';
+import { withAcceptanceCheck } from '../plan/acceptance.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
 import type { SubagentInit } from '../subagents/factory.ts';
 import { buildRolePrompt } from '../subagents/role-prompt.ts';
@@ -272,7 +273,10 @@ function buildSelfReviewTask(
   );
   return {
     id: `${group.id}-self-review`,
-    text: lines.join('\n'),
+    // SELF_REVIEW_SYSTEM_PREFIX step 3 asks whether the diff meets "the task's acceptance check" —
+    // this is where that check actually arrives, so the pass judges the real contract instead of an
+    // absent one. Groups planned before the field carry none and the task text is unchanged.
+    text: withAcceptanceCheck(lines.join('\n'), group.acceptance),
     complexity: 'complex',
     done: false,
   };

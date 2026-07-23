@@ -12,17 +12,19 @@ aitm start "<goal>"
   [--no-automerge]         # default: automerge on
   [--style <path>]         # default: detected CLAUDE.md or AGENTS.md
   [--model <id>]           # default: provider default
-  [--branch <name>]        # default: aitm/<group-id>
+  [--branch <name>]        # default: aitm/<group-id>-<title-slug>
 ```
 
 ### `--branch`
 
-By default each PR group gets an `aitm/<group-id>` branch. Pass `--branch <name>` to control it:
+By default each PR group gets an `aitm/<group-id>-<title-slug>` branch — the slug makes a branch list readable (`aitm/g1-add-todo-crud`, not `aitm/g1`). Pass `--branch <name>` to control it:
 
 - **Single-group plan** (e.g. `--max-prs 1`): the branch is used **verbatim** — the PR lands on exactly `<name>`.
-- **Multi-group plan**: `<name>` becomes a **prefix** (`<name>/<group-id>`) so concurrent worktrees and their PRs never collide on one branch.
+- **Multi-group plan**: `<name>` becomes a **prefix** (`<name>/<group-id>-<title-slug>`) so concurrent worktrees and their PRs never collide on one branch.
 
 The name is validated as a git ref (no whitespace, leading `-`, `..`, control/special chars); an invalid name is a usage error.
+
+Names aitm composes are also deduped against `origin` at plan time: one `git ls-remote --heads` lists what already exists, and a colliding name takes a numeric suffix (`aitm/g1-add-todo-crud-2`). That matters when two people run aitm on the same repo toward the same goal — they get the same plan, hence the same names, and force-push is allowed by default. An unreadable remote degrades to the plain names, and a resumed run keeps the branch already in `state.json`. An explicit single-group `--branch` is never suffixed.
 
 ### Auto-merge
 
@@ -72,8 +74,9 @@ No final verification phase. No release phase. The merge of the last PR is the t
 | --- | --- | --- |
 | Group | `Planner` | `state.json.prGroups[i]` |
 | Tasks within a group | `Planner` | `state.json.prGroups[i].tasks` |
-| Branch for a group | `branchFor()` in `run-loop-adapter.ts` (from `--branch` or default `aitm/<id>`) | `state.json.prGroups[i].branch` |
-| PR number for a group | `Worker` | `state.json.prGroups[i].pr` |
+| Branch for a group | `branchFor()` in `run-loop-adapter.ts` (from `--branch` or default `aitm/<id>-<slug>`) | `state.json.prGroups[i].branch` |
+| PR number + URL for a group | `Worker` | `state.json.prGroups[i].pr`, `.prUrl` |
+| Acceptance check for a group | `Planner` | `state.json.prGroups[i].acceptance` |
 
 `Planner` chooses group boundaries by cohesion (same feature, same file area) and reviewability (target ~ 300 changed lines per PR, soft).
 
@@ -91,13 +94,34 @@ delivery (see `PR_BODY_GUIDE` in `orchestrator.ts`):
 
 ## Testing
 <how it was verified — tests, lint — or a note that it wasn't>
+
+## Evidence
+<the verify command and its outcome, the group's acceptance check and whether it was
+demonstrated, and what was checked then thrown away — or "Nothing was run to verify this change.">
 ```
 
-Titles are conventional-commit style, ≤72 chars.
+Titles are conventional-commit style, ≤72 chars. Section headings are configurable per repo via `prBodySections` (see `../config.md`).
+
+## Acceptance checks
+
+Every PR group carries an `acceptance` check from the plan: the command to run or the behaviour to observe that proves the group done (`bun test src/auth passes and POST /login sets a session cookie`). It is required — a plan whose group arrives without one fails schema validation and goes back to the Planner — and it travels with the group: into the Coordinator's brief, into the pre-PR self-review, and into the PR body's Evidence section. A group is not done because the model says so; it is done when its check holds.
 
 ## Coding style
 
 `AgentConfigDetector` reads `CLAUDE.md` or `AGENTS.md` and produces a coding-style payload. That payload is prepended to every subagent system prompt. `--style <path>` overrides both. See `../coding-style.md`.
+
+## End-of-run output
+
+Whatever the outcome, the run ends with two blocks on stdout:
+
+```
+Usage: 41 calls, 812304 in / 39118 out tokens (611200 cached, 75% cache hit), $1.8342 — planner …
+Pull requests:
+  #12  Todo CRUD API — https://github.com/you/repo/pull/12
+  #13  Session cookie auth — https://github.com/you/repo/pull/13
+```
+
+The PR block lists every group that opened a PR, read from persisted state rather than the run result — so it appears on a merged run, on a run parked at `awaiting-pr`, and on a blocked one, where the PRs opened before the block are exactly what you want to look at. It is omitted entirely when the run opened none. Both blocks are best-effort: a reporting failure never changes the exit code.
 
 ## Termination signals
 

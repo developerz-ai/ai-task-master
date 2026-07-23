@@ -51,7 +51,7 @@ The merged result is what every other module sees. A frozen snapshot is written 
   "verifyCommand": null,              // optional; test/lint gate run before the Worker commits
   "logLevel": "info",
   "allowForcePush": true,             // optional; false forbids all force-push (incl. --force-with-lease)
-  "prBodySections": ["## Summary", "## Changes", "## Testing"]  // optional; per-repo PR body headings
+  "prBodySections": ["## Summary", "## Changes", "## Testing", "## Evidence"]  // optional; per-repo PR body headings
 }
 ```
 
@@ -87,7 +87,9 @@ before profiles existed (full back-compat). A dangling `activeProfile` (named bu
 
 ## prBodySections
 
-Every aitm-opened PR follows a fixed body shape so reviewers get a consistent layout. By default that is `## Summary`, `## Changes`, `## Testing`. Set `prBodySections` to a list of `## ` headings (in order) to match a repo whose convention differs — e.g. `["## What", "## Why", "## Changes", "## Verification"]`. The list drives both the model guidance (what the composer is told to produce) and the post-composition contract check (`assertPrBodySections`) from one source, so they never drift. Every entry must be a real `## ` heading; an empty list or any malformed entry falls back to the default. Project/global config only — not a CLI flag.
+Every aitm-opened PR follows a fixed body shape so reviewers get a consistent layout. By default that is `## Summary`, `## Changes`, `## Testing`, `## Evidence`.
+
+`## Evidence` is where the run says what it actually ran: the verify command and its outcome, the group's acceptance check and whether it was demonstrated, and anything that was checked and then thrown away. The guidance forbids unearned claims — no command output in the material means the section says nothing was run, and a plan or a "should work" is never evidence. Set `prBodySections` to a list of `## ` headings (in order) to match a repo whose convention differs — e.g. `["## What", "## Why", "## Changes", "## Verification"]`. The list drives both the model guidance (what the composer is told to produce) and the post-composition contract check (`assertPrBodySections`) from one source, so they never drift. Every entry must be a real `## ` heading; an empty list or any malformed entry falls back to the default. Project/global config only — not a CLI flag.
 
 ## formatCommand
 

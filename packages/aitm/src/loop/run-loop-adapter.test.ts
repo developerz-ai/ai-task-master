@@ -47,12 +47,14 @@ import {
   mcpTool,
   mountDeferredTools,
   type PlanGroupsOutcome,
+  parseRemoteHeads,
   persistRollingContext,
   planToPrGroups,
   RAW_STYLE_MAX_CHARS,
   type RunLoopAdapterSeams,
   recordStepDeltas,
   reminderAgentSystemPrompt,
+  remoteBranchNames,
   resolvePlannerTools,
   resolveStyleContents,
   resolveWorkerTools,
@@ -222,6 +224,7 @@ test('planToPrGroups maps plan groups to pending PrGroups with aitm/<id> branche
       {
         id: 'core',
         title: 'Core',
+        acceptance: 'the check that proves it done',
         tasks: [
           { description: 'a', complexity: 'complex' },
           { description: 'b', complexity: 'normal' },
@@ -231,6 +234,7 @@ test('planToPrGroups maps plan groups to pending PrGroups with aitm/<id> branche
       {
         id: 'api',
         title: 'API',
+        acceptance: 'the check that proves it done',
         tasks: [{ description: 'c', complexity: 'simple' }],
         dependsOn: ['core'],
       },
@@ -283,6 +287,25 @@ test('branchFor: multiple groups prefix the requested branch per group', () => {
   assert.equal(branchFor('api', 'feature/login', 2), 'feature/login/api');
 });
 
+test('branchFor: the group title becomes a readable slug on the branch', () => {
+  assert.equal(branchFor('G1', undefined, 2, 'Add todo CRUD'), 'aitm/G1-add-todo-crud');
+  assert.equal(
+    branchFor('G1', 'feature/login', 2, 'Add todo CRUD'),
+    'feature/login/G1-add-todo-crud',
+  );
+});
+
+test('branchFor: a title that restates the id adds no slug', () => {
+  assert.equal(branchFor('core', undefined, 1, 'Core'), 'aitm/core');
+  assert.equal(branchFor('G1', undefined, 1, '✨'), 'aitm/G1');
+});
+
+test('branchFor: the composed branch stays a single valid ref component under aitm/', () => {
+  const branch = branchFor('g 1..lock', undefined, 2, 'Ship: the *whole* thing');
+  assert.equal(branch, 'aitm/g-1-ship-the-whole-thing');
+  assert.ok(!branch.slice('aitm/'.length).includes('/'), 'no nested ref under the group segment');
+});
+
 test('sanitizeBranchComponent: maps unsafe Planner ids to valid ref components', () => {
   assert.equal(sanitizeBranchComponent('core'), 'core');
   assert.equal(sanitizeBranchComponent('.hidden'), 'hidden');
@@ -305,12 +328,14 @@ test('planToPrGroups: composes a valid ref even when the Planner id is unsafe', 
       {
         id: 'core',
         title: 'Core',
+        acceptance: 'the check that proves it done',
         tasks: [{ description: 'a', complexity: 'normal' }],
         dependsOn: [],
       },
       {
         id: 'api.lock',
         title: 'API',
+        acceptance: 'the check that proves it done',
         tasks: [{ description: 'b', complexity: 'simple' }],
         dependsOn: [],
       },
@@ -330,6 +355,7 @@ test('planToPrGroups: requested branch applied verbatim for a single-group plan'
       {
         id: 'core',
         title: 'Core',
+        acceptance: 'the check that proves it done',
         tasks: [{ description: 'a', complexity: 'normal' }],
         dependsOn: [],
       },
@@ -346,12 +372,14 @@ test('planToPrGroups: requested branch prefixes each group in a multi-group plan
       {
         id: 'core',
         title: 'Core',
+        acceptance: 'the check that proves it done',
         tasks: [{ description: 'a', complexity: 'normal' }],
         dependsOn: [],
       },
       {
         id: 'api',
         title: 'API',
+        acceptance: 'the check that proves it done',
         tasks: [{ description: 'b', complexity: 'simple' }],
         dependsOn: ['core'],
       },
@@ -362,6 +390,115 @@ test('planToPrGroups: requested branch prefixes each group in a multi-group plan
     groups.map((g) => g.branch),
     ['release/v2/core', 'release/v2/api'],
   );
+});
+
+test('planToPrGroups: carries the acceptance check onto the persisted PrGroup', () => {
+  const plan: Plan = {
+    goal: 'g',
+    groups: [
+      {
+        id: 'core',
+        title: 'Core',
+        tasks: [{ description: 'a', complexity: 'normal' }],
+        acceptance: 'bun test src/core passes',
+        dependsOn: [],
+      },
+    ],
+  };
+  assert.equal(planToPrGroups(plan)[0]?.acceptance, 'bun test src/core passes');
+});
+
+// ---- Branch dedupe against the remote (two humans, one repo) ----------------
+
+function twoGroupPlan(): Plan {
+  return {
+    goal: 'g',
+    groups: [
+      {
+        id: 'g1',
+        title: 'Add todo CRUD',
+        tasks: [{ description: 'a', complexity: 'normal' }],
+        acceptance: 'the check',
+        dependsOn: [],
+      },
+      {
+        id: 'g2',
+        title: 'Add auth',
+        tasks: [{ description: 'b', complexity: 'normal' }],
+        acceptance: 'the check',
+        dependsOn: ['g1'],
+      },
+    ],
+  };
+}
+
+test('planToPrGroups: a branch already on the remote is suffixed, never reused', () => {
+  const groups = planToPrGroups(
+    twoGroupPlan(),
+    undefined,
+    new Set(['main', 'aitm/g1-add-todo-crud']),
+  );
+  assert.deepEqual(
+    groups.map((g) => g.branch),
+    ['aitm/g1-add-todo-crud-2', 'aitm/g2-add-auth'],
+  );
+});
+
+test('planToPrGroups: an unreadable remote (empty set) keeps the plain branch names', () => {
+  assert.deepEqual(
+    planToPrGroups(twoGroupPlan()).map((g) => g.branch),
+    ['aitm/g1-add-todo-crud', 'aitm/g2-add-auth'],
+  );
+});
+
+test('planToPrGroups: an explicit single-group --branch is honored verbatim, never suffixed', () => {
+  const plan: Plan = {
+    goal: 'g',
+    groups: [
+      {
+        id: 'core',
+        title: 'Core',
+        tasks: [{ description: 'a', complexity: 'normal' }],
+        acceptance: 'the check',
+        dependsOn: [],
+      },
+    ],
+  };
+  const groups = planToPrGroups(plan, 'release/v2', new Set(['release/v2']));
+  assert.equal(groups[0]?.branch, 'release/v2');
+});
+
+test('planToPrGroups: --branch derived per-group names still dedupe against the remote', () => {
+  const groups = planToPrGroups(
+    twoGroupPlan(),
+    'release/v2',
+    new Set(['release/v2/g1-add-todo-crud']),
+  );
+  assert.deepEqual(
+    groups.map((g) => g.branch),
+    ['release/v2/g1-add-todo-crud-2', 'release/v2/g2-add-auth'],
+  );
+});
+
+test('parseRemoteHeads: keeps refs/heads lines, drops tags, junk and blanks', () => {
+  const stdout = [
+    'a1b2\trefs/heads/main',
+    'c3d4\trefs/heads/aitm/g1-add-todo-crud',
+    'e5f6\trefs/tags/v1.0.0',
+    'e5f6\trefs/heads/',
+    '',
+    'garbage-without-a-tab',
+  ].join('\n');
+  assert.deepEqual(parseRemoteHeads(stdout), ['main', 'aitm/g1-add-todo-crud']);
+});
+
+test('remoteBranchNames: a non-git directory degrades to an empty set (never throws)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-no-git-'));
+  try {
+    assert.deepEqual([...(await remoteBranchNames(dir))], []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 // ---- Branch: blocked (planner) ---------------------------------------------
@@ -899,6 +1036,120 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
     rolesSeen.includes('worker'),
     'buildCompactionStep queried the worker-tier model id → the worker received compaction wiring',
   );
+});
+
+test("defaultMakeOrchestrator.runWorker: the group's acceptance check reaches the Coordinator", async () => {
+  // worker.ts renders the group title + task text into its manifest prompt, never PrGroup.acceptance
+  // — so the check rides the role guidance the adapter composes. Without this the Planner's check is
+  // persisted and then never read by anyone who could satisfy it.
+  let sent = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      if (sent === '') sent = JSON.stringify(options.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+          outputTokens: { total: 1, text: 1, reasoning: undefined },
+          totalTokens: 2,
+        },
+        warnings: [],
+      };
+    },
+  });
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: () => 'openai/gpt-5',
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const orch = defaultMakeOrchestrator({
+    input: {
+      cwd: '/tmp/adapter-acceptance',
+      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
+      credentials,
+      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+      github: {},
+      goal: 'g',
+      criteria: undefined,
+      branch: undefined,
+      state: {},
+    },
+    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
+    rollingContext: '',
+    state: {},
+    stepCounter: () => undefined,
+  } as never);
+  await orch.runWorker({
+    group: group('core', { acceptance: 'bun test src/auth passes and POST /login sets a cookie' }),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  assert.match(sent, /Acceptance check for this PR group/);
+  assert.match(sent, /bun test src\/auth passes and POST \/login sets a cookie/);
+});
+
+test('defaultMakeOrchestrator.runWorker: a group with no acceptance check adds no block', async () => {
+  let sent = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      if (sent === '') sent = JSON.stringify(options.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+          outputTokens: { total: 1, text: 1, reasoning: undefined },
+          totalTokens: 2,
+        },
+        warnings: [],
+      };
+    },
+  });
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: () => 'openai/gpt-5',
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const orch = defaultMakeOrchestrator({
+    input: {
+      cwd: '/tmp/adapter-acceptance-legacy',
+      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
+      credentials,
+      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+      github: {},
+      goal: 'g',
+      criteria: undefined,
+      branch: undefined,
+      state: {},
+    },
+    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
+    rollingContext: '',
+    state: {},
+    stepCounter: () => undefined,
+  } as never);
+  await orch.runWorker({
+    group: group('core'),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  assert.doesNotMatch(sent, /Acceptance check for this PR group/);
 });
 
 test('defaultMakeOrchestrator.runWorker: resuming a recordingFailed transcript still resumes, but warns (issue #220)', async () => {

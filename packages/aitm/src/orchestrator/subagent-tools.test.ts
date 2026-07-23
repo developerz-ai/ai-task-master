@@ -170,8 +170,20 @@ function basePlan(): Plan {
   return {
     goal: 'do the thing',
     groups: [
-      { id: 'g1', title: 'First', tasks: [{ description: 't1' }], dependsOn: [] },
-      { id: 'g2', title: 'Second', tasks: [{ description: 't2' }], dependsOn: ['g1'] },
+      {
+        id: 'g1',
+        title: 'First',
+        tasks: [{ description: 't1' }],
+        acceptance: 'bun test src/first passes',
+        dependsOn: [],
+      },
+      {
+        id: 'g2',
+        title: 'Second',
+        tasks: [{ description: 't2' }],
+        acceptance: 'bun test src/second passes',
+        dependsOn: ['g1'],
+      },
     ],
   };
 }

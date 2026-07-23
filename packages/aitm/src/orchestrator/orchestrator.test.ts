@@ -44,7 +44,7 @@ import type { ModelProvider } from './subagent-tools.ts';
 
 // A PR body that satisfies the section contract (assertPrBodySections), reused by openPr tests.
 const COMPLIANT_BODY =
-  '## Summary\nDid the thing.\n\n## Changes\n- a.ts: added\n\n## Testing\n- ran tests';
+  '## Summary\nDid the thing.\n\n## Changes\n- a.ts: added\n\n## Testing\n- ran tests\n\n## Evidence\n- `bun test` exited 0';
 
 function emptyUsage() {
   return {
@@ -631,7 +631,7 @@ test('composePr requests submit via toolChoice "auto" (thinking-model compat)', 
   assert.deepEqual(seenToolChoice, { type: 'auto' });
 });
 
-test('PR_BODY_GUIDE defines the standard Summary/Changes/Testing sections', () => {
+test('PR_BODY_GUIDE defines the standard Summary/Changes/Testing/Evidence sections', () => {
   for (const heading of PR_BODY_SECTIONS) {
     assert.ok(PR_BODY_GUIDE.includes(heading), `expected guide to mention ${heading}`);
   }
@@ -720,6 +720,105 @@ test('openPr prompt instructs the standard PR body template', async () => {
   assert.match(capturedPrompt, /## Summary/);
   assert.match(capturedPrompt, /## Changes/);
   assert.match(capturedPrompt, /## Testing/);
+  assert.match(capturedPrompt, /## Evidence/);
+});
+
+test('PR_BODY_GUIDE: the Evidence section forbids unearned claims', () => {
+  assert.match(PR_BODY_GUIDE, /## Evidence/);
+  assert.match(PR_BODY_GUIDE, /acceptance/i);
+  assert.match(PR_BODY_GUIDE, /thrown away/i);
+  assert.match(PR_BODY_GUIDE, /ONLY what the/);
+  assert.match(PR_BODY_GUIDE, /Nothing was run to verify this/);
+  assert.match(PR_BODY_GUIDE, /never evidence/);
+});
+
+test('openPr prompt carries the group acceptance check for the Evidence section', async () => {
+  let capturedPrompt = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      capturedPrompt = JSON.stringify(options.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify({ title: 't', body: COMPLIANT_BODY }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await o.openPr(
+    { ...baseGroup(), acceptance: 'bun test src/auth passes' },
+    baseDelivery(),
+    'main',
+  );
+  assert.match(capturedPrompt, /Acceptance check the plan set for this group/);
+  assert.match(capturedPrompt, /bun test src\/auth passes/);
+});
+
+test('openPr prompt omits the acceptance line for a group without a check (legacy state)', async () => {
+  let capturedPrompt = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      capturedPrompt = JSON.stringify(options.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify({ title: 't', body: COMPLIANT_BODY }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  await o.openPr(baseGroup(), baseDelivery(), 'main');
+  assert.doesNotMatch(capturedPrompt, /Acceptance check the plan set/);
+});
+
+test('buildFallbackComposition: Evidence claims nothing was run and flags the check undemonstrated', () => {
+  const { body } = buildFallbackComposition(
+    { ...baseGroup(), acceptance: 'POST /login sets a session cookie' },
+    baseDelivery(),
+    PR_BODY_SECTIONS,
+  );
+  const evidence = body.slice(body.indexOf('## Evidence'));
+  assert.match(evidence, /No verification output was captured/);
+  assert.match(evidence, /POST \/login sets a session cookie/);
+  assert.match(evidence, /NOT demonstrated/);
+  assert.doesNotMatch(evidence, /passed|green|verified successfully/i);
+});
+
+test('buildFallbackComposition: Evidence says so when the group has no acceptance check', () => {
+  const { body } = buildFallbackComposition(baseGroup(), baseDelivery(), PR_BODY_SECTIONS);
+  const evidence = body.slice(body.indexOf('## Evidence'));
+  assert.match(evidence, /no recorded acceptance check/);
+  assert.doesNotThrow(() => assertPrBodySections(body, PR_BODY_SECTIONS));
 });
 
 test('composePr falls back to a deterministic composition when every submission stays schema-invalid (#101)', async () => {

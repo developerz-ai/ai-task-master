@@ -7,24 +7,21 @@ import type { Role } from '../credentials/credentials.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { Plan } from '../plan/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
-import { PLANNER_MAX_STEPS } from '../subagents/planner.ts';
 import type {
   GithubToolInput,
   GithubToolOutput,
   ReviewerTools,
   ThreadResolutionOutput,
 } from '../subagents/reviewer.ts';
-import { REVIEWER_MAX_STEPS } from '../subagents/reviewer.ts';
-import {
-  type BashInput,
-  type BashOutput,
-  type FileManifest,
-  type ReadFileInput,
-  type ReadFileOutput,
-  WORKER_MAX_STEPS,
-  type WorkerTools,
-  type WriteFileInput,
-  type WriteFileOutput,
+import type {
+  BashInput,
+  BashOutput,
+  FileManifest,
+  ReadFileInput,
+  ReadFileOutput,
+  WorkerTools,
+  WriteFileInput,
+  WriteFileOutput,
 } from '../subagents/worker.ts';
 import {
   type ModelProvider,

@@ -9,17 +9,16 @@ import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
 import type { GithubToolInput, GithubToolOutput, ReviewerTools } from '../subagents/reviewer.ts';
-import {
-  type BashInput,
-  type BashOutput,
-  type FileManifest,
-  type ReadFileInput,
-  type ReadFileOutput,
-  WORKER_MAX_STEPS,
-  type WorkerDelivery,
-  type WorkerTools,
-  type WriteFileInput,
-  type WriteFileOutput,
+import type {
+  BashInput,
+  BashOutput,
+  FileManifest,
+  ReadFileInput,
+  ReadFileOutput,
+  WorkerDelivery,
+  WorkerTools,
+  WriteFileInput,
+  WriteFileOutput,
 } from '../subagents/worker.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {

@@ -34,7 +34,6 @@ import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
   runWorker,
-  WORKER_MAX_STEPS,
   WORKER_SYSTEM_PREFIX,
   type WorkerInput,
   type WorkerResult,

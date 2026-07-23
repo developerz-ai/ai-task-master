@@ -21,7 +21,6 @@ import type { PrGroup } from '../state/schema.ts';
 import type { OnUsage, SubagentInit } from '../subagents/factory.ts';
 import {
   createPlannerAgent,
-  PLANNER_MAX_STEPS,
   PLANNER_SYSTEM_PREFIX,
   type PlannerResult,
   type PlannerTools,
@@ -29,7 +28,6 @@ import {
 } from '../subagents/planner.ts';
 import {
   createReviewerAgent,
-  REVIEWER_MAX_STEPS,
   REVIEWER_SYSTEM_PREFIX,
   type ReviewerResult,
   type ReviewerTools,
@@ -39,7 +37,6 @@ import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
   runWorker,
-  WORKER_MAX_STEPS,
   WORKER_SYSTEM_PREFIX,
   type WorkerResult,
   type WorkerTools,

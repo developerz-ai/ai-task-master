@@ -96,7 +96,6 @@ import type { OnUsage } from '../subagents/factory.ts';
 import { buildMemoryTool, type MemoryToolInput } from '../subagents/memory-tool.ts';
 import {
   createPlannerAgent,
-  PLANNER_MAX_STEPS,
   PLANNER_SYSTEM_PREFIX,
   type PlannerResult,
   type PlannerTools,
@@ -114,7 +113,6 @@ import {
   createReviewerAgent,
   type GithubToolInput,
   type GithubToolOutput,
-  REVIEWER_MAX_STEPS,
   REVIEWER_SYSTEM_PREFIX,
   type ReviewerTools,
   runReviewer as runReviewerSubagent,
@@ -130,7 +128,6 @@ import {
 import {
   createWorkerAgent,
   runWorker as runWorkerSubagent,
-  WORKER_MAX_STEPS,
   WORKER_SYSTEM_PREFIX,
   type WorkerTools,
 } from '../subagents/worker.ts';

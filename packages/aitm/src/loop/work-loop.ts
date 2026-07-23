@@ -392,9 +392,14 @@ export class WorkLoop {
         return { kind: 'session-cap', outcomes: this.outcomes.slice() };
       }
       // Run-level cost/token ceiling (issue #190): consult the live usage ledger BEFORE dispatching
-      // the next batch, so a crossed ceiling stops new work at a group boundary — never mid-commit.
+      // the next batch, so a crossed ceiling stops new work at a batch boundary — never mid-commit.
       if (budget) {
         const status = await budget();
+        // A SIGINT during the async ledger lookup must still report cancelled (exit 2), not a budget
+        // block (exit 1) or another dispatched batch — mirror the top-of-loop / post-batch re-check.
+        if (signal?.aborted) {
+          return { kind: 'cancelled', outcomes: this.outcomes.slice() };
+        }
         if (status.exceeded) {
           return { kind: 'blocked', reason: status.reason, outcomes: this.outcomes.slice() };
         }

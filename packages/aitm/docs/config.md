@@ -194,7 +194,7 @@ Unattended-run guardrails. Neither is set by default, so a run is unbounded and 
 - `maxTotalTokens` — the run's cumulative input + output tokens across every subagent.
 - `maxCostUsd` — the run's cumulative priced cost in US dollars.
 
-The work loop consults the live usage ledger **at each PR-group boundary, before dispatching the next group** — so a crossed ceiling stops the run *between* groups (never mid-commit, never abandoning work in flight). The run then blocks with a budget reason (exit 1) and opens no further PRs.
+The work loop consults the live usage ledger **once before dispatching the next batch of PR groups** — so a crossed ceiling stops the run *between* batches (never mid-commit, never abandoning work in flight). The run then blocks with a budget reason (exit 1) and opens no further PRs. With `concurrency` greater than one, the sibling groups already started in the *current* batch keep running to completion after the ceiling is crossed; only the next batch is never dispatched.
 
 ```jsonc
 {
@@ -203,7 +203,7 @@ The work loop consults the live usage ledger **at each PR-group boundary, before
 }
 ```
 
-Set either, or both (whichever trips first stops the run). This is a **guardrail, not a hard cap**: cost is priced at ledger-flush and the check runs at group boundaries, so a single group already in flight can carry the totals past the ceiling before the next check sees it. Cost enforcement is also skipped for any run whose model has **no known price** (the ledger reports tokens but `null` cost) — use `maxTotalTokens` when running on an unpriced/self-hosted model. Project/global config only — not a CLI flag.
+Set either, or both (whichever trips first stops the run). This is a **guardrail, not a hard cap**: cost is priced at ledger-flush and the check runs at batch boundaries, so groups already in flight in the current batch can carry the totals past the ceiling before the next check sees it. Cost enforcement is also skipped for any run whose model has **no known price** (the ledger reports tokens but `null` cost) — use `maxTotalTokens` when running on an unpriced/self-hosted model. Project/global config only — not a CLI flag.
 
 ## llmStepTimeoutMs
 

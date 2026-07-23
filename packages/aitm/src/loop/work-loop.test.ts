@@ -432,6 +432,26 @@ test('run: a crossed cost/token ceiling stops before the next group and blocks w
   assert.equal(ready.readyCalls, 0, 'no group was dispatched');
 });
 
+test('run: an abort during the pending budget lookup reports cancelled, not blocked (issue #190)', async () => {
+  const controller = new AbortController();
+  const ready = makeGraph([twoTaskGroup()], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({
+      graph: ready.graph,
+      signal: controller.signal,
+      budget: async () => {
+        // SIGINT arrives while the ledger lookup is in flight.
+        controller.abort();
+        return { exceeded: true, reason: 'ceiling reached' };
+      },
+    }),
+  );
+  const result = await loop.run();
+  // Cancellation (exit 2) wins over the budget block (exit 1); nothing is dispatched.
+  assert.equal(result.kind, 'cancelled');
+  assert.equal(ready.readyCalls, 0, 'no group was dispatched');
+});
+
 test('run: a budget under the ceiling lets the loop dispatch the next group (issue #190)', async () => {
   const ready = makeGraph([twoTaskGroup()], { completeAfter: 1 });
   let budgetCalls = 0;

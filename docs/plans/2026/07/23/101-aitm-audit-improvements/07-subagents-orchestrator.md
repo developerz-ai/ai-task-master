@@ -21,7 +21,8 @@
 5. `refineCommitMessage` total-function fallback mirroring `composePr`.
 6. Injection: route `verifyOutputTail` through a `data` envelope (like `review-comment`); `defuseEnvelopeTags` defangs ALL known envelope/reminder tags; cap orchestrator prompt interpolations at `MANIFEST_FIELD_MAX`.
 7. Resolve the orchestrator dead-path decision; if delete — also remove `ORCHESTRATOR_ROLE_PREFIX`, `resolveMaxSteps`, dead `SubagentToolDeps` export, and their tests.
-8. Small: `summarizeReviewerResult` includes partial resolution count; explore tool gets `timeout` + usage sink (`makeAgentTool` seam in compat); consider lower `EDITOR_MAX_STEPS` backstop.
+8. Small: `summarizeReviewerResult` includes partial resolution count; explore tool gets `timeout` + usage sink (`makeAgentTool` seam in compat).
+9. **Design stance — no step caps.** Do NOT lower `EDITOR_MAX_STEPS` or add step limits anywhere (the audit suggested a backstop; rejected — #266 removed step caps deliberately so agents can run long). Runaway protection comes from per-step timeouts and the run-level cost/token ceiling (#190) instead; the explore/orchestrator usage-sink gaps in this slice and slice 05's merge-pr budget seam are what actually close that hole.
 
 ## Tests
 - Planner/reviewer forwarding (field-drop regression); reviewer stray-edit isolation; verify-fix tree-diff delivery; rename-porcelain parsing; empty/fenced refined commit message; envelope defusing for foreign tags.

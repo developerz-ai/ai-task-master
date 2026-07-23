@@ -181,6 +181,23 @@ OpenRouter publishes `context_length` on every entry. Other OpenAI-compatible ca
 
 A model whose catalog publishes **no** window is not compacted: `aitm` skips rather than guessing a size and truncating a conversation on a wrong number. If a long run on a custom endpoint never seems to compact, check that its `/models` response carries one of the four keys above.
 
+## Per-model sampling defaults
+
+A model family's usable sampling range is part of its contract, like its context window. aitm used to send **no** sampling parameters at all, so every model ran at whatever its endpoint defaulted to — and several families behave materially worse there. The symptom is not an error, it is degraded instruction-following: on a real run against `glm-5.2` at the endpoint default we saw tool arguments double-encoded as a JSON string, an editor narrating an edit instead of writing it, and an eight-minute reasoning block before the first tool call.
+
+`src/credentials/model-params.ts` holds known-good values for the families that need them, matched on the resolved model id (substring, case-insensitive, so `glm-5.2`, `z-ai/glm-5.2`, and `zai-org/GLM-5.2` all hit):
+
+| Family | temperature | topP | topK |
+| --- | --- | --- | --- |
+| GLM (4.6 / 4.7 / 5.x) | 1.0 | — | — |
+| Qwen | 0.55 | 1 | — |
+| MiniMax M2 | 1.0 | 0.95 | 20 |
+| Gemini | 1.0 | 0.95 | 64 |
+| Kimi K2 thinking / 2.5 | 1.0 | 0.95 | — |
+| Kimi K2 | 0.6 | — | — |
+
+A family with no entry contributes nothing and its request stays byte-identical to before the table existed — Anthropic and OpenAI models are deliberately unlisted (Anthropic reasons worse with an explicit temperature). Values mirror opencode's `provider/transform.ts`, which carries them for the same reason across the same families. They compose in `chatSettings` (`credentials.ts`), the single provider-wiring point, so every subagent, the style distiller, and the PR composer get them without a per-call-site opt-in.
+
 ## Auto-compaction
 
 Long runs outgrow any window, so every subagent loop compacts itself: when the live context reaches the **usable budget**, a `fast`-tier step rewrites the older conversation into a compact note and the loop resumes with that note plus the most recent N steps verbatim (`src/compaction/`).

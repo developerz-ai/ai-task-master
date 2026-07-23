@@ -11,6 +11,7 @@ import {
 import type { LanguageModel } from 'ai';
 import type { Capability, ResolvedConfig } from '../config/schema.ts';
 import { DEFAULT_MODELS } from './defaults.ts';
+import { samplingParamsFor } from './model-params.ts';
 
 // Amazon Bedrock rejects the AI SDK's structured-output request (`output_config.format`), failing
 // the submit-tool-based subagents at random — always excluded (issue #124, originally the point fix).
@@ -84,6 +85,12 @@ export function chatSettings(
     // beyond what LanguageModelUsage alone carries. OpenRouter-only — suppressed on a custom baseURL
     // (#109 spec bullet 3) so those requests stay byte-identical.
     ...(onOpenRouter ? { usage: { include: true } } : {}),
+    // Per-model sampling defaults (see ./model-params.ts). Composed here because Credentials is the
+    // single provider-wiring point, so every subagent, the style distiller, and the PR composer all
+    // get them without a per-call-site opt-in. A family with no entry contributes nothing and its
+    // request stays byte-identical. An operator-set value always wins — this fills a gap, it does
+    // not override intent.
+    ...samplingParamsFor(modelId),
   };
 }
 

@@ -8,18 +8,24 @@ import { render } from './prompts/templates.ts';
 import {
   type BashInput,
   type BashOutput,
+  belowFanoutFloor,
+  buildPhantomRetryPrompt,
   buildTeamBrief,
   createWorkerAgent,
   editorToolSet,
+  FANOUT_FLOOR_FILES,
   type FileManifest,
   type FileManifestEntry,
   groupManifestByDir,
   hasStrayEdit,
   labelEditorGroups,
+  MANIFEST_SURVEY_BUDGET,
   MAX_FILES_PER_EDITOR,
   type ReadFileInput,
   type ReadFileOutput,
+  readOnlyStreak,
   runWorker,
+  surveyBudgetReminder,
   WORKER_SYSTEM_PREFIX,
   type WorkerInput,
   type WorkerTools,
@@ -82,11 +88,15 @@ type ToolCallLog = {
 // `strayEdits` makes the bare tree-wide `git status --porcelain` (no pathspec — the post-pass
 // cleanup guard) report a dirty tree so a test can assert the reset/clean it triggers. Default
 // false keeps the clean no-changes/blocked paths skipping cleanup, byte-identical to today.
+// `phantomOncePaths` lists paths that report clean on their FIRST status query and dirty on every
+// later one — a leaf that narrated the edit, then actually wrote it when the corrective retry told
+// it what it had done.
 function makeTools(
   opts: {
     bashExitCode?: number;
     bashStderr?: string;
     cleanStatusPaths?: string[];
+    phantomOncePaths?: string[];
     strayEdits?: boolean;
   } = {},
 ): {
@@ -94,6 +104,7 @@ function makeTools(
   calls: ToolCallLog;
 } {
   const calls: ToolCallLog = { reads: [], writes: [], bashes: [], statuses: [] };
+  const statusQueries = new Map<string, number>();
   const tools: WorkerTools = {
     readFile: tool<ReadFileInput, ReadFileOutput>({
       description: 'read a file from the checkout',
@@ -129,7 +140,11 @@ function makeTools(
           }
           // The editor-change verification never mutates and is exit-0 regardless of bashExitCode.
           calls.statuses.push(input);
-          const clean = (opts.cleanStatusPaths ?? []).some((p) => p === path);
+          const nth = (statusQueries.get(path) ?? 0) + 1;
+          statusQueries.set(path, nth);
+          const clean =
+            (opts.cleanStatusPaths ?? []).some((p) => p === path) ||
+            (nth === 1 && (opts.phantomOncePaths ?? []).some((p) => p === path));
           return { stdout: clean ? '' : ` M ${path}\n`, stderr: '', exitCode: 0 };
         }
         calls.bashes.push(input);
@@ -595,7 +610,11 @@ test('runWorker: one phantom editor blocks the whole pass and names only the unc
     false,
     'no partial commit when any planned file is unchanged',
   );
-  assert.equal(calls.statuses.length, 2, 'both planned files were verified on disk');
+  assert.equal(
+    calls.statuses.length,
+    3,
+    'both planned files verified, then the phantom re-verified after its single retry',
+  );
 });
 
 test('runWorker: scopes the manifest prompt and progress to the current Task slice', async () => {
@@ -1881,4 +1900,785 @@ test('runWorker verifyCommand emits one structured log event per verify invocati
   assert.equal(typeof verifyLogs[0]?.durationMs, 'number');
   assert.equal(verifyLogs[1]?.exitCode, 0);
   assert.equal(verifyLogs[1]?.fixPassFollowed, false);
+});
+
+// ---- verify gate: the formatter runs before the model ever sees a lint diagnostic ----
+
+test('runWorker verify gate: a failed verify re-runs formatCommand and re-verifies BEFORE any model fix pass', async () => {
+  // The observed waste: the verify gate failed on Biome formatting (an unexpanded `"exports"` field,
+  // import order) and the harness handed those diagnostics straight to the model, which spawned four
+  // editor leaves to hand-edit them. `biome check --write` fixes that whole class in ~200ms.
+  const { model, submitCount } = makeManifestModel([{ at: 0, manifest: oneFileManifest }]);
+  const { tools, bashes, verifies } = makeVerifyTools([1, 0]); // red, then green after the format
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, {
+    ...baseInput(),
+    formatCommand: 'biome check --write .',
+    verifyCommand: 'run-verify',
+  });
+  assert.equal(result.kind, 'ok');
+
+  assert.equal(submitCount(), 1, 'the formatter fixed it — no model fix pass was spent');
+  assert.equal(verifies.length, 2, 'verify ran, then re-ran after the format');
+  const cmds = bashes.map((b) => b.command);
+  const formats = cmds
+    .map((c, i) => (c.includes('biome check --write') ? i : -1))
+    .filter((i) => i >= 0);
+  const verifyIdxs = cmds.map((c, i) => (c.includes('run-verify') ? i : -1)).filter((i) => i >= 0);
+  assert.equal(formats.length, 2, 'format ran before the first verify and again after it failed');
+  assert.ok(
+    (formats[1] ?? -1) > (verifyIdxs[0] ?? -1) && (formats[1] ?? -1) < (verifyIdxs[1] ?? -1),
+    `the repair format sits between the two verifies, got ${cmds.join(' | ')}`,
+  );
+  assert.ok(
+    cmds.some((c) => c.includes('commit -m')),
+    'the formatted, re-verified change is committed',
+  );
+});
+
+test('runWorker verify gate: only what the formatter cannot fix escalates to the single bounded fix pass', async () => {
+  // red → format → still red → ONE model fix pass → format → green. The fix-pass semantics are
+  // unchanged; the formatter just gets first refusal.
+  const { model, prompts, submitCount } = makeManifestModel([
+    { at: 0, manifest: oneFileManifest },
+    { at: 2, manifest: fixManifest },
+  ]);
+  const { tools, verifies } = makeVerifyTools([1, 1, 0]);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, {
+    ...baseInput(),
+    formatCommand: 'biome check --write .',
+    verifyCommand: 'run-verify',
+  });
+  assert.equal(result.kind, 'ok');
+  assert.equal(verifies.length, 3, 'verify, format-repair re-verify, post-fix-pass re-verify');
+  assert.equal(submitCount(), 2, 'still exactly one fix pass — the bound is unchanged');
+  // The fix task is fed the SECOND (post-format) verify tail: whatever survived the formatter.
+  assert.match(prompts[2] ?? '', /verify command failed/i);
+  assert.match(prompts[2] ?? '', /VERIFY FAILED marker-1/);
+});
+
+test('runWorker verify gate: no formatCommand → a failed verify goes straight to the fix pass (unchanged)', async () => {
+  const { model, submitCount } = makeManifestModel([
+    { at: 0, manifest: oneFileManifest },
+    { at: 2, manifest: fixManifest },
+  ]);
+  const { tools, verifies } = makeVerifyTools([1, 0]);
+  const events: Array<Record<string, unknown>> = [];
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, {
+    ...baseInput(),
+    verifyCommand: 'run-verify',
+    logger: makeCaptureLogger(events),
+  });
+  assert.equal(result.kind, 'ok');
+  assert.equal(verifies.length, 2, 'no format-repair verify is inserted');
+  assert.equal(submitCount(), 2, 'the fix pass ran, exactly as before');
+  const verifyLogs = events.filter((e) => e.msg === 'worker: verify');
+  assert.equal(verifyLogs[0]?.formatRetryFollowed, false);
+  assert.equal(verifyLogs[0]?.fixPassFollowed, true);
+});
+
+test('runWorker verify gate: the format repair is logged and surfaced to the operator', async () => {
+  const realStderrWrite = process.stderr.write.bind(process.stderr);
+  const lines: string[] = [];
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  const events: Array<Record<string, unknown>> = [];
+  try {
+    const { model } = makeManifestModel([{ at: 0, manifest: oneFileManifest }]);
+    const { tools } = makeVerifyTools([1, 0]);
+    const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+    const result = await runWorker(agent, {
+      ...baseInput(),
+      formatCommand: 'biome check --write .',
+      verifyCommand: 'run-verify',
+      logger: makeCaptureLogger(events),
+    });
+    assert.equal(result.kind, 'ok');
+  } finally {
+    process.stderr.write = realStderrWrite;
+  }
+  assert.ok(
+    lines.some((l) => l.includes('verify failed → formatted → re-verified')),
+    `the operator sees the format repair, got ${lines.join('')}`,
+  );
+  // One event per verify invocation still holds; the first one names the format repair as what followed.
+  const verifyLogs = events.filter((e) => e.msg === 'worker: verify');
+  assert.equal(verifyLogs.length, 2);
+  assert.equal(verifyLogs[0]?.exitCode, 1);
+  assert.equal(verifyLogs[0]?.formatRetryFollowed, true);
+  assert.equal(
+    verifyLogs[0]?.fixPassFollowed,
+    false,
+    'no model fix pass followed the first verify',
+  );
+  assert.equal(verifyLogs[1]?.exitCode, 0);
+  assert.equal(verifyLogs[1]?.formatRetryFollowed, false);
+  assert.equal(verifyLogs[1]?.fixPassFollowed, false);
+});
+
+// ---- fanout floor: trivial manifests run inline in one pass ----
+
+const tiny = (path: string): FileManifestEntry => ({ path, kind: 'modify', purpose: 'one line' });
+
+test('belowFanoutFloor: a handful of one-line modifications is below the floor', () => {
+  assert.equal(belowFanoutFloor([tiny('a/x.ts'), tiny('b/y.ts')]), true);
+  assert.equal(
+    belowFanoutFloor([tiny('a/x.ts'), tiny('b/y.ts'), tiny('c/z.ts'), tiny('d/w.ts')]),
+    true,
+  );
+});
+
+test('belowFanoutFloor: a single-file manifest is already one leaf — nothing to collapse', () => {
+  assert.equal(belowFanoutFloor([tiny('a/x.ts')]), false);
+  assert.equal(belowFanoutFloor([]), false);
+});
+
+test('belowFanoutFloor: more than FANOUT_FLOOR_FILES entries still fans out', () => {
+  const files = Array.from({ length: FANOUT_FLOOR_FILES + 1 }, (_v, i) => tiny(`d${i}/x.ts`));
+  assert.equal(belowFanoutFloor(files), false);
+});
+
+test('belowFanoutFloor: any `create` keeps the fanout — writing a new file is never trivial', () => {
+  assert.equal(
+    belowFanoutFloor([tiny('a/x.ts'), { path: 'b/y.ts', kind: 'create', purpose: 'new' }]),
+    false,
+  );
+});
+
+test('belowFanoutFloor: substantial purposes keep the fanout even for two files', () => {
+  const meaty = (path: string): FileManifestEntry => ({
+    path,
+    kind: 'modify',
+    purpose: 'x'.repeat(200),
+  });
+  assert.equal(belowFanoutFloor([meaty('a/x.ts'), meaty('b/y.ts')]), false);
+});
+
+test('runWorker: four one-line edits run inline in ONE editor pass instead of four spawns', async () => {
+  // The observed waste, verbatim: `fanning out 4 editors — db.test.ts (1), package.json #1 (1),
+  // index.ts (1), package.json #2 (1)` — four agent spin-ups for four one-line edits.
+  const manifest: FileManifest = {
+    files: [
+      tiny('a/db.test.ts'),
+      tiny('b/package.json'),
+      tiny('c/index.ts'),
+      tiny('d/package.json'),
+    ],
+    draftCommitMessage: 'chore: four one-liners',
+  };
+  const editorPrompts: string[] = [];
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorPrompts.push(JSON.stringify(opts.prompt));
+      return {
+        content: [{ type: 'text', text: 'did all four' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools, calls } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.equal(editorPrompts.length, 1, 'one editor pass, not four');
+  assert.match(editorPrompts[0] ?? '', /You own these 4 files/);
+  assert.doesNotMatch(editorPrompts[0] ?? '', /team-brief/, 'a collapsed leaf is not a team');
+  assert.equal(calls.statuses.length, 4, 'every planned file is still phantom-guarded');
+  if (result.kind === 'ok') {
+    assert.deepEqual(
+      result.delivery.changes.map((c) => c.path),
+      ['a/db.test.ts', 'b/package.json', 'c/index.ts', 'd/package.json'],
+    );
+  }
+});
+
+test('runWorker: a manifest above the floor still fans out (the floor is a floor, not a ceiling)', async () => {
+  const manifest: FileManifest = {
+    files: [
+      { path: 'a/x.ts', kind: 'create', purpose: 'a new module' },
+      { path: 'b/y.ts', kind: 'modify', purpose: 'wire it in' },
+    ],
+    draftCommitMessage: 'feat: x + y',
+  };
+  let editorCalls = 0;
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorCalls++;
+      return {
+        content: [{ type: 'text', text: 'edited' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.equal(editorCalls, 2, 'a create in the manifest keeps the two-leaf fanout');
+});
+
+test('runWorker: the `applied: true` inline path is untouched by the floor', async () => {
+  const manifest: FileManifest = {
+    files: [tiny('a/x.ts'), tiny('b/y.ts')],
+    draftCommitMessage: 'chore: inline',
+    applied: true,
+  };
+  let modelCalls = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      modelCalls++;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify(manifest),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools, calls } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.equal(modelCalls, 1, 'no editor pass at all — the Coordinator already wrote it');
+  assert.equal(calls.statuses.length, 2, 'the inline phantom guard is unchanged');
+});
+
+// ---- manifest survey budget ----
+
+test('readOnlyStreak: counts survey calls and resets on any write', () => {
+  const step = (...names: string[]) => ({ toolCalls: names.map((toolName) => ({ toolName })) });
+  assert.equal(readOnlyStreak([]), 0);
+  assert.equal(readOnlyStreak([step('readFile', 'grep'), step('glob')]), 3);
+  assert.equal(readOnlyStreak([step('readFile', 'writeFile'), step('glob')]), 1);
+  assert.equal(readOnlyStreak([step('readFile', 'readFile'), step('editFile')]), 0);
+  assert.equal(readOnlyStreak([step('multiEdit'), step('readFile')]), 1);
+  // `bash` counts as survey: the observed spiral was `bash cat/ls/find` and `bun install` probing.
+  assert.equal(readOnlyStreak([step('bash', 'bash', 'multiBash')]), 3);
+});
+
+test('surveyBudgetReminder: names the measurement and points at submit, without forbidding reads', () => {
+  const reminder = surveyBudgetReminder(23);
+  assert.match(reminder, /<system-reminder>[\s\S]*<\/system-reminder>/);
+  assert.match(reminder, /23 read-only tool calls/);
+  assert.match(reminder, /`submit`/);
+  assert.doesNotMatch(reminder, /must not|do not read|forbidden/i);
+});
+
+test('runWorker: a manifest pass that only surveys gets one corrective nudge, then still submits', async () => {
+  // Observed: ~40 read-only calls over 12 minutes before submitting a manifest for ONE file. Five
+  // reads per step crosses MANIFEST_SURVEY_BUDGET without a single write.
+  const perStep = 5;
+  const surveySteps = Math.ceil(MANIFEST_SURVEY_BUDGET / perStep);
+  const prompts: string[] = [];
+  let step = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = step++;
+      prompts[idx] = JSON.stringify(opts.prompt);
+      if (idx < surveySteps) {
+        return {
+          content: Array.from({ length: perStep }, (_v, n) => ({
+            type: 'tool-call' as const,
+            toolCallId: `read-${idx}-${n}`,
+            toolName: 'readFile',
+            input: JSON.stringify({ path: `src/f${idx}-${n}.ts` }),
+          })),
+          finishReason: { unified: 'tool-calls' as const, raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'tool-call' as const,
+            toolCallId: 'submit-late',
+            toolName: 'submit',
+            input: JSON.stringify(oneFileManifest),
+          },
+        ],
+        finishReason: { unified: 'tool-calls' as const, raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools, calls } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+
+  assert.equal(calls.reads.length, MANIFEST_SURVEY_BUDGET, 'the survey actually ran');
+  const nudged = prompts.findIndex((p) => p.includes('read-only tool calls in a row'));
+  assert.equal(nudged, surveySteps, 'the nudge lands on the step that crosses the budget');
+  assert.ok(
+    prompts.slice(0, surveySteps).every((p) => !p.includes('read-only tool calls in a row')),
+    'no nudge before the budget is crossed',
+  );
+  // It nudges, it never fails: the pass finishes and the manifest is honored.
+  assert.equal(result.kind, 'ok');
+});
+
+test('runWorker: a manifest pass under the survey budget is never nudged', async () => {
+  const prompts: string[] = [];
+  let step = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = step++;
+      prompts[idx] = JSON.stringify(opts.prompt);
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call' as const,
+              toolCallId: 'read-0',
+              toolName: 'readFile',
+              input: JSON.stringify({ path: 'src/a.ts' }),
+            },
+          ],
+          finishReason: { unified: 'tool-calls' as const, raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'tool-call' as const,
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify(oneFileManifest),
+          },
+        ],
+        finishReason: { unified: 'tool-calls' as const, raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.ok(
+    prompts.every((p) => !p.includes('read-only tool calls in a row')),
+    'a short survey is left alone',
+  );
+});
+
+test('createWorkerAgent: the survey budget composes onto the caller prepareStep, it does not replace it', async () => {
+  let baseCalls = 0;
+  const { tools } = makeTools();
+  const model = makeWorkerModel(oneFileManifest, ['created a']);
+  const agent = createWorkerAgent({
+    model,
+    tools,
+    systemPrompt: WORKER_SYSTEM_PREFIX,
+    prepareStep: async () => {
+      baseCalls++;
+      return undefined;
+    },
+  });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.ok(baseCalls > 0, "the caller's prepareStep still runs");
+});
+
+// ---- phantom edit: one corrective retry before the whole task is blocked ----
+
+test('runWorker: a leaf that narrated instead of writing is retried once and the task ships', async () => {
+  // Observed: `group G2 task G2-3: → blocked, shipping partial PR (… no on-disk change for a planned
+  // file: apps/api/src/routes/todos.ts …)` — the PR shipped services without its routes because one
+  // leaf narrated. One corrective retry recovers it.
+  const manifest: FileManifest = {
+    files: [{ path: 'src/routes/todos.ts', kind: 'create', purpose: 'todo routes' }],
+    draftCommitMessage: 'feat: todo routes',
+  };
+  const editorPrompts: string[] = [];
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorPrompts.push(JSON.stringify(opts.prompt));
+      return {
+        content: [{ type: 'text', text: idx === 1 ? 'I updated the routes' : 'wrote the routes' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  // Clean on the first status query (narrated), dirty afterwards (the retry actually wrote it).
+  const { tools, calls } = makeTools({ phantomOncePaths: ['src/routes/todos.ts'] });
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.equal(editorPrompts.length, 2, 'exactly one corrective retry');
+  assert.equal(calls.statuses.length, 2, 'the retried file is re-verified on disk');
+  // The corrective prompt names the failure instead of re-issuing the same brief.
+  assert.match(editorPrompts[1] ?? '', /wrote nothing/);
+  assert.match(editorPrompts[1] ?? '', /src\/routes\/todos\.ts/);
+  assert.match(editorPrompts[1] ?? '', /write\/edit tool/);
+  if (result.kind === 'ok') {
+    assert.deepEqual(result.delivery.changes, [
+      { path: 'src/routes/todos.ts', kind: 'create', summary: 'wrote the routes' },
+    ]);
+  }
+});
+
+test('runWorker: a second narration after the corrective retry blocks — the retry is not repeated', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  const { tools, calls } = makeTools({ cleanStatusPaths: ['src/a.ts'] }); // never written
+  let editorCalls = 0;
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorCalls++;
+      return {
+        content: [{ type: 'text', text: 'pretended again' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'blocked');
+  assert.equal(editorCalls, 2, 'one pass + exactly one retry, never a third');
+  if (result.kind === 'blocked') assert.match(result.reason, /no on-disk change/i);
+  assert.equal(
+    calls.bashes.some((b) => /add -A|commit -m/.test(b.command)),
+    false,
+    'a doubly-narrated file still commits nothing',
+  );
+});
+
+test('runWorker: a leaf that wrote everything is never retried (byte-identical happy path)', async () => {
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
+      { path: 'src/b.ts', kind: 'create', purpose: 'create b' },
+    ],
+    draftCommitMessage: 'feat: a + b',
+  };
+  const { tools, calls } = makeTools();
+  let editorCalls = 0;
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorCalls++;
+      return {
+        content: [{ type: 'text', text: 'wrote both' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.equal(editorCalls, 1, 'no retry when nothing was phantom');
+  assert.equal(calls.statuses.length, 2, 'one status check per planned file, no more');
+});
+
+test('buildPhantomRetryPrompt: names the failure and scopes to the unwritten files only', () => {
+  const prompt = buildPhantomRetryPrompt(
+    [{ path: 'src/routes/todos.ts', kind: 'create', purpose: 'todo routes' }],
+    baseInput(),
+  );
+  assert.match(prompt, /wrote nothing/);
+  assert.match(prompt, /unchanged on disk/);
+  assert.match(prompt, /write\/edit tool/);
+  assert.match(prompt, /src\/routes\/todos\.ts/);
+  assert.match(prompt, /todo routes/);
+  assert.doesNotMatch(prompt, /Make the change\. Reply with a one-line summary\./);
+});
+
+// ---- leaf hand-off: what the Coordinator already established reaches the leaves ----
+
+test('runWorker: the manifest `sharedContext` reaches every leaf so it does not re-survey the repo', async () => {
+  // Observed: four leaves each re-read repository.ts / todo.ts / errors.ts / biome.json /
+  // package.json — the exact set the Coordinator had just finished reading during planning.
+  const manifest: FileManifest = {
+    files: [
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
+      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b' },
+    ],
+    draftCommitMessage: 'feat: a + b',
+    sharedContext: 'repository.ts exposes findById at line 40; errors are AppError subclasses.',
+  };
+  const editorPrompts: string[] = [];
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorPrompts.push(JSON.stringify(opts.prompt));
+      return {
+        content: [{ type: 'text', text: 'edited' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.equal(editorPrompts.length, 2);
+  for (const prompt of editorPrompts) {
+    assert.match(prompt, /What the coordinator already established/);
+    assert.match(prompt, /findById at line 40/);
+  }
+});
+
+test('buildEditorPrompt via runWorker: verify/format facts reach the leaf; nothing to distil leaves the prompt untouched', async () => {
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+  };
+  const capture = async (input: Partial<WorkerInput>): Promise<string> => {
+    let editorPrompt = '';
+    let call = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async (opts) => {
+        const idx = call++;
+        if (idx === 0) {
+          return {
+            content: [
+              {
+                type: 'tool-call',
+                toolCallId: 'submit-0',
+                toolName: 'submit',
+                input: JSON.stringify(manifest),
+              },
+            ],
+            finishReason: { unified: 'tool-calls', raw: undefined },
+            usage: emptyUsage(),
+            warnings: [],
+          };
+        }
+        editorPrompt = JSON.stringify(opts.prompt);
+        return {
+          content: [{ type: 'text', text: 'created a' }],
+          finishReason: { unified: 'stop', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      },
+    });
+    const { tools } = makeTools();
+    const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+    const result = await runWorker(agent, { ...baseInput(), ...input });
+    assert.equal(result.kind, 'ok');
+    return editorPrompt;
+  };
+
+  const withCommands = await capture({
+    formatCommand: 'biome check --write .',
+    verifyCommand: 'bun run test',
+  });
+  assert.match(withCommands, /must survive .bun run test./);
+  assert.match(withCommands, /do not hand-fix formatting or import order/);
+
+  const bare = await capture({});
+  assert.doesNotMatch(bare, /What the coordinator already established/);
+  assert.doesNotMatch(bare, /must survive/);
+  assert.doesNotMatch(bare, /hand-fix formatting/);
+  assert.match(
+    bare,
+    /Checkout: \/tmp\/wt\\nFile: src\/a\.ts/,
+    'with nothing to distil the leaf prompt is byte-identical to the pre-hand-off shape',
+  );
+});
+
+test('runWorker: an oversized sharedContext is capped before it is paid once per leaf', async () => {
+  const oversized = 'C'.repeat(5_000);
+  const manifest: FileManifest = {
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    draftCommitMessage: 'feat: a',
+    sharedContext: oversized,
+  };
+  let editorPrompt = '';
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const idx = call++;
+      if (idx === 0) {
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(manifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      editorPrompt = JSON.stringify(opts.prompt);
+      return {
+        content: [{ type: 'text', text: 'created a' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'ok');
+  assert.ok(!editorPrompt.includes(oversized), 'the raw oversized digest never reaches a leaf');
+  assert.match(editorPrompt, /truncated/);
+});
+
+test('buildManifestPrompt: the Coordinator is asked for the leaf hand-off digest', async () => {
+  let sent = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      if (sent === '') sent = JSON.stringify(opts.prompt);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+  await runWorker(agent, baseInput());
+  assert.match(sent, /sharedContext/);
+  assert.match(sent, /they can read the rest themselves/);
 });

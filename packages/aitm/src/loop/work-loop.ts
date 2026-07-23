@@ -128,6 +128,11 @@ export type CheckoutHome = {
   // (test stubs) always re-runs the Worker, byte-identical to pre-fix behavior for everything
   // outside that narrow crash window.
   hasTaskCommit?(branch: string, taskId: string): Promise<boolean>;
+  // Retire a group branch whose PR has merged: delete it on origin and locally, moving HEAD off it
+  // first when it is the one checked out. Called once per group, right after the merge — otherwise a
+  // finished run leaves every group branch behind and parks the operator on the last one. Optional:
+  // a home without it (test stubs) simply skips the tidy-up.
+  discardBranch?(branch: string, baseBranch: string): Promise<unknown>;
 };
 
 export type WorkLoopState = {
@@ -846,6 +851,7 @@ export class WorkLoop {
     const write = () => this.markStatus(ctx.group.id, statusForStage(to), { stage: to });
     if (to === 'merged') {
       await this.persistAfterSideEffect(this.mergedOutcome(ctx), write);
+      await this.discardMergedBranch(ctx.group);
       return;
     }
     if (from === 'pr-open') {
@@ -853,6 +859,21 @@ export class WorkLoop {
       return;
     }
     await write();
+  }
+
+  // Tidy the merged group's branch away, locally and on origin. Strictly after the state write: the
+  // merge is already durable, so a git failure here is cosmetic and must never surface as a failed
+  // group. A group that merged with no PR (nothing to ship) never pushed a branch worth removing.
+  private async discardMergedBranch(group: PrGroup): Promise<void> {
+    const branch = group.branch;
+    if (group.pr === null || branch === null || !this.deps.home.discardBranch) return;
+    try {
+      const baseBranch = await this.deps.github.defaultBranch();
+      await this.deps.home.discardBranch(branch, baseBranch);
+      this.deps.progress?.(`group ${group.id}: deleted merged branch ${branch} (local + origin)`);
+    } catch {
+      // best-effort tidy-up
+    }
   }
 
   private mergedOutcome(ctx: StageCtx): GroupOutcome {

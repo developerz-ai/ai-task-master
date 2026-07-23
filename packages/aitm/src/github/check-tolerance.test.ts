@@ -123,7 +123,9 @@ test('waitForChecks: a rate-limited review bot alone does not fail CI', async ()
   const { sleep } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
 
-  assert.deepEqual(await g.waitForChecks(42), { state: 'success', failedChecks: [] });
+  const botOnly = await g.waitForChecks(42);
+  assert.equal(botOnly.state, 'success');
+  assert.deepEqual(botOnly.failedChecks, []);
 });
 
 test('waitForChecks: a real failure alongside the rate limit still fails', async () => {
@@ -143,10 +145,9 @@ test('waitForChecks: a real failure alongside the rate limit still fails', async
   const { sleep } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
 
-  assert.deepEqual(await g.waitForChecks(42), {
-    state: 'failure',
-    failedChecks: [{ name: 'test', status: 'failure' }],
-  });
+  const failResult = await g.waitForChecks(42);
+  assert.equal(failResult.state, 'failure');
+  assert.deepEqual(failResult.failedChecks, [{ name: 'test', status: 'failure' }]);
 });
 
 test('waitForChecks: rate limit with checks still running stays pending', async () => {
@@ -162,6 +163,8 @@ test('waitForChecks: rate limit with checks still running stays pending', async 
   const { sleep } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
 
-  assert.deepEqual(await g.waitForChecks(42), { state: 'success', failedChecks: [] });
+  const okResult = await g.waitForChecks(42);
+  assert.equal(okResult.state, 'success');
+  assert.deepEqual(okResult.failedChecks, []);
   assert.equal(calls.length, 2, 'kept polling instead of resolving off the tolerated failure');
 });

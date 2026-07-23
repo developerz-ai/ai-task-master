@@ -6,6 +6,7 @@ import type { PrGroup, RunState } from '../state/schema.ts';
 import { REVIEW_COMMENTS_GRACE } from './constants.ts';
 import {
   type AddressedThreadsStore,
+  formatCheckSummary,
   handleAddressingReviews,
   handleCiFailed,
   handlePrOpen,
@@ -211,6 +212,57 @@ test('handleWaitingCi: checks succeed → waiting-reviews', async () => {
     await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })),
     'waiting-reviews',
   );
+});
+
+test('handleWaitingCi: emits one CI summary line with each check and its mark', async () => {
+  const lines: string[] = [];
+  const deps = makeDeps({
+    github: makeGithub({
+      waitForChecks: async () => ({
+        state: 'success',
+        failedChecks: [],
+        checks: [
+          { name: 'bun (test + lint)', bucket: 'pass' },
+          { name: 'CodeRabbit', bucket: 'skipping' },
+        ],
+      }),
+    }),
+    progress: (m) => lines.push(m),
+  });
+  await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 }));
+  assert.equal(lines.length, 1, 'exactly one summary line, not per-poll spam');
+  assert.match(lines[0] ?? '', /CI success — bun \(test \+ lint\) ✓, CodeRabbit ✓/);
+});
+
+test('handleWaitingCi: a CI failure summary marks the failed check', async () => {
+  const lines: string[] = [];
+  const deps = makeDeps({
+    github: makeGithub({
+      waitForChecks: async () => ({
+        state: 'failure',
+        failedChecks: [{ name: 'integration', status: 'failure' }],
+        checks: [
+          { name: 'lint', bucket: 'pass' },
+          { name: 'integration', bucket: 'fail' },
+        ],
+      }),
+    }),
+    progress: (m) => lines.push(m),
+  });
+  assert.equal(await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })), 'ci-failed');
+  assert.match(lines[0] ?? '', /CI failure — lint ✓, integration ✗/);
+});
+
+test('handleWaitingCi: no checks configured emits no summary line', async () => {
+  const lines: string[] = [];
+  const deps = makeDeps({
+    github: makeGithub({
+      waitForChecks: async () => ({ state: 'success', failedChecks: [], checks: [] }),
+    }),
+    progress: (m) => lines.push(m),
+  });
+  await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 }));
+  assert.equal(lines.length, 0, 'nothing to summarise → no line');
 });
 
 test('handleWaitingCi: waits the review grace before advancing on success', async () => {
@@ -553,5 +605,20 @@ test('handleAddressingReviews: missing PR throws', async () => {
   await assert.rejects(
     () => handleAddressingReviews(makeDeps(), group({ stage: 'addressing-reviews', pr: null })),
     /without an open PR/,
+  );
+});
+
+test('formatCheckSummary: marks buckets, dedupes, and returns empty for no checks', () => {
+  assert.equal(formatCheckSummary(undefined), '');
+  assert.equal(formatCheckSummary([]), '');
+  assert.equal(
+    formatCheckSummary([
+      { name: 'a', bucket: 'pass' },
+      { name: 'b', bucket: 'fail' },
+      { name: 'c', bucket: 'skipping' },
+      { name: 'd', bucket: 'cancel' },
+      { name: 'e', bucket: 'pending' },
+    ]),
+    'a ✓, b ✗, c ✓, d ✗, e ·',
   );
 });

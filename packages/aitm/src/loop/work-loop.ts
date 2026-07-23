@@ -738,6 +738,9 @@ export class WorkLoop {
       adminMerge: this.deps.adminMerge ?? false,
       ...(this.deps.prContext ? { prContext: this.deps.prContext } : {}),
       ...(this.deps.sleep ? { sleep: this.deps.sleep } : {}),
+      ...(this.deps.progress
+        ? { progress: (message: string) => this.deps.progress?.(message) }
+        : {}),
     };
   }
 

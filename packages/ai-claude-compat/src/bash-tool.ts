@@ -39,7 +39,15 @@ const multiBashInputSchema = z.object({
 export type BashInput = z.infer<typeof bashInputSchema>;
 // `denied` marks a command blocked by a deny rule before it ever ran (exitCode 126) — additive, so a
 // future hooks layer can tell policy denial apart from a real command failure (issue #113).
-export type BashOutput = { stdout: string; stderr: string; exitCode: number; denied?: boolean };
+// `timedOut` marks a command killed for exceeding its timeout (rather than a normal non-zero exit),
+// so the model can tell "took too long" from "failed" and retry with a larger timeoutMs (issue #269).
+export type BashOutput = {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  denied?: boolean;
+  timedOut?: boolean;
+};
 
 export type MultiBashInput = z.infer<typeof multiBashInputSchema>;
 // One entry per command that actually ran. On the first failure the sequence stops, so a
@@ -201,7 +209,13 @@ async function execBash(
     detached: true,
     env: { ...process.env, BASH_ENV: '' },
   });
+  // Set the moment our own ceiling fires, so the catch can tell a timeout-kill from a real failure
+  // even when the group-SIGKILL (not execa's own timeout) is what actually terminated the tree. The
+  // timer is cleared in `finally` if the command finishes first, so it only ever fires on a genuine
+  // timeout.
+  let timedOut = false;
   const timer = setTimeout(() => {
+    timedOut = true;
     const pid = subprocess.pid;
     if (pid !== undefined) {
       try {
@@ -216,10 +230,13 @@ async function execBash(
     return { stdout: asString(r.stdout), stderr: asString(r.stderr), exitCode: r.exitCode ?? 0 };
   } catch (err) {
     if (err instanceof ExecaError) {
+      // Either mechanism counts: our group-kill (`timedOut`) or execa's own `timeout` (`err.timedOut`).
+      const wasTimeout = timedOut || err.timedOut === true;
       return {
         stdout: asString(err.stdout),
         stderr: typeof err.stderr === 'string' ? err.stderr : err.message,
         exitCode: err.exitCode ?? 1,
+        ...(wasTimeout ? { timedOut: true } : {}),
       };
     }
     // Unknown failure (ENOENT on bash, etc.).
@@ -266,6 +283,7 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
         stdout: await capStream(withNotice, 'bash', init.outputStore),
         stderr: await capStream(raw.stderr, 'bash', init.outputStore),
         exitCode: raw.exitCode,
+        ...(raw.timedOut ? { timedOut: true } : {}),
       };
     },
     // Plain-text: stdout, then a stderr section / exit-code line only when relevant (issue #127).
@@ -276,11 +294,22 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
 // Shared plain-text rendering for a single command result (issue #127): stdout, a `stderr:` section
 // only when stderr is non-empty, an `exit code: N` line only when non-zero, and `(no output)` when
 // nothing ran to show (empty stdout+stderr on a clean exit).
-function renderBashSection(o: { stdout: string; stderr: string; exitCode: number }): string {
+function renderBashSection(o: {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  timedOut?: boolean;
+}): string {
   const parts: string[] = [];
   if (o.stdout !== '') parts.push(o.stdout);
   if (o.stderr !== '') parts.push(`stderr:\n${o.stderr}`);
   if (o.exitCode !== 0) parts.push(`exit code: ${o.exitCode}`);
+  // A timeout is a kill, not a normal exit — say so, and point at the actionable lever (issue #269).
+  if (o.timedOut) {
+    parts.push(
+      `[timed out — the command was killed for exceeding its timeout, not a normal exit. If it needs longer and is not waiting for interactive input, retry with a larger timeoutMs (ceiling ${MAX_BASH_TIMEOUT_MS} ms).]`,
+    );
+  }
   return parts.length > 0 ? parts.join('\n') : '(no output)';
 }
 
@@ -325,6 +354,7 @@ export function multiBashTool(init: BashToolInit): Tool<MultiBashInput, MultiBas
           stdout: await capStream(out.stdout, 'multiBash', init.outputStore),
           stderr: await capStream(out.stderr, 'multiBash', init.outputStore),
           exitCode: out.exitCode,
+          ...(out.timedOut ? { timedOut: true } : {}),
         });
         if (out.exitCode !== 0) {
           return { results, exitCode: out.exitCode, failedAt: i };

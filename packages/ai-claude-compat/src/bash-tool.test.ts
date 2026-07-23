@@ -40,6 +40,22 @@ test('toModelOutput: bash renders stdout/stderr/exit conditionally; clean empty 
   assert.match(failed, /exit code: 2/);
 });
 
+test('toModelOutput: a timed-out command renders a retry notice naming the ceiling (issue #269)', () => {
+  const bash = bashTool({ cwd: '/tmp/x' });
+  const rendered = textOf(
+    bash,
+    { command: 'x' },
+    { stdout: 'partial\n', stderr: '', exitCode: 1, timedOut: true },
+  );
+  assert.match(rendered, /partial/, 'partial output is still shown');
+  assert.match(rendered, /timed out/);
+  assert.match(rendered, /larger timeoutMs/);
+  assert.match(rendered, /600000 ms/, 'names the ceiling');
+  // A normal non-zero exit gets no timeout notice.
+  const normal = textOf(bash, { command: 'x' }, { stdout: '', stderr: 'boom', exitCode: 1 });
+  assert.ok(!/timed out/.test(normal), 'no timeout notice on a normal failure');
+});
+
 test('toModelOutput: multiBash renders labeled per-command sections and names the failing command (issue #127)', () => {
   const mb = multiBashTool({ cwd: '/tmp/x' });
   const out = textOf(
@@ -57,6 +73,21 @@ test('toModelOutput: multiBash renders labeled per-command sections and names th
   assert.match(out, /\$ a\nok/);
   assert.match(out, /\$ b\nstderr:\nnope\nexit code: 1/);
   assert.match(out, /\[command #2 failed: b\]/);
+});
+
+test('toModelOutput: multiBash renders the timeout notice on a timed-out command (issue #269)', () => {
+  const mb = multiBashTool({ cwd: '/tmp/x' });
+  const out = textOf(
+    mb,
+    { commands: ['slow'] },
+    {
+      results: [{ command: 'slow', stdout: '', stderr: '', exitCode: 1, timedOut: true }],
+      exitCode: 1,
+      failedAt: 0,
+    },
+  );
+  assert.match(out, /\$ slow/);
+  assert.match(out, /timed out/);
 });
 
 async function tempDir(
@@ -116,6 +147,26 @@ test('bashTool: command timeout returns non-zero exit, not a thrown rejection', 
       { command: 'sleep 5' },
     );
     assert.notEqual(out.exitCode, 0);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('bashTool: a timed-out command is flagged timedOut; a normal failure is not (issue #269)', async () => {
+  const dir = await tempDir();
+  try {
+    const timedOut = await run<{ command: string }, BashOutput>(
+      bashTool({ cwd: dir.path, defaultTimeoutMs: 50 }),
+      { command: 'sleep 5' },
+    );
+    assert.equal(timedOut.timedOut, true, 'a killed-on-timeout command is flagged');
+    assert.notEqual(timedOut.exitCode, 0);
+
+    const failed = await run<{ command: string }, BashOutput>(bashTool({ cwd: dir.path }), {
+      command: 'exit 3',
+    });
+    assert.notEqual(failed.exitCode, 0);
+    assert.ok(!failed.timedOut, 'a normal non-zero exit is not a timeout');
   } finally {
     await dir.cleanup();
   }

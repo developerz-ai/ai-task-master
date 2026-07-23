@@ -506,6 +506,42 @@ export async function runStart(
   return mapResultToExit(result);
 }
 
+// `aitm resume` — continue the run this directory already started. The goal is read from the state
+// dir rather than retyped: a resumed run must never drift onto a subtly different goal than the one
+// its plan was built for, and retyping it is exactly how that happens. Everything else is `start`,
+// so this delegates rather than duplicating the precondition/loop wiring.
+export async function runResume(
+  args: Extract<ParsedArgs, { kind: 'resume' }>,
+  ctx: StartCtx = {},
+): Promise<CommandExit> {
+  const cwd = ctx.cwd ?? process.cwd();
+  const state = new StateStore(resolvePath(cwd, '.ai-task-master'));
+  let persisted: Awaited<ReturnType<StateStore['readGoal']>>;
+  try {
+    persisted = await state.readGoal();
+  } catch (err) {
+    return { code: 1, message: `Failed to read the persisted goal: ${errMsg(err)}` };
+  }
+  if (persisted === null) {
+    return {
+      code: 1,
+      message:
+        'Nothing to resume here — no run has been started in this directory. Run `aitm start "<goal>"` first.',
+    };
+  }
+  const { kind: _kind, ...flags } = args;
+  return runStart(
+    {
+      kind: 'start',
+      goal: persisted.goal,
+      // A resumed run keeps the criteria it was planned against; an explicit --criteria still wins.
+      ...(persisted.criteria !== undefined ? { criteria: persisted.criteria } : {}),
+      ...flags,
+    },
+    ctx,
+  );
+}
+
 export async function runMergePr(
   args: Extract<ParsedArgs, { kind: 'merge-pr' }>,
   ctx: MergePrCtx = {},

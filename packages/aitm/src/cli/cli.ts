@@ -3,11 +3,20 @@
 // Single entry. Parses argv, dispatches, exits with the right code.
 
 import { realpathSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { initErrorReporter } from '../observability/error-reporter.ts';
 import { parseArgs } from './args.ts';
 import type { CleanCtx, McpLoginCtx, MergePrCtx, ProfileCtx, StartCtx } from './commands.ts';
-import { runClean, runConfig, runMcpLogin, runMergePr, runProfile, runStart } from './commands.ts';
+import {
+  runClean,
+  runConfig,
+  runMcpLogin,
+  runMergePr,
+  runProfile,
+  runResume,
+  runStart,
+} from './commands.ts';
 
 export type MainCtx = {
   cwd?: string;
@@ -32,6 +41,8 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
   switch (parsed.kind) {
     case 'start':
       return emit(await runStart(parsed, buildStartCtx(ctx)), stdout, stderr);
+    case 'resume':
+      return emit(await runResume(parsed, buildStartCtx(ctx)), stdout, stderr);
     case 'merge-pr':
       return emit(await runMergePr(parsed, buildMergePrCtx(ctx)), stdout, stderr);
     case 'config-set':
@@ -53,6 +64,9 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
       return emit(await runMcpLogin(parsed, buildMcpLoginCtx(ctx, stdout, stderr)), stdout, stderr);
     case 'help':
       stdout(`${HELP_TEXT}\n`);
+      return 0;
+    case 'version':
+      stdout(`${await readVersion()}\n`);
       return 0;
     case 'usage-error':
       stderr(`${HELP_TEXT}\n`);
@@ -125,12 +139,31 @@ function emit(
   return exit.code;
 }
 
+// The installed version, read from the package manifest at run time rather than baked in by the
+// build, so `aitm --version` can never disagree with what npm/bun actually installed. Both `src/`
+// and the built `dist/` sit two levels under the package root, so one relative URL serves both.
+// Unreadable manifest → 'unknown' rather than a crash: a version probe must never fail.
+async function readVersion(): Promise<string> {
+  try {
+    const raw = await readFile(new URL('../../package.json', import.meta.url), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === 'object' && parsed !== null && 'version' in parsed) {
+      const version = (parsed as { version: unknown }).version;
+      if (typeof version === 'string') return version;
+    }
+  } catch {
+    // fall through
+  }
+  return 'unknown';
+}
+
 const HELP_TEXT = `aitm — autonomous task orchestrator
 
 Usage:
   aitm start "<goal>" [--criteria "..."] [--max-prs N] [--max-sessions N]
                       [--no-automerge] [--admin] [--style <path>] [--model <id>]
                       [--concurrency N] [--branch <name>]
+  aitm resume         [same flags as start; the goal comes from .ai-task-master/]
   aitm merge-pr [--pr N] [--no-resume] [--admin]
   aitm config set <key> <value> [--project]
   aitm config unset <key>       [--project]
@@ -147,6 +180,7 @@ Usage:
   aitm mcp-login <server-url> [--callback-url <url>] [--timeout <ms>]
   aitm clean [--force|-f]
   aitm help | --help | -h
+  aitm version | --version | -v
 
 Exit codes:
   0  success

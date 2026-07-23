@@ -152,6 +152,17 @@ Pull requests:
 
 The PR block lists every group that opened a PR, read from persisted state rather than the run result — so it appears on a merged run, on a run parked at `awaiting-pr`, and on a blocked one, where the PRs opened before the block are exactly what you want to look at. It is omitted entirely when the run opened none. Both blocks are best-effort: a reporting failure never changes the exit code.
 
+## Resuming
+
+`aitm resume` continues the run this directory already started. It takes every `start` flag, but no goal — the goal comes from `.ai-task-master/goal.txt` and the criteria from `.ai-task-master/criteria.txt`, so a resumed run can never drift onto a subtly different goal than the one its plan was built for. Retyping the goal is exactly how that drift happens.
+
+```sh
+aitm resume                 # continue where the last run stopped
+aitm resume --admin         # …with a per-run flag
+```
+
+A directory that has never been started says so and exits 1 without touching the loop.
+
 ## Termination signals
 
 | Signal | Exit code |

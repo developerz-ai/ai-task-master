@@ -19,6 +19,7 @@ import {
   runConfig,
   runMergePr,
   runProfile,
+  runResume,
   runStart,
   usageSummaryLine,
 } from './commands.ts';
@@ -1731,4 +1732,129 @@ test('prLinksBlock: groups without a PR are skipped, and no PRs prints nothing',
 
 test('prLinksBlock: legacy state without a persisted URL still reports the number', () => {
   assert.match(prLinksBlock([prGroupFixture({ pr: 9 })]), /#9 {2}Todo CRUD API — #9/);
+});
+
+// ---- runResume ------------------------------------------------------------
+
+test('runResume: reuses the persisted goal and criteria instead of retyping them', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedStartState(repo.path);
+    await writeFile(join(repo.path, '.ai-task-master', 'goal.txt'), 'add jwt auth\n');
+    await writeFile(join(repo.path, '.ai-task-master', 'criteria.txt'), 'tests pass\n');
+    let captured: RunLoopInput | null = null;
+    const result = await runResume(
+      { kind: 'resume' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async (input) => {
+          captured = input;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(captured?.goal, 'add jwt auth');
+    assert.equal(captured?.criteria, 'tests pass');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runResume: start flags still apply to the resumed run', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedStartState(repo.path);
+    await writeFile(join(repo.path, '.ai-task-master', 'goal.txt'), 'add jwt auth\n');
+    let captured: RunLoopInput | null = null;
+    await runResume(
+      { kind: 'resume', maxPrs: 2 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async (input) => {
+          captured = input;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(captured?.resolved.maxPrs, 2);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runResume: a directory that never started says so, and does not run the loop', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let loopCalls = 0;
+    const result = await runResume(
+      { kind: 'resume' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async () => {
+          loopCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /Nothing to resume/);
+    assert.match(result.message ?? '', /aitm start/);
+    assert.equal(loopCalls, 0);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runResume: an unreadable state dir reports the real failure, not "nothing to resume"', async () => {
+  // Swallowing every read error would report "nothing to resume" for a run that exists and cannot
+  // be read — and would make this error branch unreachable. Only ENOENT means never-started.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    await mkdir(dir, { recursive: true });
+    // A directory where goal.txt should be: readFile fails with EISDIR, not ENOENT.
+    await mkdir(join(dir, 'goal.txt'), { recursive: true });
+    let loopCalls = 0;
+    const result = await runResume(
+      { kind: 'resume' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async () => {
+          loopCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /Failed to read the persisted goal/);
+    assert.doesNotMatch(result.message ?? '', /Nothing to resume/);
+    assert.equal(loopCalls, 0);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
 });

@@ -50,6 +50,7 @@ export {
   findFuzzyMatch,
   isDisproportionateMatch,
   lineTrimmedMatch,
+  type SpanMatch,
   type SpanMatcher,
   spanMatchers,
   whitespaceNormalizedMatch,

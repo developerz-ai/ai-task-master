@@ -4,15 +4,20 @@
 // a collapsed run of whitespace. Ported in spirit from OpenCode's replacer cascade
 // (`sst/opencode`, `packages/opencode/src/tool/edit.ts`), rewritten to aitm house style.
 //
-// Each matcher returns the ACTUAL substring of `content` to replace (so the caller does one literal
-// replacement on a genuine span — never a regex substitution), or `undefined` when it cannot place
-// the edit. Exactness is the caller's job: `applyEdit` runs the exact path first and only falls
-// through to these on zero exact hits, then re-checks uniqueness and `isDisproportionateMatch`
-// against whatever span comes back — so a loose match can neither bypass the uniqueness contract
-// nor silently swallow a region far larger than what was asked for.
+// Each matcher reports the ACTUAL substring of `content` to replace (so the caller does one literal
+// replacement on a genuine span — never a regex substitution) together with how many distinct
+// locations it matched, or `undefined` when it cannot place the edit. The count is what lets
+// `applyEdit` hold a fuzzy match to the SAME uniqueness contract as an exact one: it runs the exact
+// path first, falls through here only on zero exact hits, then rejects the edit when the chosen
+// matcher found more than one candidate (without `replaceAll`) or when the span is disproportionately
+// larger than `oldString` — so a loose match can neither clobber an ambiguous location nor swallow a
+// region far larger than what was asked for.
 
-/** Locates the span of `content` that fuzzily matches `find`, or `undefined` if none. */
-export type SpanMatcher = (content: string, find: string) => string | undefined;
+/** A fuzzy match: the real span of `content` to replace, and how many distinct locations matched. */
+export type SpanMatch = { readonly span: string; readonly count: number };
+
+/** Locates the span of `content` fuzzily matching `find` (with a candidate count), or `undefined`. */
+export type SpanMatcher = (content: string, find: string) => SpanMatch | undefined;
 
 // Block-anchor similarity floor: a candidate block whose middle lines score below this against the
 // search block is rejected. 0.65 mirrors OpenCode's threshold.
@@ -61,6 +66,7 @@ export const lineTrimmedMatch: SpanMatcher = (content, find) => {
   const searchLines = trimTrailingEmpty(find.split('\n'));
   if (searchLines.length === 0) return undefined;
 
+  const starts: number[] = [];
   for (let i = 0; i <= originalLines.length - searchLines.length; i++) {
     let matches = true;
     for (let j = 0; j < searchLines.length; j++) {
@@ -69,11 +75,14 @@ export const lineTrimmedMatch: SpanMatcher = (content, find) => {
         break;
       }
     }
-    if (matches) {
-      return spanOfLines(content, originalLines, i, i + searchLines.length - 1);
-    }
+    if (matches) starts.push(i);
   }
-  return undefined;
+  const first = starts[0];
+  if (first === undefined) return undefined;
+  return {
+    span: spanOfLines(content, originalLines, first, first + searchLines.length - 1),
+    count: starts.length,
+  };
 };
 
 /**
@@ -92,31 +101,36 @@ export const blockAnchorMatch: SpanMatcher = (content, find) => {
   const searchBlockSize = searchLines.length;
   const maxLineDelta = Math.max(1, Math.floor(searchBlockSize * 0.25));
 
-  const candidates: Array<{ startLine: number; endLine: number }> = [];
+  // A closing anchor like `}` recurs, so the first line matching `lastAnchor` after a first anchor is
+  // often an inner brace whose span is too short. Keep scanning past it to the real block end, taking
+  // every in-range candidate that also clears the similarity floor, and stop only once the span grows
+  // past the largest permitted size (later lines only make it longer).
+  const scored: Array<{ startLine: number; endLine: number; similarity: number }> = [];
   for (let i = 0; i < originalLines.length; i++) {
     if (trimmedAt(originalLines, i) !== firstAnchor) continue;
     for (let j = i + 2; j < originalLines.length; j++) {
-      if (trimmedAt(originalLines, j) === lastAnchor) {
-        if (Math.abs(j - i + 1 - searchBlockSize) <= maxLineDelta) {
-          candidates.push({ startLine: i, endLine: j });
+      if (j - i + 1 > searchBlockSize + maxLineDelta) break;
+      if (
+        trimmedAt(originalLines, j) === lastAnchor &&
+        Math.abs(j - i + 1 - searchBlockSize) <= maxLineDelta
+      ) {
+        const candidate = { startLine: i, endLine: j };
+        const similarity = middleSimilarity(originalLines, searchLines, candidate);
+        if (similarity >= BLOCK_ANCHOR_SIMILARITY_THRESHOLD) {
+          scored.push({ ...candidate, similarity });
         }
-        break; // only the first matching last-line for this first-line
       }
     }
   }
-  if (candidates.length === 0) return undefined;
-
-  let best: { startLine: number; endLine: number } | undefined;
-  let bestSimilarity = -1;
-  for (const candidate of candidates) {
-    const similarity = middleSimilarity(originalLines, searchLines, candidate);
-    if (similarity > bestSimilarity) {
-      bestSimilarity = similarity;
-      best = candidate;
-    }
+  let best = scored[0];
+  if (best === undefined) return undefined;
+  for (const candidate of scored) {
+    if (candidate.similarity > best.similarity) best = candidate;
   }
-  if (best === undefined || bestSimilarity < BLOCK_ANCHOR_SIMILARITY_THRESHOLD) return undefined;
-  return spanOfLines(content, originalLines, best.startLine, best.endLine);
+  return {
+    span: spanOfLines(content, originalLines, best.startLine, best.endLine),
+    count: scored.length,
+  };
 };
 
 /** Mean per-line Levenshtein similarity of the interior lines; 1 when there are no interior lines. */
@@ -154,16 +168,19 @@ export const whitespaceNormalizedMatch: SpanMatcher = (content, find) => {
   if (normalizedFind === '') return undefined;
   const lines = content.split('\n');
 
-  for (const line of lines) {
-    if (normalize(line) === normalizedFind) return line;
-  }
+  const singleLines = lines.filter((line) => normalize(line) === normalizedFind);
+  const firstLine = singleLines[0];
+  if (firstLine !== undefined) return { span: firstLine, count: singleLines.length };
 
   const findLines = find.split('\n');
   if (findLines.length > 1) {
+    const blocks: string[] = [];
     for (let i = 0; i <= lines.length - findLines.length; i++) {
       const block = lines.slice(i, i + findLines.length).join('\n');
-      if (normalize(block) === normalizedFind) return block;
+      if (normalize(block) === normalizedFind) blocks.push(block);
     }
+    const firstBlock = blocks[0];
+    if (firstBlock !== undefined) return { span: firstBlock, count: blocks.length };
   }
   return undefined;
 };
@@ -175,11 +192,11 @@ export const spanMatchers: readonly SpanMatcher[] = [
   whitespaceNormalizedMatch,
 ];
 
-/** Run the ladder in order; return the first matcher's span, or `undefined` if none locate `find`. */
-export function findFuzzyMatch(content: string, find: string): string | undefined {
+/** Run the ladder in order; return the first matcher's match, or `undefined` if none locate `find`. */
+export function findFuzzyMatch(content: string, find: string): SpanMatch | undefined {
   for (const matcher of spanMatchers) {
-    const span = matcher(content, find);
-    if (span !== undefined) return span;
+    const match = matcher(content, find);
+    if (match !== undefined) return match;
   }
   return undefined;
 }

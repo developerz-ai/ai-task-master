@@ -18,20 +18,21 @@
 ## Files to change
 - `packages/ai-claude-compat/src/bash-tool.ts`:
   - `BashOutput` type (`:42`) — add optional `timedOut?: boolean` (additive, mirrors `denied?`).
-  - `execBash` (`:185`) — set a `killedByTimer` flag inside the `setTimeout` callback (`:204`); on the catch path, stamp `timedOut: true` when the flag is set. Deterministic — don't rely on execa's `.timedOut`/`.signal`, since our own group-kill, not execa's timeout, is what fires first.
+  - `execBash` (`:185`) — set a `killedByTimer` flag **only inside** the `setTimeout` callback (`:204`), and **clear the timer the instant the subprocess settles** (a `finally`), so a command that exits on its own — even one whose non-zero exit races the deadline — never trips the flag. On the catch path, stamp `timedOut: true` only when the flag is set. Deterministic — don't rely on execa's `.timedOut`/`.signal`, since our own group-kill, not execa's timeout, is what fires first; the flag, owned solely by the fired timer, is the single source of truth for "killed on timeout".
   - `bashTool.execute` (`:241`) — propagate `timedOut` onto the returned `BashOutput`.
   - `renderBashSection` (`:279`) — when `timedOut`, append a `<bash_metadata>` line mirroring OpenCode's wording, naming the effective timeout + the 600 000 ms ceiling (`MAX_BASH_TIMEOUT_MS`, `:96`) + a note that cwd tracking is paused for this call.
   - `multiBashTool` (`:304`) — same propagation; a timed-out command already stops the sequence (non-zero exit), so `failedAt` + the notice explain the stop.
 
 ## Steps
 1. Thread the effective `timeout` (post-`Math.min(..., MAX_BASH_TIMEOUT_MS)`, `:255`) into `execBash` (currently passed as `timeout` arg — reuse) so the notice can quote the real value the model must exceed.
-2. `execBash`: `let killedByTimer = false;` set it inside the existing timer callback (`:205`) right before `process.kill(-pid, 'SIGKILL')`. In `catch`, return `{ ...result, timedOut: killedByTimer }` (only when true, to keep clean-exit output byte-identical).
+2. `execBash`: `let killedByTimer = false;` set it inside the existing timer callback (`:205`) right before `process.kill(-pid, 'SIGKILL')`, and `clearTimeout(timer)` in a `finally` once the awaited subprocess settles. Ownership is thus explicit at the exit boundary: a process that completes before the timer fires clears it and is never marked, while one the timer actually killed is. In `catch`, return `{ ...result, timedOut: killedByTimer }` (only when true, to keep clean-exit output byte-identical).
 3. Notice text (single source, shared by both tools): `command exceeded the <N> ms timeout and was terminated. If it needs longer and is not waiting for interactive input, retry with a larger timeoutMs (ceiling 600000). cwd tracking is paused for this call.` Append via `renderBashSection` only when `timedOut` — so `toModelOutput` (`:272`) carries it into context.
 4. Do **not** change `denied` (exit 126) handling or the spill/`capStream` path — timeout is a separate axis; a command can be both truncated and timed-out and both notices should render.
 
 ## Tests (`bash-tool.test.ts`)
 - `sleep 5` with `timeoutMs: 100` → `exitCode !== 0`, `timedOut === true`, `renderBashSection` output contains the `100 ms` + `600000` + retry hint.
 - Normal `false` (exit 1) → `timedOut` unset, no timeout notice.
+- Boundary case (through the `exec` seam): a command that exits non-zero right around the deadline — the timer cleared on settle — is **not** marked `timedOut` and carries no notice; only a command the timer actually killed is.
 - `multiBash` with a slow first command + `timeoutMs` small → sequence stops, `failedAt === 0`, the timed-out result carries the notice.
 - cwd regression: a timed-out `cd /tmp && sleep 5` leaves the tracked cwd unchanged (epilogue didn't run) — assert the next call still runs from the prior cwd, and the notice warned about it.
 - Use the `exec` test seam (`BashToolInit.exec`, `:62`) or a real `bash` gated behind an env check — keep portable (no `Bun.*`).

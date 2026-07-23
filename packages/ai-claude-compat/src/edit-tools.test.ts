@@ -134,10 +134,33 @@ test('applyEdit: refuses a disproportionate fuzzy match rather than clobbering',
 
 test('applyEdit: a fuzzy span occurring more than once is rejected as not unique', () => {
   const content = '\tx = 1;\n\tx = 1;\n';
-  // 2-space oldString matches neither tab-indented line exactly; the fuzzy span "\tx = 1;" occurs twice.
+  // 2-space oldString matches neither tab-indented line exactly; both lines are fuzzy candidates, so
+  // the matcher reports a candidate count of 2 and the edit is rejected before any replacement.
   assert.throws(
     () => applyEdit(content, { oldString: '  x = 1;', newString: '  x = 2;' }),
-    /not unique \(2 matches\)/,
+    /not unique \(2 fuzzy matches\)/,
+  );
+});
+
+test('applyEdit: rejects an oldString that fuzzily matches two differently-spaced lines', () => {
+  // Neither line contains the wider-spaced oldString literally (the exact pass misses), but both
+  // normalize to the same tokens. Counting only the returned span's literal copies would see one and
+  // silently edit it; counting the chosen matcher's candidates catches the ambiguity (issue #268).
+  const content = 'x = 1;\nx  =  1;\n';
+  assert.throws(
+    () => applyEdit(content, { oldString: 'x   =   1;', newString: 'x = 2;' }),
+    /not unique \(2 fuzzy matches\)/,
+  );
+});
+
+test('applyEdit: a whitespace-only oldString never fuzzy-matches a blank line', () => {
+  // No literal space exists, so the exact pass misses. Without the guard, lineTrimmedMatch would
+  // return '' for the blank line and replaceSpan would splice newString between every character.
+  const content = 'a\n\nb\n';
+  assert.throws(() => applyEdit(content, { oldString: ' ', newString: 'X' }), /not found/);
+  assert.throws(
+    () => applyEdit(content, { oldString: ' ', newString: 'X', replaceAll: true }),
+    /not found/,
   );
 });
 

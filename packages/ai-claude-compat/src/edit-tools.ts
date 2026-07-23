@@ -136,19 +136,27 @@ export function applyEdit(content: string, edit: EditSpec): { next: string; coun
   if (content.split(edit.oldString).length - 1 >= 1) {
     return replaceSpan(content, edit.oldString, edit.newString, edit.replaceAll ?? false);
   }
-  // Exact miss — fall back to a guarded fuzzy match (issue #268). The ladder runs only on zero
-  // exact hits; the located span is refused if it is disproportionately larger than `oldString`,
-  // and still goes through the same uniqueness contract below, so fuzzy never clobbers.
-  const matched = findFuzzyMatch(content, edit.oldString);
-  if (matched === undefined) {
+  // Exact miss — fall back to a guarded fuzzy match (issue #268). The ladder runs only on zero exact
+  // hits. A whitespace-only `oldString` is never fuzzed: its trimmed form matches every blank line and
+  // would yield an empty span that `replaceSpan` would splice between every character. The located
+  // span is refused if it is disproportionately larger than `oldString`, or if the chosen matcher
+  // found more than one candidate without `replaceAll` — the same uniqueness contract as the exact
+  // path — so fuzzy never clobbers.
+  const fuzzy = edit.oldString.trim() === '' ? undefined : findFuzzyMatch(content, edit.oldString);
+  if (fuzzy === undefined) {
     throw new Error(`oldString not found: ${preview(edit.oldString)}`);
   }
-  if (isDisproportionateMatch(matched, edit.oldString)) {
+  if (isDisproportionateMatch(fuzzy.span, edit.oldString)) {
     throw new Error(
       `fuzzy match refused — the located span is much larger than oldString (${preview(edit.oldString)}); re-read the file and pass the exact text to replace`,
     );
   }
-  return replaceSpan(content, matched, edit.newString, edit.replaceAll ?? false);
+  if (fuzzy.count > 1 && !(edit.replaceAll ?? false)) {
+    throw new Error(
+      `oldString is not unique (${fuzzy.count} fuzzy matches): ${preview(edit.oldString)} — add surrounding context or pass replaceAll`,
+    );
+  }
+  return replaceSpan(content, fuzzy.span, edit.newString, edit.replaceAll ?? false);
 }
 
 // Apply a replacement of an exact `target` span under the uniqueness contract: >1 occurrence

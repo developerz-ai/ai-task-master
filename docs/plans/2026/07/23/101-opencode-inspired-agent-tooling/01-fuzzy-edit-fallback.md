@@ -22,15 +22,15 @@
 - `packages/ai-claude-compat/src/index.ts` — export the new module's public surface if the package re-exports per-file (match existing pattern).
 
 ## Steps
-1. **`edit-replacers.ts`**: each matcher is `(content: string, find: string) => string | undefined` returning the *actual substring of `content`* to replace (so the caller still does one literal `indexOf`/`split` on a real span — no regex substitution surprises; mirror OpenCode returning `content.substring(...)`). Include `isDisproportionateMatch(matched, oldString): boolean` verbatim in spirit (`edit.ts:731`).
+1. **`edit-replacers.ts`**: each matcher is `(content: string, find: string) => SpanMatch | undefined` where `SpanMatch = { span: string; count: number }` — `span` is the *actual substring of `content`* to replace (so the caller still does one literal `indexOf`/`split` on a real span — no regex substitution surprises; mirror OpenCode returning `content.substring(...)`) and `count` is how many distinct locations that matcher found, so the caller can enforce uniqueness across fuzzy-equivalent candidates rather than only literal repeats of `span`. Include `isDisproportionateMatch(matched, oldString): boolean` verbatim in spirit (`edit.ts:731`).
 2. **`applyEdit` fallback** (`edit-tools.ts:124`): restructure the tail:
    - Keep `:127` empty-guard, `:131` identical-guard.
    - `const occurrences = content.split(oldString).length - 1`.
    - If `occurrences >= 1`: **unchanged** exact path (`:138`–`:148`) — exact match always wins, byte-identical.
-   - If `occurrences === 0`: run `[lineTrimmedMatch, blockAnchorMatch, whitespaceNormalizedMatch]` in order; first that returns a span `matched`:
-     - `if (isDisproportionateMatch(matched, oldString)) throw` (OpenCode's wording, `edit.ts:711`).
-     - re-derive `occurrences = content.split(matched).length - 1`; apply the **same** uniqueness rule (`>1 && !replaceAll` → the existing not-unique throw) so fuzzy never bypasses the uniqueness contract.
-     - replace via the existing `split(matched).join(newString)` / single-`indexOf` code path (reuse, don't duplicate).
+   - If `occurrences === 0`: a **whitespace-only** `oldString` is refused up front (its trimmed form matches every blank line and would yield an empty span that `split('')` splices between every character); otherwise run `[lineTrimmedMatch, blockAnchorMatch, whitespaceNormalizedMatch]` in order and take the first `{ span, count }`:
+     - `if (isDisproportionateMatch(span, oldString)) throw` (OpenCode's wording, `edit.ts:711`).
+     - `if (count > 1 && !replaceAll) throw` the not-unique error — using the **chosen matcher's own candidate count**, so two indentation/whitespace-variant blocks that share no literal text are still caught (a literal `content.split(span)` would count only one and silently edit it).
+     - replace via the existing `split(span).join(newString)` / single-`indexOf` code path (reuse, don't duplicate).
    - No matcher hits → the existing `oldString not found` throw (`:135`), now truthfully "not found even fuzzily".
 3. **`multiEdit`** (`:59`) needs no change — it calls `applyEdit` per edit (`:71`), so the fallback flows through; keep atomic all-or-nothing.
 4. **Descriptions**: leave the tool descriptions (`:41`, `:62`) as-is — they still instruct exact strings; the fallback is a silent safety net, not a new contract to advertise (avoids the model getting lazy about anchors).
@@ -39,7 +39,7 @@
 - `lineTrimmedMatch`: `oldString` indented 2 spaces vs file indented 4 → returns the file's real span; whitespace-only diff.
 - `blockAnchorMatch`: 4-line block, middle line reworded < 35% → matches; anchors mismatch → `undefined`.
 - `isDisproportionateMatch`: 1-line `oldString` matching a 20-line span → `true` (guard fires).
-- `applyEdit` integration: (a) indentation-off `oldString` now applies + correct `count`/`snippet`; (b) a fuzzy match that is disproportionate still **throws** (no clobber); (c) a fuzzy match with 2 occurrences + no `replaceAll` throws not-unique; (d) exact-match cases byte-identical (regression).
+- `applyEdit` integration: (a) indentation-off `oldString` now applies + correct `count`/`snippet`; (b) a fuzzy match that is disproportionate still **throws** (no clobber); (c) a fuzzy match with 2 candidates — including two differently-spaced lines that share no literal text — + no `replaceAll` throws not-unique; (d) exact-match cases byte-identical (regression); (e) a whitespace-only `oldString` is refused, not spliced between characters.
 - `edit-tools.test.ts`: read-before-edit + staleness gates (`:102`,`:116`) still fire ahead of any fuzzy logic.
 - Gates: `bun test`, `bun run test:node`, `bun run typecheck`, `bun run lint`.
 

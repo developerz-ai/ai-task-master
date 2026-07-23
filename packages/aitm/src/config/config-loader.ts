@@ -136,13 +136,18 @@ export class ConfigLoader {
     const active = this.resolveActiveProfile(global);
     const profile = active?.profile;
 
-    const { apiKey, apiKeySource } = this.resolveApiKey(global, profile);
+    const { baseURL, baseURLSource } = this.resolveBaseURL(global, profile);
+    const { apiKey, apiKeySource } = this.resolveApiKey(global, profile, baseURLSource);
 
     if (apiKey === undefined || apiKeySource === undefined) {
       throw new Error(
-        'No OpenRouter API key found. Set OPENROUTER_API_KEY env, add ' +
-          '"openrouterApiKey" to the user-owned ~/.aitm.json (a project config.json is ignored ' +
-          'for credentials), or create a profile with `aitm profile add <name> --api-key <key>`.',
+        baseURLSource === 'profile'
+          ? `Active profile "${active?.name}" sets a baseURL (${baseURL}) but no API key of its own, ` +
+              'and any top-level openrouterApiKey belongs to a different provider (it would be rejected ' +
+              `by that endpoint). Set the profile's key: \`aitm profile set ${active?.name} openrouterApiKey <key>\`.`
+          : 'No OpenRouter API key found. Set OPENROUTER_API_KEY env, add ' +
+              '"openrouterApiKey" to the user-owned ~/.aitm.json (a project config.json is ignored ' +
+              'for credentials), or create a profile with `aitm profile add <name> --api-key <key>`.',
       );
     }
 
@@ -174,7 +179,7 @@ export class ConfigLoader {
       openrouterApiKey: apiKey,
       apiKeySource,
       ...(active ? { activeProfile: active.name } : {}),
-      baseURL: this.resolveBaseURL(global, profile),
+      baseURL,
       models: this.resolveModels(global, project, profile, cliOverrides),
       maxPrs: pick(cliOverrides.maxPrs, project?.maxPrs, global?.maxPrs, DEFAULTS.maxPrs),
       maxSessions: pickNullable(
@@ -512,34 +517,52 @@ export class ConfigLoader {
   private resolveBaseURL(
     global: ConfigFile | null,
     profile: Profile | undefined,
-  ): string | undefined {
-    if (global?.baseURL) return global.baseURL;
-    if (profile?.baseURL) return profile.baseURL;
+  ): { baseURL: string | undefined; baseURLSource: 'global' | 'profile' | 'env' | undefined } {
+    if (global?.baseURL) return { baseURL: global.baseURL, baseURLSource: 'global' };
+    if (profile?.baseURL) return { baseURL: profile.baseURL, baseURLSource: 'profile' };
     const env = this.env.OPENROUTER_BASE_URL?.trim();
-    if (!env) return undefined;
+    if (!env) return { baseURL: undefined, baseURLSource: undefined };
     const parsed = z.url().safeParse(env);
     if (!parsed.success) {
       throw new Error(`OPENROUTER_BASE_URL is not a valid URL: ${JSON.stringify(env)}`);
     }
-    return parsed.data;
+    return { baseURL: parsed.data, baseURLSource: 'env' };
   }
 
-  // Precedence: global > active profile > env — user config wins, env is the fallback. Project
-  // scope is NEVER consulted: a project-set openrouterApiKey is stripped upstream
-  // (stripUntrustedProjectFields), so an untrusted repo can't swap the provider credential. The
-  // profile sits below explicit top-level global config (so a legacy flat key still wins) but above
-  // env (so `aitm profile use` takes effect even when a stale OPENROUTER_API_KEY lingers).
+  // The key and the baseURL must name the SAME provider — a mismatched pair silently sends one
+  // provider's key to another's endpoint (e.g. a legacy top-level OpenRouter key against a profile's
+  // z.ai baseURL → a 401 the user can't diagnose). So the key is resolved to match where the baseURL
+  // came from (`baseURLSource`):
+  //   - baseURL from the active profile (it switched the endpoint): use the profile's own key, or env
+  //     — never the top-level key, which belongs to the default/other provider. If neither exists the
+  //     run fails with an actionable error (the caller reports the missing profile key).
+  //   - baseURL from global/env/default (no profile endpoint switch): the legacy precedence holds —
+  //     top-level global key wins, then the profile key, then env.
+  // Project scope is NEVER consulted: a project-set openrouterApiKey is stripped upstream
+  // (stripUntrustedProjectFields), so an untrusted repo can't swap the provider credential.
   private resolveApiKey(
     global: ConfigFile | null,
     profile: Profile | undefined,
+    baseURLSource: 'global' | 'profile' | 'env' | undefined,
   ): { apiKey: string | undefined; apiKeySource: ResolvedConfig['apiKeySource'] | undefined } {
+    const envKey = this.env.OPENROUTER_API_KEY;
+    if (baseURLSource === 'profile') {
+      // The profile owns the endpoint, so it must own the key. A top-level key here is for a
+      // different provider and is deliberately NOT used.
+      if (profile?.openrouterApiKey) {
+        return { apiKey: profile.openrouterApiKey, apiKeySource: 'profile' };
+      }
+      if (envKey) {
+        return { apiKey: envKey, apiKeySource: 'env' };
+      }
+      return { apiKey: undefined, apiKeySource: undefined };
+    }
     if (global?.openrouterApiKey) {
       return { apiKey: global.openrouterApiKey, apiKeySource: 'global' };
     }
     if (profile?.openrouterApiKey) {
       return { apiKey: profile.openrouterApiKey, apiKeySource: 'profile' };
     }
-    const envKey = this.env.OPENROUTER_API_KEY;
     if (envKey) {
       return { apiKey: envKey, apiKeySource: 'env' };
     }

@@ -1430,6 +1430,47 @@ test('profile: active profile key beats a lingering env key (profile > env)', as
   assert.equal(resolved.apiKeySource, 'profile');
 });
 
+test('profile: a legacy top-level key is NOT paired with the profile endpoint — profile key wins (issue #280)', async () => {
+  // The trap: a flat config kept a top-level openrouterApiKey (for the default OpenRouter endpoint)
+  // but no baseURL; activating a profile switches the endpoint. The key must follow the endpoint —
+  // the profile's own key — not the stale top-level key, which belongs to a different provider.
+  const resolved = await resolveWith({
+    openrouterApiKey: 'sk-or-toplevel-openrouter',
+    activeProfile: 'z.ai',
+    profiles: {
+      'z.ai': { openrouterApiKey: 'sk-zai', baseURL: 'https://api.z.ai/api/coding/paas/v4' },
+    },
+  });
+  assert.equal(resolved.openrouterApiKey, 'sk-zai');
+  assert.equal(resolved.apiKeySource, 'profile');
+  assert.equal(resolved.baseURL, 'https://api.z.ai/api/coding/paas/v4');
+});
+
+test('profile: an endpoint-switching profile with no key falls back to env, never the top-level key (issue #280)', async () => {
+  const resolved = await resolveWith(
+    {
+      openrouterApiKey: 'sk-or-toplevel-openrouter',
+      activeProfile: 'z.ai',
+      profiles: { 'z.ai': { baseURL: 'https://api.z.ai/api/coding/paas/v4' } },
+    },
+    { OPENROUTER_API_KEY: 'sk-env-for-zai' },
+  );
+  assert.equal(resolved.openrouterApiKey, 'sk-env-for-zai');
+  assert.equal(resolved.apiKeySource, 'env');
+  assert.equal(resolved.baseURL, 'https://api.z.ai/api/coding/paas/v4');
+});
+
+test('profile: an endpoint-switching profile with no key and no env fails fast — does not send the top-level key (issue #280)', async () => {
+  await assert.rejects(
+    resolveWith({
+      openrouterApiKey: 'sk-or-toplevel-openrouter',
+      activeProfile: 'z.ai',
+      profiles: { 'z.ai': { baseURL: 'https://api.z.ai/api/coding/paas/v4' } },
+    }),
+    /sets a baseURL .* but no API key/,
+  );
+});
+
 test('profile: dangling activeProfile warns and falls back to env', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

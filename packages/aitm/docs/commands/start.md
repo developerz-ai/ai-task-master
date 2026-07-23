@@ -18,8 +18,11 @@ aitm start "<goal>"
   [--branch <name>]        # default: aitm/<group-id>
 ```
 
-Persisted config keys that these flags override, and the many run settings that have **no** flag
-(e.g. `verifyCommand`, `selfReview`, `webSearch`), are documented in [config.md](../config.md).
+`--max-fix-attempts` and `--concurrency` override the persisted `maxCiFixAttempts` / `concurrency`
+config keys for this run; `--no-automerge`, `--style`, and `--model` likewise override their config
+counterparts. `--admin` is **CLI-only** — a per-run force-merge with no config-file key. The many
+run settings that have **no** flag at all (e.g. `verifyCommand`, `selfReview`, `webSearch`) are
+documented in [config.md](../config.md).
 
 ### `--max-fix-attempts`
 

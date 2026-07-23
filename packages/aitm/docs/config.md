@@ -242,9 +242,9 @@ PreToolUse/PostToolUse shell hooks on the tool registry (issue #121) — the pro
 
 ## Per-role models
 
-Each subagent can run on a different OpenRouter model. Use a cheap fast model for `Planner`, a strong model for `Worker`, a critical model for `Reviewer` — or pin one model everywhere via `models.default`.
+Models are configured by **capability tier**, not by a per-role key. Each subagent maps to a tier: `smart` (Planner, Reviewer), `coding` (Worker), `fast` (Orchestrator), and `generic` — the fallback used for any tier left unset. So set a strong reasoning model on `smart`, a capable code model on `coding`, and a cheap model on `fast` — or pin one model everywhere via `models.generic`, which every other tier falls back to. (There is no `models.default` / `models.planner` / `models.worker` key; those are silently ignored.)
 
-`Credentials` returns role-specific model handles. `Orchestrator` injects the right handle into each subagent when constructing it.
+`Credentials` resolves each role to its tier's handle (`models[tier] || models.generic || built-in default`) and `Orchestrator` injects it into the subagent.
 
 > **Model capability matters for `coding`.** The Worker plans each PR group into a structured `FileManifest` (JSON). Weak/cheap models often return an **empty manifest** here, which blocks the group with an actionable message (issue #45). If you see "the configured coding model produced no files", set `models.coding` to a more capable model. The `smart` tier (Planner/Reviewer) likewise wants a strong reasoning model.
 

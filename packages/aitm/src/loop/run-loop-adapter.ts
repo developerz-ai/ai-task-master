@@ -1067,7 +1067,9 @@ export function makeBudgetCheck(
 export function isOpenRouterEndpoint(baseURL: string | undefined): boolean {
   if (baseURL === undefined || baseURL.trim() === '') return true;
   try {
-    return new URL(baseURL).hostname.endsWith('openrouter.ai');
+    const host = new URL(baseURL).hostname.toLowerCase();
+    // Exact host or a real subdomain — NOT a bare endsWith, which would accept `notopenrouter.ai`.
+    return host === 'openrouter.ai' || host.endsWith('.openrouter.ai');
   } catch {
     return false;
   }

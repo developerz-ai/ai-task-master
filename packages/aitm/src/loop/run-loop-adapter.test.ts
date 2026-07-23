@@ -1336,6 +1336,16 @@ test('isOpenRouterEndpoint: default and openrouter.ai are OpenRouter; other host
   assert.equal(isOpenRouterEndpoint('https://openrouter.ai/api/v1'), true);
   assert.equal(isOpenRouterEndpoint('https://api.z.ai/api/coding/paas/v4'), false);
   assert.equal(isOpenRouterEndpoint('https://api.kimi.com/coding/v1'), false);
+  assert.equal(
+    isOpenRouterEndpoint('https://notopenrouter.ai/api/v1'),
+    false,
+    'lookalike host rejected',
+  );
+  assert.equal(
+    isOpenRouterEndpoint('https://gateway.openrouter.ai/v1'),
+    true,
+    'real subdomain accepted',
+  );
   assert.equal(isOpenRouterEndpoint('not a url'), false);
 });
 
@@ -1388,17 +1398,18 @@ test('webSearchProviderOptions: object form gates via `enabled` and threads doma
     webSearchProviderOptions(
       { enabled: true, allowedDomains: ['docs.rs'], excludedDomains: ['spam.example'] },
       false,
+      OR,
     ),
   );
   assert.deepEqual(p?.allowed_domains, ['docs.rs']);
   assert.deepEqual(p?.excluded_domains, ['spam.example']);
   // Domains on a disabled config never attach.
   assert.equal(
-    webSearchProviderOptions({ enabled: false, allowedDomains: ['docs.rs'] }, true),
+    webSearchProviderOptions({ enabled: false, allowedDomains: ['docs.rs'] }, true, OR),
     undefined,
   );
   // A bare boolean carries no domain parameters (back-compat).
-  assert.deepEqual(params(webSearchProviderOptions(true, false)), {});
+  assert.deepEqual(params(webSearchProviderOptions(true, false, OR)), {});
 });
 
 test('makeBudgetCheck: no check without a ceiling or tracker; enforces token + cost ceilings (issue #190)', async () => {

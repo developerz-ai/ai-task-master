@@ -478,13 +478,17 @@ async function planAndEdit(
   input: WorkerInput,
   branch: string,
 ): Promise<PlanEditResult> {
-  // Snapshot before planning: the inline-edit inference below needs to distinguish files the
-  // Coordinator writes during this pass from dirt the task inherited. Only the self-review pass runs
-  // that inference, so every other task skips the git call entirely and stays byte-identical.
-  const dirtyBefore =
-    input.inlineEditsExpected === true
-      ? await dirtyPaths(init.tools.bash, input.checkoutPath)
-      : EMPTY_PATHS;
+  // Self-review takes a pre-planning snapshot to power the inline-edit inference, and that snapshot
+  // must be on the group branch the planner then edits — so in that mode alone, check out first. The
+  // normal path defers its checkout until it knows there is work to commit (byte-identical to before
+  // this inference existed). `undefined` from dirtyPaths means the snapshot could not be taken, which
+  // disables the inference rather than guessing — an empty baseline would make inherited-dirty files
+  // look newly edited and wrongly skip the fanout.
+  const takeSnapshot = input.inlineEditsExpected === true;
+  if (takeSnapshot) await checkoutBranch(requireExec(init.tools.bash), input, branch);
+  const dirtyBefore = takeSnapshot
+    ? await dirtyPaths(init.tools.bash, input.checkoutPath)
+    : EMPTY_PATHS;
   const { submitted, handle } = await planManifest(agent, input, init.onUsage);
   if (!submitted.ok) {
     // Only after the schema-retry kernel exhausts. A model that never submits gets the same
@@ -506,16 +510,18 @@ async function planAndEdit(
     }
     return { kind: 'blocked', reason: EMPTY_MANIFEST_REASON };
   }
+  // There is work to commit. Check out the group branch now (a no-op when self-review already did it
+  // above) so both the inline and fanout paths observe and land on the same branch — a `checkout -B`
+  // after the writes would carry uncommitted edits onto the wrong branch (audit 02). A no-changes or
+  // empty manifest returned above without ever switching, keeping the normal path byte-identical.
+  await checkoutBranch(requireExec(init.tools.bash), input, branch);
   // Inline-edit path: the Coordinator declared `applied` — it wrote every planned change to disk
   // itself during planning (opencode-style: the agent decides when to delegate; the harness honors "I
-  // did it myself"). The work-loop's acquire already checked out the group branch, so inline edits
-  // landed there directly; checkoutBranch is a harmless no-op when already on it. Each planned file is
-  // phantom-guarded (git status) so a claimed `applied` with nothing on disk blocks rather than an
-  // empty commit — the same discipline the fanout path enforces per editor. Summary comes from each
-  // entry's `purpose` (the Coordinator's own description); there are no editor texts to harvest.
-  // Create/switch the group branch BEFORE anything inspects or writes the tree, so both paths below
-  // observe (and land on) the same branch.
-  await checkoutBranch(requireExec(init.tools.bash), input, branch);
+  // did it myself"). The branch is checked out (just above), so inline edits landed there directly.
+  // Each planned file is phantom-guarded (git status) so a claimed `applied` with nothing on disk
+  // blocks rather than an empty commit — the same discipline the fanout path enforces per editor.
+  // Summary comes from each entry's `purpose` (the Coordinator's own description); there are no
+  // editor texts to harvest.
   // `applied` is what the Coordinator DECLARED; the working tree is what it actually DID, and the two
   // diverge in practice. Measured on a real run: the self-review pass edited every file it planned
   // with its own tools, submitted a manifest without the flag, and the harness fanned out two editors
@@ -767,13 +773,14 @@ const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 // Paths already dirty in the working tree, as a set. Taken BEFORE planning so the inline-edit
 // inference can tell "the Coordinator just wrote this" from "this was already dirty when the task
-// started". Never throws: a status that won't run yields an empty set, which only makes the
-// inference more conservative (every path then looks newly-touched only if it really is dirty later,
-// and the all-or-nothing rule still applies).
+// started". Never throws — but a status that won't run returns `undefined`, NOT an empty set: an
+// empty baseline is the dangerous case, because a file that was inherited-dirty (dirty before AND
+// after) would then pass the "not dirty before" test and look newly edited, skipping the fanout on
+// work the pass never did. `undefined` disables the inference entirely (see everyPlannedFileTouched).
 async function dirtyPaths(
   bash: WorkerTools['bash'],
   checkoutPath: string,
-): Promise<ReadonlySet<string>> {
+): Promise<ReadonlySet<string> | undefined> {
   try {
     const exec = requireExec(bash);
     const out = await exec(
@@ -783,7 +790,7 @@ async function dirtyPaths(
       },
       { toolCallId: `worker-status-pre-${Date.now()}`, messages: [] },
     );
-    if (isAsyncIterable(out) || out.exitCode !== 0) return new Set();
+    if (isAsyncIterable(out) || out.exitCode !== 0) return undefined;
     return new Set(
       out.stdout
         .split('\n')
@@ -791,7 +798,7 @@ async function dirtyPaths(
         .filter((path) => path !== ''),
     );
   } catch {
-    return new Set();
+    return undefined;
   }
 }
 
@@ -809,8 +816,10 @@ async function everyPlannedFileTouched(
   bash: WorkerTools['bash'],
   input: WorkerInput,
   files: readonly FileManifestEntry[],
-  dirtyBefore: ReadonlySet<string>,
+  dirtyBefore: ReadonlySet<string> | undefined,
 ): Promise<boolean> {
+  // No trustworthy pre-planning baseline → cannot tell new edits from inherited dirt → do not skip.
+  if (dirtyBefore === undefined) return false;
   if (files.length === 0) return false;
   for (const file of files) {
     if (dirtyBefore.has(file.path)) return false;

@@ -164,7 +164,7 @@ test('applyEdit: a whitespace-only oldString never fuzzy-matches a blank line', 
   );
 });
 
-test('applyEdit: replaceAll applies a fuzzy span to every occurrence', () => {
+test('applyEdit: replaceAll applies a fuzzy span to every identically-formatted occurrence', () => {
   const content = '\tx = 1;\n\tx = 1;\n';
   const { next, count } = applyEdit(content, {
     oldString: '  x = 1;',
@@ -173,6 +173,17 @@ test('applyEdit: replaceAll applies a fuzzy span to every occurrence', () => {
   });
   assert.equal(count, 2);
   assert.equal(next, '\tx = 2;\n\tx = 2;\n');
+});
+
+test('applyEdit: replaceAll refuses fuzzy candidates that are not identically formatted', () => {
+  // The two lines normalize to the same tokens but are spaced differently. Replacing only the first
+  // returned span would silently leave the other; mass-replacing heterogeneous spans would clobber a
+  // line the model never spelled out. Refuse loudly instead (issue #268).
+  const content = 'x = 1;\nx  =  1;\n';
+  assert.throws(
+    () => applyEdit(content, { oldString: 'x   =   1;', newString: 'x = 2;', replaceAll: true }),
+    /fuzzy replaceAll refused|not identically formatted/,
+  );
 });
 
 test('applyEdit: still throws not-found when neither exact nor fuzzy matches', () => {

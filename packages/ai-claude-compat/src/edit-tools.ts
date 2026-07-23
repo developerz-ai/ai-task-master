@@ -146,17 +146,31 @@ export function applyEdit(content: string, edit: EditSpec): { next: string; coun
   if (fuzzy === undefined) {
     throw new Error(`oldString not found: ${preview(edit.oldString)}`);
   }
-  if (isDisproportionateMatch(fuzzy.span, edit.oldString)) {
+  const spans = fuzzy.spans;
+  if (spans.some((span) => isDisproportionateMatch(span, edit.oldString))) {
     throw new Error(
       `fuzzy match refused — the located span is much larger than oldString (${preview(edit.oldString)}); re-read the file and pass the exact text to replace`,
     );
   }
-  if (fuzzy.count > 1 && !(edit.replaceAll ?? false)) {
-    throw new Error(
-      `oldString is not unique (${fuzzy.count} fuzzy matches): ${preview(edit.oldString)} — add surrounding context or pass replaceAll`,
-    );
+  const replaceAll = edit.replaceAll ?? false;
+  if (spans.length > 1) {
+    if (!replaceAll) {
+      throw new Error(
+        `oldString is not unique (${spans.length} fuzzy matches): ${preview(edit.oldString)} — add surrounding context or pass replaceAll`,
+      );
+    }
+    // `replaceAll` across fuzzy candidates is only safe when they are identically formatted: replacing
+    // differently-spaced spans would clobber lines the model never spelled out. Refuse loudly rather
+    // than mass-replace heterogeneous text or silently leave some candidates untouched.
+    if (new Set(spans).size > 1) {
+      throw new Error(
+        `fuzzy replaceAll refused — the ${spans.length} matches are not identically formatted: ${preview(edit.oldString)} — use exact strings or edit them individually`,
+      );
+    }
   }
-  return replaceSpan(content, fuzzy.span, edit.newString, edit.replaceAll ?? false);
+  // One unique span, or several identically-formatted ones under replaceAll — reuse the exact-path
+  // replacement on the located literal text (which re-counts and honors the uniqueness rule too).
+  return replaceSpan(content, spans[0] ?? '', edit.newString, replaceAll);
 }
 
 // Apply a replacement of an exact `target` span under the uniqueness contract: >1 occurrence

@@ -13,34 +13,30 @@ import {
 test('lineTrimmedMatch: locates a line whose indentation differs from the search', () => {
   const content = 'function foo() {\n    return 42;\n}\n';
   // Search indented 2 spaces; the file uses 4. The returned span is the file's REAL text.
-  assert.deepEqual(lineTrimmedMatch(content, '  return 42;'), { span: '    return 42;', count: 1 });
+  assert.deepEqual(lineTrimmedMatch(content, '  return 42;'), { spans: ['    return 42;'] });
 });
 
 test('lineTrimmedMatch: matches a multi-line block ignoring per-line indentation', () => {
   const content = '  if (x) {\n    doThing();\n  }\n';
   assert.deepEqual(lineTrimmedMatch(content, 'if (x) {\ndoThing();\n}'), {
-    span: '  if (x) {\n    doThing();\n  }',
-    count: 1,
+    spans: ['  if (x) {\n    doThing();\n  }'],
   });
 });
 
 test('lineTrimmedMatch: tolerates a trailing-whitespace-only difference', () => {
-  assert.deepEqual(lineTrimmedMatch('let a = 1;\n', 'let a = 1;  '), {
-    span: 'let a = 1;',
-    count: 1,
-  });
+  assert.deepEqual(lineTrimmedMatch('let a = 1;\n', 'let a = 1;  '), { spans: ['let a = 1;'] });
 });
 
 test('lineTrimmedMatch: returns undefined when no line trims to the search', () => {
   assert.equal(lineTrimmedMatch('alpha\nbeta\n', 'gamma'), undefined);
 });
 
-test('lineTrimmedMatch: counts every indentation-variant location, not just the first', () => {
+test('lineTrimmedMatch: reports every indentation-variant location, not just the first', () => {
   // Two lines trim to the same search; neither is a literal hit for a 2-space search, so both are
-  // fuzzy candidates and the count must reflect the ambiguity.
-  const match = lineTrimmedMatch('  x = 1;\n    x = 1;\n', 'x = 1;');
-  assert.equal(match?.span, '  x = 1;'); // the first location's real text
-  assert.equal(match?.count, 2);
+  // fuzzy candidates and both must be reported so the caller can catch the ambiguity.
+  assert.deepEqual(lineTrimmedMatch('  x = 1;\n    x = 1;\n', 'x = 1;'), {
+    spans: ['  x = 1;', '    x = 1;'],
+  });
 });
 
 // ---- blockAnchorMatch ----
@@ -49,8 +45,7 @@ test('blockAnchorMatch: matches a ≥3-line block with a reworded middle via its
   const content = 'function calc() {\n  const total = a + b;\n  return total * 2;\n}\n';
   const find = 'function calc() {\n  const total = a + c;\n  return total * 2;\n}';
   assert.deepEqual(blockAnchorMatch(content, find), {
-    span: 'function calc() {\n  const total = a + b;\n  return total * 2;\n}',
-    count: 1,
+    spans: ['function calc() {\n  const total = a + b;\n  return total * 2;\n}'],
   });
 });
 
@@ -58,9 +53,7 @@ test('blockAnchorMatch: keeps scanning past an inner closing anchor to the real 
   // The first `}` after the opener is an inner brace whose span is too short. The old code broke at
   // it and missed the real end; the scan must continue to the in-range closing anchor (issue #268).
   const block = 'function f() {\n  const a = 1;\n  if (x) {\n  }\n  return a;\n}';
-  const match = blockAnchorMatch(`${block}\n`, block);
-  assert.equal(match?.span, block);
-  assert.equal(match?.count, 1);
+  assert.deepEqual(blockAnchorMatch(`${block}\n`, block), { spans: [block] });
 });
 
 test('blockAnchorMatch: returns undefined when the anchors do not line up', () => {
@@ -78,27 +71,25 @@ test('blockAnchorMatch: rejects a middle too dissimilar to score above threshold
   assert.equal(blockAnchorMatch(content, find), undefined);
 });
 
-test('blockAnchorMatch: counts each anchor-aligned block that clears the threshold', () => {
+test('blockAnchorMatch: reports each anchor-aligned block that clears the threshold', () => {
   const content = 'start\n  mid\nend\nstart\n  mid\nend\n';
-  const match = blockAnchorMatch(content, 'start\nmid\nend');
-  assert.equal(match?.span, 'start\n  mid\nend');
-  assert.equal(match?.count, 2);
+  assert.deepEqual(blockAnchorMatch(content, 'start\nmid\nend'), {
+    spans: ['start\n  mid\nend', 'start\n  mid\nend'],
+  });
 });
 
 // ---- whitespaceNormalizedMatch ----
 
 test('whitespaceNormalizedMatch: matches a single line with collapsed whitespace', () => {
   assert.deepEqual(whitespaceNormalizedMatch('const  x   =    1;\n', 'const x = 1;'), {
-    span: 'const  x   =    1;',
-    count: 1,
+    spans: ['const  x   =    1;'],
   });
 });
 
 test('whitespaceNormalizedMatch: matches a multi-line block ignoring whitespace runs', () => {
   const content = 'foo(\n    a,\n    b\n)\n';
   assert.deepEqual(whitespaceNormalizedMatch(content, 'foo(\na,\nb\n)'), {
-    span: 'foo(\n    a,\n    b\n)',
-    count: 1,
+    spans: ['foo(\n    a,\n    b\n)'],
   });
 });
 
@@ -106,10 +97,8 @@ test('whitespaceNormalizedMatch: returns undefined when tokens differ', () => {
   assert.equal(whitespaceNormalizedMatch('const x = 1;\n', 'const y = 2;'), undefined);
 });
 
-test('whitespaceNormalizedMatch: counts every line that normalizes to the search', () => {
-  const match = whitespaceNormalizedMatch('a  b\na   b\n', 'a b');
-  assert.equal(match?.span, 'a  b');
-  assert.equal(match?.count, 2);
+test('whitespaceNormalizedMatch: reports every line that normalizes to the search', () => {
+  assert.deepEqual(whitespaceNormalizedMatch('a  b\na   b\n', 'a b'), { spans: ['a  b', 'a   b'] });
 });
 
 // ---- isDisproportionateMatch ----
@@ -136,16 +125,12 @@ test('isDisproportionateMatch: a proportionate multi-line match does not fire', 
 
 test('findFuzzyMatch: returns the first matcher that locates a span', () => {
   // An indentation near-miss is caught by lineTrimmedMatch, first in the ladder.
-  assert.deepEqual(findFuzzyMatch('x\n    y = 1;\nz\n', '  y = 1;'), {
-    span: '    y = 1;',
-    count: 1,
-  });
+  assert.deepEqual(findFuzzyMatch('x\n    y = 1;\nz\n', '  y = 1;'), { spans: ['    y = 1;'] });
 });
 
-test('findFuzzyMatch: propagates the chosen matcher candidate count', () => {
+test('findFuzzyMatch: propagates every candidate the chosen matcher found', () => {
   assert.deepEqual(findFuzzyMatch('  y = 1;\n    y = 1;\n', 'y = 1;'), {
-    span: '  y = 1;',
-    count: 2,
+    spans: ['  y = 1;', '    y = 1;'],
   });
 });
 

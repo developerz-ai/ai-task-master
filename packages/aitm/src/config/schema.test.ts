@@ -40,6 +40,18 @@ test('ConfigFileSchema accepts a positive maxCiFixAttempts and rejects non-posit
   assert.throws(() => ConfigFileSchema.parse({ maxCiFixAttempts: 'three' }));
 });
 
+test('ConfigFileSchema accepts maxCostUsd / maxTotalTokens and rejects non-positive (issue #190)', () => {
+  const parsed = ConfigFileSchema.parse({ maxCostUsd: 2.5, maxTotalTokens: 500_000 });
+  assert.equal(parsed.maxCostUsd, 2.5);
+  assert.equal(parsed.maxTotalTokens, 500_000);
+  assert.equal(ConfigFileSchema.parse({}).maxCostUsd, undefined);
+  assert.throws(() => ConfigFileSchema.parse({ maxCostUsd: 0 }));
+  assert.throws(() => ConfigFileSchema.parse({ maxCostUsd: -1 }));
+  assert.throws(() => ConfigFileSchema.parse({ maxTotalTokens: 0 }));
+  assert.throws(() => ConfigFileSchema.parse({ maxTotalTokens: 1.5 }));
+  assert.throws(() => ConfigFileSchema.parse({ maxTotalTokens: 'lots' }));
+});
+
 test('ConfigFileSchema accepts editorConcurrency >= 1 and rejects < 1 / non-int / non-number', () => {
   assert.equal(ConfigFileSchema.parse({ editorConcurrency: 4 }).editorConcurrency, 4);
   assert.equal(ConfigFileSchema.parse({ editorConcurrency: 1 }).editorConcurrency, 1);

@@ -396,6 +396,7 @@ function makeDeps(
       : {}),
     ...(overrides.signal !== undefined ? { signal: overrides.signal } : {}),
     ...(overrides.now !== undefined ? { now: overrides.now } : {}),
+    ...(overrides.budget !== undefined ? { budget: overrides.budget } : {}),
   };
 }
 
@@ -410,6 +411,45 @@ function steppedClock(stepMs: number): () => number {
 }
 
 // ---- Tests ---------------------------------------------------------------
+
+test('run: a crossed cost/token ceiling stops before the next group and blocks with the reason (issue #190)', async () => {
+  const ready = makeGraph([twoTaskGroup()], { completeAfter: 1 });
+  let budgetCalls = 0;
+  const loop = new WorkLoop(
+    makeDeps({
+      graph: ready.graph,
+      budget: async () => {
+        budgetCalls++;
+        return { exceeded: true, reason: 'token ceiling reached (1100 ≥ maxTotalTokens 1000)' };
+      },
+    }),
+  );
+  const result = await loop.run();
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /token ceiling/);
+  assert.equal(budgetCalls, 1, 'the budget was consulted at the group boundary');
+  // Checked BEFORE graph.ready(): no group is dispatched, so nothing lands mid-commit.
+  assert.equal(ready.readyCalls, 0, 'no group was dispatched');
+});
+
+test('run: a budget under the ceiling lets the loop dispatch the next group (issue #190)', async () => {
+  const ready = makeGraph([twoTaskGroup()], { completeAfter: 1 });
+  let budgetCalls = 0;
+  const loop = new WorkLoop(
+    makeDeps({
+      autoMerge: false,
+      graph: ready.graph,
+      budget: async () => {
+        budgetCalls++;
+        return { exceeded: false };
+      },
+    }),
+  );
+  await loop.run();
+  assert.equal(budgetCalls, 1, 'the budget was consulted');
+  // A non-exceeding budget does not short-circuit — the loop proceeds to dispatch (graph.ready()).
+  assert.ok(ready.readyCalls >= 1, 'the loop proceeded past the budget check');
+});
 
 test('WorkLoop is constructible', () => {
   const loop = new WorkLoop(makeDeps());

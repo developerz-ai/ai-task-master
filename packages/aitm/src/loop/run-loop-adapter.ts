@@ -69,7 +69,7 @@ import {
   type RunStep,
   shortModelName,
 } from '../observability/step-progress.ts';
-import { roleUsageSink } from '../observability/usage-tracker.ts';
+import { roleUsageSink, type UsageTracker } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
 import {
@@ -137,6 +137,7 @@ import { makeProgressTee } from './progress-file.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
 import { runSelfReviewSession } from './self-review.ts';
 import {
+  type BudgetStatus,
   type ReviewerInvocation,
   WorkLoop,
   type WorkLoopGithub,
@@ -714,6 +715,11 @@ export async function runLoopAdapter(
       background,
     });
 
+    const budgetCheck = makeBudgetCheck(
+      input.usage,
+      input.resolved.maxCostUsd,
+      input.resolved.maxTotalTokens,
+    );
     const loop = new WorkLoop({
       orchestrator,
       github,
@@ -737,6 +743,8 @@ export async function runLoopAdapter(
       ),
       stepCounter,
       ...(input.signal ? { signal: input.signal } : {}),
+      // Run-level cost/token ceiling (issue #190). Omitted when no ceiling is configured.
+      ...(budgetCheck ? { budget: budgetCheck } : {}),
     });
     return await loop.run();
   } finally {
@@ -877,6 +885,38 @@ async function defaultPlanGroups(
   }
   if (result.kind === 'blocked') return { kind: 'blocked', reason: result.reason };
   return { kind: 'error', error: result.error };
+}
+
+// Run-level cost/token ceiling (issue #190). Builds the WorkLoop `budget` seam from the usage ledger
+// and the resolved ceilings. Returns undefined when no ceiling is set OR there is no tracker, so the
+// loop runs unbounded and byte-identical. Token enforcement needs no pricing; cost is priced at flush
+// and skipped when the overall cost is unknown (an unpriced model) — the guardrail is honestly
+// approximate. Exported for tests.
+export function makeBudgetCheck(
+  usage: UsageTracker | undefined,
+  maxCostUsd: number | undefined,
+  maxTotalTokens: number | undefined,
+): (() => Promise<BudgetStatus>) | undefined {
+  if ((maxCostUsd === undefined && maxTotalTokens === undefined) || !usage) return undefined;
+  return async (): Promise<BudgetStatus> => {
+    const { overall } = await usage.totals();
+    if (maxTotalTokens !== undefined) {
+      const total = overall.inputTokens + overall.outputTokens;
+      if (total >= maxTotalTokens) {
+        return {
+          exceeded: true,
+          reason: `token ceiling reached (${total} ≥ maxTotalTokens ${maxTotalTokens}); stopping before the next PR group`,
+        };
+      }
+    }
+    if (maxCostUsd !== undefined && overall.costUsd !== null && overall.costUsd >= maxCostUsd) {
+      return {
+        exceeded: true,
+        reason: `cost ceiling reached ($${overall.costUsd.toFixed(4)} ≥ maxCostUsd $${maxCostUsd}); stopping before the next PR group`,
+      };
+    }
+    return { exceeded: false };
+  };
 }
 
 // ---- Orchestrator bridge ---------------------------------------------------

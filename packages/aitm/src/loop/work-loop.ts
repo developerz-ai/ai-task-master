@@ -150,6 +150,10 @@ export type WorkLoopPrContext = {
   recordAddressedThreads(pr: number, ids: readonly string[]): Promise<void>;
 };
 
+// Result of a run-level budget check (issue #190). `exceeded` carries the human reason the run
+// stops; the run-loop adapter builds the check from the usage ledger + resolved ceilings.
+export type BudgetStatus = { exceeded: true; reason: string } | { exceeded: false };
+
 export type WorkLoopDeps = {
   orchestrator: WorkLoopOrchestrator;
   github: WorkLoopGithub;
@@ -195,6 +199,11 @@ export type WorkLoopDeps = {
   // `runGroup`'s catch produced as `blocked` (exit 1). Optional — omitted → no cancellation check,
   // byte-identical to pre-signal behavior. See docs/plans/.../02-signal-cancellation-cleanup.md.
   signal?: AbortSignal;
+  // Run-level cost/token budget check (issue #190). Consulted at each group-batch boundary BEFORE new
+  // work is dispatched (never mid-commit); an exceeded result stops the run and blocks with the
+  // reason. Optional — omitted → no ceiling, byte-identical to before. Built by run-loop-adapter's
+  // makeBudgetCheck from the usage ledger + resolved maxCostUsd/maxTotalTokens.
+  budget?: () => Promise<BudgetStatus>;
   // Clock for task/group timing lines (`task done in 7.2m`, group totals at merge). Optional —
   // defaults to the wall clock; tests inject a stepped fake so duration assertions are
   // deterministic instead of racing the real clock.
@@ -373,7 +382,7 @@ export class WorkLoop {
   }
 
   async run(): Promise<WorkLoopResult> {
-    const { graph, maxSessions, concurrency, signal } = this.deps;
+    const { graph, maxSessions, concurrency, signal, budget } = this.deps;
 
     while (!graph.isComplete()) {
       if (signal?.aborted) {
@@ -381,6 +390,14 @@ export class WorkLoop {
       }
       if (this.sessionCapReached(maxSessions)) {
         return { kind: 'session-cap', outcomes: this.outcomes.slice() };
+      }
+      // Run-level cost/token ceiling (issue #190): consult the live usage ledger BEFORE dispatching
+      // the next batch, so a crossed ceiling stops new work at a group boundary — never mid-commit.
+      if (budget) {
+        const status = await budget();
+        if (status.exceeded) {
+          return { kind: 'blocked', reason: status.reason, outcomes: this.outcomes.slice() };
+        }
       }
       const ready = graph.ready();
       if (ready.length === 0) break;

@@ -148,6 +148,28 @@ test('resolve: editorConcurrency defaults 4 and is project over global', async (
   }
 });
 
+test('resolve: maxCostUsd / maxTotalTokens omitted when unset, project over global (issue #190)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    const resolved = await loader.resolve({});
+    assert.equal('maxCostUsd' in resolved, false, 'omitted when unset');
+    assert.equal('maxTotalTokens' in resolved, false, 'omitted when unset');
+
+    await writeGlobalConfig(home.path, { maxCostUsd: 5, maxTotalTokens: 100_000 });
+    assert.equal((await loader.resolve({})).maxCostUsd, 5, 'global applies');
+    assert.equal((await loader.resolve({})).maxTotalTokens, 100_000, 'global applies');
+
+    await writeProjectConfig(cwd.path, { maxCostUsd: 2 });
+    assert.equal((await loader.resolve({})).maxCostUsd, 2, 'project wins over global');
+    assert.equal((await loader.resolve({})).maxTotalTokens, 100_000, 'global still applies');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: streaming defaults false and is project over global', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

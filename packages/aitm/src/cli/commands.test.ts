@@ -282,6 +282,9 @@ test('runStart: --no-automerge suppresses the banner', async () => {
           out += chunk;
         },
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
+        // Stubbed so this assertion tests the auto-merge banner, not whether the model catalog was
+        // reachable — the real one prints a table whose presence depends on a network round-trip.
+        modelBanner: async () => '',
       },
     );
     assert.equal(result.code, 0, result.message);
@@ -1857,4 +1860,52 @@ test('runResume: an unreadable state dir reports the real failure, not "nothing 
     await repo.cleanup();
     await home.cleanup();
   }
+});
+
+test('prLinksBlock: a group with no persisted URL borrows a sibling repo prefix', () => {
+  // The upgrade-mid-run case, observed for real: G1..G3 finished under a build that never persisted
+  // prUrl, G4..G5 under one that did, and the first three printed `#1  title — #1` — a non-link.
+  const block = prLinksBlock([
+    prGroupFixture({ id: 'g1', title: 'Domain types', pr: 1 }),
+    prGroupFixture({ id: 'g2', title: 'API CRUD', pr: 2 }),
+    prGroupFixture({
+      id: 'g4',
+      title: 'Web UI',
+      pr: 4,
+      prUrl: 'https://github.com/sebyx07/test-todo-app/pull/4',
+    }),
+  ]);
+  assert.match(
+    block,
+    /#1 {2}Domain types — https:\/\/github\.com\/sebyx07\/test-todo-app\/pull\/1/,
+  );
+  assert.match(block, /#2 {2}API CRUD — https:\/\/github\.com\/sebyx07\/test-todo-app\/pull\/2/);
+  assert.match(block, /#4 {2}Web UI — https:\/\/github\.com\/sebyx07\/test-todo-app\/pull\/4/);
+});
+
+test('prLinksBlock: with no sibling URL anywhere it still degrades to the bare number', () => {
+  // Nothing in the run knows the repo URL — inventing one would be worse than printing the number.
+  assert.match(prLinksBlock([prGroupFixture({ pr: 9 })]), /#9 {2}Todo CRUD API — #9/);
+});
+
+test('usageSummaryLine: a reference-priced total is labelled an estimate, a provider-priced one is not', () => {
+  // On a flat subscription the dollar figure is what the same work costs at OpenRouter list rates,
+  // not what was billed. Printing it unlabelled would read as a bill.
+  const overall = {
+    inputTokens: 1000,
+    outputTokens: 100,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    calls: 1,
+    costUsd: 1.5,
+    cacheDiscountUsd: null,
+  };
+  assert.match(
+    usageSummaryLine({ perRole: {}, overall, costEstimated: true }),
+    /\$1\.5000 est\. at OpenRouter list rates/,
+  );
+  assert.doesNotMatch(
+    usageSummaryLine({ perRole: {}, overall, costEstimated: false }),
+    /est\. at OpenRouter/,
+  );
 });

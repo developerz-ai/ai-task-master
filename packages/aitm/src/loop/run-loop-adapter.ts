@@ -1059,16 +1059,39 @@ export function makeBudgetCheck(
 
 // ---- Orchestrator bridge ---------------------------------------------------
 
+// True when `baseURL` targets the OpenRouter API (the default when unset). The `web_search` server
+// tool is an OpenRouter-API feature carried in the `openrouter` provider namespace; a non-OpenRouter
+// OpenAI-compatible endpoint (z.ai, kimi, a vLLM gateway) receives a tool schema it does not
+// understand and hard-rejects the whole request (observed: `tools[0].type:type is illegal` on z.ai,
+// which blocked a CI-fix session). Exported for tests.
+export function isOpenRouterEndpoint(baseURL: string | undefined): boolean {
+  if (baseURL === undefined || baseURL.trim() === '') return true;
+  try {
+    const host = new URL(baseURL).hostname.toLowerCase();
+    // Exact host or a real subdomain — NOT a bare endsWith, which would accept `notopenrouter.ai`.
+    return host === 'openrouter.ai' || host.endsWith('.openrouter.ai');
+  } catch {
+    return false;
+  }
+}
+
 // web_search server-tool gating (issue #112) + optional domain filters (issue #195). The tri-state
 // gate lives on a bare boolean or, for the object form, on its `enabled` field: undefined → CI-fix
 // sessions only (highest lookup value, bounded cost); true → all Worker calls; false → never. When
 // enabled, the object form's allowed/excluded domains ride the server-tool payload. Returns the
 // providerOptions fragment (openrouter namespace) or undefined when web_search should not attach.
-// Exported for tests.
+//
+// Attaches ONLY on an OpenRouter endpoint: the server tool lives in the `openrouter` provider
+// namespace, so on any other OpenAI-compatible endpoint it is a tool schema the provider rejects
+// outright — attaching it there crashes the request rather than degrading. The provider-agnostic
+// DuckDuckGo `webSearch` function tool stays in the tool set on every endpoint, so web search still
+// works elsewhere; only this OpenRouter-native server tool is gated off. Exported for tests.
 export function webSearchProviderOptions(
   webSearch: WebSearchConfig | undefined,
   ciFix: boolean,
+  baseURL: string | undefined,
 ): ReturnType<typeof providerOptionsWithServerTools> | undefined {
+  if (!isOpenRouterEndpoint(baseURL)) return undefined;
   const config = typeof webSearch === 'object' ? webSearch : undefined;
   // The tri-state flag is the bare boolean, or the object's `enabled` (unset → CI-fix-only default).
   const flag = typeof webSearch === 'boolean' ? webSearch : config?.enabled;
@@ -1366,7 +1389,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const resumeMessages = carried ?? (await resumeMessagesFor(store, group.id, 'working'));
       const recorder = await beginTranscript(store, { group: group.id, stage: 'working' });
       // Regular Worker: web_search only when explicitly enabled (webSearch: true).
-      const providerOptions = webSearchProviderOptions(input.resolved.webSearch, false);
+      const providerOptions = webSearchProviderOptions(
+        input.resolved.webSearch,
+        false,
+        input.resolved.baseURL,
+      );
       const workerModelId = input.credentials.modelIdFor('worker');
       const workerModel = shortModelName(workerModelId);
       const workerStepTag: RunStep = { phase: 'working', ...stepCounter(group.id, task) };
@@ -1525,7 +1552,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     // rebase/force-push, since the PR isn't open yet. Verification is coordinator-owned: the session
     // runs the command; the Worker only commits.
     selfReview: async ({ group, checkout, baseBranch }) => {
-      const selfReviewProviderOptions = webSearchProviderOptions(input.resolved.webSearch, false);
+      const selfReviewProviderOptions = webSearchProviderOptions(
+        input.resolved.webSearch,
+        false,
+        input.resolved.baseURL,
+      );
       // The self-review Worker runs on the coding tier, so its fallback model id is the coding id.
       const selfReviewUsage = roleUsageSink(
         input.usage,
@@ -1621,7 +1652,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     // the coding-capability Worker pointed at them, rebase onto origin/<base>, force-with-lease push.
     runCiFix: async ({ group, pr, checkout, baseBranch }) => {
       const priorHandle = ciFixHandles.get(group.id);
-      const ciFixProviderOptions = webSearchProviderOptions(input.resolved.webSearch, true);
+      const ciFixProviderOptions = webSearchProviderOptions(
+        input.resolved.webSearch,
+        true,
+        input.resolved.baseURL,
+      );
       // The CI-fix Worker runs on the coding tier, so its fallback model id is the coding id.
       const ciFixUsage = roleUsageSink(
         input.usage,

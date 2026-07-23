@@ -17,20 +17,25 @@ export function progressFileEntry(
   return tag ? `- ${stamp} [${tag}] ${message}` : `- ${stamp} ${message}`;
 }
 
-export type ProgressTee = (message: string, step?: RunStep) => void;
+export type ProgressOpts = { milestone?: boolean };
+export type ProgressTee = (message: string, step?: RunStep, opts?: ProgressOpts) => void;
 
 // Build the WorkLoop `progress` callback: every line goes to the console emitter, and — when the
 // state port supplies appendProgress — to progress.md. Append failures (rejection or sync throw)
-// are swallowed: observability must never break the run.
+// are swallowed: observability must never break the run. `opts` (e.g. a milestone highlight) is
+// passed to the console emitter only; the file entry stays plain markdown.
 export function makeProgressTee(input: {
   append?: (entry: string) => Promise<void>;
-  emit?: (message: string, step?: RunStep) => void;
+  emit?: (message: string, step?: RunStep, opts?: ProgressOpts) => void;
   now?: () => Date;
 }): ProgressTee {
-  const emit = input.emit ?? harnessProgress;
+  // Default emitter forwards to harnessProgress with the default sink, threading opts (the milestone
+  // highlight) into its 4th param without leaking the sink type into this module.
+  const emit =
+    input.emit ?? ((message, step, opts) => harnessProgress(message, step, undefined, opts));
   const { append, now } = input;
-  return (message, step) => {
-    emit(message, step);
+  return (message, step, opts) => {
+    emit(message, step, opts);
     if (!append) return;
     try {
       void append(progressFileEntry(message, step, now)).catch(() => undefined);

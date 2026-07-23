@@ -125,6 +125,30 @@ test('harnessProgress strips ANSI/control from the message', () => {
   assert.deepEqual(lines, ['[aitm 03:04:05] done!\n']);
 });
 
+test('harnessProgress milestone: a ★ leads the line, and it goes green under color', () => {
+  // The one event the operator waits for (a group merged) must be scannable in a wall of cyan lines.
+  const plain = stubSink(false);
+  harnessProgress('group g1: reviewing → merged — done in 8m', undefined, plain.sink, {
+    milestone: true,
+  });
+  assert.deepEqual(plain.lines, ['[aitm 03:04:05] ★ group g1: reviewing → merged — done in 8m\n']);
+
+  const colored = stubSink(true);
+  harnessProgress('group g1: merged', undefined, colored.sink, { milestone: true });
+  const line = colored.lines[0] ?? '';
+  assert.ok(line.includes('★'), 'the star is present');
+  assert.ok(line.includes('\x1b[32m'), 'the line uses the green SGR code');
+  assert.ok(!line.includes('\x1b[36m'), 'not the cyan default');
+});
+
+test('harnessProgress: a non-milestone line stays cyan with no star', () => {
+  const colored = stubSink(true);
+  harnessProgress('group g1: working', undefined, colored.sink);
+  const line = colored.lines[0] ?? '';
+  assert.ok(line.includes('\x1b[36m'), 'cyan default');
+  assert.ok(!line.includes('★'), 'no milestone star');
+});
+
 test('renderStepLines emits text then Using tool lines with timestamped prefix, blank line before each section', () => {
   const { sink } = stubSink();
   const lines = renderStepLines(

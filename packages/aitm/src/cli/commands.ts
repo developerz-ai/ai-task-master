@@ -718,29 +718,30 @@ export async function runMergePr(
     // synthesize a minimal one from --pr (or the current branch's PR) and persist it so
     // subsequent calls resume.
     let runState: RunState;
-    // `--no-resume` means don't trust a persisted `currentPr` from a prior run — always
-    // force the take-over flow so the PR comes from --pr or the current branch instead.
+    // `--no-resume` means don't trust a persisted `currentPr` from a prior run — the PR is
+    // re-resolved from --pr or the current branch instead. It does not mean the run behind that
+    // number is junk, so the take-over PR is written in place: a mid-plan run keeps its plan,
+    // group stages, options and runId rather than being replaced by a bare take-over state.
     if (args.resume === false) {
       const synth = await synthesizeTakeoverState({ args, github, resolved });
       if (synth.kind === 'error') return synth.exit;
-      runState = synth.state;
+      const takeover = synth.state;
       try {
-        // `--no-resume` is the operator saying persisted state is not to be trusted, so replacing it
-        // with the synthesized take-over state is the requested clobber, not an accidental one.
-        await state.init(runState, { force: true });
-      } catch (initErr) {
-        return { code: 1, message: errMsg(initErr) };
+        runState = await state.update((prior) => ({ ...prior, currentPr: takeover.currentPr }));
+      } catch (err) {
+        if (!isFileNotFound(err)) return unreadableStateExit(stateDir, err);
+        runState = takeover;
+        try {
+          await state.init(runState);
+        } catch (initErr) {
+          return { code: 1, message: errMsg(initErr) };
+        }
       }
     } else {
       try {
         runState = await state.read();
       } catch (err) {
-        if (!isFileNotFound(err)) {
-          return {
-            code: 1,
-            message: `Run state at ${join(stateDir, 'state.json')} is unreadable: ${errMsg(err)}. Fix or delete the file to start fresh.`,
-          };
-        }
+        if (!isFileNotFound(err)) return unreadableStateExit(stateDir, err);
         const synth = await synthesizeTakeoverState({ args, github, resolved });
         if (synth.kind === 'error') return synth.exit;
         runState = synth.state;
@@ -1336,6 +1337,15 @@ async function synthesizeTakeoverState(input: {
     },
   };
   return { kind: 'ok', state };
+}
+
+// A state.json that is present but unreadable is never rewritten from under the operator — not
+// even by `--no-resume`, which distrusts one field, not the file. They fix or delete it.
+function unreadableStateExit(stateDir: string, err: unknown): CommandExit {
+  return {
+    code: 1,
+    message: `Run state at ${join(stateDir, 'state.json')} is unreadable: ${errMsg(err)}. Fix or delete the file to start fresh.`,
+  };
 }
 
 function isFileNotFound(err: unknown): boolean {

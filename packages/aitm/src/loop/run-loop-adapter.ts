@@ -49,6 +49,7 @@ import { z } from 'zod';
 import type { RunLoopInput } from '../cli/commands.ts';
 import { buildCompactionStep } from '../compaction/compaction-step.ts';
 import { Compactor } from '../compaction/compactor.ts';
+import type { WebSearchConfig } from '../config/schema.ts';
 import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager, type ToolSurface } from '../mcp/mcp-client.ts';
 import { guardDeferred, TOOL_SEARCH_TOOL_NAME, toolSearch } from '../mcp/tool-search.ts';
@@ -71,7 +72,11 @@ import {
 import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { ModelLimitsRegistry } from '../openrouter/model-limits.ts';
-import { providerOptionsWithServerTools, webSearchServerTool } from '../openrouter/server-tools.ts';
+import {
+  providerOptionsWithServerTools,
+  type WebSearchOptions,
+  webSearchServerTool,
+} from '../openrouter/server-tools.ts';
 import { DEFAULT_MAX_STEPS, Orchestrator } from '../orchestrator/orchestrator.ts';
 import { withAcceptanceCheck } from '../plan/acceptance.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
@@ -561,6 +566,10 @@ export type OrchestratorBridgeCtx = {
   // The run's single background-process handle (issue #103). Threaded into the worker/reviewer tool
   // resolvers so `bash({ run_in_background: true })` backgrounds and bashOutput/killBash are mounted.
   background: BackgroundTools;
+  // Test seam (issue #189): override the Worker subagent runner so a test can deterministically
+  // capture the worker input the bridge builds — chiefly that the resolved `editorConcurrency` cap
+  // is threaded through. Omitted in production, where it defaults to the real runWorkerSubagent.
+  workerRunner?: typeof runWorkerSubagent;
 };
 
 export type RunLoopAdapterSeams = {
@@ -926,15 +935,26 @@ async function defaultPlanGroups(
 
 // ---- Orchestrator bridge ---------------------------------------------------
 
-// web_search server-tool gating (issue #112). webSearch undefined → CI-fix sessions only (highest
-// lookup value, bounded cost); true → all Worker calls; false → never. Returns the providerOptions
-// fragment (openrouter namespace) or undefined when web_search should not attach. Exported for tests.
+// web_search server-tool gating (issue #112) + optional domain filters (issue #195). The tri-state
+// gate lives on a bare boolean or, for the object form, on its `enabled` field: undefined → CI-fix
+// sessions only (highest lookup value, bounded cost); true → all Worker calls; false → never. When
+// enabled, the object form's allowed/excluded domains ride the server-tool payload. Returns the
+// providerOptions fragment (openrouter namespace) or undefined when web_search should not attach.
+// Exported for tests.
 export function webSearchProviderOptions(
-  webSearch: boolean | undefined,
+  webSearch: WebSearchConfig | undefined,
   ciFix: boolean,
 ): ReturnType<typeof providerOptionsWithServerTools> | undefined {
-  const enabled = webSearch === true || (ciFix && webSearch !== false);
-  return enabled ? providerOptionsWithServerTools([webSearchServerTool()]) : undefined;
+  const config = typeof webSearch === 'object' ? webSearch : undefined;
+  // The tri-state flag is the bare boolean, or the object's `enabled` (unset → CI-fix-only default).
+  const flag = typeof webSearch === 'boolean' ? webSearch : config?.enabled;
+  const enabled = flag === true || (ciFix && flag !== false);
+  if (!enabled) return undefined;
+  const options: WebSearchOptions = {
+    ...(config?.allowedDomains?.length ? { allowed_domains: config.allowedDomains } : {}),
+    ...(config?.excludedDomains?.length ? { excluded_domains: config.excludedDomains } : {}),
+  };
+  return providerOptionsWithServerTools([webSearchServerTool(options)]);
 }
 
 // The effective verify command for the pre-PR self-review: the configured verifyCommand when set,
@@ -952,6 +972,7 @@ export function selfReviewVerifyCommand(
 
 export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
   const { input, mcp, rollingContext, fetchHtmlAvailable, state, stepCounter, background } = ctx;
+  const workerRunner = ctx.workerRunner ?? runWorkerSubagent;
   // Rolling context accumulates across groups within a run (issue #123): seeded from what a resumed
   // run already persisted (ctx.rollingContext), grown by openPr after each PR, and read LIVE by the
   // worker + ci-fix bridges — so group N+1 plans against group N's digest. Appends are serialized so
@@ -1301,7 +1322,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const stopWorkerHeartbeat = startHeartbeat(workerAgentLabel, workerHeartbeatSink);
       let result: Awaited<ReturnType<typeof runWorkerSubagent>>;
       try {
-        result = await runWorkerSubagent(agent, {
+        result = await workerRunner(agent, {
           group,
           ...(task ? { task } : {}),
           checkoutPath: checkout.path,
@@ -1313,6 +1334,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           progressBlock: runProgressReminder(workerStepTag),
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
+          // Bound the editor fanout at the resolved cap (issue #189). Always a number (config default
+          // 4), so passed unconditionally — with the default it equals EDITOR_CONCURRENCY_DEFAULT, so
+          // behavior is unchanged until an operator sets `editorConcurrency`.
+          editorConcurrency: input.resolved.editorConcurrency,
           // Resume (issue #108): continue the interrupted conversation from its retained messages
           // instead of cold-starting, reusing the #107 priorHandle continuation seam.
           ...(resumeMessages ? { priorHandle: { agent, messages: resumeMessages } } : {}),

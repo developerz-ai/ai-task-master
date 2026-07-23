@@ -1152,6 +1152,63 @@ test('defaultMakeOrchestrator.runWorker: a group with no acceptance check adds n
   assert.doesNotMatch(sent, /Acceptance check for this PR group/);
 });
 
+test('defaultMakeOrchestrator.runWorker: threads resolved.editorConcurrency into the worker input (issue #189)', async () => {
+  // The fan-out honors `input.editorConcurrency` — that BEHAVIOR is covered by
+  // worker.test.ts ('the editor fanout honors the concurrency cap'). Here we assert the link the fix
+  // restores: the run-loop adapter passes the *resolved* cap into the worker input. Captured
+  // deterministically through the workerRunner seam — no fan-out, no timing. A non-default value (7)
+  // so a hard-coded default could never satisfy the assertion.
+  const model = emptyManifestModel();
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: () => 'openai/gpt-5',
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const mcp = {
+    toolsForRole: () => ({}),
+    toolSurfaceForRole: () => ({ direct: {}, deferred: {} }),
+  };
+  let captured: number | undefined;
+  const workerRunner = async (
+    _agent: unknown,
+    workerInput: { editorConcurrency?: number },
+  ): Promise<WorkerResult> => {
+    captured = workerInput.editorConcurrency;
+    return { kind: 'blocked', reason: 'captured' };
+  };
+  const input = {
+    cwd: '/tmp/adapter-editorcap',
+    resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null, editorConcurrency: 7 },
+    credentials,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    github: {},
+    goal: 'g',
+    criteria: undefined,
+    branch: undefined,
+    state: {},
+  };
+  const orch = defaultMakeOrchestrator({
+    input,
+    mcp,
+    rollingContext: '',
+    state: {},
+    stepCounter: () => undefined,
+    workerRunner,
+  } as never);
+  const res = await orch.runWorker({
+    group: group('core'),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  assert.equal(res.kind, 'blocked');
+  assert.equal(
+    captured,
+    7,
+    'the run-loop adapter threads resolved.editorConcurrency into the worker input',
+  );
+});
+
 test('defaultMakeOrchestrator.runWorker: resuming a recordingFailed transcript still resumes, but warns (issue #220)', async () => {
   // resumeMessagesFor (run-loop-adapter.ts) is looked up before the transcript for this run begins,
   // so seed an interrupted 'working' transcript for group 'core' carrying the same on-disk marker
@@ -1258,6 +1315,46 @@ test('webSearchProviderOptions: unset → CI-fix only; true → all Worker calls
   // false: off for both, including CI-fix.
   assert.equal(webSearchProviderOptions(false, true), undefined, 'false → CI-fix off');
   assert.equal(webSearchProviderOptions(false, false), undefined, 'false → regular off');
+});
+
+test('webSearchProviderOptions: object form gates via `enabled` and threads domain filters (issue #195)', () => {
+  const params = (po: ReturnType<typeof webSearchProviderOptions>) => {
+    const t = (po?.openrouter?.tools ?? [])[0];
+    return t?.type === 'openrouter:web_search' ? t.parameters : undefined;
+  };
+  // `enabled` occupies the same tri-state axis as the bare boolean.
+  assert.notEqual(
+    params(webSearchProviderOptions({ enabled: true }, false)),
+    undefined,
+    'enabled:true → regular on',
+  );
+  assert.equal(
+    webSearchProviderOptions({ enabled: false }, true),
+    undefined,
+    'enabled:false → CI-fix off',
+  );
+  assert.notEqual(
+    params(webSearchProviderOptions({}, true)),
+    undefined,
+    'enabled unset → CI-fix on',
+  );
+  assert.equal(webSearchProviderOptions({}, false), undefined, 'enabled unset → regular off');
+  // Domain filters reach the server-tool payload when enabled.
+  const p = params(
+    webSearchProviderOptions(
+      { enabled: true, allowedDomains: ['docs.rs'], excludedDomains: ['spam.example'] },
+      false,
+    ),
+  );
+  assert.deepEqual(p?.allowed_domains, ['docs.rs']);
+  assert.deepEqual(p?.excluded_domains, ['spam.example']);
+  // Domains on a disabled config never attach.
+  assert.equal(
+    webSearchProviderOptions({ enabled: false, allowedDomains: ['docs.rs'] }, true),
+    undefined,
+  );
+  // A bare boolean carries no domain parameters (back-compat).
+  assert.deepEqual(params(webSearchProviderOptions(true, false)), {});
 });
 
 test('selfReviewVerifyCommand: configured wins; TS repo falls back to typecheck; else undefined', async () => {

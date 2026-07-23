@@ -901,6 +901,63 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
   );
 });
 
+test('defaultMakeOrchestrator.runWorker: threads resolved.editorConcurrency into the worker input (issue #189)', async () => {
+  // The fan-out honors `input.editorConcurrency` — that BEHAVIOR is covered by
+  // worker.test.ts ('the editor fanout honors the concurrency cap'). Here we assert the link the fix
+  // restores: the run-loop adapter passes the *resolved* cap into the worker input. Captured
+  // deterministically through the workerRunner seam — no fan-out, no timing. A non-default value (7)
+  // so a hard-coded default could never satisfy the assertion.
+  const model = emptyManifestModel();
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: () => 'openai/gpt-5',
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const mcp = {
+    toolsForRole: () => ({}),
+    toolSurfaceForRole: () => ({ direct: {}, deferred: {} }),
+  };
+  let captured: number | undefined;
+  const workerRunner = async (
+    _agent: unknown,
+    workerInput: { editorConcurrency?: number },
+  ): Promise<WorkerResult> => {
+    captured = workerInput.editorConcurrency;
+    return { kind: 'blocked', reason: 'captured' };
+  };
+  const input = {
+    cwd: '/tmp/adapter-editorcap',
+    resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null, editorConcurrency: 7 },
+    credentials,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    github: {},
+    goal: 'g',
+    criteria: undefined,
+    branch: undefined,
+    state: {},
+  };
+  const orch = defaultMakeOrchestrator({
+    input,
+    mcp,
+    rollingContext: '',
+    state: {},
+    stepCounter: () => undefined,
+    workerRunner,
+  } as never);
+  const res = await orch.runWorker({
+    group: group('core'),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  assert.equal(res.kind, 'blocked');
+  assert.equal(
+    captured,
+    7,
+    'the run-loop adapter threads resolved.editorConcurrency into the worker input',
+  );
+});
+
 test('defaultMakeOrchestrator.runWorker: resuming a recordingFailed transcript still resumes, but warns (issue #220)', async () => {
   // resumeMessagesFor (run-loop-adapter.ts) is looked up before the transcript for this run begins,
   // so seed an interrupted 'working' transcript for group 'core' carrying the same on-disk marker

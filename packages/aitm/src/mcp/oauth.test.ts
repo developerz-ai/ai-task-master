@@ -43,14 +43,28 @@ test('default callback URL uses the loopback IP literal', () => {
 });
 
 test('performOAuthFlow constructs valid authorization URL', async () => {
+  let openedUrl: string | undefined;
   const options: OAuthOptions = {
     authUrl: 'https://example.com/oauth/authorize',
     tokenUrl: 'https://example.com/oauth/token',
     clientId: 'test-client',
+    scope: 'read write',
     timeout: 100,
+    openBrowser: async (url) => {
+      openedUrl = url;
+    },
   };
 
   await assert.rejects(async () => performOAuthFlow(options), /OAuth callback timeout/);
+
+  assert.ok(openedUrl, 'openBrowser was not called');
+  const url = new URL(openedUrl);
+  assert.strictEqual(url.origin + url.pathname, 'https://example.com/oauth/authorize');
+  assert.strictEqual(url.searchParams.get('client_id'), 'test-client');
+  assert.strictEqual(url.searchParams.get('response_type'), 'code');
+  assert.strictEqual(url.searchParams.get('scope'), 'read write');
+  assert.match(url.searchParams.get('redirect_uri') ?? '', /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+  assert.match(url.searchParams.get('state') ?? '', /^[A-Za-z0-9_-]{43}$/);
 });
 
 test('performOAuthFlow requires valid options', async () => {
@@ -59,9 +73,10 @@ test('performOAuthFlow requires valid options', async () => {
     tokenUrl: 'https://example.com/oauth/token',
     clientId: 'test-client',
     timeout: 100,
+    openBrowser: async () => {},
   };
 
-  assert.rejects(async () => performOAuthFlow(options), /OAuth callback timeout/);
+  await assert.rejects(async () => performOAuthFlow(options), /OAuth callback timeout/);
 });
 
 test('OAuthOptions has correct structure', () => {

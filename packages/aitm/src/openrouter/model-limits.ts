@@ -2,7 +2,7 @@
 // Cached per-run after first fetch — model catalog changes slowly.
 // docs/auth.md, src/compaction/compactor.ts
 
-import type { OpenRouterClient } from './client.ts';
+import { contextLengthOf, maxOutputTokensOf, type OpenRouterClient } from './client.ts';
 
 // Minimal catalog contract the registry actually needs — lets stubs (and any narrower client) pass
 // without an `as unknown as OpenRouterClient` cast at the constructor boundary.
@@ -10,7 +10,14 @@ export type ModelCatalogClient = Pick<OpenRouterClient, 'listModels'>;
 
 export type ModelLimits = {
   modelId: string;
-  contextLength: number;
+  // Undefined when the catalog publishes no window for this model (a non-OpenRouter OpenAI-compatible
+  // gateway may not). Consumers skip rather than guess: the Compactor does not compact a model whose
+  // window it doesn't know, exactly as it treats a non-finite one.
+  contextLength?: number;
+  // The most the model may emit in one reply. Input and output share the window, so this is the
+  // slice of it that cannot hold conversation — the Compactor reserves it. Undefined when the
+  // catalog publishes none.
+  maxOutputTokens?: number;
   // Per-token USD, parsed from the catalog pricing strings (issue #114). Undefined when the catalog
   // omits the field; consumers degrade cost to `null` rather than guessing. `cacheRead`/`cacheWrite`
   // price cached prompt tokens (issue #114 amendment) — absent → fall back to `promptUsdPerToken`.
@@ -82,9 +89,12 @@ export class ModelLimitsRegistry implements ModelLimitsLookup {
       const completionUsdPerToken = parsePrice(m.pricing?.completion);
       const cacheReadUsdPerToken = parsePrice(m.pricing?.input_cache_read);
       const cacheWriteUsdPerToken = parsePrice(m.pricing?.input_cache_write);
+      const contextLength = contextLengthOf(m);
+      const maxOutputTokens = maxOutputTokensOf(m);
       next.set(m.id, {
         modelId: m.id,
-        contextLength: m.context_length,
+        ...(contextLength !== undefined ? { contextLength } : {}),
+        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
         // Omit undefined keys rather than storing undefined (exactOptionalPropertyTypes).
         ...(promptUsdPerToken !== undefined ? { promptUsdPerToken } : {}),
         ...(completionUsdPerToken !== undefined ? { completionUsdPerToken } : {}),

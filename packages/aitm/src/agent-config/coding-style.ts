@@ -1,11 +1,15 @@
-// Distill raw style signals (CLAUDE.md/AGENTS.md/CONTRIBUTING + test globs + config files) into a
-// compact markdown digest via one smart-tier LLM call. The digest is injected into planning/work
-// prompts instead of the raw style file. SRP: this module only turns signals into a digest — it
-// reads signals but never writes (caching is StateStore's job; see plan slice 01).
+// Build the coding-style guide injected into planning and work prompts. Two halves, in this order:
+//   1. the project's own CLAUDE.md/AGENTS.md, VERBATIM — it is the repo's house rules, and a
+//      summarizer silently drops rules ("no default exports", "tests must pass under Node too"),
+//      which is how an agent ends up violating a file it was told to follow;
+//   2. a distilled digest from one smart-tier LLM call, whose job is the conventions the style file
+//      does NOT state — where tests live, how they run, what the formatter/compiler enforce.
+// SRP: this module only turns signals into that guide — it reads signals but never writes (caching is
+// StateStore's job; see plan slice 01).
 // Mirrors claudetm core/prompts_coding_style.py (reference behavior, not code).
 
 import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
 import { type OnUsage, reportUsage } from '../subagents/factory.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
@@ -44,6 +48,12 @@ const INTRO = [
   "Analyze the project's raw style signals below and produce a concise coding guide (under 600",
   'words). This digest is injected into every planning and work prompt, so keep it short and',
   'actionable. Do NOT write files — OUTPUT the guide as markdown text only.',
+  '',
+  'The project style file (CLAUDE.md / AGENTS.md) is injected verbatim alongside your digest, so do',
+  'NOT restate or summarize its rules — the agent already has them. Your job is the conventions it',
+  'does not spell out: the patterns actually visible in the config files and scripts below (where',
+  'tests live and how they are named, the commands that gate a commit, what the formatter and',
+  'compiler enforce). Concrete paths and commands beat prose.',
 ].join('\n');
 
 const OUTPUT_FORMAT = [
@@ -51,9 +61,9 @@ const OUTPUT_FORMAT = [
   'Output a markdown guide starting with `# Coding Style`. Include these sections, skipping any',
   'that do not apply:',
   '- **Workflow** — TDD? required gates/checks before commit?',
-  '- **Code Style** — naming, formatting, imports (2-4 bullets)',
+  '- **Code Style** — naming, formatting, imports the tooling enforces (2-4 bullets)',
   '- **Testing** — CRITICAL: exact paths, naming patterns, run commands, example files',
-  '- **Project-Specific** — unique requirements from CLAUDE.md / AGENTS.md',
+  '- **Patterns** — conventions to imitate that the style file does not state',
   '',
   `End with: \`${COMPLETION_MARKER}\``,
 ].join('\n');
@@ -77,12 +87,13 @@ function reportProgress(
 export class StyleDistiller {
   constructor(private readonly init: StyleDistillerInit) {}
 
-  // Never throws: a missing signal, an unreadable file, or a model error all degrade to the raw
-  // style contents (or empty) so a flaky style step can never block the run.
+  // Returns the digest alone — the verbatim style file is composed back in by composeStyleGuide, so
+  // a cached digest from an earlier run still gets today's CLAUDE.md. Never throws: a missing signal,
+  // an unreadable file, or a model error all degrade to '' so a flaky style step can never block the
+  // run (the verbatim half still reaches every prompt).
   async distill(input: DistillInput): Promise<string> {
-    const fallback = input.config?.contents ?? '';
     const signals = await gatherSignals(input);
-    if (signals.length === 0) return fallback;
+    if (signals.length === 0) return '';
     reportProgress(this.init.onProgress, signals);
     try {
       const result = await generateText({
@@ -91,12 +102,28 @@ export class StyleDistiller {
         ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
       });
       reportUsage(this.init.onUsage, result);
-      const digest = cleanDigest(result.text);
-      return digest === '' ? fallback : digest;
+      return cleanDigest(result.text);
     } catch {
-      return fallback;
+      return '';
     }
   }
+}
+
+// The guide handed to every planner/worker/editor/reviewer prompt: the project style file verbatim,
+// then the digest. The verbatim half leads because it is authoritative and because the one cap that
+// truncates this string (the editor leaf's, worker.ts) keeps the head. Either half may be missing;
+// both missing → '' and the style block is omitted entirely.
+export function composeStyleGuide(config: AgentConfig | null, digest: string): string {
+  const parts: string[] = [];
+  const contents = config?.contents.trim() ?? '';
+  if (config && contents !== '') {
+    parts.push(
+      `# ${basename(config.path)} (project style file, verbatim — authoritative)\n\n${contents}`,
+    );
+  }
+  const trimmed = digest.trim();
+  if (trimmed !== '') parts.push(trimmed);
+  return parts.join('\n\n');
 }
 
 async function gatherSignals(input: DistillInput): Promise<Signal[]> {

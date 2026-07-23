@@ -120,7 +120,7 @@ export type OrchestratorInit = {
   maxSteps: number | null;
   github: GhClient;
   // Optional per-repo PR body section headings (each a `## ` heading). Undefined/empty/malformed
-  // falls back to the default Summary/Changes/Testing. See resolvePrBodySections.
+  // falls back to the default Summary/Changes/Testing/Evidence. See resolvePrBodySections.
   prBodySections?: readonly string[];
   // Defaults to execa-backed runner. Tests inject a recorder.
   runCmd?: RunCmd;
@@ -157,7 +157,7 @@ export type OrchestratorTools = {
 
 // The default PR body section headings, in order. Used when a repo does not configure its own
 // via `prBodySections`. Single source of truth for both the model guidance and the assertion.
-export const PR_BODY_SECTIONS = ['## Summary', '## Changes', '## Testing'] as const;
+export const PR_BODY_SECTIONS = ['## Summary', '## Changes', '## Testing', '## Evidence'] as const;
 
 // Resolve the effective section list from optional config. Every entry must be a real `## `
 // heading; if the config is empty or any entry is malformed, fall back to the default so a bad
@@ -264,10 +264,31 @@ function fallbackSectionContent(heading: string, group: PrGroup, delivery: Worke
   if (name.startsWith('test')) {
     return 'Automated verification output was not captured for this fallback; confirm via CI on this pull request.';
   }
+  // The fallback runs when the model never produced a usable composition, so nothing here can be
+  // attributed to a tool result — say exactly that rather than implying anything was demonstrated.
+  if (name.startsWith('evidence')) {
+    return fallbackEvidence(group);
+  }
   if (name.startsWith('summar')) {
     return `Auto-generated composition for PR group ${oneLine(group.id)} — ${oneLine(group.title.trim() || group.id)}.`;
   }
   return `Auto-generated fallback content for PR group ${oneLine(group.id)}.`;
+}
+
+// The deterministic fallback's Evidence section: no run happened at this layer, so the only honest
+// content is the group's acceptance check (when the plan carried one) plus an explicit statement
+// that nothing here demonstrates it. Never claims a command ran.
+function fallbackEvidence(group: PrGroup): string {
+  const check = group.acceptance?.trim();
+  const lines = ['- No verification output was captured for this pull request.'];
+  if (check) {
+    lines.push(
+      `- Acceptance check for this group: ${oneLine(check)} — NOT demonstrated here; verify it before merging.`,
+    );
+  } else {
+    lines.push('- This PR group carries no recorded acceptance check.');
+  }
+  return lines.join('\n');
 }
 
 // The deterministic fallback's Changes section. The per-file `summary` fields are raw editor output
@@ -320,7 +341,7 @@ export function buildFallbackComposition(
 // Orchestrator model fills these sections from the worker delivery; exported so the format is
 // unit-testable and documented in one place.
 export const PR_BODY_GUIDE = [
-  'body: GitHub-flavored markdown with exactly these three sections, in order, each with its',
+  'body: GitHub-flavored markdown with exactly these four sections, in order, each with its',
   'heading verbatim:',
   `  ${PR_BODY_SECTIONS[0]}`,
   '    1-2 sentences on what changed and why.',
@@ -330,6 +351,13 @@ export const PR_BODY_GUIDE = [
   '    several files. Treat the raw file notes as LEADS, not prose to copy — rewrite them for a human.',
   `  ${PR_BODY_SECTIONS[2]}`,
   '    How the change was verified (tests, lint). If not verified, say so explicitly.',
+  `  ${PR_BODY_SECTIONS[3]}`,
+  '    What was actually run and what it showed: the verify command and its outcome, the acceptance',
+  '    check for this group and whether it was demonstrated, and anything that was checked and then',
+  '    thrown away (an approach tried and reverted, a lead that went nowhere). Report ONLY what the',
+  '    material below states was run — no command output here means `Nothing was run to verify this',
+  '    change.`, and an acceptance check nothing demonstrates is reported as not demonstrated. A',
+  '    plan, an intention, or "should work" is never evidence.',
 ].join('\n');
 
 // Model guidance for the configured section set. The default set keeps its bespoke per-section
@@ -554,6 +582,12 @@ export class Orchestrator {
       '  stays scannable, not one noisy bullet per file.',
       '',
       `PR group goal (use this as the title's subject): ${group.id} — ${group.title}`,
+      // The plan's acceptance check — what this group was supposed to prove. It belongs in the body
+      // so a human reviewer sees what "done" meant; whether it HOLDS is only what the material below
+      // shows, which is why the Evidence guidance forbids reporting it as demonstrated on faith.
+      ...(group.acceptance?.trim()
+        ? [`Acceptance check the plan set for this group: ${oneLine(group.acceptance)}`]
+        : []),
       `Worker draft message (context for the body only — not the title): ${delivery.draftCommitMessage}`,
       'Files changed:',
       ...delivery.changes.map((c) => `  - ${c.kind} ${c.path}: ${c.summary}`),

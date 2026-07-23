@@ -34,12 +34,16 @@ export const memoryInputSchema = z.object({
 
 export type MemoryToolInput = z.infer<typeof memoryInputSchema>;
 
+// Record from success as well as failure: a memory bank fed only by corrections teaches the next run
+// what to avoid while letting it drift away from the approaches that were already validated here.
 const MEMORY_TOOL_DESCRIPTION = [
-  'Durable per-repo memory that survives across runs — record hard-won repo facts (flaky CI checks,',
-  'the real format/verify commands, build quirks) so the next run does not rediscover them.',
-  'Write discipline: update-over-duplicate — reuse an existing `name` to update that memory in place;',
-  'delete a memory (action "remove") once it is wrong; and never store what the repo already records',
-  '(CLAUDE.md, README, config, lockfiles). One fact per memory, kebab-case name.',
+  'Durable per-repo memory that survives across runs — record hard-won repo facts so the next run does',
+  'not rediscover them. Record from BOTH sides: what went wrong (flaky CI checks, build quirks, a',
+  'command that looks right and is not) AND what worked (the verify subset that actually catches',
+  'regressions here, the pattern this repo uses for a thing you had to look up, the probe that found a',
+  'real bug). Write discipline: update-over-duplicate — reuse an existing `name` to update that memory',
+  'in place; delete a memory (action "remove") once it is wrong; and never store what the repo already',
+  'records (CLAUDE.md, README, config, lockfiles). One fact per memory, kebab-case name.',
 ].join(' ');
 
 function renderMemory(memory: Memory): string {

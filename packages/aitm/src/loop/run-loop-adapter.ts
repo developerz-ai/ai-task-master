@@ -78,6 +78,7 @@ import {
   webSearchServerTool,
 } from '../openrouter/server-tools.ts';
 import { DEFAULT_MAX_STEPS, Orchestrator } from '../orchestrator/orchestrator.ts';
+import { withAcceptanceCheck } from '../plan/acceptance.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { Plan } from '../plan/schema.ts';
@@ -128,7 +129,11 @@ import { datetimeTool } from '../tools/datetime.ts';
 import { type FetchHtmlInput, fetchHtmlTool, isFetchHtmlAvailable } from '../tools/fetch-html.ts';
 import { type WebFetchOutput, webFetchTool } from '../tools/web-fetch.ts';
 import { webSearchTool } from '../tools/web-search.ts';
-import { sanitizeBranchComponent } from '../workspace/branch-name.ts';
+import {
+  dedupeBranchNames,
+  sanitizeBranchComponent,
+  slugifyTitle,
+} from '../workspace/branch-name.ts';
 import { commitsAheadOfBase, runGit } from '../workspace/git-exec.ts';
 import { InPlaceCheckout } from '../workspace/in-place-checkout.ts';
 import { runFixSession } from './ci-fix.ts';
@@ -755,27 +760,49 @@ export async function runLoopAdapter(
 export { sanitizeBranchComponent };
 
 // Resolve a group's branch name, honoring a caller-specified `--branch`.
-//   - no branch requested        → `aitm/<group-id>` (default)
+//   - no branch requested        → `aitm/<group-id>-<title-slug>` (default)
 //   - requested, single group    → the requested name verbatim (already validated by the CLI)
-//   - requested, multiple groups → `<requested>/<group-id>` so the groups' branches
+//   - requested, multiple groups → `<requested>/<group-id>-<title-slug>` so the groups' branches
 //     (and the PRs they open) don't collide on one branch name.
+// The title slug is what makes a branch list readable — `aitm/g1` says nothing next to
+// `aitm/g1-add-todo-crud`, and on a repo where two people run aitm it is the difference between two
+// runs sharing a branch name and not. Dropped when the title yields no usable characters.
 // The group-id segment is always sanitized so the composed ref is valid regardless of what the
 // Planner emitted.
 export function branchFor(
   groupId: string,
   requested: string | undefined,
   totalGroups: number,
+  title?: string,
 ): string {
   const safeId = sanitizeBranchComponent(groupId);
-  if (requested === undefined) return `aitm/${safeId}`;
-  return totalGroups <= 1 ? requested : `${requested}/${safeId}`;
+  const slug = title ? slugifyTitle(title) : '';
+  // A title that just restates the id (`g1` / "G1") would give `aitm/g1-g1` — keep the bare id.
+  const redundant = slug === '' || slug === safeId.toLowerCase();
+  const segment = redundant ? safeId : `${safeId}-${slug}`;
+  if (requested === undefined) return `aitm/${segment}`;
+  return totalGroups <= 1 ? requested : `${requested}/${segment}`;
 }
 
-export function planToPrGroups(plan: Plan, branch?: string): PrGroup[] {
+// Plan → the persisted PrGroups the loop drives. `takenBranches` is the set of branch names already
+// published on the remote (see remoteBranchNames): every name aitm composes itself is resolved
+// against it — and against this run's own groups — so two people running aitm on one repo can't end
+// up sharing a branch and force-pushing over each other. Branches are assigned HERE, once, at plan
+// acceptance; a resumed run reuses what state.json already holds and never re-dedupes.
+// An explicit single-group `--branch` is the operator's own name: honored verbatim, never suffixed.
+export function planToPrGroups(
+  plan: Plan,
+  branch?: string,
+  takenBranches: ReadonlySet<string> = new Set(),
+): PrGroup[] {
   const total = plan.groups.length;
-  return plan.groups.map((g) => ({
+  const desired = plan.groups.map((g) => branchFor(g.id, branch, total, g.title));
+  const verbatim = branch !== undefined && total <= 1;
+  const branches = verbatim ? desired : dedupeBranchNames(desired, takenBranches);
+  return plan.groups.map((g, groupIndex) => ({
     id: g.id,
     title: g.title,
+    acceptance: g.acceptance,
     tasks: g.tasks.map((t, i) => ({
       id: `${g.id}-${i + 1}`,
       text: t.description,
@@ -783,11 +810,35 @@ export function planToPrGroups(plan: Plan, branch?: string): PrGroup[] {
       done: false,
     })),
     dependsOn: g.dependsOn,
-    branch: branchFor(g.id, branch, total),
+    branch: branches[groupIndex] ?? branchFor(g.id, branch, total, g.title),
     pr: null,
     status: 'pending' as const,
     stage: 'pending' as const,
   }));
+}
+
+// Branch names already published on `origin`, read in ONE `ls-remote` for the whole run rather than
+// a probe per group. Best-effort by design: no origin, no network, or not a git repo all yield an
+// empty set, so branch dedupe degrades to the plain names — a naming courtesy must never fail a run.
+export async function remoteBranchNames(cwd: string): Promise<Set<string>> {
+  try {
+    const result = await runGit(['ls-remote', '--heads', 'origin'], { cwd });
+    return new Set(parseRemoteHeads(result.stdout));
+  } catch {
+    return new Set();
+  }
+}
+
+// `<sha>\trefs/heads/<branch>` lines → branch names, skipping blank lines and any non-heads ref git
+// prints. Exported for unit testing — it is the half of remoteBranchNames that has no process in it.
+export function parseRemoteHeads(stdout: string): string[] {
+  const prefix = 'refs/heads/';
+  const names: string[] = [];
+  for (const line of stdout.split('\n')) {
+    const ref = line.split('\t')[1]?.trim();
+    if (ref?.startsWith(prefix) && ref.length > prefix.length) names.push(ref.slice(prefix.length));
+  }
+  return names;
 }
 
 async function defaultPlanGroups(
@@ -868,7 +919,10 @@ async function defaultPlanGroups(
   }
   await plannerRecorder?.end(runEndOutcome(result.kind));
   if (result.kind === 'ok') {
-    const groups = planToPrGroups(result.plan, input.branch);
+    // One remote read per run, here at first branch assignment — the only moment a branch name is
+    // chosen. A resume never reaches this path, so a persisted branch is never renamed underneath a
+    // half-finished PR.
+    const groups = planToPrGroups(result.plan, input.branch, await remoteBranchNames(input.cwd));
     harnessProgress(
       `plan ready: ${groups.length} PR group(s) — ${groups.map((g) => g.id).join(', ')}`,
       { phase: 'planning' },
@@ -1192,7 +1246,14 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           workerStepTag,
         );
       }
-      const workerGuidance = composeSpecialistGuidance(WORKER_SYSTEM_PREFIX, specialist);
+      // The group's acceptance check rides the role guidance (as the specialist's does): the Worker's
+      // manifest prompt renders the title + task text only, so a check left on the PrGroup alone
+      // would never reach the Coordinator that has to satisfy it. No check → the guidance is
+      // byte-identical to before.
+      const workerGuidance = withAcceptanceCheck(
+        composeSpecialistGuidance(WORKER_SYSTEM_PREFIX, specialist),
+        group.acceptance,
+      );
       harnessProgress(
         `group ${group.id}: worker starting with ${workerModelId} — ${task ? task.text : group.title}`,
         workerStepTag,

@@ -252,3 +252,44 @@ test('runSelfReviewSession: builds the review Worker on the coding-capability mo
   assert.deepEqual(caps, ['coding']);
   assert.equal(result.kind, 'clean'); // empty manifest = nothing to fix
 });
+
+test("runSelfReviewSession: the group's acceptance check lands in the review task", async () => {
+  // SELF_REVIEW_SYSTEM_PREFIX step 3 asks whether the diff meets the task's acceptance check; this
+  // is the only path that supplies it, so without it the pass judges a contract it never saw.
+  let captured: WorkerInput | null = null;
+  await runSelfReviewSession(
+    baseInput({
+      group: baseGroup({
+        acceptance: 'bun test src/core passes and `aitm --version` prints 1.2.3',
+      }),
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  const task = (captured as WorkerInput | null)?.task;
+  assert.ok(task);
+  assert.match(task.text, /## Acceptance check for this PR group/);
+  assert.match(task.text, /bun test src\/core passes/);
+  assert.match(task.text, /never report it as holding on reasoning alone/);
+});
+
+test('runSelfReviewSession: a group without an acceptance check leaves the task text unchanged', async () => {
+  let captured: WorkerInput | null = null;
+  await runSelfReviewSession(
+    baseInput({
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  const task = (captured as WorkerInput | null)?.task;
+  assert.ok(task);
+  assert.doesNotMatch(task.text, /Acceptance check/);
+});

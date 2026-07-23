@@ -155,8 +155,9 @@ test('buildCompactionStep: threads the prior summary into the next compaction (a
 
 test('buildCompactionStep sizes off the live messages via a real Compactor: large context compacts, small does not (issue #102)', async () => {
   // The override is not persisted across steps by the installed ai, so sizing must read the live
-  // `messages` (the real to-be-sent context), not the last step's usage. A small window makes the
-  // char-estimate cross 0.7 on a large message array and stay under it on a small one.
+  // `messages` (the real to-be-sent context), not the last step's usage. A tiny window plus a tiny
+  // reply reserve (usable = 100 - 20 = 80 tokens) makes the char estimate cross the budget on a
+  // large message array and stay under it on a small one.
   const limits: ModelLimitsLookup = {
     forModel: async () => ({ modelId: 'm', contextLength: 100 }),
     preload: async () => {},
@@ -174,15 +175,15 @@ test('buildCompactionStep sizes off the live messages via a real Compactor: larg
     }),
   });
   const build = buildCompactionStep({
-    compactor: new Compactor({ summarizer, limits, keepLastSteps: 1 }),
+    compactor: new Compactor({ summarizer, limits, keepLastSteps: 1, reserveTokens: 20 }),
     modelId: 'm',
   });
 
-  // Small live context (~1 token) → stays under 0.7 → pass-through.
+  // Small live context (~1 token) → stays under the 80-token budget → pass-through.
   const small = await build(prepInput([step(1)], [msg('user', 'hi'), msg('assistant', 'ok')]));
   assert.equal(small, undefined);
 
-  // Large live context (~200 tokens vs a 100 window) → crosses 0.7 → real summarizer runs.
+  // Large live context (~200 tokens vs an 80-token budget) → crosses it → real summarizer runs.
   const big = 'x'.repeat(400);
   const large = await build(
     prepInput([step(1), step(2)], [msg('user', big), msg('assistant', big), msg('tool', 'r')]),
@@ -250,7 +251,7 @@ test('buildCompactionStep: usage-grounded trigger compacts when the char estimat
     }),
   });
   const build = buildCompactionStep({
-    compactor: new Compactor({ summarizer, limits, keepLastSteps: 1 }),
+    compactor: new Compactor({ summarizer, limits, keepLastSteps: 1, reserveTokens: 20 }),
     modelId: 'm',
   });
   const messages = [
@@ -259,9 +260,9 @@ test('buildCompactionStep: usage-grounded trigger compacts when the char estimat
     { role: 'tool', content: 'bbbb' },
     { role: 'assistant', content: 'cccc' },
   ];
-  // Four short messages estimate ~4 tokens, far under the 70-token (0.7 × 100) trigger. But the last
-  // step reported 80 input tokens — the system prompt + tool schemas the estimate can't see — so the
-  // grounded size crosses the threshold and compaction runs.
+  // Four short messages estimate ~4 tokens, far under the 80-token budget (a 100 window minus a
+  // 20-token reply reserve). But the last step reported 80 input tokens — the system prompt + tool
+  // schemas the estimate can't see — so the grounded size reaches the budget and compaction runs.
   const grounded = await build(prepInput([step(2), stepWithUsage(4, 80)], messages));
   assert.ok(grounded && Array.isArray(grounded.messages));
   assert.match(String(grounded.messages[0].content), /REAL SUMMARY/);

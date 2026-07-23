@@ -21,6 +21,18 @@ Subagents never call each other. Only `Orchestrator` composes them — the depen
 
 The FS/edit/search/shell tools are the Claude-Code-style surface from `@developerz.ai/ai-claude-compat`, scoped to the active worktree. When an MCP server supplies some of them, the rest are partial-filled from the local set so a bare `aitm start` (no `mcpServers`) still works.
 
+## Specialists
+
+A repo that ships `.claude/agents/*.md` gets its own agents layered onto the generic Worker: work is routed to the best match, and that agent's guidance is appended to the role prompt. When a repo ships none, `bootstrapSpecialists` generates a team for the accepted plan (one smart-tier call) into `<stateDir>/agents/`, in the same frontmatter format — routing and resume behave identically either way. Repo-shipped agents always win.
+
+**The name is the routing key.** `specialist-registry.ts` scores an agent against the task text by token overlap, weighting name words ×3 over description words, after dropping stopwords and tokens under 3 characters. That has a sharp consequence: a name like `code-specialist` is *entirely* stopwords, so it matches nothing, ever. Generated names are therefore normalized and validated at parse time (`sanitizeName`):
+
+- lowercase kebab-case, 1–3 domain words, ≤24 chars — `sqlite-migrations`, `stripe-webhooks`, `cli-flags`
+- meaningless suffixes stripped: `stripe-webhooks-agent` → `stripe-webhooks`
+- a name with nothing routable left is dropped, as is one whose words a previously accepted specialist already claims (two agents sharing every word are a permanent tie)
+
+Descriptions are router entries, not bios: *what it owns → `Use for <literal task keywords>` → `Do NOT use for <adjacent domain> — <the capability limit>`*. Bodies are rule lists (one imperative per line, no headings) — the generic agent already knows how to write code; the body carries only what is specific to this domain in this repo.
+
 ## The `explore` fan-out (issue #126)
 
 The Planner and the Worker's manifest pass also get a read-only **`explore`** tool. Calling it spawns a fresh, bounded, fast-tier child that surveys the repo with the read-only trio (`readFile`/`grep`/`glob`) and returns a single self-contained conclusion. The child ingests the raw file text; the parent's context holds only the answer — so a survey phase no longer re-sends file dumps on every step of its own conversation (the pressure `#102`'s compaction repairs after the fact). Independent `explore` calls issued in one assistant turn run in parallel (AI SDK parallel tool execution).

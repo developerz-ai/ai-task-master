@@ -37,7 +37,7 @@ All run state lives in `.ai-task-master/` at the target repo root (mirrors the o
 | `logs/run-{timestamp}.log` | `Logger` | Per-run structured log. |
 | `memory/` | `Worker` (via the `memory` tool), `Planner` (reads) | Durable per-repo memory (issue #118): one-fact-per-file markdown memories + a `MEMORY.md` index (one line each). Survives `cleanupOnSuccess()` alongside `logs/`, so cross-run knowledge (flaky checks, real verify commands, build quirks) persists. The index is injected into Planner + Worker prompts as an advisory, point-in-time block; the path is handed out by `StateStore.memoryDir()`, and nothing is scaffolded until the first write. Git-excluded (per-clone, never committed). |
 | `downloads/` | `GitHubClient`, `Worker` | Files pulled from outside the repo — CI log archives, review-comment JSON, any fixtures Worker fetches. Never committed. |
-| `scratch/` | `Worker` | Free-form working area for the active subagent — diffs in progress, intermediate output. Wiped between groups. |
+| `scratch/` | `Worker` | Free-form working area for the active subagent — diffs in progress, intermediate output, and the **disposable verification code** a pass writes to try to prove its own change wrong (fuzz/property harnesses, differential oracles against a naive re-implementation, benchmarks, trace scripts). Structurally unmergeable: `stageAndCommit` runs `git add -A` then `git reset -q -- .ai-task-master`, so nothing under here can reach a commit — which is the point. Only what a future regression needs (a test for a bug a probe actually found) gets written into the repo proper. Wiped between groups. |
 
 ## `state.json` schema
 

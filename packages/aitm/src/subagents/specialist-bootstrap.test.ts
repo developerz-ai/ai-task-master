@@ -5,16 +5,16 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { PrGroup } from '../state/schema.ts';
-import { bootstrapSpecialists, parseSpecialists } from './specialist-bootstrap.ts';
+import { bootstrapSpecialists, parseSpecialists, sanitizeName } from './specialist-bootstrap.ts';
 
 const OUTPUT = [
   '===AGENT backend-api===',
-  'description: Hono routes, services, drizzle data access',
+  'description: Owns Hono routes, services, and drizzle data access. Use for endpoints and queries.',
   'Keep routes thin; services framework-free.',
   'Validate every payload with zod at the boundary.',
   '',
-  '===AGENT test-writer===',
-  'description: bun test integration and unit coverage',
+  '===AGENT bun-tests===',
+  'description: Owns bun test integration and unit coverage. Use for specs, fixtures, and harnesses.',
   'Use app.request; never spawn a server process.',
   '',
   'SPECIALISTS_COMPLETE',
@@ -57,27 +57,93 @@ test('parseSpecialists extracts named blocks with description and guidance', () 
   assert.equal(parsed[0]?.name, 'backend-api');
   assert.match(parsed[0]?.description ?? '', /drizzle/);
   assert.match(parsed[0]?.guidance ?? '', /framework-free/);
-  assert.equal(parsed[1]?.name, 'test-writer');
+  assert.equal(parsed[1]?.name, 'bun-tests');
 });
+
+// A description long enough to pass the router-entry floor, keyed by domain word.
+function desc(domain: string): string {
+  return `description: Owns the ${domain} surface. Use for ${domain} tasks, files, and checks.`;
+}
 
 test('parseSpecialists drops malformed blocks, duplicates, and caps at 4', () => {
   const raw = [
-    '===AGENT ok-one===',
-    'description: fine',
+    '===AGENT stripe-webhooks===',
+    desc('stripe webhook'),
     'body',
     '===AGENT MissingDesc===',
     'no description line',
-    '===AGENT ok-one===',
-    'description: duplicate name',
+    '===AGENT stripe-webhooks===',
+    desc('duplicate'),
     'body again',
-    ...[2, 3, 4, 5].flatMap((n) => [`===AGENT ok-${n}===`, `description: d${n}`, `b${n}`]),
+    ...['sqlite', 'graphql', 'react', 'kafka'].flatMap((n) => [
+      `===AGENT ${n}-layer===`,
+      desc(n),
+      `body ${n}`,
+    ]),
   ].join('\n');
   const parsed = parseSpecialists(raw);
   assert.equal(parsed.length, 4, 'capped at 4');
   assert.deepEqual(
     parsed.map((p) => p.name),
-    ['ok-one', 'ok-2', 'ok-3', 'ok-4'],
+    ['stripe-webhooks', 'sqlite-layer', 'graphql-layer', 'react-layer'],
   );
+});
+
+test('parseSpecialists drops a name that carries no routable word', () => {
+  // `code-specialist` is every word the router already discards — it would match no task, ever.
+  const raw = [
+    '===AGENT code-specialist===',
+    desc('everything'),
+    'body',
+    '===AGENT sqlite-migrations===',
+    desc('sqlite migration'),
+    'body',
+  ].join('\n');
+  assert.deepEqual(
+    parseSpecialists(raw).map((p) => p.name),
+    ['sqlite-migrations'],
+  );
+});
+
+test('parseSpecialists drops a description too thin to route against', () => {
+  const raw = ['===AGENT sqlite-migrations===', 'description: db stuff', 'body'].join('\n');
+  assert.deepEqual(parseSpecialists(raw), []);
+});
+
+test('parseSpecialists drops a specialist whose words a prior one already claims', () => {
+  const raw = [
+    '===AGENT graphql-schema===',
+    desc('graphql schema'),
+    'body',
+    '===AGENT graphql===',
+    desc('graphql'),
+    'body',
+  ].join('\n');
+  assert.deepEqual(
+    parseSpecialists(raw).map((p) => p.name),
+    ['graphql-schema'],
+  );
+});
+
+test('sanitizeName: normalizes case and separators to kebab-case', () => {
+  assert.equal(sanitizeName('GraphQL_Schema'), 'graphql-schema');
+  assert.equal(sanitizeName('  Stripe Webhooks  '), 'stripe-webhooks');
+});
+
+test('sanitizeName: strips suffixes that name no domain', () => {
+  assert.equal(sanitizeName('stripe-webhooks-agent'), 'stripe-webhooks');
+  assert.equal(sanitizeName('react-forms-specialist'), 'react-forms');
+});
+
+test('sanitizeName: rejects a name with nothing routable left', () => {
+  assert.equal(sanitizeName('code-specialist'), '');
+  assert.equal(sanitizeName('agent'), '');
+  assert.equal(sanitizeName('---'), '');
+});
+
+test('sanitizeName: keeps at most three words and rejects an over-long name', () => {
+  assert.equal(sanitizeName('stripe-webhooks-retry-backoff-queue'), 'stripe-webhooks-retry');
+  assert.equal(sanitizeName('authentication-authorization-provisioning'), '');
 });
 
 test('bootstrapSpecialists generates, persists loadAgents-compatible files, and returns the roster', async () => {
@@ -90,7 +156,7 @@ test('bootstrapSpecialists generates, persists loadAgents-compatible files, and 
     );
     assert.deepEqual(
       roster.map((a) => a.name),
-      ['backend-api', 'test-writer'],
+      ['backend-api', 'bun-tests'],
     );
     assert.match(roster[0]?.systemPrompt ?? '', /framework-free/);
     const onDisk = await readFile(join(dir, 'agents', 'backend-api.md'), 'utf8');

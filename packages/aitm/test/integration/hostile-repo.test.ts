@@ -152,15 +152,20 @@ test('hostile-repo: project-scoped formatCommand/verifyCommand/stylePath are str
   }
 });
 
-test('hostile-repo: stdio mcpServers from config.json+.mcp.json are dropped + warned, McpClientManager never spawns them', async () => {
+test('hostile-repo: project-scoped stdio mcpServers ARE mounted and spawned (a deliberate trade)', async () => {
+  // This file otherwise proves the project-scope strips. MCP is the documented exception: a repo's
+  // ./.mcp.json is the file its own Claude Code session already spawns those servers from, and
+  // refusing to run them made aitm useless in exactly the repos that ship them. Running a checkout's
+  // tooling is the operator's decision, taken when they run `aitm start` in it. The strips that
+  // redirect the HARNESS ITSELF — credentials, baseURL, hooks, format/verify commands, stylePath —
+  // still stand, and the test above holds them to that. Asserted here so the trade is explicit: if
+  // this ever flips back, it flips deliberately, with this test as the record.
   const repo = await makeTempRepo();
   const home = await makeTrustedHome();
   try {
     await writeHostileRepoFiles(repo.path);
     await execa('git', ['add', '-A'], { cwd: repo.path });
-    await execa('git', ['commit', '-m', 'malicious mcp servers shipped by the repo'], {
-      cwd: repo.path,
-    });
+    await execa('git', ['commit', '-m', 'repo-shipped mcp servers'], { cwd: repo.path });
 
     const warnings: string[] = [];
     const loader = new ConfigLoader(
@@ -172,31 +177,31 @@ test('hostile-repo: stdio mcpServers from config.json+.mcp.json are dropped + wa
     const resolved = await loader.resolve({});
 
     assert.deepEqual(
-      resolved.mcpServers,
-      {},
-      'neither hostile stdio server may be mounted into the resolved config',
+      Object.keys(resolved.mcpServers).sort(),
+      ['evil-aitm', 'evil-claude'],
+      'project-scoped stdio servers are mounted from both project files',
     );
+    assert.equal(resolved.mcpServerSources['evil-aitm'], 'aitm-project');
+    assert.equal(resolved.mcpServerSources['evil-claude'], 'claude-mcp-project');
     assert.ok(
-      warnings.some((w) => w.includes('evil-aitm') && w.includes('ignored')),
-      `expected evil-aitm blocked warning, got: ${JSON.stringify(warnings)}`,
-    );
-    assert.ok(
-      warnings.some((w) => w.includes('evil-claude') && w.includes('ignored')),
-      `expected evil-claude blocked warning, got: ${JSON.stringify(warnings)}`,
+      !warnings.some((w) => w.includes('mcp server')),
+      `no mcp server is warned about any more, got: ${JSON.stringify(warnings)}`,
     );
 
-    // Prove the "run" side too: even if McpClientManager were handed exactly the resolved (empty)
-    // server set, it never invokes the client factory — no local process is ever spawned.
-    let spawnAttempts = 0;
+    // And the run side actually connects them — one client per declared server.
+    const spawned: string[] = [];
     const createClient: CreateMcpClient = async (config) => {
-      spawnAttempts += 1;
-      throw new Error(`unexpected MCP spawn attempt: ${JSON.stringify(config)}`);
+      spawned.push(String(config.clientName ?? ''));
+      return {
+        tools: async () => ({}),
+        close: async () => {},
+      } as unknown as Awaited<ReturnType<CreateMcpClient>>;
     };
     const manager = new McpClientManager({ servers: resolved.mcpServers, createClient });
     await manager.connectAll();
-
-    assert.equal(spawnAttempts, 0, 'no MCP client/spawn attempt must occur for a hostile server');
-    assert.deepEqual(manager.connected(), []);
+    assert.deepEqual(spawned.sort(), ['aitm-evil-aitm', 'aitm-evil-claude']);
+    assert.equal(manager.connected().length, 2);
+    await manager.close();
   } finally {
     await repo.cleanup();
     await home.cleanup();

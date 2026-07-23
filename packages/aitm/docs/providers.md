@@ -173,6 +173,29 @@ calling support (see above). Example shape:
 }
 ```
 
+## Model catalog: context window + pricing
+
+`GET {baseURL}/models` is the only place `aitm` learns a model's **context window**, and that window is what decides when the Compactor auto-compacts (see below). The same response supplies per-token pricing for the run's cost line, and `max_completion_tokens` (top-level or under `top_provider`) sizes the reply reserve.
+
+OpenRouter publishes `context_length` on every entry. Other OpenAI-compatible catalogs spell it differently or omit it, so the parser accepts, in order: `context_length`, `top_provider.context_length`, `max_model_len`, `context_window`. Entries that fail to parse are dropped individually rather than failing the whole catalog — one odd model must not cost the run its autocompaction and its cost accounting.
+
+A model whose catalog publishes **no** window is not compacted: `aitm` skips rather than guessing a size and truncating a conversation on a wrong number. If a long run on a custom endpoint never seems to compact, check that its `/models` response carries one of the four keys above.
+
+## Auto-compaction
+
+Long runs outgrow any window, so every subagent loop compacts itself: when the live context reaches the **usable budget**, a `fast`-tier step rewrites the older conversation into a compact note and the loop resumes with that note plus the most recent N steps verbatim (`src/compaction/`).
+
+Usable is not a fixed fraction of the window. Input and output share the context, so the budget is:
+
+```
+usable = contextLength − reserve
+reserve = min(20_000, max_completion_tokens)      # the whole 20k when the catalog publishes no output limit
+```
+
+A flat fraction gets both ends wrong: 70% of a 200k window strands 60k that the reply will never need, while 70% of a 32k window can still overflow a model that may emit 8k. Reserving what the model can actually emit fixes both — a model capped at 4k output gets 96k of a 100k window for conversation, and a 200k model compacts at 180k. (Same shape as opencode's `session/overflow.ts`, which is where the approach comes from.)
+
+Two windows are left alone: one the catalog never published (no number to be right about), and one smaller than the reserve itself, where summarizing could never bring the conversation under budget and would just burn a summarizer call per step.
+
 ## Cross-links
 
 - [`commands/profile.md`](./commands/profile.md) — profile command reference (one-command provider switching)

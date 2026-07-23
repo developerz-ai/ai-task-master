@@ -45,6 +45,7 @@ function basicPlan(groupCount: number): Plan {
     id: `g${i + 1}`,
     title: `Group ${i + 1}`,
     tasks: [{ description: `task ${i + 1}` }],
+    acceptance: `group ${i + 1} check: bun test passes`,
     dependsOn: i === 0 ? [] : [`g${i}`],
   }));
   return { goal: 'do the thing', groups };
@@ -57,6 +58,7 @@ function planWith(specs: ReadonlyArray<{ id: string; dependsOn: string[] }>): Pl
       id: s.id,
       title: `Group ${s.id}`,
       tasks: [{ description: `task ${s.id}` }],
+      acceptance: `group ${s.id} check: bun test passes`,
       dependsOn: s.dependsOn,
     })),
   };
@@ -351,6 +353,38 @@ test('runPlanner: persistently schema-invalid submit → error after retries, na
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
   assert.equal(result.kind, 'error');
   if (result.kind === 'error') assert.match(result.error, /schema validation after retries/i);
+});
+
+test('runPlanner: a plan whose group omits the acceptance check is rejected after retries', async () => {
+  // The check is what the Worker builds against and the self-review judges — a plan without one is
+  // not accepted silently, it routes to the schema-retry loop and, unfixed, fails as invalid.
+  const agent = createPlannerAgent({
+    model: planSubmitModel({
+      goal: 'x',
+      groups: [{ id: 'g1', title: 'Group g1', tasks: [{ description: 'task g1' }], dependsOn: [] }],
+    }),
+    tools: {},
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
+  const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') assert.match(result.error, /acceptance/i);
+});
+
+test('runPlanner: the accepted plan keeps every group acceptance check', async () => {
+  const agent = createPlannerAgent({
+    model: planJsonModel(basicPlan(2)),
+    tools: {},
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
+  const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
+  assert.equal(result.kind, 'ok');
+  if (result.kind === 'ok') {
+    assert.deepEqual(
+      result.plan.groups.map((g) => g.acceptance),
+      ['group 1 check: bun test passes', 'group 2 check: bun test passes'],
+    );
+  }
 });
 
 test('runPlanner rejects maxPrs < 1 up front', async () => {

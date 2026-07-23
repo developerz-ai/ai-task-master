@@ -17,6 +17,7 @@ import {
   renderPromptBlocks,
   selfIdBlock,
   stepBudgetLine,
+  toolResultTrustBlock,
 } from '@developerz.ai/ai-claude-compat';
 import { data, instruction, renderSlot } from './slots.ts';
 
@@ -65,7 +66,9 @@ export type RolePromptSlots = {
   readonly roleGuidance: string;
   // The role's effective step budget; interpolated into the baked-in step-budget reminder.
   readonly maxSteps: number;
-  // Coding-style digest (StyleDistiller output). Empty → the style block is omitted.
+  // Coding-style digest (StyleDistiller output, which leads with the repo's own CLAUDE.md verbatim).
+  // Trusted, verbatim: aitm runs against a repo the operator chose, and that repo's style guide is
+  // authoritative for the code written in it. Empty → the style block is omitted.
   readonly style: string;
   // The pre-rendered `<env>` block. Computed by the harness (it reads cwd/platform/clock) and injected
   // so this template stays pure.
@@ -94,18 +97,24 @@ function rolePrompt(slots: RolePromptSlots): string {
   return renderPromptBlocks(blocks);
 }
 
-// Editor-leaf system prompt: role guidance + step-budget, style, and `<env>` only — no contract
-// blocks, no self-id, no memory index. Mirrors the `explore` leaf's contract-free pattern (a leaf
+// Editor-leaf system prompt: role guidance + step-budget, style, and `<env>` — no self-id, no memory
+// index, and only ONE contract block. Mirrors the `explore` leaf's contract-free pattern (a leaf
 // can't spawn/delegate, so the harness/communication/autonomy governance text it exists to constrain
 // doesn't apply), but unlike `explore` the editor writes code, so it keeps the style digest and the
 // `<env>` block a code-writing leaf still needs. Fans out once per manifest file, so trimming the
 // per-call frame here compounds across the whole fanout.
+//
+// The one contract it DOES keep is tool-result trust: an editor holds readFile and webFetch, so it
+// ingests file contents and web pages — the exact channel that block exists to govern. Dropping it
+// here would leave the only role that reads untrusted content as the only role never told to treat
+// it as data.
 export type EditorPromptSlots = {
   // EDITOR_SYSTEM_PREFIX. Trusted, verbatim.
   readonly roleGuidance: string;
   // The editor's step budget; interpolated into the baked-in step-budget reminder.
   readonly maxSteps: number;
-  // Coding-style digest, already capped by the caller. Empty → the style block is omitted.
+  // Coding-style digest, already capped by the caller. Trusted, verbatim. Empty → the style block is
+  // omitted.
   readonly style: string;
   // The pre-rendered `<env>` block.
   readonly env: string;
@@ -117,6 +126,7 @@ export type EditorPromptSlots = {
 function editorPrompt(slots: EditorPromptSlots): string {
   const guidance = `${slots.roleGuidance}\n\n${stepBudgetLine(slots.maxSteps)}`;
   return renderPromptBlocks([
+    toolResultTrustBlock(),
     {
       kind: 'sessionGuidance',
       text: slots.teamBrief ? `${guidance}\n\n${slots.teamBrief}` : guidance,
@@ -127,10 +137,10 @@ function editorPrompt(slots: EditorPromptSlots): string {
 }
 
 // Orchestrator top-level system prompt: the coding-style digest, the orchestrator role guidance, and
-// the rolling summary of prior PRs. All three are harness-authored (aitm's own governance prose and its
-// own run summary — nothing external is concatenated here), so all three are trusted instruction slots.
-// Routed through render() so the top agent shares the one prompt-assembly seam; if a later slice needs
-// to fence an untrusted value, it flips a slot kind HERE, not at the call site.
+// the rolling summary of prior PRs. All three are trusted instruction slots — aitm's own governance
+// prose, its own run summary, and the operator-chosen repo's own style guide, which is authoritative
+// here by design. Routed through render() so the top agent shares the one prompt-assembly seam; if a
+// later slice needs to fence an untrusted value, it flips a slot kind HERE, not at the call site.
 export type OrchestratorSystemSlots = {
   // Coding-style digest (StyleDistiller output or raw agent-config contents). Trusted, verbatim.
   readonly style: string;

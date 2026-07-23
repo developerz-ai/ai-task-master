@@ -4,6 +4,7 @@ import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { PrGroup, Task } from '../state/schema.ts';
+import { render } from './prompts/templates.ts';
 import {
   type BashInput,
   type BashOutput,
@@ -13,6 +14,7 @@ import {
   type FileManifest,
   type FileManifestEntry,
   groupManifestByDir,
+  hasStrayEdit,
   labelEditorGroups,
   MAX_FILES_PER_EDITOR,
   type ReadFileInput,
@@ -351,10 +353,19 @@ test('runWorker: a prior handle is continued — the retained conversation is re
   assert.match(sent, /PRIOR-MANIFEST-CONVERSATION/, 'the prior conversation was replayed');
 });
 
-test('WORKER_SYSTEM_PREFIX carries the compaction continuation contract (issue #102)', () => {
-  assert.match(WORKER_SYSTEM_PREFIX, /summarized/i);
-  assert.match(WORKER_SYSTEM_PREFIX, /resume from the summary/i);
-  assert.match(WORKER_SYSTEM_PREFIX, /do not re-plan from\s+scratch or hand off early/i);
+test("the Coordinator's rendered prompt carries the compaction continuation contract (issue #102)", () => {
+  // The contract itself moved from this role's prose into the shared contextManagement block — it is
+  // cross-cutting, and every role needs it. Assert on what the Coordinator actually receives, so the
+  // invariant survives wherever the sentence lives.
+  const rendered = render('role-prompt', {
+    roleGuidance: WORKER_SYSTEM_PREFIX,
+    maxSteps: 30,
+    style: '',
+    env: '<env>\n</env>',
+  });
+  assert.match(rendered, /summarized/i);
+  assert.match(rendered, /resume from the summary/i);
+  assert.match(rendered, /do not re-plan from scratch/i);
 });
 
 test('createWorkerAgent builds an agent that exposes the injected tools', () => {
@@ -807,6 +818,36 @@ test('runWorker: a blocked pass with stray edits restores a clean tree (no parti
     cmds.some((c) => /clean -fd/.test(c)),
     'untracked stray files are cleaned',
   );
+});
+
+test('hasStrayEdit: state-dir entries never count as a dirty tree', () => {
+  // In a repo that does not gitignore `.ai-task-master`, aitm's own untracked state files show up in
+  // `git status --porcelain`. Counting them would hard-reset the checkout on every non-committing
+  // pass — and `git clean` would delete the run's own plan and scratch.
+  assert.equal(hasStrayEdit(''), false);
+  assert.equal(hasStrayEdit('?? .ai-task-master/\n'), false);
+  assert.equal(
+    hasStrayEdit('?? .ai-task-master/state.json\n?? .ai-task-master/scratch/fuzz.ts\n'),
+    false,
+  );
+  assert.equal(hasStrayEdit(' M README.md\n'), true);
+  assert.equal(hasStrayEdit('?? .ai-task-master/state.json\n M README.md\n'), true);
+});
+
+test('runWorker: the stray-edit cleanup never deletes aitm own state dir', async () => {
+  // `git clean -fd` without an exclude only spares .ai-task-master when the TARGET repo happens to
+  // gitignore it; otherwise it wipes the run's plan, style cache, generated specialists, and scratch
+  // mid-run. Same guard as InPlaceCheckout.ensureCleanTree.
+  const manifest: FileManifest = { files: [], draftCommitMessage: 'chore: noop' };
+  const { tools, calls } = makeTools({ strayEdits: true });
+  const model = makeWorkerModel(manifest);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  await runWorker(agent, baseInput());
+
+  const clean = calls.bashes.map((b) => b.command).find((c) => /clean -fd/.test(c));
+  assert.ok(clean, 'the dirty tree was cleaned');
+  assert.match(clean, /-e \.ai-task-master/, 'the state dir is excluded from the clean');
 });
 
 test('runWorker: a clean no-changes tree is left untouched (no-op cleanup, byte-identical git sequence)', async () => {

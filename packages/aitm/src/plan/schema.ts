@@ -5,8 +5,15 @@
 import { z } from 'zod';
 import { TaskComplexitySchema } from '../state/schema.ts';
 
+// The `.describe()` text reaches the model as the tool-input JSON schema, at the moment it fills the
+// field — far closer to the decision than the system prompt, and the only layer the schema-retry
+// loop can enforce. Kept one line each and consistent with PLANNER_SYSTEM_PREFIX.
 export const PlannedTaskSchema = z.object({
-  description: z.string(),
+  description: z
+    .string()
+    .describe(
+      'Verb-first imperative, 5-12 words, one action, checkable: "Add retry with backoff to fetchUser".',
+    ),
   // Mirrors Task.complexity in src/state/schema.ts — kept in sync so Planner
   // output maps onto persisted PrGroup.tasks without a separate field.
   complexity: TaskComplexitySchema.default('normal'),
@@ -17,10 +24,32 @@ export const PlannedTaskSchema = z.object({
 });
 export type PlannedTask = z.infer<typeof PlannedTaskSchema>;
 
+// A title over this reads as a sentence, not a label — and it becomes a branch name and a PR
+// subject, both of which truncate. Failing validation here routes to the schema-retry loop, which is
+// cheaper than a run full of `aitm/g2-implement-the-crud-endpoints-for` branches.
+const MAX_TITLE_CHARS = 48;
+
 export const PlannedGroupSchema = z.object({
   id: z.string(),
-  title: z.string(),
+  title: z
+    .string()
+    .min(1)
+    .max(MAX_TITLE_CHARS)
+    .describe(
+      'Branch name + PR subject: 2-5 word noun phrase naming the capability delivered, no trailing period, no "feat:" prefix. E.g. "Todo CRUD API".',
+    ),
   tasks: z.array(PlannedTaskSchema),
+  // REQUIRED, not optional: this is the only thing that separates "the model says it is done" from
+  // "something demonstrated it", and it is what the Worker builds against and the pre-PR self-review
+  // judges against. A group that arrives without one fails validation and routes to the schema-retry
+  // loop — one more cheap Planner turn, against a whole PR nobody can check. The `.describe()` below
+  // is what that retry re-asks with, so it names the shape of an answer rather than the field.
+  acceptance: z
+    .string()
+    .min(1)
+    .describe(
+      'How to PROVE this group done: the command to run or the behaviour to observe, concrete enough to execute, no restating the title. E.g. "bun test src/auth passes and POST /login sets a session cookie".',
+    ),
   // Group ids that must merge before this group runs. Empty = root of DAG.
   dependsOn: z.array(z.string()).default([]),
 });

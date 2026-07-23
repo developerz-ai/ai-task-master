@@ -22,8 +22,9 @@ export function discoverSpecialists(repoRoot: string): Promise<AgentDefinition[]
 
 // Words too generic to discriminate one specialist from another — they appear in most task text and
 // most agent descriptions, so counting them would flatten every score. Kept small and hand-picked;
-// the signal is short, so precision matters more than recall.
-const STOPWORDS = new Set([
+// the signal is short, so precision matters more than recall. Exported because a generated NAME made
+// only of these words can never route (specialist-bootstrap rejects such names at parse time).
+export const STOPWORDS = new Set([
   'the',
   'and',
   'for',

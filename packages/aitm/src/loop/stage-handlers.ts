@@ -50,15 +50,20 @@ export type StageHandlerResult = GroupStage | { stage: 'blocked'; reason: string
 
 // Checkout-bound execution facade, built per group-run by the dispatcher (which owns the checkout,
 // base branch and subagents). Its methods take the group so the handlers stay checkout-agnostic.
+// What a freshly opened PR carries back to the stage machine: its number for every later `gh` call,
+// and its URL so the run can print a link rather than a number.
+export type OpenedPr = { number: number; url: string };
+
 export type StageOrchestrator = {
   // Run every not-yet-done task in the group (Worker → finalize commit → mark done → persist),
   // in order, leaving the branch holding all the group's commits. Idempotent on resume: tasks
   // already marked done are skipped. Returns blocked when a Worker pass can't complete.
   work(group: PrGroup): Promise<StageWorkResult>;
-  // Push the group branch and open its PR from the work() delivery; returns the new PR number.
-  // Returns null when the branch adds no commits over the base (every task completed without a
-  // commit) — there is nothing to ship, and the group completes without a PR.
-  openPr(group: PrGroup): Promise<number | null>;
+  // Push the group branch and open its PR from the work() delivery; returns the new PR's number and
+  // web URL (the URL is persisted so every later report can link to it). Returns null when the
+  // branch adds no commits over the base (every task completed without a commit) — there is nothing
+  // to ship, and the group completes without a PR.
+  openPr(group: PrGroup): Promise<OpenedPr | null>;
   // ci-failed: download the failed CI logs + unresolved comments, run the shared fix session
   // (Worker pass), then rebase onto origin/<base> and force-with-lease push so CI re-runs. ok →
   // waiting-ci; blocked → the fix couldn't land (still red, or a rebase conflict needing a human).
@@ -112,11 +117,13 @@ export const handleWorking: StageHandler = async (deps, group) => {
 // done without a PR, so it goes straight to the merged terminal instead of blocking the run.
 export const handlePrOpen: StageHandler = async (deps, group) => {
   if (group.pr !== null) return 'waiting-ci';
-  const pr = await deps.orchestrator.openPr(group);
-  if (pr === null) return 'merged';
+  const opened = await deps.orchestrator.openPr(group);
+  if (opened === null) return 'merged';
   await deps.state.update((s) => ({
     ...s,
-    prGroups: s.prGroups.map((g) => (g.id === group.id ? { ...g, pr } : g)),
+    prGroups: s.prGroups.map((g) =>
+      g.id === group.id ? { ...g, pr: opened.number, prUrl: opened.url } : g,
+    ),
   }));
   return 'waiting-ci';
 };

@@ -12,6 +12,15 @@
 
 `AgentConfigDetector` chooses the file. Its raw contents become the **style payload**.
 
+## The style guide is two halves
+
+`composeStyleGuide` (`src/agent-config/coding-style.ts`) builds what every prompt actually sees:
+
+1. **The project style file, verbatim.** `CLAUDE.md` / `AGENTS.md` is injected in full, unsummarized, at the head of the guide. It is the repo's house rules, and a summarizer silently drops rules ("no default exports", "tests must pass under Node too") — which is how an agent ends up violating the file it was told to follow. It leads because it is authoritative and because the one cap that truncates this string (the editor leaf's) keeps the head.
+2. **A distilled digest**, from one smart-tier LLM call over the repo's *other* signals — `CONTRIBUTING.md`, `biome.json`, every root `tsconfig*.json`, `package.json` scripts. The distiller is told the style file ships verbatim alongside it, so its job is the conventions the style file does not state: where tests live and how they are named, the commands that gate a commit, what the formatter and compiler enforce.
+
+Only the digest is cached (`<stateDir>/coding-style.md`). The verbatim half is re-read from `AgentConfig` every run, so an edit to `CLAUDE.md` takes effect on the next run instead of being pinned by a stale cache. Any failure — no signals, a model error, a timeout — degrades to the verbatim half alone; the style file always reaches the prompts.
+
 ## How subagents consume it
 
 `Orchestrator` builds each subagent's system prompt as:

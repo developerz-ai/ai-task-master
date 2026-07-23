@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
-import { StyleDistiller } from './coding-style.ts';
+import { composeStyleGuide, StyleDistiller } from './coding-style.ts';
 
 function claudeConfig(path: string, contents: string): AgentConfig {
   return { flavor: 'claude', path, contents };
@@ -97,7 +97,7 @@ test('StyleDistiller: wraps headerless output under the canonical header', async
   }
 });
 
-test('StyleDistiller: model error → falls back to raw config contents', async () => {
+test('StyleDistiller: model error → empty digest (the verbatim half still reaches prompts)', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   try {
     const config = claudeConfig(join(repo.path, 'CLAUDE.md'), '# raw fallback contents\n- rule\n');
@@ -106,17 +106,18 @@ test('StyleDistiller: model error → falls back to raw config contents', async 
       repoRoot: repo.path,
     });
 
-    assert.equal(digest, '# raw fallback contents\n- rule\n');
+    assert.equal(digest, '');
+    assert.match(composeStyleGuide(config, digest), /# raw fallback contents/);
   } finally {
     await repo.cleanup();
   }
 });
 
-test('StyleDistiller: a stalled step is aborted at the deadline and degrades to raw contents (issue #129)', async () => {
+test('StyleDistiller: a stalled step is aborted at the deadline and degrades to an empty digest (issue #129)', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   try {
     // A summarizer that never settles on its own; the armed { stepMs: 40 } deadline aborts it, and
-    // distill's never-throws contract degrades to the raw config contents rather than hanging.
+    // distill's never-throws contract degrades to '' rather than hanging.
     const stalling = new MockLanguageModelV3({
       doGenerate: (opts) =>
         new Promise((_resolve, reject) => {
@@ -130,7 +131,7 @@ test('StyleDistiller: a stalled step is aborted at the deadline and degrades to 
       config,
       repoRoot: repo.path,
     });
-    assert.equal(digest, '# raw fallback\n- rule\n');
+    assert.equal(digest, '');
   } finally {
     await repo.cleanup();
   }
@@ -233,4 +234,42 @@ test('StyleDistiller: a throwing onProgress never breaks distillation', async ()
   } finally {
     await repo.cleanup();
   }
+});
+
+test('composeStyleGuide: the style file leads verbatim, digest follows', () => {
+  const config = claudeConfig('/repo/CLAUDE.md', '# House rules\n\n- named exports only\n');
+  const guide = composeStyleGuide(config, '# Coding Style\n\n- tests live beside sources');
+
+  const verbatimAt = guide.indexOf('- named exports only');
+  const digestAt = guide.indexOf('- tests live beside sources');
+  assert.ok(verbatimAt >= 0, 'every rule of the style file survives, unsummarized');
+  assert.ok(digestAt > verbatimAt, 'the digest tails the authoritative half');
+  assert.match(guide, /^# CLAUDE\.md \(project style file, verbatim — authoritative\)/);
+});
+
+test('composeStyleGuide: an AGENTS.md style file is labelled by its own filename', () => {
+  const config: AgentConfig = {
+    flavor: 'agents',
+    path: '/repo/AGENTS.md',
+    contents: '# Agents\n',
+  };
+  assert.match(composeStyleGuide(config, ''), /^# AGENTS\.md \(project style file/);
+});
+
+test('composeStyleGuide: no digest → the style file alone, no stray separators', () => {
+  const config = claudeConfig('/repo/CLAUDE.md', '# House rules\n');
+  const guide = composeStyleGuide(config, '   ');
+  assert.equal(
+    guide,
+    '# CLAUDE.md (project style file, verbatim — authoritative)\n\n# House rules',
+  );
+});
+
+test('composeStyleGuide: no style file → the digest alone', () => {
+  assert.equal(composeStyleGuide(null, '# Coding Style\n\n- x'), '# Coding Style\n\n- x');
+});
+
+test('composeStyleGuide: nothing to say → empty, so the prompt omits the style block', () => {
+  assert.equal(composeStyleGuide(null, ''), '');
+  assert.equal(composeStyleGuide(claudeConfig('/repo/CLAUDE.md', '  \n'), ''), '');
 });

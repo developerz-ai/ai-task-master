@@ -6,6 +6,7 @@ import {
   OpenRouterClient,
   type OpenRouterModel,
   OpenRouterModelSchema,
+  parseModelCatalog,
 } from './client.ts';
 
 const realFetch = globalThis.fetch;
@@ -159,4 +160,37 @@ test('contextLengthOf: the top-level field wins over the per-provider one', () =
     top_provider: { context_length: 64000 },
   });
   assert.equal(contextLengthOf(model), 200000);
+});
+
+test('parseModelCatalog: an explicit null numeric keeps the model instead of dropping it', () => {
+  // Real shape from openrouter.ai: moonshotai/kimi-k3 ships `max_completion_tokens: null`. Under a
+  // plain `.optional()` that failed the entry, the whole model vanished from the catalog, and a
+  // vanished model has no context window (autocompaction off) and no price (cost unknown).
+  const models = parseModelCatalog({
+    data: [
+      {
+        id: 'moonshotai/kimi-k3',
+        context_length: 1_048_576,
+        top_provider: { context_length: 1_048_576, max_completion_tokens: null },
+        pricing: { prompt: '0.000003', completion: '0.000015', input_cache_read: null },
+      },
+    ],
+  });
+  assert.equal(models.length, 1);
+  const model = models[0];
+  assert.ok(model);
+  assert.equal(contextLengthOf(model), 1_048_576);
+  assert.equal(maxOutputTokensOf(model), undefined);
+  assert.equal(model.pricing?.prompt, '0.000003');
+  assert.equal(model.pricing?.input_cache_read, undefined);
+});
+
+test('parseModelCatalog: a genuinely invalid entry is still dropped, and drops only itself', () => {
+  const models = parseModelCatalog({
+    data: [{ id: 'good/model', context_length: 100 }, { context_length: 5 }, { id: 'other/model' }],
+  });
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ['good/model', 'other/model'],
+  );
 });

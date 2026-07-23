@@ -30,6 +30,11 @@ export type RoleUsage = {
 export type UsageTotals = {
   perRole: Partial<Record<Role, RoleUsage>>;
   overall: RoleUsage;
+  // True when any priced model was priced from OpenRouter's public catalog rather than the endpoint
+  // aitm actually called — the subscription case, where the provider publishes no rates. The dollar
+  // figure is then a LIST-price estimate of the same work, not what was billed, and the summary line
+  // must say so. False when every price came from the configured provider (or nothing was priced).
+  costEstimated: boolean;
 };
 
 // Token accumulation for one (role, model id) bucket; priced per model at flush time.
@@ -128,6 +133,7 @@ export class UsageTracker {
   async totals(): Promise<UsageTotals> {
     const perRole: Partial<Record<Role, RoleUsage>> = {};
     const overall: RoleUsage = { ...newAccumulation(), costUsd: 0 };
+    let costEstimated = false;
     for (const [role, models] of this.byRole) {
       const roleUsage: RoleUsage = { ...newAccumulation(), costUsd: 0 };
       for (const [modelId, acc] of models) {
@@ -136,7 +142,8 @@ export class UsageTracker {
         roleUsage.cachedInputTokens += acc.cachedInputTokens;
         roleUsage.cacheWriteInputTokens += acc.cacheWriteInputTokens;
         roleUsage.calls += acc.calls;
-        const cost = await this.costFor(modelId, acc);
+        const { cost, estimated } = await this.costFor(modelId, acc);
+        if (estimated) costEstimated = true;
         if (cost === null) roleUsage.costUsd = null;
         else if (roleUsage.costUsd !== null) roleUsage.costUsd += cost;
         if (acc.cacheDiscountUsd !== null) {
@@ -155,16 +162,24 @@ export class UsageTracker {
         overall.cacheDiscountUsd = (overall.cacheDiscountUsd ?? 0) + roleUsage.cacheDiscountUsd;
       }
     }
-    return { perRole, overall };
+    return { perRole, overall, costEstimated };
   }
 
-  private async costFor(modelId: string, acc: Accumulation): Promise<number | null> {
-    if (modelId === UNKNOWN_MODEL) return null;
+  // `estimated` reports only whether the RATES were borrowed from the reference catalog, never
+  // whether a cost was produced — a model priced from the provider's own sheet is exact, and one
+  // that could not be priced at all contributes nothing either way.
+  private async costFor(
+    modelId: string,
+    acc: Accumulation,
+  ): Promise<{ cost: number | null; estimated: boolean }> {
+    if (modelId === UNKNOWN_MODEL) return { cost: null, estimated: false };
     try {
-      return costForModel(await this.limits.forModel(modelId), acc);
+      const limits = await this.limits.forModel(modelId);
+      const cost = costForModel(limits, acc);
+      return { cost, estimated: cost !== null && limits.pricingSource === 'reference' };
     } catch {
       // ModelNotFound, or a failed catalog fetch/parse — tokens still reported, cost unknown.
-      return null;
+      return { cost: null, estimated: false };
     }
   }
 }

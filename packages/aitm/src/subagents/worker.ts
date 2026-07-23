@@ -220,9 +220,10 @@ export type WorkerResult =
 // buildRolePrompt. The per-file EDITOR_SYSTEM_PREFIX is imported above for the local editor fanout.
 export { WORKER_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 
-// Worker + editor step caps. Both are the shared runaway backstop, not a work budget: the Coordinator
-// and each editor leaf terminate when they call `submit`, and the cap only guards a non-terminating
-// loop. See AGENT_STEP_BACKSTOP — the former low caps (30/12) cut real work off mid-task.
+// Worker + editor step caps. Both are the shared runaway backstop, not a work budget — the former low
+// caps (30/12) cut real work off mid-task. The Coordinator's manifest pass terminates by calling
+// `submit`; an editor leaf has no `submit` tool, so it ends on a plain-text response (runEditorPass).
+// Either way the cap only guards a non-terminating loop. See AGENT_STEP_BACKSTOP.
 export const WORKER_MAX_STEPS = AGENT_STEP_BACKSTOP;
 export const EDITOR_MAX_STEPS = AGENT_STEP_BACKSTOP;
 

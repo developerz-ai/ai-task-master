@@ -32,7 +32,7 @@
   "scripts": {
     "build": "tsc -b tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "bun test",
+    "test": "AITM_INSTANT_SLEEP=1 bun test",
     "test:node": "node --test --test-timeout=30000 --import tsx \"src/**/*.test.ts\"",
     "test:integration": "node --test --test-timeout=120000 --import tsx \"test/**/*.test.ts\"",
     "debug:start": "bun --inspect-brk scripts/debug-start.ts",

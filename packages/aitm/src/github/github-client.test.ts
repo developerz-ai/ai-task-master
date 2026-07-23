@@ -1141,7 +1141,7 @@ test('listUnresolvedThreads breaks on non-advancing cursor in thread comments', 
 });
 
 // defaultSleep short-circuits to a microtask under a test runner (NODE_TEST_CONTEXT under
-// `node --test`, NODE_ENV=test under `bun test`), so un-injected grace/poll waits don't burn real
+// `node --test`, or explicit AITM_INSTANT_SLEEP=1), so un-injected grace/poll waits don't burn real
 // minutes in CI. Production, with neither signal, keeps the real timer. A 1-hour ask must return
 // effectively instantly here, under either runtime.
 test('defaultSleep: instant under the test runner', async () => {
@@ -1151,7 +1151,7 @@ test('defaultSleep: instant under the test runner', async () => {
   assert.ok(Date.now() - start < 250, 'defaultSleep must not wait real time in tests');
 });
 
-const INSTANT_SLEEP_ENV = ['AITM_INSTANT_SLEEP', 'NODE_ENV', 'NODE_TEST_CONTEXT'] as const;
+const INSTANT_SLEEP_ENV = ['AITM_INSTANT_SLEEP', 'NODE_TEST_CONTEXT'] as const;
 
 // The cancellation path only exists behind the instant-sleep short circuit, so these cases have to
 // run with every instant-sleep signal unset — and put them back, or the rest of the file waits out

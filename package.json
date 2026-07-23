@@ -9,7 +9,7 @@
     "build": "bun run --filter '*' build",
     "typecheck": "bun run --filter '*' typecheck",
     "typecheck:tests": "bun run --filter '*' typecheck:tests",
-    "test": "bun test",
+    "test": "AITM_INSTANT_SLEEP=1 bun test",
     "test:node": "bun run --filter '*' test:node",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",

@@ -346,7 +346,6 @@ async function runReviewerThreads(
       style: input.subagents.styleContents,
       roleGuidance: REVIEWER_SYSTEM_PREFIX,
       cwd: input.checkoutPath,
-      maxSteps: REVIEWER_MAX_STEPS,
     }),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
     ...(input.subagents.onReviewerStepFinish
@@ -411,7 +410,6 @@ async function runWorkerCiFix(
       style: input.subagents.styleContents,
       roleGuidance: WORKER_SYSTEM_PREFIX,
       cwd: input.checkoutPath,
-      maxSteps: WORKER_MAX_STEPS,
     }),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
     ...(input.subagents.onWorkerStepFinish

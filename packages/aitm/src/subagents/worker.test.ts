@@ -2261,16 +2261,26 @@ test('runWorker: a manifest pass that only surveys gets one corrective nudge, th
           warnings: [],
         };
       }
+      if (idx === surveySteps) {
+        return {
+          content: [
+            {
+              type: 'tool-call' as const,
+              toolCallId: 'submit-late',
+              toolName: 'submit',
+              input: JSON.stringify(oneFileManifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls' as const, raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      // The editor-fanout leaf (no submit tool) terminates by returning a plain text response — not
+      // by exhausting a step cap, which is now the shared runaway backstop rather than a low bound.
       return {
-        content: [
-          {
-            type: 'tool-call' as const,
-            toolCallId: 'submit-late',
-            toolName: 'submit',
-            input: JSON.stringify(oneFileManifest),
-          },
-        ],
-        finishReason: { unified: 'tool-calls' as const, raw: undefined },
+        content: [{ type: 'text' as const, text: 'edited' }],
+        finishReason: { unified: 'stop' as const, raw: undefined },
         usage: emptyUsage(),
         warnings: [],
       };
@@ -2313,16 +2323,25 @@ test('runWorker: a manifest pass under the survey budget is never nudged', async
           warnings: [],
         };
       }
+      if (idx === 1) {
+        return {
+          content: [
+            {
+              type: 'tool-call' as const,
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify(oneFileManifest),
+            },
+          ],
+          finishReason: { unified: 'tool-calls' as const, raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      }
+      // Editor-fanout leaf: terminate via a text response, not the raised step backstop.
       return {
-        content: [
-          {
-            type: 'tool-call' as const,
-            toolCallId: 'submit-0',
-            toolName: 'submit',
-            input: JSON.stringify(oneFileManifest),
-          },
-        ],
-        finishReason: { unified: 'tool-calls' as const, raw: undefined },
+        content: [{ type: 'text' as const, text: 'edited' }],
+        finishReason: { unified: 'stop' as const, raw: undefined },
         usage: emptyUsage(),
         warnings: [],
       };

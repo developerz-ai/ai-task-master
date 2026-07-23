@@ -80,10 +80,9 @@ test('render is pure: identical slots render byte-for-byte identically', () => {
   assert.equal(render('review-thread', slots), render('review-thread', slots));
 });
 
-test('render(role-prompt): bakes the contract blocks, <env>, and step-budget around the role guidance; trusted slots are never fenced', () => {
+test('render(role-prompt): bakes the contract blocks and <env> around the role guidance; trusted slots are never fenced', () => {
   const out = render('role-prompt', {
     roleGuidance: 'You are the Worker.',
-    maxSteps: 30,
     style: '# style digest',
     env: '<env>\nWorking directory: /repo\n</env>',
     modelId: 'prov/model-x',
@@ -92,7 +91,11 @@ test('render(role-prompt): bakes the contract blocks, <env>, and step-budget aro
   assert.match(out, /Communication contract:/, 'communication contract baked in');
   assert.match(out, /Autonomy:/, 'autonomy contract baked in');
   assert.match(out, /You are the Worker\./, 'role guidance present');
-  assert.match(out, /hard budget of 30 tool steps/, 'step-budget reminder interpolates the cap');
+  assert.doesNotMatch(
+    out,
+    /hard budget of/,
+    'no step-budget reminder — agents run until they submit',
+  );
   assert.match(out, /# style digest/, 'style slot present');
   assert.match(
     out,
@@ -112,7 +115,6 @@ test("render(role-prompt / orchestrator-system): the repo's own style guide is a
   const guide = '# CLAUDE.md\n\n- No default exports.\n- Named exports only.';
   const role = render('role-prompt', {
     roleGuidance: 'You are the Worker.',
-    maxSteps: 30,
     style: guide,
     env: '<env>\n</env>',
   });
@@ -131,7 +133,6 @@ test("render(role-prompt / orchestrator-system): the repo's own style guide is a
 test('render(role-prompt): omits the self-id block when no modelId is supplied', () => {
   const out = render('role-prompt', {
     roleGuidance: 'ROLE',
-    maxSteps: 12,
     style: '',
     env: '<env>\n</env>',
   });
@@ -139,15 +140,14 @@ test('render(role-prompt): omits the self-id block when no modelId is supplied',
   assert.match(out, /Harness contract:/, 'contracts still baked in');
 });
 
-test('render(editor-prompt): lean leaf — role guidance + step-budget, style, env, and tool-result trust only', () => {
+test('render(editor-prompt): lean leaf — role guidance, style, env, and tool-result trust only', () => {
   const out = render('editor-prompt', {
     roleGuidance: 'You are the Editor.',
-    maxSteps: 15,
     style: '# style digest',
     env: '<env>\nWorking directory: /repo\n</env>',
   });
   assert.match(out, /You are the Editor\./, 'role guidance present');
-  assert.match(out, /hard budget of 15 tool steps/, 'step-budget reminder interpolates the cap');
+  assert.doesNotMatch(out, /hard budget of/, 'no step-budget reminder on the leaf either');
   assert.match(out, /# style digest/, 'style slot present');
   assert.match(
     out,
@@ -171,7 +171,6 @@ test('render(editor-prompt): lean leaf — role guidance + step-budget, style, e
 test('render(editor-prompt): an empty style omits the style block, still renders role guidance and env', () => {
   const out = render('editor-prompt', {
     roleGuidance: 'ROLE_MARK',
-    maxSteps: 10,
     style: '',
     env: '<env>\n</env>',
   });
@@ -182,7 +181,6 @@ test('render(editor-prompt): an empty style omits the style block, still renders
 test('render(editor-prompt): a team brief rides after the role guidance, before the style block', () => {
   const out = render('editor-prompt', {
     roleGuidance: 'ROLE_MARK',
-    maxSteps: 12,
     style: 'STYLE_MARK',
     env: '<env>\n</env>',
     teamBrief: '<team-brief>\nBRIEF_MARK\n</team-brief>',
@@ -199,6 +197,6 @@ test('render(editor-prompt): a team brief rides after the role guidance, before 
 });
 
 test('render(editor-prompt): an empty team brief renders byte-identically to omitting it', () => {
-  const base = { roleGuidance: 'R', maxSteps: 12, style: 'S', env: '<env>\n</env>' };
+  const base = { roleGuidance: 'R', style: 'S', env: '<env>\n</env>' };
   assert.equal(render('editor-prompt', { ...base, teamBrief: '' }), render('editor-prompt', base));
 });

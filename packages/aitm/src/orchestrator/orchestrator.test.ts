@@ -247,7 +247,7 @@ test('resolveMaxSteps: null / 0 / negative fall back to DEFAULT_MAX_STEPS', () =
   assert.equal(resolveMaxSteps(-3), DEFAULT_MAX_STEPS);
 });
 
-test("build: the Worker subagent tool keeps its own fixed step-budget regardless of the orchestrator's maxSteps (decoupled)", async () => {
+test("build: the Worker subagent tool carries no step-budget reminder, whatever the orchestrator's maxSteps", async () => {
   const manifest: FileManifest = {
     files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
     draftCommitMessage: 'feat: x',
@@ -281,8 +281,9 @@ test("build: the Worker subagent tool keeps its own fixed step-budget regardless
     },
   });
   const { provider } = recordingProvider(model);
-  // An orchestrator maxSteps wildly different from WORKER_MAX_STEPS — if the two were coupled, the
-  // Worker's system prompt would report this number instead of its own fixed budget.
+  // An orchestrator maxSteps wildly different from any role cap — the Worker's prompt must carry no
+  // step-budget number at all (agents run until they submit; see AGENT_STEP_BACKSTOP), so neither
+  // the orchestrator's value nor a role cap can leak into it.
   const o = new Orchestrator({
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
@@ -294,8 +295,7 @@ test("build: the Worker subagent tool keeps its own fixed step-budget regardless
   const workerExec = agent.tools.worker.execute;
   if (typeof workerExec !== 'function') throw new Error('no worker execute');
   await workerExec({}, { toolCallId: 'tc', messages: [] });
-  assert.match(sentSystem, new RegExp(`hard budget of ${WORKER_MAX_STEPS} tool steps`));
-  assert.doesNotMatch(sentSystem, /hard budget of 3 tool steps/);
+  assert.doesNotMatch(sentSystem, /hard budget of/, 'no step-budget reminder in the worker prompt');
 });
 
 test('Orchestrator is constructible', () => {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import { AGENT_STEP_BACKSTOP } from '../subagents/factory.ts';
 import type { WorkerTools } from '../subagents/worker.ts';
 import { buildConflictResolver, CONFLICT_RESOLVER_MAX_STEPS } from './conflict-resolution.ts';
 
@@ -119,6 +120,8 @@ test('buildConflictResolver: a stalled/aborted generate → unresolved carrying 
   if (result.kind === 'unresolved') assert.match(result.reason, /exceeded the configured deadline/);
 });
 
-test('CONFLICT_RESOLVER_MAX_STEPS is a small positive bound', () => {
-  assert.ok(CONFLICT_RESOLVER_MAX_STEPS > 0 && CONFLICT_RESOLVER_MAX_STEPS <= 30);
+test('CONFLICT_RESOLVER_MAX_STEPS is the shared runaway backstop, not a low work cap', () => {
+  // The resolver terminates when it submits; the cap only guards a non-terminating loop, so it sits
+  // far above any real resolution (see AGENT_STEP_BACKSTOP) rather than at a low 20-30.
+  assert.equal(CONFLICT_RESOLVER_MAX_STEPS, AGENT_STEP_BACKSTOP);
 });

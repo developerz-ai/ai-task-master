@@ -283,7 +283,6 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
       style: subagents.styleContents,
       roleGuidance: WORKER_SYSTEM_PREFIX,
       cwd: checkoutPath,
-      maxSteps: WORKER_MAX_STEPS,
       modelId: subagents.credentials.modelIdForCapability('coding'),
       ...(subagents.memoryIndex ? { memoryIndex: subagents.memoryIndex } : {}),
     }),

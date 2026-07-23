@@ -230,8 +230,13 @@ async function execBash(
     return { stdout: asString(r.stdout), stderr: asString(r.stderr), exitCode: r.exitCode ?? 0 };
   } catch (err) {
     if (err instanceof ExecaError) {
-      // Either mechanism counts: our group-kill (`timedOut`) or execa's own `timeout` (`err.timedOut`).
-      const wasTimeout = timedOut || err.timedOut === true;
+      // A timeout only counts when the subprocess was actually terminated by a signal — our own
+      // group-SIGKILL (with the timer having fired) or execa's own `timeout`. Timers fire in libuv's
+      // timers phase, ahead of the I/O poll phase, so a command that exits on its own right at the
+      // deadline can still trip our timer; but such a self-exit reports an exit code, not a signal, so
+      // requiring signal-termination keeps ownership at the exit boundary and never mis-stamps it.
+      const killedBySignal = err.isTerminated === true || typeof err.signal === 'string';
+      const wasTimeout = (timedOut && killedBySignal) || err.timedOut === true;
       return {
         stdout: asString(err.stdout),
         stderr: typeof err.stderr === 'string' ? err.stderr : err.message,

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import type { execa } from 'execa';
+import { ExecaError, type execa } from 'execa';
 import { ProcessManager, type SpawnFn } from './background-process.ts';
 import { type BashOutput, bashTool, MAX_BASH_OUTPUT_CHARS, multiBashTool } from './bash-tool.ts';
 import { ToolOutputStore } from './tool-output-store.ts';
@@ -170,6 +170,72 @@ test('bashTool: a timed-out command is flagged timedOut; a normal failure is not
   } finally {
     await dir.cleanup();
   }
+});
+
+// An ExecaError-shaped rejection built without running a process, so a test can drive the exit
+// boundary deterministically. setPrototypeOf (not Object.create + assign) so `instanceof ExecaError`
+// holds while own data props shadow any prototype accessors.
+function fakeExecaError(fields: {
+  exitCode?: number;
+  signal?: string;
+  isTerminated?: boolean;
+  timedOut?: boolean;
+  stderr?: string;
+}): ExecaError {
+  const err = {
+    message: 'command failed',
+    stdout: '',
+    stderr: fields.stderr ?? '',
+    exitCode: fields.exitCode,
+    signal: fields.signal,
+    isTerminated: fields.isTerminated ?? false,
+    timedOut: fields.timedOut ?? false,
+  };
+  Object.setPrototypeOf(err, ExecaError.prototype);
+  return err as unknown as ExecaError;
+}
+
+// A fake exec whose subprocess rejects with `err` after `delayMs`, past the effective timeout — so
+// the real timer fires first (on a bogus pid: process.kill throws ESRCH and is swallowed).
+function rejectAfterExec(delayMs: number, err: ExecaError): typeof execa {
+  const stub = (_file: string, _args: readonly string[], _opts: { timeout?: number }) => {
+    const p = new Promise((_resolve, reject) => {
+      setTimeout(() => reject(err), delayMs);
+    }) as Promise<never> & { pid: number };
+    p.pid = 999999; // not a live group — the timer's group-kill is a harmless no-op
+    return p;
+  };
+  return stub as unknown as typeof execa;
+}
+
+test('bashTool: a command that exits on its own around the deadline is not mis-flagged timedOut (issue #269)', async () => {
+  // The timer fires at 30ms and (uselessly) signals a bogus pid; the subprocess then rejects at 80ms
+  // as a self-exit (exit code, no signal). Ownership lives at the exit boundary — only a signal
+  // termination counts — so this normal failure must not be flagged.
+  const out = await run<{ command: string }, BashOutput>(
+    bashTool({
+      cwd: '/w',
+      exec: rejectAfterExec(80, fakeExecaError({ exitCode: 3, stderr: 'boom' })),
+      defaultTimeoutMs: 30,
+    }),
+    { command: 'sleep 0.05 && exit 3' },
+  );
+  assert.equal(out.exitCode, 3);
+  assert.ok(!out.timedOut, 'a self-exit racing the deadline is not a timeout');
+});
+
+test('bashTool: a command our timer signal-kills at the deadline is flagged timedOut (issue #269)', async () => {
+  // Same race, but the subprocess ends by SIGKILL — the signal our group-kill would send — so it is
+  // correctly a timeout.
+  const out = await run<{ command: string }, BashOutput>(
+    bashTool({
+      cwd: '/w',
+      exec: rejectAfterExec(80, fakeExecaError({ signal: 'SIGKILL', isTerminated: true })),
+      defaultTimeoutMs: 30,
+    }),
+    { command: 'sleep 5' },
+  );
+  assert.equal(out.timedOut, true, 'a signal-terminated command at the deadline is a timeout');
 });
 
 type MultiOut = {

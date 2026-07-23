@@ -337,6 +337,10 @@ function crashGroup(overrides: Partial<PrGroup> = {}): PrGroup {
   };
 }
 
+function prUrl(number: number): string {
+  return `https://github.com/owner/repo/pull/${number}`;
+}
+
 // Fake GitHub remote: a Map that outlives the crash (an external system, not process memory),
 // mirroring the real GitHubClient.createPr contract — adopt the existing PR for a branch instead of
 // creating a duplicate. `createCalls` counts genuine creates only; an adopt never increments it.
@@ -347,11 +351,11 @@ function makeFakeRemote(): { openPr: StageOrchestrator['openPr']; createCalls: (
     openPr: async (group) => {
       const branch = group.branch ?? `aitm/${group.id}`;
       const existing = remote.get(branch);
-      if (existing !== undefined) return existing;
+      if (existing !== undefined) return { number: existing, url: prUrl(existing) };
       createCalls += 1;
       const pr = 501;
       remote.set(branch, pr);
-      return pr;
+      return { number: pr, url: prUrl(pr) };
     },
     createCalls: () => createCalls,
   };

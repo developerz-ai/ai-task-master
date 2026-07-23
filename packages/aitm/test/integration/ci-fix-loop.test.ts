@@ -488,6 +488,22 @@ async function localHeadSha(repoPath: string): Promise<string> {
   return stdout.trim();
 }
 
+async function currentBranchName(repoPath: string): Promise<string> {
+  const { stdout } = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath });
+  return stdout.trim();
+}
+
+async function localBranchExists(repoPath: string, branch: string): Promise<boolean> {
+  try {
+    await execa('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], {
+      cwd: repoPath,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 test('ci-fix-loop (WorkLoop/autoMerge): CI fix reaches the real remote before the PR merges', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   let origin: { remotePath: string; cleanup: () => Promise<void> } | undefined;
@@ -527,6 +543,10 @@ test('ci-fix-loop (WorkLoop/autoMerge): CI fix reaches the real remote before th
     // Remote branch HEAD sha captured at the instant each mergePr fires — proves the fix push
     // happened BEFORE the merge, not after.
     const remoteShaAtMerge: (string | null)[] = [];
+    // Local group-branch tip captured at the SAME instant. Read here, not after the run, because a
+    // merged branch is now deleted (local + origin) the moment the merge lands — so post-run HEAD
+    // sits on the base, not on the fix commit this assertion is about.
+    const localShaAtMerge: string[] = [];
 
     const orchestrator: WorkLoopOrchestrator = {
       runWorker: async ({ checkout }) => {
@@ -589,6 +609,7 @@ test('ci-fix-loop (WorkLoop/autoMerge): CI fix reaches the real remote before th
         mergeCalls.push(pr);
         // biome-ignore lint/style/noNonNullAssertion: origin is assigned above before the loop runs
         remoteShaAtMerge.push(await remoteHeadSha(origin!.remotePath, groupBranch));
+        localShaAtMerge.push(await localHeadSha(repo.path));
       },
     };
 
@@ -609,15 +630,26 @@ test('ci-fix-loop (WorkLoop/autoMerge): CI fix reaches the real remote before th
     assert.equal(runCiFixCalls, 1, 'the fix session runs exactly once on the red PR');
     assert.deepEqual(mergeCalls, [1], 'PR merges exactly once, after CI goes green');
 
-    const localSha = await localHeadSha(repo.path);
     assert.equal(
       remoteShaAtMerge[0],
-      localSha,
+      localShaAtMerge[0],
       'the remote branch must already carry the fix commit at the moment mergePr fires',
     );
 
-    const remoteFix = await execa('git', ['show', `${groupBranch}:fix.ts`], {
-      cwd: origin.remotePath,
+    // The merged branch is deleted on both sides once the merge lands, HEAD moved to base first so
+    // the local delete is possible at all.
+    assert.equal(
+      await remoteHeadSha(origin.remotePath, groupBranch),
+      null,
+      'remote branch deleted',
+    );
+    assert.equal(await currentBranchName(repo.path), defaultBranch, 'HEAD moved to base');
+    assert.equal(await localBranchExists(repo.path, groupBranch), false, 'local branch deleted');
+
+    // The fix commit is captured at merge time, before deletion, so `git show <sha>:fix.ts` still
+    // resolves it from the object store even though the branch ref is gone.
+    const remoteFix = await execa('git', ['show', `${localShaAtMerge[0]}:fix.ts`], {
+      cwd: repo.path,
     });
     assert.ok(
       remoteFix.stdout.includes('fixed'),

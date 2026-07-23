@@ -32,7 +32,8 @@ import { test } from 'node:test';
 import type { ModelMessage } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
-import { runStart } from '../../src/cli/commands.ts';
+import type { RunLoopInput } from '../../src/cli/commands.ts';
+import { runMergePr, runStart } from '../../src/cli/commands.ts';
 import type { ReviewThread } from '../../src/github/schema.ts';
 import { normalizeResumeStatus } from '../../src/loop/resume-normalize.ts';
 import {
@@ -49,6 +50,7 @@ import {
   type WorkLoopGithub,
   type WorkLoopGraph,
   type WorkLoopOrchestrator,
+  type WorkLoopResult,
   type WorkLoopState,
 } from '../../src/loop/work-loop.ts';
 import { Orchestrator } from '../../src/orchestrator/orchestrator.ts';
@@ -916,6 +918,339 @@ test('crash-durability: prPerTask + no-automerge is rejected before any side eff
       cwd: repo.path,
     });
     assert.equal(branches.trim(), '', 'no aitm/* branch must be created for a rejected combo');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Dirty-tree crash boundary: a run must never destroy work it did not create
+// ---------------------------------------------------------------------------
+//
+// docs/plans/2026/07/23/101-aitm-audit-improvements/01-data-safety-state.md step 1. Before the
+// fix, the FIRST checkout acquire of a run silently ran `git reset --hard` + `git clean -fd` over
+// whatever sat in the tree — indistinguishable, from aitm's point of view, from a crashed prior
+// run's own leftovers. An operator mid-edit (or dirt a dead run left that the operator had since
+// built on) lost that work with no warning. The fix (workspace/dirty-tree.ts,
+// in-place-checkout.ts#enterRun) refuses at run entry instead of cleaning; auto-clean stays only
+// between groups, once the run has proven the dirt is its own. This drives the real `runStart` →
+// `InPlaceCheckout.acquire` path — the exact "first acquire of a run" call site production hits —
+// against a real dirty tree, then proves the refusal touched nothing and a retry after committing
+// the dirt carries that exact work through instead of losing it.
+test('crash-durability: a dirty tree at run entry is refused untouched; committing it and retrying carries the work through', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    await execa('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: repo.path });
+    await execa('git', ['add', 'CLAUDE.md'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'initial commit'], { cwd: repo.path });
+
+    // Dirt an operator (or a crashed prior run) left behind: one modified tracked file and one
+    // untracked file — the two porcelain shapes dirty-tree.ts has to recognize as work, not junk.
+    await writeFile(join(repo.path, 'CLAUDE.md'), '# CLAUDE.md\n\nin-progress edit\n');
+    await writeFile(join(repo.path, 'notes.md'), 'uncommitted analysis nobody has seen yet\n');
+
+    // The exact call InPlaceCheckout.acquire makes for the first group of a run — this is the run
+    // entry the guard protects, not a reimplementation of it.
+    const runLoopHitsAcquire = async (input: RunLoopInput): Promise<WorkLoopResult> => {
+      const home = new InPlaceCheckout(input.cwd);
+      await home.acquire('g1', 'aitm/g1', 'main');
+      return { kind: 'success', outcomes: [] };
+    };
+
+    const refused = await runStart(
+      { kind: 'start', goal: 'add hello' },
+      {
+        cwd: repo.path,
+        homeDir: repo.path,
+        env: { OPENROUTER_API_KEY: 'test-key-x' },
+        authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        resolveStyle: async () => 'stub digest\n',
+        runLoop: runLoopHitsAcquire,
+      },
+    );
+
+    assert.equal(refused.code, 1, `expected refusal, got: ${refused.message ?? ''}`);
+    assert.match(refused.message ?? '', /Refusing to start/);
+    assert.match(refused.message ?? '', /uncommitted changes/);
+
+    // Nothing touched: both files still carry their pre-refusal content, and git still sees them
+    // exactly as dirty as before — no reset, no clean, no partial commit.
+    assert.equal(
+      await readFile(join(repo.path, 'CLAUDE.md'), 'utf8'),
+      '# CLAUDE.md\n\nin-progress edit\n',
+      'the modified tracked file must survive the refusal untouched',
+    );
+    assert.equal(
+      await readFile(join(repo.path, 'notes.md'), 'utf8'),
+      'uncommitted analysis nobody has seen yet\n',
+      'the untracked file must survive the refusal untouched',
+    );
+    const { stdout: statusAfterRefusal } = await execa('git', ['status', '--porcelain'], {
+      cwd: repo.path,
+    });
+    assert.match(statusAfterRefusal, /CLAUDE\.md/);
+    assert.match(statusAfterRefusal, /notes\.md/);
+
+    // The operator resolves it the way the refusal message suggests: commit the work.
+    await execa('git', ['add', '-A'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'wip: in-progress edit + notes'], { cwd: repo.path });
+
+    // Retry: same runLoop, now over a clean tree — resumes the state.json the refused attempt
+    // already persisted (init happens before the loop runs, so the refusal did not even cost a
+    // second `state.init`).
+    const retried = await runStart(
+      { kind: 'start', goal: 'add hello' },
+      {
+        cwd: repo.path,
+        homeDir: repo.path,
+        env: { OPENROUTER_API_KEY: 'test-key-x' },
+        authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        resolveStyle: async () => 'stub digest\n',
+        runLoop: runLoopHitsAcquire,
+      },
+    );
+    assert.equal(retried.code, 0, `expected success on retry, got: ${retried.message ?? ''}`);
+
+    // The committed work is not merely still on disk — it is reachable on the group branch
+    // acquire just checked out, proving the guard never cost the run the work it protected.
+    const { stdout: onGroupBranch } = await execa('git', ['show', 'aitm/g1:notes.md'], {
+      cwd: repo.path,
+    });
+    assert.equal(onGroupBranch, 'uncommitted analysis nobody has seen yet');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Concurrent-run crash boundary: a second invocation while the lock is held must cost nothing
+// ---------------------------------------------------------------------------
+//
+// docs/plans/2026/07/23/101-aitm-audit-improvements/01-data-safety-state.md step 2. StateStore
+// mutates from a write-behind cache of the last state IT wrote, so two overlapping `aitm`
+// invocations over one `.ai-task-master/` do not merely interleave — they last-writer-wins over
+// each other's plan, group stages and PR numbers. The fix (state/run-lock.ts) makes the SECOND
+// `acquireRunLock` over an already-held dir fail fast instead of racing. This test drives a real
+// concurrent overlap — a second `runStart` invoked from INSIDE the first run's own `runLoop`,
+// while the first still holds `run.lock` (release only happens in `runStart`'s `finally`, after
+// the loop resolves) — and proves the refused second run touches nothing while the first keeps
+// every write it made.
+test('crash-durability: a concurrent run while the lock is held is refused untouched; the holder finishes and keeps every write it made', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    await execa('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: repo.path });
+    await execa('git', ['add', 'CLAUDE.md'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'initial commit'], { cwd: repo.path });
+
+    let innerLoopCalls = 0;
+    let concurrentResult: Awaited<ReturnType<typeof runStart>> | null = null;
+
+    const holderRunLoop = async (input: RunLoopInput): Promise<WorkLoopResult> => {
+      // Progress this "process" makes while it holds the lock — must survive whatever the
+      // concurrent attempt below does.
+      await input.state.update((s) => ({ ...s, status: 'working', sessionCount: 1 }));
+
+      // A second `aitm start` over the SAME state dir, invoked while this run still holds
+      // run.lock — the real race two overlapping invocations would hit.
+      concurrentResult = await runStart(
+        { kind: 'start', goal: 'a different goal entirely' },
+        {
+          cwd: input.cwd,
+          homeDir: input.cwd,
+          env: { OPENROUTER_API_KEY: 'test-key-x' },
+          authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+          resolveStyle: async () => 'stub digest\n',
+          runLoop: async () => {
+            innerLoopCalls += 1;
+            return { kind: 'success', outcomes: [] };
+          },
+        },
+      );
+
+      return { kind: 'success', outcomes: [] };
+    };
+
+    const result = await runStart(
+      { kind: 'start', goal: 'add hello' },
+      {
+        cwd: repo.path,
+        homeDir: repo.path,
+        env: { OPENROUTER_API_KEY: 'test-key-x' },
+        authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        resolveStyle: async () => 'stub digest\n',
+        runLoop: holderRunLoop,
+      },
+    );
+
+    assert.ok(concurrentResult, 'the concurrent attempt ran');
+    assert.equal(
+      concurrentResult?.code,
+      1,
+      `expected the concurrent run to be refused, got: ${concurrentResult?.message ?? ''}`,
+    );
+    assert.match(concurrentResult?.message ?? '', /another aitm run holds/);
+    assert.equal(innerLoopCalls, 0, 'the concurrent run must never reach its own loop');
+
+    // The holder's own run must succeed, undisturbed by the refused concurrent attempt.
+    assert.equal(
+      result.code,
+      0,
+      `expected the holder to finish cleanly, got: ${result.message ?? ''}`,
+    );
+
+    // The lock is released now that both invocations have returned.
+    await assert.rejects(
+      () => readFile(join(repo.path, '.ai-task-master', 'run.lock'), 'utf8'),
+      /ENOENT/,
+      'lock released once the holder finishes',
+    );
+
+    // The refused concurrent attempt never persisted its own goal.
+    const goal = await readFile(join(repo.path, '.ai-task-master', 'goal.txt'), 'utf8');
+    assert.equal(goal.trim(), 'add hello', "the concurrent goal must never overwrite the holder's");
+
+    // The progress the holder wrote mid-run is exactly what a fresh read sees — the refused
+    // concurrent attempt cost the holder nothing.
+    const finalState = await new StateStore(join(repo.path, '.ai-task-master')).read();
+    assert.equal(finalState.status, 'working');
+    assert.equal(finalState.sessionCount, 1);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// `--no-resume` crash boundary: a mid-plan run must survive a crash in the take-over write itself
+// ---------------------------------------------------------------------------
+//
+// docs/plans/2026/07/23/101-aitm-audit-improvements/01-data-safety-state.md step 4. Before the
+// fix, `merge-pr --no-resume` re-initialised state wholesale, discarding a mid-plan run's plan,
+// group stages, session count and runId for one distrusted field (`currentPr`). The fix
+// (cli/commands.ts) re-points `currentPr` in place via `StateStore.update` instead. This test
+// proves the durability angle the rest of this file is about: the update itself can crash
+// mid-fsync exactly like every other write here, and the mid-plan run must come through that
+// crash exactly as intact as the fix promises — not just when the write succeeds outright.
+test('crash-durability: `merge-pr --no-resume` re-pointing currentPr crashes mid-fsync; the mid-plan run survives untouched, and a clean retry keeps every group', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    const stateDir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(stateDir);
+    const midPlan = baseState({
+      status: 'working',
+      currentPr: 73,
+      currentGroupIndex: 1,
+      sessionCount: 3,
+      runId: 'run-midplan',
+      prGroups: [
+        {
+          id: 'g1',
+          title: 'schema',
+          tasks: [{ id: 't1', text: 'schema', complexity: 'normal', done: true }],
+          dependsOn: [],
+          branch: 'feat/schema',
+          pr: 70,
+          status: 'merged',
+          stage: 'merged',
+        },
+        {
+          id: 'g2',
+          title: 'api',
+          tasks: [
+            { id: 't2', text: 'api', complexity: 'normal', done: true },
+            { id: 't3', text: 'api part two', complexity: 'normal', done: false },
+          ],
+          dependsOn: ['g1'],
+          branch: 'feat/api',
+          pr: 73,
+          status: 'awaiting-pr',
+          stage: 'waiting-ci',
+        },
+      ],
+    });
+    await store.init(midPlan);
+
+    // Crash: `merge-pr --no-resume`'s own state.update (re-pointing currentPr at the take-over PR)
+    // dies mid-fsync — the exact instant a `kill -9` between reading the mid-plan state and
+    // persisting the new currentPr would land. commands.ts treats any state.update failure here as
+    // an unreadable-state exit (code 1) rather than propagating the raw error — so this asserts the
+    // exit, not a rejection — but the guarantee under test is the same one every other crash
+    // boundary in this file proves: the write never renamed, so nothing was lost.
+    const crashErr = Object.assign(new Error('power loss mid-fsync'), { code: 'EIO' });
+    let flowCallsDuringCrash = 0;
+    const crashExit = await withArmedSyncFault(crashErr, () =>
+      runMergePr(
+        { kind: 'merge-pr', resume: false, pr: 88 },
+        {
+          cwd: repo.path,
+          homeDir: repo.path,
+          env: { OPENROUTER_API_KEY: 'test-key-x' },
+          authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+          resolveStyle: async () => 'stub digest\n',
+          runMergeFlow: async () => {
+            flowCallsDuringCrash += 1;
+            return { kind: 'success', outcomes: [] };
+          },
+        },
+      ),
+    );
+    assert.equal(
+      crashExit.code,
+      1,
+      `expected the crash to surface as exit 1, got: ${crashExit.message ?? ''}`,
+    );
+    assert.match(crashExit.message ?? '', /power loss mid-fsync/);
+    assert.equal(
+      flowCallsDuringCrash,
+      0,
+      'the merge flow must never run against a half-written take-over',
+    );
+    assert.deepEqual(
+      await tmpArtifacts(stateDir),
+      [],
+      'a failed take-over write must not leave a .tmp file behind',
+    );
+
+    // The crashed write never renamed — the mid-plan run is intact, not partially clobbered.
+    const crashed = await store.read();
+    assert.equal(crashed.currentPr, 73, 'the crashed write must not have applied the take-over PR');
+    assert.deepEqual(
+      crashed.prGroups.map((g) => `${g.id}:${g.stage}:${g.pr}`),
+      ['g1:merged:70', 'g2:waiting-ci:73'],
+      'plan and group stages survive the crash untouched',
+    );
+
+    // Retry with fresh instances (new process) over a clean fsync — the take-over succeeds and
+    // the plan it distrusted only one field of is still exactly there.
+    let capturedPr: number | undefined;
+    let capturedGroups: readonly PrGroup[] | undefined;
+    const retried = await runMergePr(
+      { kind: 'merge-pr', resume: false, pr: 88 },
+      {
+        cwd: repo.path,
+        homeDir: repo.path,
+        env: { OPENROUTER_API_KEY: 'test-key-x' },
+        authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        resolveStyle: async () => 'stub digest\n',
+        runMergeFlow: async (input) => {
+          capturedPr = input.pr;
+          capturedGroups = input.runState.prGroups;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(retried.code, 0, `expected the retry to succeed, got: ${retried.message ?? ''}`);
+    assert.equal(capturedPr, 88, "take-over PR wins over the crashed write's stale currentPr");
+    assert.deepEqual(
+      capturedGroups?.map((g) => `${g.id}:${g.stage}:${g.pr}`),
+      ['g1:merged:70', 'g2:waiting-ci:73'],
+      'the flow sees the exact plan the crash almost cost the run',
+    );
+
+    const resumedStore = new StateStore(stateDir);
+    const finalState = await resumedStore.read();
+    assert.equal(finalState.currentPr, 88, 'currentPr re-pointed at the take-over PR');
+    assert.equal(finalState.runId, 'run-midplan', 'runId kept — prompt-cache session stays sticky');
+    assert.equal(finalState.sessionCount, 3, 'session count survives the crash and the retry');
   } finally {
     await repo.cleanup();
   }

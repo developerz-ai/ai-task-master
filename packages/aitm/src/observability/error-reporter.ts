@@ -69,6 +69,7 @@ export async function initErrorReporter(
       flush: async () => {
         try {
           await Sentry.flush(2000);
+          Sentry.close();
         } catch {
           // ignore — observability must never break the run
         }

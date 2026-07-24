@@ -9,6 +9,7 @@ import {
   type OAuthConfig,
   type OAuthOptions,
   openBrowser,
+  parseCallback,
   performOAuthFlow,
 } from './oauth.ts';
 
@@ -177,4 +178,190 @@ test('openBrowser swallows spawn errors on headless hosts', async () => {
     'openBrowser must absorb spawn failures via its error handler',
   );
   assert.ok(unrefed, 'openBrowser must unref the detached process');
+});
+
+test('parseCallback: returns code and state on a success callback', () => {
+  assert.deepStrictEqual(parseCallback({ code: 'abc', state: 'xyz' }), {
+    code: 'abc',
+    state: 'xyz',
+  });
+});
+
+test('parseCallback: maps error and error_description, keeping state', () => {
+  assert.deepStrictEqual(
+    parseCallback({ error: 'access_denied', error_description: 'user said no', state: 'xyz' }),
+    { error: 'access_denied', errorDescription: 'user said no', state: 'xyz' },
+  );
+});
+
+test('parseCallback: returns undefined when neither code nor error is present', () => {
+  assert.strictEqual(parseCallback({ state: 'xyz' }), undefined);
+  assert.strictEqual(parseCallback({}), undefined);
+});
+
+test('parseCallback: treats an empty code as missing', () => {
+  assert.strictEqual(parseCallback({ code: '', state: 'xyz' }), undefined);
+});
+
+test('parseCallback: an error takes precedence over a code', () => {
+  const result = parseCallback({ error: 'server_error', code: 'abc', state: 'xyz' });
+  assert.ok(result && 'error' in result);
+  assert.strictEqual(result.error, 'server_error');
+});
+
+// Fire a callback to the loopback server once waitForCallback has wired its resolver (next tick).
+function fireCallbackAfter(delayMs: number, url: string): void {
+  const realFetch = globalThis.fetch;
+  setTimeout(() => {
+    void realFetch(url).catch(() => {});
+  }, delayMs);
+}
+
+test('performOAuthFlow: a state-mismatch callback is reported via onWarn and does not resolve', async () => {
+  const warnings: string[] = [];
+
+  await assert.rejects(
+    performOAuthFlow({
+      authUrl: 'https://example.com/oauth/authorize',
+      tokenUrl: 'https://example.com/oauth/token',
+      clientId: 'test-client',
+      timeout: 250,
+      onWarn: (message) => warnings.push(message),
+      openBrowser: async (rawUrl) => {
+        const redirectUri = new URL(rawUrl).searchParams.get('redirect_uri') ?? '';
+        fireCallbackAfter(10, `${redirectUri}?code=attacker-code&state=wrong-state`);
+      },
+    }),
+    /OAuth callback timeout/,
+  );
+
+  assert.ok(
+    warnings.some((w) => w.includes('state parameter mismatch')),
+    'a state mismatch must be surfaced via onWarn, not silently swallowed',
+  );
+});
+
+test('performOAuthFlow: a callback missing both code and error is reported and does not resolve', async () => {
+  const warnings: string[] = [];
+
+  await assert.rejects(
+    performOAuthFlow({
+      authUrl: 'https://example.com/oauth/authorize',
+      tokenUrl: 'https://example.com/oauth/token',
+      clientId: 'test-client',
+      timeout: 250,
+      onWarn: (message) => warnings.push(message),
+      openBrowser: async (rawUrl) => {
+        const authUrl = new URL(rawUrl);
+        const redirectUri = authUrl.searchParams.get('redirect_uri') ?? '';
+        const cbState = authUrl.searchParams.get('state') ?? '';
+        // Correct state, but neither code nor error → malformed; must not post code=undefined.
+        fireCallbackAfter(10, `${redirectUri}?state=${cbState}`);
+      },
+    }),
+    /OAuth callback timeout/,
+  );
+
+  assert.ok(
+    warnings.some((w) => w.includes('neither authorization code nor error')),
+    'a malformed callback must be surfaced via onWarn',
+  );
+});
+
+test('performOAuthFlow: the authorized callback still resolves after a state-mismatch probe', async () => {
+  const tokenUrl = 'https://example.com/oauth/token';
+  const realFetch = globalThis.fetch;
+  const warnings: string[] = [];
+
+  globalThis.fetch = async (input, init) => {
+    if (String(input) === tokenUrl) {
+      return new Response(JSON.stringify({ access_token: 'tok-abc' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return realFetch(input, init);
+  };
+
+  try {
+    const config = await performOAuthFlow({
+      authUrl: 'https://example.com/oauth/authorize',
+      tokenUrl,
+      clientId: 'test-client',
+      timeout: 2000,
+      onWarn: (message) => warnings.push(message),
+      openBrowser: async (rawUrl) => {
+        const authUrl = new URL(rawUrl);
+        const redirectUri = authUrl.searchParams.get('redirect_uri') ?? '';
+        const cbState = authUrl.searchParams.get('state') ?? '';
+        setTimeout(() => {
+          // Forged probe first (wrong state), then the authorized callback.
+          void realFetch(`${redirectUri}?code=attacker&state=nope`).catch(() => {});
+        }, 10);
+        setTimeout(() => {
+          void realFetch(`${redirectUri}?code=good-code&state=${cbState}`).catch(() => {});
+        }, 60);
+      },
+    });
+
+    assert.strictEqual(config.headers.Authorization, 'Bearer tok-abc');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  assert.ok(
+    warnings.some((w) => w.includes('state parameter mismatch')),
+    'the probe should have been reported even though the flow ultimately succeeded',
+  );
+});
+
+// Drive performOAuthFlow to token exchange with a valid callback, stubbing the token endpoint.
+async function runFlowWithTokenResponse(tokenResponse: Response): Promise<OAuthConfig> {
+  const tokenUrl = 'https://example.com/oauth/token';
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) =>
+    String(input) === tokenUrl ? tokenResponse : realFetch(input, init);
+
+  try {
+    return await performOAuthFlow({
+      authUrl: 'https://example.com/oauth/authorize',
+      tokenUrl,
+      clientId: 'test-client',
+      timeout: 2000,
+      openBrowser: async (rawUrl) => {
+        const authUrl = new URL(rawUrl);
+        const redirectUri = authUrl.searchParams.get('redirect_uri') ?? '';
+        const cbState = authUrl.searchParams.get('state') ?? '';
+        setTimeout(() => {
+          void realFetch(`${redirectUri}?code=good-code&state=${cbState}`).catch(() => {});
+        }, 10);
+      },
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+test('performOAuthFlow: rejects a 200 token response with no access_token', async () => {
+  await assert.rejects(
+    runFlowWithTokenResponse(
+      new Response(JSON.stringify({ token_type: 'bearer' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    ),
+    /access_token/,
+  );
+});
+
+test('performOAuthFlow: rejects a 200 token response with an empty access_token', async () => {
+  await assert.rejects(
+    runFlowWithTokenResponse(
+      new Response(JSON.stringify({ access_token: '' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    ),
+    /access_token/,
+  );
 });

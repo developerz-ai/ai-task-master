@@ -48,6 +48,9 @@ export type OAuthOptions = {
   port?: number;
   timeout?: number;
   openBrowser?: (url: string) => Promise<void>;
+  // Sink for operator-visible warnings (e.g. an ignored state-mismatch callback). Defaults to
+  // stderr; injected in tests to assert a mismatch is surfaced rather than silently swallowed.
+  onWarn?: (message: string) => void;
 };
 
 type ServerResponse = {
@@ -55,19 +58,6 @@ type ServerResponse = {
   headers: Record<string, string>;
   body: string;
 };
-
-type ServerImpl = {
-  start: (port: number) => Promise<number>;
-  stop: () => Promise<void>;
-  waitForCallback: (path: string, timeout: number, state: string) => Promise<OAuthCallbackResult>;
-};
-
-// Runtime detection for cross-platform HTTP server.
-function detectRuntime(): 'bun' | 'deno' | 'node' {
-  if (typeof globalThis === 'object' && globalThis !== null && 'Bun' in globalThis) return 'bun';
-  if (typeof globalThis === 'object' && globalThis !== null && 'Deno' in globalThis) return 'deno';
-  return 'node';
-}
 
 // Generate cryptographically random state for CSRF protection.
 function generateState(): string {
@@ -210,18 +200,16 @@ function getDefaultHtml(type: 'success' | 'error'): string {
 }
 
 // Node.js HTTP server implementation using native http module.
-class NodeServer implements ServerImpl {
+class NodeServer {
   private server?: import('node:http').Server;
   private resolver?: (value: OAuthCallbackResult) => void;
-  private rejecter?: (reason: Error) => void;
   private callbackPath?: string;
   private expectedState?: string;
-  private successHtml?: string;
-  private errorHtml?: string;
 
   constructor(
     private successHtmlTemplate: string,
     private errorHtmlTemplate: string,
+    private onWarn: (message: string) => void,
   ) {}
 
   async start(port: number): Promise<number> {
@@ -231,7 +219,7 @@ class NodeServer implements ServerImpl {
     return new Promise((resolve, reject) => {
       this.server = http.createServer(async (req, res) => {
         const requestUrl = new url.URL(req.url || '', `http://${LOOPBACK_HOST}:${port}`);
-        const response = await this.handleRequest(requestUrl, port);
+        const response = await this.handleRequest(requestUrl);
 
         res.writeHead(response.status, response.headers);
         res.end(response.body);
@@ -264,63 +252,93 @@ class NodeServer implements ServerImpl {
         clearTimeout(timer);
         resolve(value);
       };
-
-      this.rejecter = (reason) => {
-        clearTimeout(timer);
-        reject(reason);
-      };
     });
   }
 
-  private async handleRequest(requestUrl: URL, port: number): Promise<ServerResponse> {
-    const pathname = requestUrl.pathname;
-    const searchParams = requestUrl.searchParams;
-
-    if (pathname === this.callbackPath) {
-      const params = Object.fromEntries(searchParams.entries()) as OAuthCallbackResult;
-
-      // Validate state parameter for CSRF protection
-      if (this.expectedState && params.state !== this.expectedState) {
-        return {
-          status: 400,
-          headers: { 'Content-Type': 'text/html; charset=utf-8' },
-          body: this.errorHtmlTemplate
-            .replace('{{error}}', 'invalid_request')
-            .replace('{{error_description}}', 'State parameter mismatch - possible CSRF attack'),
-        };
-      }
-
-      const html =
-        'error' in params
-          ? this.errorHtmlTemplate
-              .replace('{{error}}', params.error)
-              .replace('{{error_description}}', params.errorDescription || '')
-          : this.successHtmlTemplate;
-
-      if (this.resolver) {
-        this.resolver(params);
-      }
-
-      return {
-        status: 200,
-        headers: { 'Content-Type': 'text/html; charset=utf-8' },
-        body: html,
-      };
+  private async handleRequest(requestUrl: URL): Promise<ServerResponse> {
+    if (requestUrl.pathname !== this.callbackPath) {
+      return { status: 404, headers: {}, body: 'Not Found' };
     }
 
-    return { status: 404, headers: {}, body: 'Not Found' };
+    const params = Object.fromEntries(requestUrl.searchParams.entries());
+
+    // CSRF protection: a callback whose state does not match the one we issued is an unexpected or
+    // forged request. Reject this request but keep waiting for the authorized callback (the timeout
+    // is the backstop), and surface a warning so the wait is not a silent hang.
+    if (this.expectedState && params.state !== this.expectedState) {
+      this.onWarn(
+        'OAuth callback ignored: state parameter mismatch (possible CSRF probe); still waiting for the authorized callback',
+      );
+      return this.errorResponse(
+        'invalid_request',
+        'State parameter mismatch - possible CSRF attack',
+      );
+    }
+
+    // A callback carrying neither a non-empty `code` nor an `error` is malformed; resolving it would
+    // post `code=undefined` to the token endpoint. Ignore it and keep waiting.
+    const result = parseCallback(params);
+    if (!result) {
+      this.onWarn(
+        'OAuth callback ignored: neither authorization code nor error present; still waiting for the authorized callback',
+      );
+      return this.errorResponse('invalid_request', 'Callback missing authorization code or error');
+    }
+
+    const body =
+      'error' in result
+        ? this.errorHtmlTemplate
+            .replace('{{error}}', result.error)
+            .replace('{{error_description}}', result.errorDescription ?? '')
+        : this.successHtmlTemplate;
+
+    this.resolver?.(result);
+
+    return { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' }, body };
   }
+
+  private errorResponse(error: string, description: string): ServerResponse {
+    return {
+      status: 400,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      body: this.errorHtmlTemplate
+        .replace('{{error}}', error)
+        .replace('{{error_description}}', description),
+    };
+  }
+}
+
+// Parse the OAuth callback query into a validated result. Returns `undefined` when the callback
+// carries neither a non-empty authorization `code` (success) nor an `error` (failure) — a malformed
+// request that must not resolve the flow. Maps the wire-format `error_description` onto the internal
+// camelCase field.
+export function parseCallback(params: Record<string, string>): OAuthCallbackResult | undefined {
+  if (typeof params.error === 'string' && params.error.length > 0) {
+    const result: { error: string; errorDescription?: string; state?: string } = {
+      error: params.error,
+    };
+    if (params.error_description) result.errorDescription = params.error_description;
+    if (params.state) result.state = params.state;
+    return result;
+  }
+
+  if (typeof params.code === 'string' && params.code.length > 0) {
+    return { code: params.code, state: params.state ?? '' };
+  }
+
+  return undefined;
 }
 
 // Main OAuth flow orchestrator.
 export async function performOAuthFlow(options: OAuthOptions): Promise<OAuthConfig> {
-  const runtime = detectRuntime();
   const port = options.port ?? (await findAvailablePort(DEFAULT_PORT, PORT_RANGE.max));
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
   const state = generateState();
   const pkce = generatePkcePair();
   const callbackPath = CALLBACK_PATH;
   const callbackUrl = options.callbackUrl ?? loopbackCallbackUrl(port);
+  const onWarn: (message: string) => void =
+    options.onWarn ?? ((message) => process.stderr.write(`${message}\n`));
 
   const successHtml = await loadHtmlTemplate('success');
   const errorHtml = await loadHtmlTemplate('error');
@@ -342,7 +360,7 @@ export async function performOAuthFlow(options: OAuthOptions): Promise<OAuthConf
   const authUrl = `${options.authUrl}?${authParams.toString()}`;
 
   // Start callback server
-  const server = new NodeServer(successHtml, errorHtml);
+  const server = new NodeServer(successHtml, errorHtml, onWarn);
   await server.start(port);
 
   try {
@@ -416,13 +434,25 @@ async function exchangeToken(
     throw new Error(`Token exchange failed: ${response.status} ${response.statusText}\n${text}`);
   }
 
-  const data = (await response.json()) as { access_token: string } | { error: string };
+  const data: unknown = await response.json();
 
-  if ('error' in data) {
+  if (!isRecord(data)) {
+    throw new Error('Token exchange returned a non-object response');
+  }
+
+  if (typeof data.error === 'string' && data.error.length > 0) {
     throw new Error(`Token exchange error: ${data.error}`);
   }
 
-  return data as { access_token: string };
+  if (typeof data.access_token !== 'string' || data.access_token.length === 0) {
+    throw new Error('Token exchange response is missing a non-empty access_token');
+  }
+
+  return { access_token: data.access_token };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 // Extract a server name from the authorization URL.

@@ -4,6 +4,7 @@ import type { MCPClient, MCPClientConfig } from '@ai-sdk/mcp';
 import type { ToolSet } from 'ai';
 import type { LoggerLike } from '../logger/logger.ts';
 import { type CreateMcpClient, McpClientManager } from './mcp-client.ts';
+import { StdioProcessRegistry } from './stdio-process-registry.ts';
 
 type FakeClient = MCPClient & {
   closeCalls: number;
@@ -26,6 +27,29 @@ function fakeClient(tools: ToolSet): FakeClient {
 
 function fakeTool(): ToolSet[string] {
   return { description: 't', inputSchema: { type: 'object' } } as ToolSet[string];
+}
+
+// A promise that never settles — stands in for an SDK call wedged mid-handshake or a no-op close.
+function pending<T = never>(): Promise<T> {
+  return new Promise<T>(() => {});
+}
+
+function recordingLogger(): {
+  logger: LoggerLike;
+  warnings: Array<{ msg: string; fields: Record<string, unknown> | undefined }>;
+} {
+  const warnings: Array<{ msg: string; fields: Record<string, unknown> | undefined }> = [];
+  const logger: LoggerLike = {
+    debug: () => {},
+    info: () => {},
+    warn: (msg: string, fields?: Record<string, unknown>) => {
+      warnings.push({ msg, fields });
+    },
+    error: () => {},
+    status: () => {},
+    flush: async () => {},
+  };
+  return { logger, warnings };
 }
 
 function recordingFactory(map: Record<string, ToolSet>): {
@@ -483,5 +507,120 @@ test('toolSurfaceForRole: the split honors the per-role allowlist (issue #119)',
   // Only server `a` is mounted for the worker, so only its tool appears — then defers at threshold 0.
   assert.deepEqual(Object.keys(surface.deferred), ['mcp__a__x']);
   assert.deepEqual(surface.direct, {});
+  await m.close();
+});
+
+// ---- connect/close deadlines: no MCP path may hang forever (slice 04) ----
+
+test('connectAll: a server that spawns but never finishes tools() is skipped after connectTimeoutMs', async () => {
+  const { logger, warnings } = recordingLogger();
+  const createClient: CreateMcpClient = async () => {
+    const c = fakeClient({});
+    c.tools = () => pending();
+    return c;
+  };
+  const m = new McpClientManager({
+    servers: { wedged: { command: 'x' } },
+    createClient,
+    connectTimeoutMs: 20,
+    logger,
+  });
+
+  await m.connectAll();
+
+  assert.equal(m.connected().length, 0);
+  const failed = warnings.find((w) => w.msg === 'mcp server connect failed');
+  assert.ok(failed, 'expected a connect-failed warning');
+  assert.equal(failed?.fields?.name, 'wedged');
+  assert.match(String(failed?.fields?.error), /timed out/);
+  await m.close();
+});
+
+test('connectAll: a client that connects then wedges on tools() is still closed after the deadline', async () => {
+  const c = fakeClient({});
+  c.tools = () => pending();
+  const createClient: CreateMcpClient = async () => c;
+  const m = new McpClientManager({
+    servers: { wedged: { command: 'x' } },
+    createClient,
+    connectTimeoutMs: 20,
+  });
+
+  await m.connectAll();
+
+  assert.equal(m.connected().length, 0);
+  // createClient resolved before tools() wedged, so cleanup must close the connected client.
+  assert.equal(c.closeCalls, 1);
+});
+
+test('connectAll: a createClient that never resolves is skipped after the deadline without throwing', async () => {
+  const { logger, warnings } = recordingLogger();
+  const createClient: CreateMcpClient = () => pending();
+  const m = new McpClientManager({
+    servers: { wedged: { command: 'x' } },
+    createClient,
+    connectTimeoutMs: 20,
+    logger,
+  });
+
+  await assert.doesNotReject(() => m.connectAll());
+
+  assert.equal(m.connected().length, 0);
+  assert.ok(warnings.some((w) => w.msg === 'mcp server connect failed'));
+  await m.close();
+});
+
+test('close: a client.close() that never returns does not block terminate() (time-boxed batch)', async () => {
+  const { logger, warnings } = recordingLogger();
+  const c = fakeClient({ t: fakeTool() });
+  c.close = () => pending();
+  const createClient: CreateMcpClient = async () => c;
+
+  const registry = new StdioProcessRegistry({
+    kill: () => {},
+    exitHooks: { on: () => {}, off: () => {} },
+  });
+  let terminateCalls = 0;
+  const realTerminate = registry.terminate.bind(registry);
+  registry.terminate = async () => {
+    terminateCalls += 1;
+    await realTerminate();
+  };
+
+  const m = new McpClientManager({
+    servers: { wedged: { command: 'x' } },
+    createClient,
+    processes: registry,
+    closeTimeoutMs: 20,
+    logger,
+  });
+  await m.connectAll();
+  assert.equal(m.connected().length, 1);
+
+  await m.close();
+
+  assert.equal(terminateCalls, 1, 'terminate() must run even when a client.close() hangs');
+  assert.deepEqual(m.connected(), []);
+  assert.ok(warnings.some((w) => w.msg === 'mcp close batch timed out'));
+});
+
+test('connectAll: connectTimeoutMs <= 0 disables the deadline — a slow but successful connect completes', async () => {
+  const createClient: CreateMcpClient = async () => {
+    const c = fakeClient({});
+    c.tools = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return { slow: fakeTool() } as never;
+    };
+    return c;
+  };
+  const m = new McpClientManager({
+    servers: { slow: { command: 'x' } },
+    createClient,
+    connectTimeoutMs: 0,
+  });
+
+  await m.connectAll();
+
+  assert.deepEqual(Object.keys(m.toolsForRole('worker')), ['mcp__slow__slow']);
   await m.close();
 });

@@ -4,7 +4,9 @@ import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import {
   type BrowserLauncher,
+  discoverOAuthEndpoints,
   LOOPBACK_HOST,
+  loginToMcpServer,
   loopbackCallbackUrl,
   type OAuthConfig,
   type OAuthOptions,
@@ -49,6 +51,7 @@ test('default callback URL uses the loopback IP literal', () => {
 test('performOAuthFlow constructs valid authorization URL', async () => {
   let openedUrl: string | undefined;
   const options: OAuthOptions = {
+    serverUrl: 'https://example.com/mcp',
     authUrl: 'https://example.com/oauth/authorize',
     tokenUrl: 'https://example.com/oauth/token',
     clientId: 'test-client',
@@ -75,6 +78,7 @@ test('performOAuthFlow constructs valid authorization URL', async () => {
 
 test('performOAuthFlow requires valid options', async () => {
   const options: OAuthOptions = {
+    serverUrl: 'https://example.com/mcp',
     authUrl: 'https://example.com/oauth/authorize',
     tokenUrl: 'https://example.com/oauth/token',
     clientId: 'test-client',
@@ -104,6 +108,7 @@ test('performOAuthFlow sends the S256 code_verifier bound to the challenge on to
 
   try {
     const config = await performOAuthFlow({
+      serverUrl: 'https://example.com/mcp',
       authUrl: 'https://example.com/oauth/authorize',
       tokenUrl,
       clientId: 'test-client',
@@ -137,6 +142,7 @@ test('performOAuthFlow sends the S256 code_verifier bound to the challenge on to
 
 test('OAuthOptions has correct structure', () => {
   const options: OAuthOptions = {
+    serverUrl: 'https://example.com/mcp',
     authUrl: 'https://example.com/oauth/authorize',
     tokenUrl: 'https://example.com/oauth/token',
     clientId: 'test-client',
@@ -147,6 +153,7 @@ test('OAuthOptions has correct structure', () => {
     timeout: 30000,
   };
 
+  assert.strictEqual(options.serverUrl, 'https://example.com/mcp');
   assert.strictEqual(options.authUrl, 'https://example.com/oauth/authorize');
   assert.strictEqual(options.tokenUrl, 'https://example.com/oauth/token');
   assert.strictEqual(options.clientId, 'test-client');
@@ -222,6 +229,7 @@ test('performOAuthFlow: a state-mismatch callback is reported via onWarn and doe
 
   await assert.rejects(
     performOAuthFlow({
+      serverUrl: 'https://example.com/mcp',
       authUrl: 'https://example.com/oauth/authorize',
       tokenUrl: 'https://example.com/oauth/token',
       clientId: 'test-client',
@@ -246,6 +254,7 @@ test('performOAuthFlow: a callback missing both code and error is reported and d
 
   await assert.rejects(
     performOAuthFlow({
+      serverUrl: 'https://example.com/mcp',
       authUrl: 'https://example.com/oauth/authorize',
       tokenUrl: 'https://example.com/oauth/token',
       clientId: 'test-client',
@@ -285,6 +294,7 @@ test('performOAuthFlow: the authorized callback still resolves after a state-mis
 
   try {
     const config = await performOAuthFlow({
+      serverUrl: 'https://example.com/mcp',
       authUrl: 'https://example.com/oauth/authorize',
       tokenUrl,
       clientId: 'test-client',
@@ -324,6 +334,9 @@ async function runFlowWithTokenResponse(tokenResponse: Response): Promise<OAuthC
 
   try {
     return await performOAuthFlow({
+      // serverUrl path deliberately differs from authUrl's, to prove config.url is the server URL
+      // verbatim rather than reverse-engineered by stripping /oauth/authorize off authUrl.
+      serverUrl: 'https://mcp.example.com/mcp',
       authUrl: 'https://example.com/oauth/authorize',
       tokenUrl,
       clientId: 'test-client',
@@ -341,6 +354,19 @@ async function runFlowWithTokenResponse(tokenResponse: Response): Promise<OAuthC
     globalThis.fetch = realFetch;
   }
 }
+
+test('performOAuthFlow: config url is the server URL verbatim, not derived from authUrl', async () => {
+  const config = await runFlowWithTokenResponse(
+    new Response(JSON.stringify({ access_token: 'tok-url' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  );
+
+  assert.strictEqual(config.url, 'https://mcp.example.com/mcp');
+  assert.strictEqual(config.name, 'mcp-example-com');
+  assert.strictEqual(config.headers.Authorization, 'Bearer tok-url');
+});
 
 test('performOAuthFlow: rejects a 200 token response with no access_token', async () => {
   await assert.rejects(
@@ -364,4 +390,275 @@ test('performOAuthFlow: rejects a 200 token response with an empty access_token'
     ),
     /access_token/,
   );
+});
+
+// Bind a throwaway loopback listener to learn a currently-free port, then release it.
+async function getFreePort(): Promise<number> {
+  const net = await import('node:net');
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.listen(0, LOOPBACK_HOST, () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      server.close(() => resolve(port));
+    });
+    server.on('error', reject);
+  });
+}
+
+test('performOAuthFlow: binds the loopback server to the port named by callbackUrl', async () => {
+  const port = await getFreePort();
+  const callbackUrl = `http://${LOOPBACK_HOST}:${port}/callback`;
+  const tokenUrl = 'https://example.com/oauth/token';
+  const realFetch = globalThis.fetch;
+  let redirectUsed: string | undefined;
+
+  globalThis.fetch = async (input, init) =>
+    String(input) === tokenUrl
+      ? new Response(JSON.stringify({ access_token: 'tok-port' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      : realFetch(input, init);
+
+  try {
+    // The callback fetch only reaches a server bound to `port`; with the old auto-scanned bind it
+    // would hit a closed port and the flow would time out instead.
+    const config = await performOAuthFlow({
+      serverUrl: 'https://example.com/mcp',
+      authUrl: 'https://example.com/oauth/authorize',
+      tokenUrl,
+      clientId: 'test-client',
+      callbackUrl,
+      timeout: 2000,
+      openBrowser: async (rawUrl) => {
+        const authUrl = new URL(rawUrl);
+        redirectUsed = authUrl.searchParams.get('redirect_uri') ?? undefined;
+        const cbState = authUrl.searchParams.get('state') ?? '';
+        setTimeout(() => {
+          void realFetch(`${redirectUsed}?code=good&state=${cbState}`).catch(() => {});
+        }, 10);
+      },
+    });
+
+    assert.strictEqual(redirectUsed, callbackUrl);
+    assert.strictEqual(config.headers.Authorization, 'Bearer tok-port');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+test('discoverOAuthEndpoints: resolves RFC 8414 authorization-server metadata', async () => {
+  const seen: string[] = [];
+  const fetchStub: typeof fetch = async (input) => {
+    const url = String(input);
+    seen.push(url);
+    if (url === 'https://mcp.example.com/.well-known/oauth-authorization-server') {
+      return jsonResponse({
+        authorization_endpoint: 'https://auth.example.com/authorize',
+        token_endpoint: 'https://auth.example.com/token',
+      });
+    }
+    return new Response('not found', { status: 404 });
+  };
+
+  const endpoints = await discoverOAuthEndpoints('https://mcp.example.com/mcp', {
+    fetch: fetchStub,
+  });
+
+  assert.strictEqual(endpoints.authorizationEndpoint, 'https://auth.example.com/authorize');
+  assert.strictEqual(endpoints.tokenEndpoint, 'https://auth.example.com/token');
+});
+
+test('discoverOAuthEndpoints: follows the WWW-Authenticate probe to the authorization server', async () => {
+  const fetchStub: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://mcp.example.com/mcp') {
+      return new Response('unauthorized', {
+        status: 401,
+        headers: {
+          'www-authenticate':
+            'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"',
+        },
+      });
+    }
+    if (url === 'https://mcp.example.com/.well-known/oauth-protected-resource') {
+      return jsonResponse({ authorization_servers: ['https://issuer.example.com'] });
+    }
+    if (url === 'https://issuer.example.com/.well-known/oauth-authorization-server') {
+      return jsonResponse({
+        authorization_endpoint: 'https://issuer.example.com/authorize',
+        token_endpoint: 'https://issuer.example.com/token',
+      });
+    }
+    return new Response('not found', { status: 404 });
+  };
+
+  const endpoints = await discoverOAuthEndpoints('https://mcp.example.com/mcp', {
+    fetch: fetchStub,
+  });
+
+  assert.strictEqual(endpoints.authorizationEndpoint, 'https://issuer.example.com/authorize');
+  assert.strictEqual(endpoints.tokenEndpoint, 'https://issuer.example.com/token');
+});
+
+test('discoverOAuthEndpoints: builds a path-aware well-known URL for an issuer with a path', async () => {
+  const seen: string[] = [];
+  const fetchStub: typeof fetch = async (input) => {
+    const url = String(input);
+    seen.push(url);
+    if (url === 'https://mcp.example.com/mcp') {
+      return new Response('', {
+        status: 401,
+        headers: { 'www-authenticate': 'Bearer resource_metadata="https://mcp.example.com/prm"' },
+      });
+    }
+    if (url === 'https://mcp.example.com/prm') {
+      return jsonResponse({ authorization_servers: ['https://issuer.example.com/tenant1'] });
+    }
+    if (url === 'https://issuer.example.com/.well-known/oauth-authorization-server/tenant1') {
+      return jsonResponse({
+        authorization_endpoint: 'https://issuer.example.com/tenant1/authorize',
+        token_endpoint: 'https://issuer.example.com/tenant1/token',
+      });
+    }
+    return new Response('not found', { status: 404 });
+  };
+
+  const endpoints = await discoverOAuthEndpoints('https://mcp.example.com/mcp', {
+    fetch: fetchStub,
+  });
+
+  assert.strictEqual(
+    endpoints.authorizationEndpoint,
+    'https://issuer.example.com/tenant1/authorize',
+  );
+  assert.ok(
+    seen.includes('https://issuer.example.com/.well-known/oauth-authorization-server/tenant1'),
+    'RFC 8414 inserts the well-known segment between host and issuer path',
+  );
+});
+
+test('discoverOAuthEndpoints: falls back to conventional endpoints and warns when discovery fails', async () => {
+  const warnings: string[] = [];
+  const fetchStub: typeof fetch = async () => new Response('not found', { status: 404 });
+
+  const endpoints = await discoverOAuthEndpoints('https://dev.local:3000/mcp', {
+    fetch: fetchStub,
+    onWarn: (message) => warnings.push(message),
+  });
+
+  assert.strictEqual(endpoints.authorizationEndpoint, 'https://dev.local:3000/oauth/authorize');
+  assert.strictEqual(endpoints.tokenEndpoint, 'https://dev.local:3000/oauth/token');
+  assert.ok(warnings.some((w) => w.includes('discovery failed')));
+});
+
+test('discoverOAuthEndpoints: falls back when the metadata fetch throws', async () => {
+  const fetchStub: typeof fetch = async () => {
+    throw new Error('ECONNREFUSED');
+  };
+
+  const endpoints = await discoverOAuthEndpoints('https://mcp.example.com', {
+    fetch: fetchStub,
+    onWarn: () => {},
+  });
+
+  assert.strictEqual(endpoints.authorizationEndpoint, 'https://mcp.example.com/oauth/authorize');
+  assert.strictEqual(endpoints.tokenEndpoint, 'https://mcp.example.com/oauth/token');
+});
+
+test('discoverOAuthEndpoints: ignores metadata whose endpoints are not absolute http(s) URLs', async () => {
+  const warnings: string[] = [];
+  const fetchStub: typeof fetch = async (input) => {
+    if (String(input) === 'https://mcp.example.com/.well-known/oauth-authorization-server') {
+      return jsonResponse({
+        authorization_endpoint: '/authorize',
+        token_endpoint: 'ftp://x/token',
+      });
+    }
+    return new Response('not found', { status: 404 });
+  };
+
+  const endpoints = await discoverOAuthEndpoints('https://mcp.example.com', {
+    fetch: fetchStub,
+    onWarn: (message) => warnings.push(message),
+  });
+
+  assert.strictEqual(endpoints.authorizationEndpoint, 'https://mcp.example.com/oauth/authorize');
+  assert.ok(warnings.some((w) => w.includes('discovery failed')));
+});
+
+test('loginToMcpServer: discovers endpoints, then reports the server URL as config url', async () => {
+  const realFetch = globalThis.fetch;
+  const wellKnown = 'https://mcp.example.com/.well-known/oauth-authorization-server';
+  const authorize = 'https://auth.example.com/authorize';
+  const tokenEndpoint = 'https://auth.example.com/token';
+  let tokenHit = false;
+
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url === 'https://mcp.example.com/mcp') return new Response('', { status: 200 });
+    if (url === wellKnown) {
+      return jsonResponse({ authorization_endpoint: authorize, token_endpoint: tokenEndpoint });
+    }
+    if (url === tokenEndpoint) {
+      tokenHit = true;
+      return jsonResponse({ access_token: 'tok-login' });
+    }
+    return realFetch(input, init);
+  };
+
+  try {
+    const config = await loginToMcpServer({
+      serverUrl: 'https://mcp.example.com/mcp',
+      timeout: 2000,
+      openBrowser: async (rawUrl) => {
+        const authUrl = new URL(rawUrl);
+        assert.strictEqual(authUrl.origin + authUrl.pathname, authorize);
+        const redirectUri = authUrl.searchParams.get('redirect_uri') ?? '';
+        const cbState = authUrl.searchParams.get('state') ?? '';
+        setTimeout(() => {
+          void realFetch(`${redirectUri}?code=c&state=${cbState}`).catch(() => {});
+        }, 10);
+      },
+    });
+
+    assert.strictEqual(config.url, 'https://mcp.example.com/mcp');
+    assert.strictEqual(config.name, 'mcp-example-com');
+    assert.strictEqual(config.headers.Authorization, 'Bearer tok-login');
+    assert.ok(tokenHit, 'token endpoint was not called');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('loginToMcpServer: reads client_id from the server URL query when present', async () => {
+  let sentClientId: string | undefined;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('not found', { status: 404 });
+
+  try {
+    await assert.rejects(
+      loginToMcpServer({
+        serverUrl: 'https://example.com/mcp?client_id=my-registered-app',
+        timeout: 120,
+        onWarn: () => {},
+        openBrowser: async (rawUrl) => {
+          sentClientId = new URL(rawUrl).searchParams.get('client_id') ?? undefined;
+        },
+      }),
+      /timeout/,
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  assert.strictEqual(sentClientId, 'my-registered-app');
 });

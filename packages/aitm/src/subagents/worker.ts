@@ -19,6 +19,7 @@
 //   chunk-04.md §"ToolLoopAgent" (agent class)
 //   chunk-02.md §"Tool Calling" (parallelToolCalls)
 
+import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import type {
   BashInput,
@@ -704,7 +705,7 @@ async function committedFileChanges(
       command: `git -C ${shQuote(checkoutPath)} --no-optional-locks diff-tree --no-commit-id --name-status -r HEAD`,
       description: 'list the files in the verify-gate commit',
     },
-    { toolCallId: `worker-difftree-${Date.now()}`, messages: [] },
+    { toolCallId: `worker-difftree-${randomUUID()}`, messages: [] },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');
@@ -879,6 +880,29 @@ type EditorOutcome = { changed: true; change: FileChange } | { changed: false; p
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
+// Parse porcelain output with `-z` flag (null-byte-separated format). Handles renames and quoted
+// paths correctly, unlike the newline-based format which breaks on special characters and renames.
+// Format: "XY<space>path<NUL>" for regular changes, "XY<space>oldpath<NUL>newpath<NUL>" for renames.
+// Returns all affected paths (both old and new for renames).
+function parsePorcelainZ(porcelainOutput: string): readonly string[] {
+  const entries = porcelainOutput.split('\0').filter((e) => e !== '');
+  const paths: string[] = [];
+
+  for (const entry of entries) {
+    if (entry.length <= 3) {
+      // Bare entry with no path (shouldn't happen, but skip if it does)
+      continue;
+    }
+    // Status is first 2 chars, space is 3rd char. Path starts at index 3.
+    const path = entry.slice(3);
+    if (path !== '') {
+      paths.push(path);
+    }
+  }
+
+  return paths;
+}
+
 // Paths already dirty in the working tree, as a set. Taken BEFORE planning so the inline-edit
 // inference can tell "the Coordinator just wrote this" from "this was already dirty when the task
 // started". Never throws — but a status that won't run returns `undefined`, NOT an empty set: an
@@ -893,18 +917,13 @@ async function dirtyPaths(
     const exec = requireExec(bash);
     const out = await exec(
       {
-        command: `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain`,
+        command: `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain -z`,
         description: 'snapshot the working tree before planning',
       },
-      { toolCallId: `worker-status-pre-${Date.now()}`, messages: [] },
+      { toolCallId: `worker-status-pre-${randomUUID()}`, messages: [] },
     );
     if (isAsyncIterable(out) || out.exitCode !== 0) return undefined;
-    return new Set(
-      out.stdout
-        .split('\n')
-        .map((line) => line.slice(3).trim())
-        .filter((path) => path !== ''),
-    );
+    return new Set(parsePorcelainZ(out.stdout));
   } catch {
     return undefined;
   }
@@ -1269,10 +1288,10 @@ async function editorTouchedPath(
   filePath: string,
 ): Promise<boolean> {
   const exec = requireExec(bash);
-  const command = `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain -- ${shQuote(filePath)}`;
+  const command = `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain -z -- ${shQuote(filePath)}`;
   const out = await exec(
     { command, description: 'verify the editor changed the file on disk' },
-    { toolCallId: `worker-status-${Date.now()}`, messages: [] },
+    { toolCallId: `worker-status-${randomUUID()}`, messages: [] },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');
@@ -1453,7 +1472,7 @@ async function runVerify(
   const command = `cd ${shQuote(input.checkoutPath)} && ${input.verifyCommand}`;
   const out = await exec(
     { command, description: 'run the configured verify command', timeoutMs: VERIFY_TIMEOUT_MS },
-    { toolCallId: `worker-verify-${Date.now()}`, messages: [] },
+    { toolCallId: `worker-verify-${randomUUID()}`, messages: [] },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');
@@ -1517,7 +1536,7 @@ async function runBash(
 ): Promise<void> {
   const out = await exec(
     { command, description: 'worker commit-phase git/format step' },
-    { toolCallId: `worker-bash-${Date.now()}`, messages: [] },
+    { toolCallId: `worker-bash-${randomUUID()}`, messages: [] },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');

@@ -630,7 +630,7 @@ test('runWorker: a narrate-only editor (no on-disk write) records no change and 
   }
   // The path was verified on disk. The group branch is created before the editor fanout
   // (branch-before-edit), but the phantom is caught before staging — nothing is added or committed.
-  assert.ok(calls.statuses.some((s) => s.command.includes("status --porcelain -- 'src/a.ts'")));
+  assert.ok(calls.statuses.some((s) => s.command.includes("status --porcelain -z -- 'src/a.ts'")));
   const cmds = calls.bashes.map((b) => b.command);
   assert.equal(
     cmds.some((c) => /add -A|commit -m/.test(c)),

@@ -205,12 +205,16 @@ export class GitHubClient {
   // waitForChecks takes its own signal, since a caller may cancel a wait without ending the run.
   // `now` is the wall clock waitForChecks anchors its timeout budget on. Optional — defaults to
   // Date.now; tests inject a stepped fake so the 120-minute budget is reachable without real time.
+  // `onWarn` surfaces non-fatal review-thread pagination truncation (a page cap or a non-advancing
+  // cursor left data unfetched) to the operator; defaults to a no-op for callers that never
+  // paginate threads (e.g. the auth-status probe).
   constructor(
     private readonly cwd: string,
     runCmd: RunCmd = defaultRunCmd,
     private readonly sleep: Sleep = defaultSleep,
     signal?: AbortSignal,
     private readonly now: () => number = () => Date.now(),
+    private readonly onWarn: (message: string) => void = () => {},
   ) {
     this.runCmd = signal ? withSignal(runCmd, signal) : runCmd;
   }
@@ -533,18 +537,27 @@ export class GitHubClient {
       );
       const conn = parsed.data.repository.pullRequest.reviewThreads;
       pageCount++;
-      if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) {
-        collected.push(...conn.nodes);
-        return collected;
-      }
-      // Break if cursor is not advancing (broken pagination) — before adding nodes
-      if (conn.pageInfo.endCursor === prevEndCursor) {
-        return collected;
-      }
+      // Keep this page's threads before deciding whether to stop — both a terminal page and a
+      // broken-pagination page carry real threads that must not be dropped.
       collected.push(...conn.nodes);
+      if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) {
+        return collected;
+      }
+      // Non-advancing cursor → GitHub's pagination is broken; stop after keeping this page.
+      if (conn.pageInfo.endCursor === prevEndCursor) {
+        this.onWarn(
+          `listUnresolvedThreads: review threads for PR #${pr} truncated after ${pageCount} pages` +
+            ' — GitHub returned a non-advancing pagination cursor',
+        );
+        return collected;
+      }
       prevEndCursor = conn.pageInfo.endCursor;
       cursor = conn.pageInfo.endCursor;
     }
+    this.onWarn(
+      `listUnresolvedThreads: review threads for PR #${pr} truncated at the ` +
+        `${MAX_REVIEW_THREAD_PAGES}-page cap — some threads were not fetched`,
+    );
     return collected;
   }
 
@@ -553,10 +566,10 @@ export class GitHubClient {
     startCursor: string,
   ): Promise<RawReviewComment[]> {
     const collected: RawReviewComment[] = [];
-    let cursor: string | null = startCursor;
+    let cursor: string = startCursor;
     let pageCount = 0;
     let prevEndCursor: string | null = null;
-    while (cursor && pageCount < MAX_THREAD_COMMENT_PAGES) {
+    while (pageCount < MAX_THREAD_COMMENT_PAGES) {
       const r = await this.runCmd(
         'gh',
         [
@@ -579,16 +592,27 @@ export class GitHubClient {
       );
       const conn = parsed.data.node.comments;
       pageCount++;
-      // Break if cursor is not advancing (broken pagination) — before adding nodes
-      if (conn.pageInfo.endCursor === prevEndCursor) {
-        cursor = null;
-      } else {
-        collected.push(...conn.nodes);
-        prevEndCursor = conn.pageInfo.endCursor;
-        cursor =
-          conn.pageInfo.hasNextPage && conn.pageInfo.endCursor ? conn.pageInfo.endCursor : null;
+      // Keep this page's comments before deciding whether to stop — both a terminal page and a
+      // broken-pagination page carry real comments that must not be dropped.
+      collected.push(...conn.nodes);
+      if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) {
+        return collected;
       }
+      // Non-advancing cursor → GitHub's pagination is broken; stop after keeping this page.
+      if (conn.pageInfo.endCursor === prevEndCursor) {
+        this.onWarn(
+          `listUnresolvedThreads: comments for thread ${threadId} truncated after ${pageCount} ` +
+            'pages — GitHub returned a non-advancing pagination cursor',
+        );
+        return collected;
+      }
+      prevEndCursor = conn.pageInfo.endCursor;
+      cursor = conn.pageInfo.endCursor;
     }
+    this.onWarn(
+      `listUnresolvedThreads: comments for thread ${threadId} truncated at the ` +
+        `${MAX_THREAD_COMMENT_PAGES}-page cap — some comments were not fetched`,
+    );
     return collected;
   }
 

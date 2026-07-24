@@ -16,6 +16,7 @@ import {
   GitHubClient,
   isInstantSleepEnabled,
   MAX_REVIEW_THREAD_PAGES,
+  MAX_THREAD_COMMENT_PAGES,
   type RunCmd,
   type RunCmdOptions,
   type RunCmdResult,
@@ -1196,7 +1197,10 @@ test('listUnresolvedThreads stops paginating review threads at max pages', async
       exitCode: 0,
     };
   };
-  const g = new GitHubClient('/tmp/repo', run);
+  const warnings: string[] = [];
+  const g = new GitHubClient('/tmp/repo', run, undefined, undefined, undefined, (m) => {
+    warnings.push(m);
+  });
   const threads = await g.listUnresolvedThreads(7);
 
   // Should have collected only up to MAX_REVIEW_THREAD_PAGES threads.
@@ -1207,9 +1211,11 @@ test('listUnresolvedThreads stops paginating review threads at max pages', async
     MAX_REVIEW_THREAD_PAGES + 1,
     'should not paginate beyond MAX_REVIEW_THREAD_PAGES',
   );
+  // The final page ends the connection (hasNextPage: false), so this is not a truncation.
+  assert.equal(warnings.length, 0, 'finishing exactly at the cap is not a truncation');
 });
 
-test('listUnresolvedThreads breaks on non-advancing cursor in review threads', async () => {
+test('listUnresolvedThreads keeps the stuck page and warns on a non-advancing review-thread cursor', async () => {
   const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
   // Page 1: has next page
   const page1 = threadsResponse(
@@ -1226,7 +1232,7 @@ test('listUnresolvedThreads breaks on non-advancing cursor in review threads', a
     ],
     { hasNextPage: true, endCursor: 'stuck-cursor' },
   );
-  // Page 2: same cursor (broken pagination) — should break after this
+  // Page 2: same cursor (broken pagination) — its threads are kept, then pagination stops.
   const page2 = threadsResponse(
     [
       {
@@ -1242,14 +1248,23 @@ test('listUnresolvedThreads breaks on non-advancing cursor in review threads', a
     { hasNextPage: true, endCursor: 'stuck-cursor' }, // same as before
   );
   const { run, calls } = makeRun([{ stdout: meta }, { stdout: page1 }, { stdout: page2 }]);
-  const g = new GitHubClient('/tmp/repo', run);
+  const warnings: string[] = [];
+  const g = new GitHubClient('/tmp/repo', run, undefined, undefined, undefined, (m) => {
+    warnings.push(m);
+  });
   const threads = await g.listUnresolvedThreads(7);
 
-  // Should have only 1 thread (from page 1); detects non-advancing cursor and stops after page 2.
-  assert.equal(threads.length, 1);
-  assert.equal(threads[0]?.id, 'PRRT_1');
-  // Should have made 3 calls (repoMeta + page1 + page2 where page2 detects the stuck cursor).
+  // Both pages' threads survive — the stuck page is no longer silently dropped.
+  assert.equal(threads.length, 2);
+  assert.deepEqual(
+    threads.map((t) => t.id),
+    ['PRRT_1', 'PRRT_2'],
+  );
+  // Still stops after page 2 (repoMeta + page1 + page2), detecting the stuck cursor.
   assert.equal(calls.length, 3, 'should detect non-advancing cursor and stop');
+  assert.equal(warnings.length, 1, 'a truncation warning is surfaced');
+  assert.match(warnings[0] ?? '', /non-advancing pagination cursor/);
+  assert.match(warnings[0] ?? '', /PR #7/);
 });
 
 test('listUnresolvedThreads breaks on non-advancing cursor in thread comments', async () => {
@@ -1281,15 +1296,115 @@ test('listUnresolvedThreads breaks on non-advancing cursor in thread comments', 
     { stdout: commentPage1 },
     { stdout: commentPage2 },
   ]);
-  const g = new GitHubClient('/tmp/repo', run);
+  const warnings: string[] = [];
+  const g = new GitHubClient('/tmp/repo', run, undefined, undefined, undefined, (m) => {
+    warnings.push(m);
+  });
   const threads = await g.listUnresolvedThreads(3);
 
-  // Should have thread with only first 2 comments (detected non-advancing cursor after page 2).
+  // The stuck comment page is kept: IC_a (thread) + IC_b (page1) + IC_c (page2).
   assert.equal(threads.length, 1);
-  assert.equal(threads[0]?.comments.length, 2, 'should have 2 comments (first + second)');
+  assert.equal(threads[0]?.comments.length, 3, 'should keep all three comments');
+  assert.deepEqual(
+    threads[0]?.comments.map((c) => c.id),
+    ['IC_a', 'IC_b', 'IC_c'],
+  );
   // Should have made 4 calls (repoMeta + threads + commentPage1 + commentPage2).
-  // commentPage2 detects the stuck cursor and breaks.
+  // commentPage2 is kept, then the stuck cursor stops pagination.
   assert.equal(calls.length, 4, 'should detect non-advancing cursor after fetching page 2');
+  assert.equal(warnings.length, 1, 'a truncation warning is surfaced');
+  assert.match(warnings[0] ?? '', /non-advancing pagination cursor/);
+  assert.match(warnings[0] ?? '', /PRRT_long/);
+});
+
+test('listUnresolvedThreads warns when review threads hit the page cap', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  let callCount = 0;
+  const run: RunCmd = async () => {
+    if (callCount === 0) {
+      callCount++;
+      return { stdout: meta, stderr: '', exitCode: 0 };
+    }
+    // Every page advertises another with an advancing cursor, so pagination stops only when it
+    // reaches MAX_REVIEW_THREAD_PAGES — the genuine truncation case (unlike the max-pages test
+    // above, whose final page ends the connection naturally).
+    const pageNum = callCount - 1;
+    callCount++;
+    return {
+      stdout: threadsResponse(
+        [
+          {
+            id: `PRRT_${pageNum}`,
+            isResolved: false,
+            path: 'a.ts',
+            comments: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [{ id: `IC_${pageNum}`, body: 'x', author: { login: 'r' } }],
+            },
+          },
+        ],
+        { hasNextPage: true, endCursor: `cursor-${pageNum}` },
+      ),
+      stderr: '',
+      exitCode: 0,
+    };
+  };
+  const warnings: string[] = [];
+  const g = new GitHubClient('/tmp/repo', run, undefined, undefined, undefined, (m) => {
+    warnings.push(m);
+  });
+  const threads = await g.listUnresolvedThreads(7);
+
+  assert.equal(threads.length, MAX_REVIEW_THREAD_PAGES, 'keeps every fetched page');
+  assert.equal(callCount, MAX_REVIEW_THREAD_PAGES + 1, 'stops at the page cap');
+  assert.equal(warnings.length, 1, 'a truncation warning is surfaced');
+  assert.match(warnings[0] ?? '', /page cap/);
+  assert.match(warnings[0] ?? '', /PR #7/);
+});
+
+test('listUnresolvedThreads warns when thread comments hit the page cap', async () => {
+  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
+  const thread = threadsResponse([
+    {
+      id: 'PRRT_long',
+      isResolved: false,
+      path: 'big.ts',
+      comments: {
+        pageInfo: { hasNextPage: true, endCursor: 'c-1' },
+        nodes: [{ id: 'IC_a', body: 'first', author: { login: 'r' } }],
+      },
+    },
+  ]);
+  let callCount = 0;
+  const run: RunCmd = async () => {
+    callCount++;
+    if (callCount === 1) return { stdout: meta, stderr: '', exitCode: 0 };
+    if (callCount === 2) return { stdout: thread, stderr: '', exitCode: 0 };
+    // Every comment page advertises another with an advancing cursor → stops only at the cap.
+    const n = callCount - 2;
+    return {
+      stdout: commentsResponse([{ id: `IC_${n}`, body: 'c', author: { login: 'r' } }], {
+        hasNextPage: true,
+        endCursor: `cc-${n}`,
+      }),
+      stderr: '',
+      exitCode: 0,
+    };
+  };
+  const warnings: string[] = [];
+  const g = new GitHubClient('/tmp/repo', run, undefined, undefined, undefined, (m) => {
+    warnings.push(m);
+  });
+  const threads = await g.listUnresolvedThreads(3);
+
+  assert.equal(threads.length, 1);
+  // IC_a from the thread + one comment per comment page up to the cap.
+  assert.equal(threads[0]?.comments.length, MAX_THREAD_COMMENT_PAGES + 1);
+  // repoMeta + threads page + MAX_THREAD_COMMENT_PAGES comment pages.
+  assert.equal(callCount, MAX_THREAD_COMMENT_PAGES + 2, 'stops at the comment page cap');
+  assert.equal(warnings.length, 1, 'a truncation warning is surfaced');
+  assert.match(warnings[0] ?? '', /page cap/);
+  assert.match(warnings[0] ?? '', /PRRT_long/);
 });
 
 // defaultSleep short-circuits to a microtask under a test runner (NODE_TEST_CONTEXT under

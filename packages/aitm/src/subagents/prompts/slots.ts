@@ -83,11 +83,18 @@ export const RESERVED_PROMPT_TAGS = [
 ] as const;
 
 // One pass that escapes the angle brackets of every reserved tag (opener or closer, any case, tolerant
-// of internal whitespace) so the only literal reserved tags in the render are the real fence boundaries
-// renderSlot emits. The names are fixed literals from the list above — never attacker-controlled — so
-// the alternation is safe to build; the captured name is lower-cased to a canonical defanged entity.
+// of internal whitespace AND of any attributes on the tag) so the only literal reserved tags in the
+// render are the real fence boundaries renderSlot emits. The names are fixed literals from the list
+// above — never attacker-controlled — so the alternation is safe to build; the captured name is
+// lower-cased to a canonical defanged entity and any attributes are dropped.
+//
+// The `(?:\s[^>]*)?` group swallows an attribute list like `<system-reminder foo="bar">`; without it a
+// forged tag carrying any attribute would slip through unescaped and open a live region the model may
+// read as trusted structure. The leading `\s` requirement keeps a longer name like `<environment>`
+// unmatched — after the literal `env` the next char is `i`, not whitespace, so the group can't extend
+// a reserved name into a different word.
 const RESERVED_TAG_PATTERN = new RegExp(
-  `<\\s*(/?)\\s*(${RESERVED_PROMPT_TAGS.join('|')})\\s*>`,
+  `<\\s*(/?)\\s*(${RESERVED_PROMPT_TAGS.join('|')})(?:\\s[^>]*)?\\s*>`,
   'gi',
 );
 

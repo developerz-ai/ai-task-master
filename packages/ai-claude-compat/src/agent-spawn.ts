@@ -176,17 +176,12 @@ export function makeAgentTool(
             }),
           opts.timeout,
         );
-        // Report token usage to the optional sink (fire-and-forget, never breaks the run).
+        // Report token usage to the optional sink (fire-and-forget, never breaks the run). Provider
+        // metadata is the top-level `result.providerMetadata`; `result.response` only carries the
+        // response id/modelId/timestamp, so reading providerMetadata off it would always be undefined.
         if (opts.onUsage) {
           try {
-            const resultAny = result as unknown as {
-              response?: { modelId?: string; providerMetadata?: unknown };
-            };
-            opts.onUsage(
-              result.totalUsage,
-              resultAny.response?.modelId,
-              resultAny.response?.providerMetadata as import('ai').ProviderMetadata | undefined,
-            );
+            opts.onUsage(result.totalUsage, result.response.modelId, result.providerMetadata);
           } catch {
             // Swallow recording errors — a broken sink must never abort the run.
           }

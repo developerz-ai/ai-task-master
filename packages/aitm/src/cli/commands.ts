@@ -220,9 +220,9 @@ export type ProfileCtx = {
 export type McpLoginCtx = {
   stdout?: (chunk: string) => void;
   stderr?: (chunk: string) => void;
-  // OAuth flow injection seams for testing
+  // OAuth flow injection seam for testing
   performOAuth?: (
-    options: import('../mcp/oauth.js').OAuthOptions,
+    input: import('../mcp/oauth.js').McpOAuthLoginInput,
   ) => Promise<import('../mcp/oauth.js').OAuthConfig>;
 };
 
@@ -1106,26 +1106,15 @@ export async function runMcpLogin(
   const stderr = ctx.stderr ?? ((chunk: string) => process.stderr.write(chunk));
 
   try {
-    // Infer OAuth endpoints from the MCP server URL
-    const serverUrl = new URL(args.serverUrl);
-    const authUrl = `${serverUrl.origin}/oauth/authorize`;
-    const tokenUrl = `${serverUrl.origin}/oauth/token`;
+    // Endpoint discovery (RFC 8414 metadata + MCP WWW-Authenticate probe) and client-id resolution
+    // live in mcp/oauth.ts; the CLI only forwards the server URL and user-supplied overrides.
+    const login = ctx.performOAuth ?? (await import('../mcp/oauth.ts')).loginToMcpServer;
 
-    // Extract client_id from URL if provided as query param (common dev pattern)
-    const clientId = serverUrl.searchParams.get('client_id') ?? 'aitm-cli';
+    const input: import('../mcp/oauth.ts').McpOAuthLoginInput = { serverUrl: args.serverUrl };
+    if (args.callbackUrl) input.callbackUrl = args.callbackUrl;
+    if (args.timeout) input.timeout = args.timeout;
 
-    const performOAuthFlow = ctx.performOAuth ?? (await import('../mcp/oauth.js')).performOAuthFlow;
-
-    const oauthOptions: import('../mcp/oauth.js').OAuthOptions = {
-      authUrl,
-      tokenUrl,
-      clientId,
-    };
-
-    if (args.callbackUrl) oauthOptions.callbackUrl = args.callbackUrl;
-    if (args.timeout) oauthOptions.timeout = args.timeout;
-
-    const config = await performOAuthFlow(oauthOptions);
+    const config = await login(input);
 
     const configSnippet = JSON.stringify(
       {

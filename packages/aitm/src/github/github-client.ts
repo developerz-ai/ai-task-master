@@ -261,9 +261,16 @@ export class GitHubClient {
       );
       // `gh pr checks` exits 8 when any check fails but still emits JSON on stdout. Treat any
       // exit code as "command ran" if stdout parses; otherwise propagate the failure.
-      const rows = tryParseChecks(r.stdout);
+      let rows = tryParseChecks(r.stdout);
       if (!rows) {
-        throw new Error(`gh pr checks failed: ${r.stderr.trim() || r.stdout.trim()}`);
+        // With no JSON on stdout, `gh pr checks` prints "no checks reported on the '<branch>' branch"
+        // to stderr when the PR has no checks configured at all — an empty set, not a failure. Treat
+        // it as empty so the grace-then-mergeable path below lands the merge; any other unparseable
+        // output is a real command failure.
+        if (!/no checks reported/i.test(r.stderr)) {
+          throw new Error(`gh pr checks failed: ${r.stderr.trim() || r.stdout.trim()}`);
+        }
+        rows = [];
       }
       const status = aggregateChecks(rows);
       if (status === 'failure' || status === 'cancelled') {

@@ -500,6 +500,34 @@ test('waitForChecks: a PR with no checks resolves to success only after the empt
   );
 });
 
+test('waitForChecks: "no checks reported" on stderr (no JSON) is an empty set, not a failure', async () => {
+  // A repo with no CI workflows: `gh pr checks` prints "no checks reported on the '<branch>' branch"
+  // to stderr and emits no JSON. That is an empty check set — the merge must still land after the
+  // empty grace, not error out.
+  const { run } = makeRun(() => ({
+    stdout: '',
+    stderr: "no checks reported on the 'aitm/x' branch",
+    exitCode: 1,
+  }));
+  const { sleep } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  const result = await g.waitForChecks(7);
+  assert.equal(result.state, 'success');
+  assert.deepEqual(result.failedChecks, []);
+  assert.deepEqual(result.checks, []);
+});
+
+test('waitForChecks: unparseable output that is NOT "no checks reported" is a real failure', async () => {
+  const { run } = makeRun(() => ({
+    stdout: 'not json',
+    stderr: 'gh: unexpected error',
+    exitCode: 1,
+  }));
+  const { sleep } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  await assert.rejects(() => g.waitForChecks(9), /gh pr checks failed/);
+});
+
 test('CHECKS_START_WAIT_MS / CHECKS_EMPTY_GRACE_MS: 60s each', () => {
   assert.equal(CHECKS_START_WAIT_MS, 60_000);
   assert.equal(CHECKS_EMPTY_GRACE_MS, 60_000);

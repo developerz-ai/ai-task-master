@@ -436,10 +436,11 @@ test('runStart: missing API key → exit 1 with actionable message', async () =>
   }
 });
 
-test('runStart: missing CLAUDE.md and AGENTS.md → exit 1', async () => {
+test('runStart: no CLAUDE.md/AGENTS.md and no --style → proceeds with a default style (no abort)', async () => {
   const repo = await makeTempRepo({ withClaudeMd: false });
   const home = await tempHome();
   try {
+    let loopCalls = 0;
     const result = await runStart(
       { kind: 'start', goal: 'g' },
       {
@@ -447,11 +448,19 @@ test('runStart: missing CLAUDE.md and AGENTS.md → exit 1', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
-        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+        resolveStyle: okStyle(),
+        runLoop: async () => {
+          loopCalls++;
+          return { kind: 'success', outcomes: [] };
+        },
       },
     );
-    assert.equal(result.code, 1);
-    assert.match(result.message ?? '', /CLAUDE\.md|AGENTS\.md/);
+    assert.equal(
+      result.code,
+      0,
+      'runs on a bare repo instead of aborting on the missing style file',
+    );
+    assert.equal(loopCalls, 1, 'reached the run loop past the style gate');
   } finally {
     await repo.cleanup();
     await home.cleanup();

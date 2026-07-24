@@ -1316,6 +1316,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     const reviewerCompaction = buildCompactionStep<ReviewerTools>({
       compactor,
       modelId: input.credentials.modelIdFor('reviewer'),
+      ...(input.logger ? { logger: input.logger } : {}),
     });
     const recorder = await beginTranscript(state.transcripts?.(), {
       group: checkout.groupId,
@@ -1443,6 +1444,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const workerCompaction = buildCompactionStep<WorkerTools>({
         compactor,
         modelId: input.credentials.modelIdFor('worker'),
+        ...(input.logger ? { logger: input.logger } : {}),
       });
       const memoryIndex = await memoryIndexFor(state);
       // Transcript (issue #108): resume from an interrupted 'working' transcript for this group if one

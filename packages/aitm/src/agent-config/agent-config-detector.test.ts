@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { makeTempRepo } from '../testing/temp-repo.ts';
-import { AgentConfigDetector } from './agent-config-detector.ts';
+import {
+  AgentConfigDetector,
+  DEFAULT_STYLE_CONTENTS,
+  defaultAgentConfig,
+} from './agent-config-detector.ts';
 
 async function tempUserDir(): Promise<{ path: string; cleanup: () => Promise<void> }> {
   const path = await mkdtemp(join(tmpdir(), 'aitm-userhome-'));
@@ -155,6 +159,17 @@ test('detect: neither present and no --style → null', async () => {
   } finally {
     await repo.cleanup();
   }
+});
+
+test('defaultAgentConfig: a generic custom-flavor config for a repo with no style file', () => {
+  // The CLI falls back to this (rather than aborting) when detect() returns null, so aitm runs on a
+  // bare repo. flavor 'custom' maps to state.json agentConfigFile 'custom'; path is empty (no file).
+  const cfg = defaultAgentConfig();
+  assert.equal(cfg.flavor, 'custom');
+  assert.equal(cfg.path, '');
+  assert.deepEqual(cfg.sources, []);
+  assert.equal(cfg.contents, DEFAULT_STYLE_CONTENTS);
+  assert.match(cfg.contents, /# Coding Style/);
 });
 
 test('detect: --style takes precedence over CLAUDE.md/AGENTS.md', async () => {

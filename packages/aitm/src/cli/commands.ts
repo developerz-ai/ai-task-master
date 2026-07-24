@@ -13,6 +13,7 @@ import {
   type AgentConfig,
   AgentConfigDetector,
   type DetectOptions,
+  defaultAgentConfig,
 } from '../agent-config/agent-config-detector.ts';
 import { composeStyleGuide, StyleDistiller } from '../agent-config/coding-style.ts';
 import { ConfigLoader } from '../config/config-loader.ts';
@@ -409,11 +410,11 @@ export async function runStart(
     return { code: 1, message: errMsg(err) };
   }
   if (!agentConfig) {
-    return {
-      code: 1,
-      message:
-        'No CLAUDE.md or AGENTS.md found in the target repo (and no --style override). Add one or pass --style <path>.',
-    };
+    process.stderr.write(
+      'No CLAUDE.md or AGENTS.md in the repo and no --style — using a generic default style, ' +
+        "distilled with the repo's config files. Add a CLAUDE.md/AGENTS.md or pass --style for a sharper guide.\n",
+    );
+    agentConfig = defaultAgentConfig();
   }
 
   const authStatus = ctx.authStatus ?? defaultAuthStatus;
@@ -825,11 +826,10 @@ export async function runMergePr(
       return { code: 1, message: errMsg(err) };
     }
     if (!agentConfig) {
-      return {
-        code: 1,
-        message:
-          'No CLAUDE.md or AGENTS.md found in the target repo (and no stylePath in state). Add one or pass --style on `aitm start`.',
-      };
+      process.stderr.write(
+        'No CLAUDE.md or AGENTS.md in the repo and no stylePath in state — using a generic default style.\n',
+      );
+      agentConfig = defaultAgentConfig();
     }
 
     const authStatus = ctx.authStatus ?? defaultAuthStatus;

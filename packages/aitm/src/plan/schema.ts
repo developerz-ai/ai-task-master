@@ -72,6 +72,11 @@ export type PlannedGroup = z.infer<typeof PlannedGroupSchema>;
 export const PlanSchema = z.object({
   goal: z.string(),
   criteria: z.string().optional(),
-  groups: z.array(PlannedGroupSchema),
+  groups: z
+    .array(PlannedGroupSchema)
+    .min(1)
+    .describe(
+      'One or more PR groups. Each group bundles 1-5 disjoint behaviour slices into one PR with its own branch, CI, and acceptance test — split bigger features into multiple groups rather than cramming them into one.',
+    ),
 });
 export type Plan = z.infer<typeof PlanSchema>;

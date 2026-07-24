@@ -117,9 +117,7 @@ export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Prom
       }
       return { kind: 'blocked', reason: 'planner did not submit a plan after retries' };
     }
-    if (submitted.value.groups.length === 0) {
-      return { kind: 'blocked', reason: 'planner returned an empty group list' };
-    }
+    // Schema validation now enforces groups.min(1), so submitted.value.groups is never empty.
     return { kind: 'ok', plan: capGroups(submitted.value, input.maxPrs) };
   } catch (err) {
     return { kind: 'error', error: err instanceof Error ? err.message : String(err) };

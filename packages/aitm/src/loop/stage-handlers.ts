@@ -179,11 +179,22 @@ export const handleWaitingCi: StageHandler = async (deps, group) => {
     default: {
       // Review bots (CodeRabbit) post their comments a little *after* CI completes rather than as a
       // blocking status check. Give them a grace window to land before waiting-reviews reads the
-      // unresolved threads — otherwise we'd advance to merge ahead of the review.
-      await (deps.sleep ?? defaultSleep)(REVIEW_COMMENTS_GRACE, deps.signal);
-      // The grace resolves early on abort; advancing then would hand the cancelled run to
-      // waiting-reviews, one transition away from merging a PR the operator stopped.
-      if (deps.signal?.aborted) return 'waiting-ci';
+      // unresolved threads — otherwise we'd advance to merge ahead of the review. Only sleep once per
+      // group, since the waiting-ci handler may be called again if the loop revisits this stage
+      // (e.g. after addressing reviews and re-polling CI).
+      if (!group.reviewGraceApplied) {
+        await (deps.sleep ?? defaultSleep)(REVIEW_COMMENTS_GRACE, deps.signal);
+        // The grace resolves early on abort; advancing then would hand the cancelled run to
+        // waiting-reviews, one transition away from merging a PR the operator stopped.
+        if (deps.signal?.aborted) return 'waiting-ci';
+        // Mark the grace as applied so re-visits to this stage don't sleep again.
+        await deps.state.update((s) => ({
+          ...s,
+          prGroups: s.prGroups.map((g) =>
+            g.id === group.id ? { ...g, reviewGraceApplied: true } : g,
+          ),
+        }));
+      }
       return 'waiting-reviews';
     }
   }

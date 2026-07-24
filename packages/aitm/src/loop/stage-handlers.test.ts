@@ -413,6 +413,44 @@ test('handleWaitingCi: abort during the review grace → waiting-ci, not waiting
   assert.equal(await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })), 'waiting-ci');
 });
 
+test('handleWaitingCi: grace sleep skipped when reviewGraceApplied is true', async () => {
+  const slept: number[] = [];
+  const { state: stateStore, snapshot } = makeState(baseState([]));
+  const deps = makeDeps({
+    github: makeGithub({ waitForChecks: async () => ({ state: 'success', failedChecks: [] }) }),
+    state: stateStore,
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+  // On a group that already has the grace applied, sleep should be skipped.
+  await handleWaitingCi(
+    deps,
+    group({ stage: 'waiting-ci', pr: 5, reviewGraceApplied: true }),
+  );
+  assert.deepEqual(slept, [], 'grace sleep should be skipped when reviewGraceApplied is true');
+});
+
+test('handleWaitingCi: grace sleep sets reviewGraceApplied flag', async () => {
+  const slept: number[] = [];
+  const { state: stateStore, snapshot } = makeState(baseState([group({ pr: 5 })]));
+  const deps = makeDeps({
+    github: makeGithub({ waitForChecks: async () => ({ state: 'success', failedChecks: [] }) }),
+    state: stateStore,
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+  await handleWaitingCi(deps, snapshot().prGroups[0]);
+  assert.deepEqual(slept, [REVIEW_COMMENTS_GRACE], 'grace sleep should happen on first pass');
+  const afterState = snapshot();
+  assert.equal(
+    afterState.prGroups[0].reviewGraceApplied,
+    true,
+    'reviewGraceApplied flag should be set after sleep',
+  );
+});
+
 test('handleWaitingCi: missing PR throws', async () => {
   await assert.rejects(
     () => handleWaitingCi(makeDeps(), group({ stage: 'waiting-ci', pr: null })),

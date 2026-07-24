@@ -226,8 +226,8 @@ export type WorkerResult =
   | { kind: 'error'; error: string };
 
 // The Coordinator's role prose lives behind the prompts seam (slice 08); re-exported for the wiring
-// sites (run-loop-adapter, orchestrator subagent-tools, take-over/ci-fix flows) that feed it to
-// buildRolePrompt. The per-file EDITOR_SYSTEM_PREFIX is imported above for the local editor fanout.
+// sites (run-loop-adapter, take-over/ci-fix flows) that feed it to buildRolePrompt. The per-file
+// EDITOR_SYSTEM_PREFIX is imported above for the local editor fanout.
 export { WORKER_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 
 // Worker + editor step caps. Both are the shared runaway backstop, not a work budget — the former low

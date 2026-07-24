@@ -66,8 +66,8 @@ export type PlannerResult =
   | { kind: 'blocked'; reason: string }
   | { kind: 'error'; error: string };
 
-// The Planner's role prose lives behind the prompts seam (slice 08); re-exported for the wiring sites
-// (run-loop-adapter, orchestrator subagent-tools) that feed it to buildRolePrompt.
+// The Planner's role prose lives behind the prompts seam (slice 08); re-exported for the wiring site
+// (run-loop-adapter) that feeds it to buildRolePrompt.
 export { PLANNER_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 
 // Planner step budget — single-sourced so the step-budget reminder (issue #105) and the actual

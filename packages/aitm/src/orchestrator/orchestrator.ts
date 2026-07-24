@@ -23,32 +23,26 @@ import {
 } from '@developerz.ai/ai-claude-compat';
 import {
   generateText,
-  hasToolCall,
+  type LanguageModel,
   type ModelMessage,
-  stepCountIs,
   type TimeoutConfiguration,
-  type Tool,
-  ToolLoopAgent,
   tool,
 } from 'ai';
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
 import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
+import type { Role } from '../credentials/credentials.ts';
 import type { CreatePrInput } from '../github/github-client.ts';
-import type { PullRequest, ReviewThread } from '../github/schema.ts';
+import type { PullRequest } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
 import { type OnUsage, reportUsage } from '../subagents/factory.ts';
-import type { PlannerTools } from '../subagents/planner.ts';
 import { render } from '../subagents/prompts/templates.ts';
-import type { ReviewerTools } from '../subagents/reviewer.ts';
-import { MANIFEST_FIELD_MAX, type WorkerDelivery, type WorkerTools } from '../subagents/worker.ts';
+import { MANIFEST_FIELD_MAX, type WorkerDelivery } from '../subagents/worker.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
-import {
-  type ModelProvider,
-  makePlannerTool,
-  makeReviewerTool,
-  makeWorkerTool,
-} from './subagent-tools.ts';
+
+// Minimal model-resolver surface. The concrete `Credentials` class is structurally compatible;
+// tests substitute a `{ modelFor }` literal so they don't need to construct the real provider.
+export type ModelProvider = { modelFor(role: Role): LanguageModel };
 
 // Narrow surface — orchestrator only opens PRs, never shells `gh` itself.
 // Structural so tests can drop in a literal stub without subclassing GitHubClient.
@@ -119,25 +113,21 @@ function failureStderr(err: ExecaError): string {
   return err.timedOut || err.isCanceled ? (err.shortMessage ?? err.message) : '';
 }
 
-// The orchestrator's role guidance. buildSystemPrompt weaves it with the style digest and rolling
-// context through render('orchestrator-system', …) — the one prompt-assembly seam, no call-site concat.
-export const ORCHESTRATOR_ROLE_PREFIX = [
+// The orchestrator's role guidance for its two model calls — refining the final commit message and
+// composing the PR title + body. buildSystemPrompt weaves it with the style digest and rolling context
+// through render('orchestrator-system', …), the one prompt-assembly seam, no call-site concat. Kept
+// accurate to the tool surface: the production Orchestrator authors prose, it does not route subagents.
+export const COMPOSER_ROLE_PREFIX = [
   '',
-  '## Role: Orchestrator',
+  '## Role: PR composer',
   '',
-  'You coordinate Planner, Worker (Coordinator), and Reviewer, each exposed as a tool. You see the whole',
-  'plan and the rolling context, so you own the per-PR prose: the final commit message and the PR title',
-  '+ body.',
-  '',
-  'Flow:',
-  '  1. planner → the PR-group DAG (once).',
-  '  2. each ready group → worker; the harness commits + opens the PR.',
-  '  3. each PR with unresolved threads → reviewer.',
-  '  4. stop when every group is merged or blocked.',
+  'You author the per-PR prose for one PR group: the final commit message and the pull-request title',
+  '+ body. You see the whole plan and the rolling context of prior PRs, so the prose you write reads',
+  'coherently across the run.',
   '',
   'Rules:',
-  '  - Only you route between subagents; subagents are leaves and never spawn each other.',
   '  - Specific and terse. No marketing prose. Conventional commit subjects, ≤72 chars.',
+  '  - Describe what actually changed; never restate the diff line by line.',
 ].join('\n');
 
 export type OrchestratorInit = {
@@ -149,9 +139,6 @@ export type OrchestratorInit = {
   // prefix for the orchestrator prompt and every subagent tool; absent → raw contents.
   styleDigest?: string;
   rollingContext: string;
-  // LLM step budget for the orchestrator loop (separate from maxSessions, a PR/session count).
-  // Null/0/negative → DEFAULT_MAX_STEPS. Caller responsibility to set a sensible value.
-  maxSteps: number | null;
   github: GhClient;
   // Optional per-repo PR body section headings (each a `## ` heading). Undefined/empty/malformed
   // falls back to the default Summary/Changes/Testing/Evidence. See resolvePrBodySections.
@@ -164,37 +151,13 @@ export type OrchestratorInit = {
   // Usage sink for the two direct generateText sites, recorded under the orchestrator role (#114).
   onUsage?: OnUsage;
   // Run-scoped cancellation for the Orchestrator's OWN work — the two direct generateText calls and
-  // the `git commit --amend` plumbing. Orthogonal to `timeout`, which is a per-step deadline. The
-  // subagent tools are cancelled through OrchestratorBuildContext.signal instead, since a build is
-  // per-group. Unset → this work is not cancellable.
+  // the `git commit --amend` plumbing. Orthogonal to `timeout`, which is a per-step deadline. Unset →
+  // this work is not cancellable.
   signal?: AbortSignal;
   // Harness-level notice sink for the direct generateText sites — currently only composePr's
   // deterministic fallback (`PR composition fell back …`). Injected so the Orchestrator stays free of
   // the observability rendering details; the adapter wires it to harnessProgress. Mirrors `onUsage`.
   onProgress?: (message: string) => void;
-};
-
-// Per-group state needed to wire the subagent tools. Built fresh for each Orchestrator
-// invocation since checkoutPath / group / pr / threads vary between groups.
-export type OrchestratorBuildContext = {
-  plannerTools: PlannerTools;
-  workerTools: WorkerTools;
-  reviewerTools: ReviewerTools;
-  checkoutPath: string;
-  baseBranch: string;
-  group: PrGroup;
-  pr: number;
-  threads: ReviewThread[];
-  // Run-scoped cancellation, handed to every subagent tool this build wires (see
-  // SubagentInit.signal). Unset → subagent generations are not cancellable.
-  signal?: AbortSignal;
-};
-
-export type OrchestratorTools = {
-  planner: ReturnType<typeof makePlannerTool>;
-  worker: ReturnType<typeof makeWorkerTool>;
-  reviewer: ReturnType<typeof makeReviewerTool>;
-  done: Tool<Record<string, never>, Record<string, never>>;
 };
 
 // The default PR body section headings, in order. Used when a repo does not configure its own
@@ -760,15 +723,6 @@ function sameSections(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((s, i) => s === b[i]);
 }
 
-// Fallback LLM step cap when caller passes null / 0 / negative `maxSteps`.
-export const DEFAULT_MAX_STEPS = 50;
-
-// Resolve the agent step cap from caller-provided `maxSteps`. Falls back to the
-// default when the value is null, zero, or negative. Exported for unit testing.
-export function resolveMaxSteps(maxSteps: number | null): number {
-  return typeof maxSteps === 'number' && maxSteps > 0 ? maxSteps : DEFAULT_MAX_STEPS;
-}
-
 export class Orchestrator {
   constructor(private readonly init: OrchestratorInit) {}
 
@@ -782,47 +736,10 @@ export class Orchestrator {
     return resolvePrBodySections(this.init.prBodySections);
   }
 
-  build(context: OrchestratorBuildContext): ToolLoopAgent<never, OrchestratorTools> {
-    const commonDeps = {
-      credentials: this.init.credentials,
-      styleContents: this.styleContents(),
-      rollingContext: this.init.rollingContext,
-      checkoutPath: context.checkoutPath,
-      ...(context.signal ? { signal: context.signal } : {}),
-    };
-    const tools: OrchestratorTools = {
-      planner: makePlannerTool({ ...commonDeps, plannerTools: context.plannerTools }),
-      worker: makeWorkerTool({
-        ...commonDeps,
-        workerTools: context.workerTools,
-        baseBranch: context.baseBranch,
-        group: context.group,
-      }),
-      reviewer: makeReviewerTool({
-        ...commonDeps,
-        reviewerTools: context.reviewerTools,
-        pr: context.pr,
-        threads: context.threads,
-      }),
-      done: tool<Record<string, never>, Record<string, never>>({
-        description:
-          'Signal that all PR groups have been processed and the orchestration is complete.',
-        inputSchema: z.object({}),
-        execute: async () => ({}),
-      }),
-    };
-    return new ToolLoopAgent<never, OrchestratorTools>({
-      model: this.init.credentials.modelFor('orchestrator'),
-      instructions: this.buildSystemPrompt(),
-      tools,
-      stopWhen: [stepCountIs(resolveMaxSteps(this.init.maxSteps)), hasToolCall('done')],
-    });
-  }
-
   buildSystemPrompt(): string {
     return render('orchestrator-system', {
       style: this.styleContents(),
-      roleGuidance: ORCHESTRATOR_ROLE_PREFIX,
+      roleGuidance: COMPOSER_ROLE_PREFIX,
       rollingContext: this.init.rollingContext,
     });
   }

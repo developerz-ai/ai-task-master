@@ -133,7 +133,12 @@ export type SelfReviewResult =
   | { kind: 'reviewed' }
   // Verify failed and the review Worker could not deliver a fix — a red PR may ship. Open it anyway
   // (external CI is the backstop) with the reason recorded.
-  | { kind: 'unclean'; reason: string };
+  | { kind: 'unclean'; reason: string }
+  // The review Worker itself errored (LLM timeout, provider 5xx, schema failure after retries, a
+  // bash fault mid-commit) — the diff was never reviewed, so this is NOT evidence it is clean.
+  // Distinct from `clean` so an unrun review can't read as "nothing to fix". Non-fatal like the rest
+  // of the pass — the caller opens the PR anyway (external CI is the backstop) with the reason recorded.
+  | { kind: 'error'; reason: string };
 
 // Last N chars of combined stdout+stderr — the failure tail is what a fixer needs. Matches worker.ts.
 const VERIFY_TAIL_MAX = 4000;
@@ -171,15 +176,30 @@ export async function runSelfReviewSession(input: SelfReviewInput): Promise<Self
     return { kind: 'reviewed' };
   }
 
-  // The Worker produced no fix (empty manifest / blocked / error). With verify green or unrun, that
-  // means the diff is already clean. With verify red, the failure it reported still ships — record
-  // why so the run summary shows it, and let the caller open the PR (external CI catches it).
+  // An errored review Worker (LLM timeout, provider 5xx, schema failure after retries, a bash fault
+  // mid-commit) never reviewed the diff — that is not evidence it is clean, whatever the verify
+  // result. Surface it as its own outcome so an unrun review can never read as "nothing to fix".
+  // Non-fatal like the rest of the pass: the caller still opens the PR (external CI is the backstop).
+  if (worker.kind === 'error') {
+    log?.warn('self-review: review worker errored, opening PR anyway', {
+      group: group.id,
+      detail: worker.error,
+    });
+    return { kind: 'error', reason: worker.error };
+  }
+
+  // The Worker reported nothing to fix (a reasoned no-changes or an empty-manifest block). With verify
+  // green or unrun, that means the diff is already clean. With verify red, the failure it reported
+  // still ships — record why so the run summary shows it, and let the caller open the PR (external CI
+  // catches it).
   if (verifyFailure === null) {
     log?.info('self-review: nothing to fix', { group: group.id });
     return { kind: 'clean' };
   }
-  const detail = worker.kind === 'error' ? worker.error : worker.reason;
-  log?.warn('self-review: verify still failing, opening PR anyway', { group: group.id, detail });
+  log?.warn('self-review: verify still failing, opening PR anyway', {
+    group: group.id,
+    detail: worker.reason,
+  });
   return { kind: 'unclean', reason: uncleanReason(input.verifyCommand ?? '', verifyFailure) };
 }
 

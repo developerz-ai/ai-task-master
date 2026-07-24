@@ -8,6 +8,10 @@
 //     comments/summary.txt         counts + files touched
 //     addressed_threads.json       review-thread IDs already handled, so a re-poll never re-processes them
 //
+// clearCi/clearComments scope removal to the ci/ and comments/ subdirs so addressed_threads.json —
+// a durable ledger, not stale context — survives a re-download. A whole-prDir wipe would reset it
+// every CI-fix pass, re-feeding already-replied threads to the Reviewer (freshThreads reads it).
+//
 // SRP: this module only persists/clears the context. Fetching the logs is GitHubClient's job
 // (getFailedCiLogs + listUnresolvedThreads); wiring lives in the merge-pr flow.
 
@@ -38,14 +42,21 @@ export class PrContextStore {
     return join(this.stateDir, 'debugging', 'pr', String(pr));
   }
 
-  // Remove any previously-downloaded context for this PR so a re-run never reads stale logs.
-  async clear(pr: number): Promise<void> {
-    await rm(this.prDir(pr), { recursive: true, force: true });
+  // Drop the downloaded CI logs so a re-run never reads stale ones. Scoped to ci/ so the sibling
+  // addressed_threads.json ledger survives — see the header note on why a whole-prDir wipe is wrong.
+  async clearCi(pr: number): Promise<void> {
+    await rm(this.ciDir(pr), { recursive: true, force: true });
+  }
+
+  // Drop the downloaded review comments. Scoped to comments/ for the same reason clearCi scopes to
+  // ci/: the addressed-thread ledger must outlive a re-poll.
+  async clearComments(pr: number): Promise<void> {
+    await rm(this.commentsDir(pr), { recursive: true, force: true });
   }
 
   async saveCiFailures(pr: number, failures: readonly CiFailure[]): Promise<string | null> {
     if (failures.length === 0) return null;
-    const ciDir = join(this.prDir(pr), 'ci');
+    const ciDir = this.ciDir(pr);
     await mkdir(ciDir, { recursive: true });
     const used = new Map<string, number>();
     for (const { check, logs } of failures) {
@@ -69,7 +80,7 @@ export class PrContextStore {
 
   async saveComments(pr: number, threads: readonly ReviewThread[]): Promise<string | null> {
     if (threads.length === 0) return null;
-    const commentsDir = join(this.prDir(pr), 'comments');
+    const commentsDir = this.commentsDir(pr);
     await mkdir(commentsDir, { recursive: true });
     let i = 0;
     for (const thread of threads) {
@@ -129,6 +140,14 @@ export class PrContextStore {
 
   private addressedThreadsFile(pr: number): string {
     return join(this.prDir(pr), 'addressed_threads.json');
+  }
+
+  private ciDir(pr: number): string {
+    return join(this.prDir(pr), 'ci');
+  }
+
+  private commentsDir(pr: number): string {
+    return join(this.prDir(pr), 'comments');
   }
 }
 

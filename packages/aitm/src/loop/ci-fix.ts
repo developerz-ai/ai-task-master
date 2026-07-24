@@ -51,7 +51,8 @@ export type FixSessionGithub = {
 // saveComments return the directory they wrote to (or null when there was nothing) — the Worker
 // prompt points at exactly those dirs.
 export type FixSessionPrContext = {
-  clear(pr: number): Promise<void>;
+  clearCi(pr: number): Promise<void>;
+  clearComments(pr: number): Promise<void>;
   saveCiFailures(
     pr: number,
     failures: ReadonlyArray<{ check: string; logs: string }>,
@@ -178,8 +179,10 @@ export async function runFixSession(input: FixSessionInput): Promise<FixSessionR
   const runCmd = input.runCmd ?? defaultRunCmd;
   const log = input.logger;
 
-  // 1. Fresh context only: drop any stale dump from a prior push, then download logs + comments.
-  await prContext.clear(pr);
+  // 1. Fresh context only: drop the stale ci/ + comments/ dump from a prior push — the addressed-
+  //    thread ledger deliberately survives — then download logs + comments.
+  await prContext.clearCi(pr);
+  await prContext.clearComments(pr);
   const failures = await github.getFailedCiLogs(pr);
   const threads = await github.listUnresolvedThreads(pr);
   const ciDir = await prContext.saveCiFailures(pr, failures);
@@ -399,7 +402,19 @@ async function resolveRebaseConflicts(
 ): Promise<PushResult> {
   const cwd = { cwd: checkoutPath };
   const abortAndBlock = async (reason: string): Promise<PushResult> => {
-    await runCmd('git', ['rebase', '--abort'], cwd);
+    const abort = await runCmd('git', ['rebase', '--abort'], cwd);
+    if (abort.exitCode !== 0) {
+      // Retry with fresh stderr in case the first attempt left residual state. If the retry also
+      // fails the checkout is stranded mid-rebase, so report that explicitly instead of returning
+      // the original reason as if cleanup had succeeded.
+      const retry = await runCmd('git', ['rebase', '--abort'], cwd);
+      if (retry.exitCode !== 0) {
+        return {
+          kind: 'blocked',
+          reason: `${reason}; git rebase --abort failed twice: ${gitErr(retry)}`,
+        };
+      }
+    }
     return { kind: 'blocked', reason };
   };
 

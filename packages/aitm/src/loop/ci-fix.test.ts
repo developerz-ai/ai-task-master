@@ -104,7 +104,8 @@ function baseInput(overrides: Partial<FixSessionInput> = {}): FixSessionInput {
 
 function stubPrContext(): FixSessionPrContext {
   return {
-    clear: async () => {},
+    clearCi: async () => {},
+    clearComments: async () => {},
     saveCiFailures: async () => null,
     saveComments: async () => null,
   };
@@ -195,6 +196,37 @@ test('runFixSession: CI failure → saves logs+comments to disk, fix prompt refe
       'git rebase origin/main',
       'git push --force-with-lease',
     ]);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('runFixSession: a fix pass preserves the addressed-thread ledger (scoped clears)', async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'aitm-cifix-'));
+  try {
+    const prContext = new PrContextStore(stateDir);
+    // An earlier addressing-reviews pass recorded these; the CI-fix pass must not wipe them, or
+    // freshThreads re-feeds already-replied threads to the Reviewer (the whole-prDir-wipe bug).
+    await prContext.recordAddressedThreads(7, ['TH_1', 'TH_2']);
+    const github = fakeGithub({
+      failures: [{ check: 'test', logs: 'boom' }],
+      threads: [
+        {
+          id: 'TH_1',
+          isResolved: false,
+          path: 'src/a.ts',
+          comments: [{ id: 'C_1', body: 'x', author: 'rabbit' }],
+        },
+      ],
+    });
+    const result = await runFixSession(
+      baseInput({ github, prContext, runCmd: recordingRunCmd().runCmd }),
+    );
+    assert.equal(result.kind, 'fixed');
+    // Context was re-downloaded fresh into ci/...
+    assert.ok((await readdir(join(stateDir, 'debugging', 'pr', '7', 'ci'))).length > 0);
+    // ...but the ledger from the earlier review pass is intact.
+    assert.deepEqual([...(await prContext.readAddressedThreads(7))].sort(), ['TH_1', 'TH_2']);
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }
@@ -418,8 +450,11 @@ test('runFixSession: without a prior handle the fix Worker cold-starts (issue #1
 test('runFixSession: clears stale context before downloading (fresh-context-only)', async () => {
   const order: string[] = [];
   const prContext: FixSessionPrContext = {
-    clear: async () => {
-      order.push('clear');
+    clearCi: async () => {
+      order.push('clearCi');
+    },
+    clearComments: async () => {
+      order.push('clearComments');
     },
     saveCiFailures: async () => {
       order.push('saveCiFailures');
@@ -432,8 +467,8 @@ test('runFixSession: clears stale context before downloading (fresh-context-only
   };
   const result = await runFixSession(baseInput({ prContext, runCmd: recordingRunCmd().runCmd }));
   assert.equal(result.kind, 'fixed');
-  assert.equal(order[0], 'clear', 'clear must run before any save');
-  assert.deepEqual(order, ['clear', 'saveCiFailures', 'saveComments']);
+  // Both scoped clears run before any save — never a whole-prDir wipe that would drop the ledger.
+  assert.deepEqual(order, ['clearCi', 'clearComments', 'saveCiFailures', 'saveComments']);
 });
 
 test('runFixSession: Worker blocked → session blocked, nothing is pushed', async () => {
@@ -813,6 +848,48 @@ test('rebaseAndForcePush: rebase conflict → blocked, aborts, never pushes', as
   if (result.kind === 'blocked') assert.match(result.reason, /conflict/i);
   assert.ok(commands.includes('git rebase --abort'));
   assert.ok(!commands.some((c) => c.includes('push')));
+});
+
+test('rebaseAndForcePush: first `git rebase --abort` fails, retry succeeds → keeps the original reason', async () => {
+  let aborts = 0;
+  const { runCmd } = recordingRunCmd((args) => {
+    if (args[0] === 'rebase' && args[1] === '--abort') {
+      return ++aborts === 1 ? { exitCode: 1, stderr: 'residual state' } : {};
+    }
+    return args[0] === 'rebase' && args[1]?.startsWith('origin/')
+      ? { exitCode: 1, stderr: 'CONFLICT (content): Merge conflict in src/a.ts' }
+      : {};
+  });
+  const result = await rebaseAndForcePush(runCmd, '/tmp/wt', 'main', 9, undefined);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /manual resolution/i);
+    // A recovered cleanup must not masquerade as a double failure.
+    assert.doesNotMatch(result.reason, /failed twice/);
+  }
+});
+
+test('rebaseAndForcePush: both `git rebase --abort` attempts fail → blocked reason reports the stranded cleanup', async () => {
+  const { runCmd, commands } = recordingRunCmd((args) => {
+    if (args[0] === 'rebase' && args[1] === '--abort') {
+      return { exitCode: 1, stderr: 'fatal: could not abort rebase' };
+    }
+    return args[0] === 'rebase' && args[1]?.startsWith('origin/')
+      ? { exitCode: 1, stderr: 'CONFLICT (content): Merge conflict in src/a.ts' }
+      : {};
+  });
+  const result = await rebaseAndForcePush(runCmd, '/tmp/wt', 'main', 9, undefined);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /manual resolution/i);
+    assert.match(result.reason, /git rebase --abort failed twice: fatal: could not abort rebase/);
+  }
+  assert.equal(
+    commands.filter((c) => c === 'git rebase --abort').length,
+    2,
+    'retries the abort exactly once before giving up',
+  );
+  assert.ok(!commands.some((c) => c.includes('push')), 'never force-pushes a stranded checkout');
 });
 
 test('rebaseAndForcePush: push rejected → blocked, surfaces the git error', async () => {

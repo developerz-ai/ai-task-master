@@ -71,7 +71,8 @@ export type TakeOverGithub = {
 // satisfies this; tests pass a stub. Optional on the flow input — when omitted, nothing is
 // downloaded and the CI-fix Worker falls back to its generic "read the CI logs via gh" task.
 export type PrContextPort = {
-  clear(pr: number): Promise<void>;
+  clearCi(pr: number): Promise<void>;
+  clearComments(pr: number): Promise<void>;
   saveCiFailures(
     pr: number,
     failures: ReadonlyArray<{ check: string; logs: string }>,
@@ -218,7 +219,9 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
     //    Re-downloaded each iteration so the Worker never reads stale logs from a prior push.
     let ciLogsDir: string | null = null;
     if (input.prContext) {
-      await input.prContext.clear(input.pr);
+      // Scoped clears so the addressed-thread ledger survives the re-download each iteration.
+      await input.prContext.clearCi(input.pr);
+      await input.prContext.clearComments(input.pr);
       if ((ciStatus === 'failure' || ciStatus === 'cancelled') && input.github.getFailedCiLogs) {
         const failures = await input.github.getFailedCiLogs(input.pr);
         ciLogsDir = await input.prContext.saveCiFailures(input.pr, failures);
@@ -238,11 +241,14 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
 
     if (ciStatus === 'failure' || ciStatus === 'cancelled') {
       const fixed = await runWorkerCiFix(input, ciLogsDir);
-      if (fixed.kind === 'blocked') {
-        return { kind: 'blocked', reason: fixed.reason, iterations: iteration };
-      }
-      if (fixed.kind === 'error') {
-        return { kind: 'blocked', reason: `worker error: ${fixed.error}`, iterations: iteration };
+      // Anything but a delivered fix ends the run. 'blocked'/'error' are explicit failures; a
+      // 'no-changes' verdict while CI is red is a contradiction — claiming nothing needs changing
+      // cannot fix a failing check. Block on the worker's own reason instead of force-pushing zero
+      // commits and re-polling the same red CI until maxIterations. Mirrors ci-fix.ts's
+      // `worker.kind !== 'ok'` guard.
+      if (fixed.kind !== 'ok') {
+        const reason = fixed.kind === 'error' ? `worker error: ${fixed.error}` : fixed.reason;
+        return { kind: 'blocked', reason, iterations: iteration };
       }
       pushedSomething = true;
     }

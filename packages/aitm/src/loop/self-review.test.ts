@@ -226,6 +226,44 @@ test('runSelfReviewSession: verify fails and Worker cannot fix → unclean, PR o
   }
 });
 
+test('runSelfReviewSession: review Worker errors, verify clean → error, not masked as clean', async () => {
+  // An LLM timeout / provider 5xx surfaces as WorkerResult.kind === 'error'. With verify green or
+  // unrun the old code returned { kind: 'clean' } ("nothing to fix"), hiding that the diff was never
+  // reviewed. It must surface as its own outcome instead.
+  const result = await runSelfReviewSession(
+    baseInput({
+      subagents: baseSubagents({
+        runWorkerOverride: async () => ({ kind: 'error', error: 'provider 503: upstream timeout' }),
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') {
+    assert.match(result.reason, /provider 503: upstream timeout/);
+  }
+});
+
+test('runSelfReviewSession: review Worker errors while verify is red → error, not unclean', async () => {
+  // A crashed reviewer is not "the review ran and could not clean it" (unclean) — the review never
+  // completed, so the error is the dominant signal; the red verify is re-caught by external CI.
+  const { runCmd } = recordingRunCmd((args) =>
+    args[0] === '-c' ? { exitCode: 1, stderr: 'FAIL 2 tests' } : {},
+  );
+  const result = await runSelfReviewSession(
+    baseInput({
+      runCmd,
+      verifyCommand: 'bun test',
+      subagents: baseSubagents({
+        runWorkerOverride: async () => ({ kind: 'error', error: 'LLM step timed out' }),
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') {
+    assert.match(result.reason, /LLM step timed out/);
+  }
+});
+
 test('runSelfReviewSession: verify command-not-found (exit 127) is inconclusive → clean, no fix task pressure', async () => {
   let captured: WorkerInput | null = null;
   const { runCmd } = recordingRunCmd((args) =>
@@ -259,18 +297,20 @@ test('runSelfReviewSession: builds the review Worker on the coding-capability mo
         credentials: {
           modelForCapability: (cap) => {
             caps.push(cap);
-            // Empty manifest → runWorker blocks before any editor/commit; we only assert the tier.
             return submitManifestModel({ files: [], draftCommitMessage: '' });
           },
           modelIdForCapability: () => 'test/model',
         },
+        // Empty tool surface: the real worker path can't run git, so it returns `error`. That is now
+        // an `error` outcome (not the old masked `clean`); we only assert the model was requested for
+        // the 'coding' tier, with no hardcoded role mapping.
         workerTools: {} as WorkerTools,
         styleContents: '',
       },
     }),
   );
   assert.deepEqual(caps, ['coding']);
-  assert.equal(result.kind, 'clean'); // empty manifest = nothing to fix
+  assert.equal(result.kind, 'error');
 });
 
 test("runSelfReviewSession: the group's acceptance check lands in the review task", async () => {

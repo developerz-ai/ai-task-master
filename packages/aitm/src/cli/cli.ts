@@ -7,7 +7,14 @@ import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { type ErrorReporter, initErrorReporter } from '../observability/error-reporter.ts';
 import { parseArgs } from './args.ts';
-import type { CleanCtx, McpLoginCtx, MergePrCtx, ProfileCtx, StartCtx } from './commands.ts';
+import type {
+  CleanCtx,
+  ConfigCtx,
+  McpLoginCtx,
+  MergePrCtx,
+  ProfileCtx,
+  StartCtx,
+} from './commands.ts';
 import {
   runClean,
   runConfig,
@@ -51,13 +58,14 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
     case 'config-unset':
     case 'config-get':
     case 'config-list':
-      return emit(await runConfig(parsed, buildConfigCtx(ctx, stdout)), stdout, stderr);
+      return emit(await runConfig(parsed, buildConfigCtx(ctx, stdout, stderr)), stdout, stderr);
     case 'profile-list':
     case 'profile-use':
     case 'profile-add':
     case 'profile-set':
     case 'profile-get':
     case 'profile-remove':
+    case 'profile-rename':
     case 'profile-show':
       return emit(await runProfile(parsed, buildProfileCtx(ctx, stdout)), stdout, stderr);
     case 'clean':
@@ -108,10 +116,12 @@ function buildMergePrCtx(ctx: MainCtx): MergePrCtx {
 function buildConfigCtx(
   ctx: MainCtx,
   stdout: (chunk: string) => void,
-): { cwd?: string; homeDir?: string; stdout: (chunk: string) => void } {
-  const out: { cwd?: string; homeDir?: string; stdout: (chunk: string) => void } = { stdout };
+  stderr: (chunk: string) => void,
+): ConfigCtx {
+  const out: ConfigCtx = { stdout, stderr };
   if (ctx.cwd !== undefined) out.cwd = ctx.cwd;
   if (ctx.homeDir !== undefined) out.homeDir = ctx.homeDir;
+  if (ctx.env !== undefined) out.env = ctx.env;
   return out;
 }
 

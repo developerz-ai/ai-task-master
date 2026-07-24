@@ -271,6 +271,65 @@ test('remove rejects an unknown profile', async () => {
   });
 });
 
+test('rename keeps every field and returns the profile under the new name', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai', apiKey: 'sk-or-secret' });
+    const renamed = await manager.rename('z.ai', 'zed');
+    assert.equal(renamed.baseURL, 'https://api.z.ai/api/coding/paas/v4');
+    assert.equal(renamed.openrouterApiKey, 'sk-or-secret');
+    const listing = await manager.list();
+    assert.deepEqual(Object.keys(listing.profiles), ['zed']);
+  });
+});
+
+test('rename repoints activeProfile at the new name when the renamed profile was active', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    await manager.rename('z.ai', 'zed');
+    assert.equal((await manager.list()).activeProfile, 'zed');
+  });
+});
+
+test('rename leaves activeProfile alone when a different profile is renamed', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    await manager.add('openrouter', { preset: 'openrouter' });
+    await manager.rename('openrouter', 'or2');
+    assert.equal((await manager.list()).activeProfile, 'z.ai');
+  });
+});
+
+test('rename rejects an unknown source profile', async () => {
+  await withManager(async ({ manager }) => {
+    await assert.rejects(() => manager.rename('ghost', 'new'), /Unknown profile/);
+  });
+});
+
+test('rename rejects a destination name that already exists', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    await manager.add('openrouter', { preset: 'openrouter' });
+    await assert.rejects(() => manager.rename('z.ai', 'openrouter'), /already exists/);
+  });
+});
+
+test('rename to the same name is a no-op that still returns the profile', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    const result = await manager.rename('z.ai', 'z.ai');
+    assert.equal(result.baseURL, 'https://api.z.ai/api/coding/paas/v4');
+    assert.deepEqual(Object.keys((await manager.list()).profiles), ['z.ai']);
+  });
+});
+
+test('rename rejects a reserved name on either side', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    await assert.rejects(() => manager.rename('z.ai', '__proto__'), /reserved word/);
+    await assert.rejects(() => manager.rename('__proto__', 'z.ai'), /reserved word/);
+  });
+});
+
 test('show defaults to the active profile', async () => {
   await withManager(async ({ manager }) => {
     await manager.add('z.ai', { preset: 'zai' });

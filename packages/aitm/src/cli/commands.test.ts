@@ -1909,7 +1909,7 @@ test('runConfig list → prints JSON, exit 0', async () => {
     await writeFile(join(home.path, '.aitm.json'), JSON.stringify({ maxPrs: 4 }));
     const writes: string[] = [];
     const result = await runConfig(
-      { kind: 'config-list', scope: 'global' },
+      { kind: 'config-list', scope: 'global', effective: false },
       {
         cwd: repo.path,
         homeDir: home.path,
@@ -1935,7 +1935,7 @@ test('runConfig list → masks openrouterApiKey (no cleartext leak)', async () =
     await writeFile(join(home.path, '.aitm.json'), JSON.stringify({ openrouterApiKey: secret }));
     const writes: string[] = [];
     const result = await runConfig(
-      { kind: 'config-list', scope: 'global' },
+      { kind: 'config-list', scope: 'global', effective: false },
       {
         cwd: repo.path,
         homeDir: home.path,
@@ -1957,6 +1957,101 @@ test('runConfig list → masks openrouterApiKey (no cleartext leak)', async () =
       printed.openrouterApiKey.endsWith('cdef'),
       'last 4 chars retained for identification',
     );
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runConfig list --effective → merged config with per-key source labels, exit 0', async () => {
+  const repo = await makeTempRepo();
+  const home = await tempHome();
+  try {
+    await writeFile(
+      join(home.path, '.aitm.json'),
+      JSON.stringify({ maxPrs: 7, openrouterApiKey: 'sk-or-v1-0123456789abcdef' }),
+    );
+    const writes: string[] = [];
+    const result = await runConfig(
+      { kind: 'config-list', scope: 'global', effective: true },
+      { cwd: repo.path, homeDir: home.path, env: {}, stdout: (s) => writes.push(s) },
+    );
+    assert.equal(result.code, 0);
+    const out = writes.join('');
+    assert.match(out, /default < profile < global < project < env < CLI/);
+    assert.match(out, /\nmaxPrs\t7\tglobal\n/);
+    assert.match(out, /\nmaxSessions\tnull\tdefault\n/, 'unset scalar shows default');
+    assert.match(out, /\nbashRules\t\d+ rules \(first-match-wins\)\tmerged\n/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runConfig list --effective → api key masked and labeled by its source', async () => {
+  const repo = await makeTempRepo();
+  const home = await tempHome();
+  try {
+    const secret = 'sk-or-v1-0123456789abcdef';
+    const writes: string[] = [];
+    const result = await runConfig(
+      { kind: 'config-list', scope: 'global', effective: true },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: secret },
+        stdout: (s) => writes.push(s),
+      },
+    );
+    assert.equal(result.code, 0);
+    const out = writes.join('');
+    assert.ok(!out.includes(secret), 'full API key must never be printed');
+    assert.match(out, /\nopenrouterApiKey\tsk-or-…cdef\tenv\n/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runConfig list --effective → resolution warnings route to ctx.stderr, not stdout', async () => {
+  const repo = await makeTempRepo();
+  const home = await tempHome();
+  try {
+    await writeFile(
+      join(home.path, '.aitm.json'),
+      JSON.stringify({ openrouterApiKey: 'sk-or-v1-0123456789abcdef', bogusKey: 1 }),
+    );
+    const writes: string[] = [];
+    const errs: string[] = [];
+    const result = await runConfig(
+      { kind: 'config-list', scope: 'global', effective: true },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: {},
+        stdout: (s) => writes.push(s),
+        stderr: (s) => errs.push(s),
+      },
+    );
+    assert.equal(result.code, 0);
+    assert.match(errs.join(''), /unknown config key "bogusKey"/);
+    assert.ok(!writes.join('').includes('bogusKey'), 'warning must not pollute stdout');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runConfig list --effective → no credentials surfaces the actionable error, exit 1', async () => {
+  const repo = await makeTempRepo();
+  const home = await tempHome();
+  try {
+    const result = await runConfig(
+      { kind: 'config-list', scope: 'global', effective: true },
+      { cwd: repo.path, homeDir: home.path, env: {}, stdout: () => {} },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /No OpenRouter API key found/);
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -2179,6 +2274,55 @@ test('runProfile: get returns a single field value', async () => {
     );
     assert.equal(res.code, 0);
     assert.equal(sink.text().trim(), 'https://api.z.ai/api/coding/paas/v4');
+  } finally {
+    await home.cleanup();
+  }
+});
+
+test('runProfile: rename renames the profile and reports success', async () => {
+  const home = await tempHome();
+  try {
+    await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    const sink = collectStdout();
+    const res = await runProfile(
+      { kind: 'profile-rename', from: 'z.ai', to: 'zed' },
+      { homeDir: home.path, stdout: sink.out },
+    );
+    assert.equal(res.code, 0);
+    assert.match(sink.text(), /Renamed profile "z\.ai" to "zed"/);
+    const listSink = collectStdout();
+    await runProfile({ kind: 'profile-list' }, { homeDir: home.path, stdout: listSink.out });
+    assert.match(listSink.text(), /\* zed/);
+    assert.doesNotMatch(
+      listSink.text(),
+      /^[* ] z\.ai\t/m,
+      'the old profile name must be gone from the listing',
+    );
+  } finally {
+    await home.cleanup();
+  }
+});
+
+test('runProfile: rename to an existing name exits 1', async () => {
+  const home = await tempHome();
+  try {
+    await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    await runProfile(
+      { kind: 'profile-add', name: 'openrouter', preset: 'openrouter' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    const res = await runProfile(
+      { kind: 'profile-rename', from: 'z.ai', to: 'openrouter' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    assert.equal(res.code, 1);
+    assert.match(res.message ?? '', /already exists/);
   } finally {
     await home.cleanup();
   }

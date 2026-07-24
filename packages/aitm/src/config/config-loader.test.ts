@@ -600,6 +600,164 @@ test('resolve: maxCiFixAttempts follows CLI > project > global > default precede
   }
 });
 
+test('resolve: AITM_* env overrides win over project + global but lose to CLI (issue #94)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-global',
+      maxPrs: 2,
+      logLevel: 'warn',
+    });
+    await writeProjectConfig(cwd.path, { maxPrs: 4 });
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_MAX_PRS: '9',
+      AITM_MAX_SESSIONS: '3',
+      AITM_MAX_CI_FIX_ATTEMPTS: '7',
+      AITM_CONCURRENCY: '5',
+      AITM_AUTO_MERGE: 'false',
+      AITM_PR_PER_TASK: 'true',
+      AITM_SELF_REVIEW: 'false',
+      AITM_MERGE_METHOD: 'rebase',
+      AITM_LOG_LEVEL: 'debug',
+    });
+
+    const resolved = await loader.resolve({});
+    assert.equal(resolved.maxPrs, 9, 'env beats project + global');
+    assert.equal(resolved.maxSessions, 3);
+    assert.equal(resolved.maxCiFixAttempts, 7);
+    assert.equal(resolved.concurrency, 5);
+    assert.equal(resolved.autoMerge, false);
+    assert.equal(resolved.prPerTask, true);
+    assert.equal(resolved.selfReview, false);
+    assert.equal(resolved.mergeMethod, 'rebase');
+    assert.equal(resolved.logLevel, 'debug', 'env beats global logLevel');
+
+    // An explicit CLI flag still wins over the env override.
+    const withCli = await loader.resolve({ maxPrs: 1, autoMerge: true, mergeMethod: 'merge' });
+    assert.equal(withCli.maxPrs, 1);
+    assert.equal(withCli.autoMerge, true);
+    assert.equal(withCli.mergeMethod, 'merge');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: AITM_MAX_SESSIONS=0 means unlimited (null), matching --max-sessions 0', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_MAX_SESSIONS: '0',
+    });
+    assert.equal((await loader.resolve({})).maxSessions, null);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: blank/whitespace-only AITM_* env vars are treated as unset', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global', maxPrs: 6 });
+    const loader = new ConfigLoader(cwd.path, home.path, { AITM_MAX_PRS: '   ' });
+    assert.equal((await loader.resolve({})).maxPrs, 6);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: an out-of-range AITM_* int env var throws', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_MAX_PRS: 'not-a-number',
+    });
+    await assert.rejects(() => loader.resolve({}), /AITM_MAX_PRS must be a positive integer/);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: an invalid AITM_* boolean env var throws', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_AUTO_MERGE: 'yes-please',
+    });
+    await assert.rejects(() => loader.resolve({}), /AITM_AUTO_MERGE must be "true"\/"false"/);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: an invalid AITM_MERGE_METHOD / AITM_LOG_LEVEL enum throws', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const badMethod = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_MERGE_METHOD: 'octopus',
+    });
+    await assert.rejects(() => badMethod.resolve({}), /AITM_MERGE_METHOD must be one of/);
+
+    const badLevel = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_LOG_LEVEL: 'verbose',
+    });
+    await assert.rejects(() => badLevel.resolve({}), /AITM_LOG_LEVEL must be one of/);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: adminMerge and allowDirty have no env override — CLI-only stays CLI-only', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    // These aren't real config-file keys, but the env vars must be inert either way: no
+    // AITM_ADMIN_MERGE/AITM_ALLOW_DIRTY var is read at all.
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_ADMIN_MERGE: 'true',
+      AITM_ALLOW_DIRTY: 'true',
+    });
+    const resolved = await loader.resolve({});
+    assert.equal(resolved.adminMerge, false);
+    assert.equal(resolved.allowDirty, false);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolveWithSources: env-overridden keys are labeled "env" in provenance', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global', maxPrs: 2 });
+    const loader = new ConfigLoader(cwd.path, home.path, { AITM_MAX_PRS: '9' });
+    const { sources } = await loader.resolveWithSources({});
+    assert.equal(sources.maxPrs, 'env');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: llmStepTimeoutMs follows project > global > default (config-only, no CLI flag) (issue #129)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
@@ -1726,6 +1884,132 @@ test('resolve: registers env + global + every profile key for literal redaction,
     );
   } finally {
     clearRegisteredSecrets();
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+// --- resolveWithSources: per-key provenance for `config list --effective` ---
+
+test('resolveWithSources: scalar provenance — default, then global, then project override', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    let r = await loader.resolveWithSources({});
+    assert.equal(r.sources.maxPrs, 'default');
+
+    await writeGlobalConfig(home.path, { maxPrs: 7 });
+    r = await loader.resolveWithSources({});
+    assert.equal(r.sources.maxPrs, 'global');
+    assert.equal(r.resolved.maxPrs, 7);
+
+    await writeProjectConfig(cwd.path, { maxPrs: 9 });
+    r = await loader.resolveWithSources({});
+    assert.equal(r.sources.maxPrs, 'project');
+    assert.equal(r.resolved.maxPrs, 9);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolveWithSources: a CLI override wins and is labeled cli', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, { maxPrs: 7 });
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    const r = await loader.resolveWithSources({ maxPrs: 3 });
+    assert.equal(r.resolved.maxPrs, 3);
+    assert.equal(r.sources.maxPrs, 'cli');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolveWithSources: apiKey/baseURL provenance across env, global, then profile', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    let r = await loader.resolveWithSources({});
+    assert.equal(r.sources.openrouterApiKey, 'env');
+    assert.equal(r.sources.baseURL, 'default', 'no baseURL override → provider default');
+    assert.ok(!('activeProfile' in r.sources), 'no profile → no activeProfile label');
+
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-global',
+      baseURL: 'https://g.example/v1',
+    });
+    r = await loader.resolveWithSources({});
+    assert.equal(r.sources.openrouterApiKey, 'global');
+    assert.equal(r.sources.baseURL, 'global');
+
+    await writeGlobalConfig(home.path, {
+      activeProfile: 'z',
+      profiles: { z: { openrouterApiKey: 'sk-z', baseURL: 'https://z.example/v1' } },
+    });
+    r = await loader.resolveWithSources({});
+    assert.equal(r.sources.baseURL, 'profile');
+    assert.equal(r.sources.openrouterApiKey, 'profile');
+    assert.equal(r.sources.activeProfile, 'global');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolveWithSources: per-tier model provenance is independent', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, { models: { smart: 'g/smart' } });
+    await writeProjectConfig(cwd.path, { models: { coding: 'p/coding' } });
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    const r = await loader.resolveWithSources({});
+    assert.equal(r.sources['models.smart'], 'global');
+    assert.equal(r.sources['models.coding'], 'project');
+    assert.equal(r.sources['models.generic'], 'default');
+    assert.equal(r.sources['models.fast'], 'default');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolveWithSources: present-only keys are labeled only when a layer sets them', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    let r = await loader.resolveWithSources({});
+    assert.ok(!('webSearch' in r.sources), 'unset webSearch carries no label');
+
+    await writeGlobalConfig(home.path, { webSearch: true });
+    r = await loader.resolveWithSources({});
+    assert.equal(r.sources.webSearch, 'global');
+
+    await writeProjectConfig(cwd.path, { webSearch: false });
+    r = await loader.resolveWithSources({});
+    assert.equal(r.sources.webSearch, 'project');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolveWithSources: resolved is identical to resolve()', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, { maxPrs: 7, models: { coding: 'x/y' } });
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    const viaResolve = await loader.resolve({ concurrency: 2 });
+    const viaSources = await loader.resolveWithSources({ concurrency: 2 });
+    assert.deepEqual(viaSources.resolved, viaResolve);
+  } finally {
     await home.cleanup();
     await cwd.cleanup();
   }

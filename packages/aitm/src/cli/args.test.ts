@@ -250,12 +250,22 @@ const configCases: Case[] = [
   {
     name: 'config list global',
     argv: ['config', 'list'],
-    expected: { kind: 'config-list', scope: 'global' },
+    expected: { kind: 'config-list', scope: 'global', effective: false },
   },
   {
     name: 'config list --project',
     argv: ['config', 'list', '--project'],
-    expected: { kind: 'config-list', scope: 'project' },
+    expected: { kind: 'config-list', scope: 'project', effective: false },
+  },
+  {
+    name: 'config list --effective',
+    argv: ['config', 'list', '--effective'],
+    expected: { kind: 'config-list', scope: 'global', effective: true },
+  },
+  {
+    name: 'config list --project --effective (both toggles, any order)',
+    argv: ['config', 'list', '--effective', '--project'],
+    expected: { kind: 'config-list', scope: 'project', effective: true },
   },
   {
     name: 'config set: -- sentinel lets a value begin with --',
@@ -471,6 +481,21 @@ const usageErrorCases: Case[] = [
     expected: { kind: 'usage-error' },
   },
   {
+    name: 'config list: --effective takes no value',
+    argv: ['config', 'list', '--effective=1'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'config set: --effective is list-only, not a set flag',
+    argv: ['config', 'set', 'k', 'v', '--effective'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'config get: --effective is list-only, not a get flag',
+    argv: ['config', 'get', 'k', '--effective'],
+    expected: { kind: 'usage-error' },
+  },
+  {
     name: 'config: unknown flag',
     argv: ['config', 'set', 'k', 'v', '--global'],
     expected: { kind: 'usage-error' },
@@ -503,6 +528,26 @@ const profileCases: Case[] = [
     name: 'profile remove',
     argv: ['profile', 'remove', 'z.ai'],
     expected: { kind: 'profile-remove', name: 'z.ai' },
+  },
+  {
+    name: 'profile rename',
+    argv: ['profile', 'rename', 'z.ai', 'zed'],
+    expected: { kind: 'profile-rename', from: 'z.ai', to: 'zed' },
+  },
+  {
+    name: 'profile rename: -- sentinel lets a name begin with a dash',
+    argv: ['profile', 'rename', '--', '-old', '-new'],
+    expected: { kind: 'profile-rename', from: '-old', to: '-new' },
+  },
+  {
+    name: 'profile rename: wrong arity is a usage error',
+    argv: ['profile', 'rename', 'z.ai'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'profile rename: a stray flag without -- is a usage error',
+    argv: ['profile', 'rename', 'z.ai', '--dashed'],
+    expected: { kind: 'usage-error' },
   },
   { name: 'profile show (active)', argv: ['profile', 'show'], expected: { kind: 'profile-show' } },
   {

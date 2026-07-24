@@ -251,6 +251,16 @@ export type ConfigFile = z.infer<typeof ConfigFileSchema>;
 // it. Add a key to ConfigFileSchema and both tables pick it up automatically.
 export const CONFIG_KEYS: ReadonlySet<string> = new Set(Object.keys(ConfigFileSchema.shape));
 
+// Object keys reserved by the JS runtime: a dotted config/profile path or a profile name containing
+// one of these would resolve to Object.prototype, and a write through it would pollute every object
+// in the process. Rejected before any lookup or setDotted call — see config/dotted-path.ts
+// (splitDottedKey) and config/profiles.ts (assertProfileName).
+export const FORBIDDEN_KEY_SEGMENTS: ReadonlySet<string> = new Set([
+  '__proto__',
+  'prototype',
+  'constructor',
+]);
+
 export type CliOverrides = {
   maxPrs?: number;
   maxSessions?: number | null;
@@ -361,3 +371,19 @@ export type ResolvedConfig = {
 };
 
 export type McpServerSource = 'aitm-global' | 'aitm-project' | 'claude-mcp-project' | 'claude-user';
+
+// Which layer supplied a resolved value, low→high precedence: default < profile < global < project <
+// env < CLI. 'profile' applies only to provider-shaped keys (openrouterApiKey/baseURL/models/…); a
+// run setting never reads a profile. 'env' covers the two credential keys sourced from the
+// environment (OPENROUTER_API_KEY/OPENROUTER_BASE_URL) plus the bounded AITM_* run-setting overrides
+// (maxPrs/maxSessions/maxCiFixAttempts/concurrency/autoMerge/prPerTask/selfReview/mergeMethod/
+// logLevel). Surfaced by `aitm config list --effective` so the precedence outcome of every key is
+// visible without starting a run and reading the snapshot.
+export type ConfigSource = 'cli' | 'project' | 'global' | 'profile' | 'env' | 'default';
+
+// Per-key provenance for a resolved config, keyed by ResolvedConfig field name — dotted for the
+// per-tier composites ('models.coding', 'reasoningEffort.smart'). bashRules (a first-match-wins merge
+// of several layers) and mcpServers (its own McpServerSource per entry) carry provenance elsewhere and
+// are deliberately absent here. Built alongside resolution by ConfigLoader.resolveWithSources, so it
+// can never drift from the values it labels.
+export type ConfigSourceMap = Record<string, ConfigSource>;

@@ -101,13 +101,24 @@ const fakeCredentials = (model: LanguageModel): FixSessionModelSelector => ({
 const dummyCredentials = fakeCredentials(dummyModel);
 
 // runFixSession clears + writes the downloaded CI context through this port; a no-op stub is enough
-// since the CI-fix tests drive the Worker via runWorkerOverride.
-const fakePrContext = (): PrContextPort => ({
-  clearCi: async () => {},
-  clearComments: async () => {},
-  saveCiFailures: async () => null,
-  saveComments: async () => null,
-});
+// since the CI-fix tests drive the Worker via runWorkerOverride. The addressed-thread ledger is
+// backed by a real in-memory Set per instance so dedup tests can observe it working across
+// iterations, mirroring how PrContextStore actually persists it.
+function fakePrContext(): PrContextPort {
+  const addressed = new Map<number, Set<string>>();
+  return {
+    clearCi: async () => {},
+    clearComments: async () => {},
+    saveCiFailures: async () => null,
+    saveComments: async () => null,
+    readAddressedThreads: async (pr) => new Set(addressed.get(pr) ?? []),
+    recordAddressedThreads: async (pr, ids) => {
+      const set = addressed.get(pr) ?? new Set<string>();
+      for (const id of ids) set.add(id);
+      addressed.set(pr, set);
+    },
+  };
+}
 
 function baseInput(
   github: TakeOverGithub,
@@ -204,6 +215,94 @@ test('runTakeOverFlow: unresolved threads → invokes Reviewer, pushes, then mer
     'git push --force-with-lease',
   ]);
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 1);
+});
+
+test('runTakeOverFlow: replied-only thread is recorded as addressed → not re-fed to the Reviewer', async () => {
+  // GitHub never marks the thread resolved (only a reply, by design for "replied"), so
+  // listUnresolvedThreads keeps returning it forever. Without the addressed-thread dedup this
+  // would loop the Reviewer over the same thread every iteration.
+  const threads: ReviewThread[] = [
+    {
+      id: 'TH_D',
+      isResolved: false,
+      path: 'src/a.ts',
+      comments: [{ id: 'C_D', body: 'why?', author: 'rabbit' }],
+    },
+  ];
+  const gh = fakeGithub({ checks: ['success', 'success'], threads: [threads] });
+  let reviewerInvocations = 0;
+  const input = baseInput(gh.github, {
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      credentials: dummyCredentials,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runReviewerOverride: async () => {
+        reviewerInvocations++;
+        return { kind: 'ok', resolutions: [{ threadId: 'TH_D', kind: 'replied' }] };
+      },
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'merged');
+  // The Reviewer ran exactly once — the second iteration's freshThreads filtered TH_D out even
+  // though listUnresolvedThreads keeps reporting it unresolved.
+  assert.equal(reviewerInvocations, 1);
+  if (result.kind === 'merged') assert.equal(result.iterations, 1);
+});
+
+test('runTakeOverFlow: review grace re-arms after a push', async () => {
+  const threads: ReviewThread[] = [
+    {
+      id: 'TH_G',
+      isResolved: false,
+      path: 'src/a.ts',
+      comments: [{ id: 'C_G', body: 'fix', author: 'rabbit' }],
+    },
+  ];
+  // 1st iteration: green CI + a thread the Reviewer fixes → pushes. 2nd iteration: green + clean.
+  const gh = fakeGithub({ checks: ['success', 'success'], threads: [threads, []] });
+  const graceSleeps: number[] = [];
+  const input = baseInput(gh.github, {
+    sleep: async (ms) => {
+      if (ms === REVIEW_COMMENTS_GRACE) graceSleeps.push(ms);
+    },
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      credentials: dummyCredentials,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runReviewerOverride: async () => ({
+        kind: 'ok',
+        resolutions: [{ threadId: 'TH_G', kind: 'fixed', commitSha: 'abc' }],
+      }),
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'merged');
+  // The grace fired once before the fixing pass and a second time after the push re-armed it —
+  // a once-only grace would have only ever waited for review bots against the pre-push head.
+  assert.equal(graceSleeps.length, 2);
+});
+
+test('runTakeOverFlow: CI stays pending → retries without reading threads, then blocks', async () => {
+  // waitForChecks only ever returns 'pending' on a cancelled poll, but a non-aborted 'pending' can
+  // still theoretically reach the loop (a race between the abort check and the signal firing) — it
+  // must be treated as "not settled yet", not fall through to the Reviewer/merge logic below it.
+  const gh = fakeGithub({ checks: ['pending'], threads: [[]] });
+  const result = await runTakeOverFlow(baseInput(gh.github, { maxIterations: 2 }));
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /CI pending after 2 iteration/i);
+    assert.equal(result.iterations, 2);
+  }
+  assert.deepEqual(
+    gh.calls.map((c) => c.method),
+    ['waitForChecks', 'waitForChecks', 'waitForChecks', 'listUnresolvedThreads'],
+    'threads are only read on the final settle check, never mid-loop while CI is pending',
+  );
 });
 
 test('runTakeOverFlow: CI failure → invokes Worker, blocks if Worker blocked', async () => {
@@ -337,9 +436,9 @@ test('runTakeOverFlow: max iterations exhausted with threads remaining → block
     },
   ];
   const gh = fakeGithub({
-    // Always green CI, but threads never go away. Reviewer "fixes" them but our stubbed
-    // listUnresolvedThreads keeps returning them — simulating Reviewer not actually
-    // resolving on the API. Flow should bail with a max-iterations message.
+    // Always green CI, but the thread never gets recorded as addressed (empty resolutions below) —
+    // the addressed-thread dedup only drops a thread once the Reviewer actually reports handling it,
+    // so an empty pass leaves it fresh forever. Flow should bail with a max-iterations message.
     checks: ['success'],
     threads: [threads],
   });
@@ -351,10 +450,9 @@ test('runTakeOverFlow: max iterations exhausted with threads remaining → block
       credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
-      runReviewerOverride: async () => ({
-        kind: 'ok',
-        resolutions: [{ threadId: 'TH_X', kind: 'fixed', commitSha: 'def456' }],
-      }),
+      // Reports no resolutions at all — nothing to record as addressed, nothing to push — so the
+      // thread stays fresh and the loop keeps re-polling it until maxIterations.
+      runReviewerOverride: async () => ({ kind: 'ok', resolutions: [] }),
     },
   });
   const result = await runTakeOverFlow(input);

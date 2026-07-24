@@ -5,7 +5,7 @@
 // Refs: RFC 8252 §7.3 (loopback redirect), §8.3 (IP literal, never `localhost`),
 // MCP OAuth 2.1 spec.
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,7 @@ const DEFAULT_TIMEOUT = 30000;
 const DEFAULT_PORT = 8787;
 const PORT_RANGE = { min: 8787, max: 9000 };
 const STATE_LENGTH = 32;
+const PKCE_VERIFIER_BYTES = 32;
 const CALLBACK_PATH = '/callback';
 
 // RFC 8252 §8.3: bind and redirect to the IP literal. `localhost` resolves via
@@ -71,6 +72,17 @@ function detectRuntime(): 'bun' | 'deno' | 'node' {
 // Generate cryptographically random state for CSRF protection.
 function generateState(): string {
   return randomBytes(STATE_LENGTH).toString('base64url');
+}
+
+type PkcePair = { verifier: string; challenge: string };
+
+// RFC 7636 S256 PKCE. MCP OAuth 2.1 mandates PKCE for the authorization-code flow,
+// including public clients like the default `aitm-cli` that carry no client secret.
+// The verifier is a base64url random string; the challenge is BASE64URL(SHA256(verifier)).
+function generatePkcePair(): PkcePair {
+  const verifier = randomBytes(PKCE_VERIFIER_BYTES).toString('base64url');
+  const challenge = createHash('sha256').update(verifier).digest('base64url');
+  return { verifier, challenge };
 }
 
 // Find an available port in the configured range.
@@ -306,6 +318,7 @@ export async function performOAuthFlow(options: OAuthOptions): Promise<OAuthConf
   const port = options.port ?? (await findAvailablePort(DEFAULT_PORT, PORT_RANGE.max));
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
   const state = generateState();
+  const pkce = generatePkcePair();
   const callbackPath = CALLBACK_PATH;
   const callbackUrl = options.callbackUrl ?? loopbackCallbackUrl(port);
 
@@ -318,6 +331,8 @@ export async function performOAuthFlow(options: OAuthOptions): Promise<OAuthConf
     redirect_uri: callbackUrl,
     response_type: 'code',
     state,
+    code_challenge: pkce.challenge,
+    code_challenge_method: 'S256',
   });
 
   if (options.scope) {
@@ -349,6 +364,7 @@ export async function performOAuthFlow(options: OAuthOptions): Promise<OAuthConf
       options.clientId,
       result.code,
       callbackUrl,
+      pkce.verifier,
       options.clientSecret,
     );
 
@@ -372,6 +388,7 @@ async function exchangeToken(
   clientId: string,
   code: string,
   redirectUri: string,
+  codeVerifier: string,
   clientSecret?: string,
 ): Promise<{ access_token: string }> {
   const body = new URLSearchParams({
@@ -379,6 +396,7 @@ async function exchangeToken(
     client_id: clientId,
     code,
     redirect_uri: redirectUri,
+    code_verifier: codeVerifier,
   });
 
   if (clientSecret !== undefined) {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import {
@@ -68,6 +68,8 @@ test('performOAuthFlow constructs valid authorization URL', async () => {
   assert.strictEqual(url.searchParams.get('scope'), 'read write');
   assert.match(url.searchParams.get('redirect_uri') ?? '', /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
   assert.match(url.searchParams.get('state') ?? '', /^[A-Za-z0-9_-]{43}$/);
+  assert.strictEqual(url.searchParams.get('code_challenge_method'), 'S256');
+  assert.match(url.searchParams.get('code_challenge') ?? '', /^[A-Za-z0-9_-]{43}$/);
 });
 
 test('performOAuthFlow requires valid options', async () => {
@@ -80,6 +82,56 @@ test('performOAuthFlow requires valid options', async () => {
   };
 
   await assert.rejects(async () => performOAuthFlow(options), /OAuth callback timeout/);
+});
+
+test('performOAuthFlow sends the S256 code_verifier bound to the challenge on token exchange', async () => {
+  const tokenUrl = 'https://example.com/oauth/token';
+  const realFetch = globalThis.fetch;
+  let tokenBody: string | undefined;
+  let challenge: string | null = null;
+
+  globalThis.fetch = async (input, init) => {
+    if (String(input) === tokenUrl) {
+      tokenBody = typeof init?.body === 'string' ? init.body : undefined;
+      return new Response(JSON.stringify({ access_token: 'tok-123' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return realFetch(input, init);
+  };
+
+  try {
+    const config = await performOAuthFlow({
+      authUrl: 'https://example.com/oauth/authorize',
+      tokenUrl,
+      clientId: 'test-client',
+      timeout: 2000,
+      openBrowser: async (rawUrl) => {
+        const authUrl = new URL(rawUrl);
+        challenge = authUrl.searchParams.get('code_challenge');
+        const redirectUri = authUrl.searchParams.get('redirect_uri') ?? '';
+        const cbState = authUrl.searchParams.get('state') ?? '';
+        // Fire the redirect callback once waitForCallback has wired its resolver (next tick).
+        setTimeout(() => {
+          void realFetch(`${redirectUri}?code=auth-code-1&state=${cbState}`).catch(() => {});
+        }, 10);
+      },
+    });
+
+    assert.strictEqual(config.headers.Authorization, 'Bearer tok-123');
+    assert.ok(tokenBody, 'token exchange did not run');
+    const body = new URLSearchParams(tokenBody);
+    assert.strictEqual(body.get('grant_type'), 'authorization_code');
+    assert.strictEqual(body.get('code'), 'auth-code-1');
+    const verifier = body.get('code_verifier') ?? '';
+    assert.match(verifier, /^[A-Za-z0-9_-]{43}$/);
+    // PKCE proof-of-possession: challenge must equal BASE64URL(SHA256(verifier)).
+    assert.ok(challenge, 'authorization URL carried no code_challenge');
+    assert.strictEqual(challenge, createHash('sha256').update(verifier).digest('base64url'));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test('OAuthOptions has correct structure', () => {

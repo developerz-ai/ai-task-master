@@ -707,7 +707,12 @@ export async function runLoopAdapter(
     // are functions of group ids + dependsOn edges, which stay fixed for the whole run. The per-tick
     // ready()/isComplete() below only read live statuses, so they rebuild via PlanGraph.trusted() and
     // skip re-paying validate()'s DFS every tick (this gate also keeps that memoized DFS terminating).
-    PlanGraph.validate(groups);
+    try {
+      PlanGraph.validate(groups);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { kind: 'blocked', reason: msg, outcomes: [] };
+    }
     // PlanGraph captures its groups at construction, so rebuild it per call against the
     // mirror that workLoopState keeps in sync after every persisted update.
     let liveGroups: readonly PrGroup[] = groups;
@@ -1582,7 +1587,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // first — `gh pr create` won't open a PR for a branch that isn't on the remote
       // ("No commits between … / Head ref must be a branch").
       harnessProgress(`group ${group.id}: pushing ${head} and opening PR`, prOpenTag);
-      await runGit(['push', '-u', 'origin', head], {
+      await runGit(['push', '--force-with-lease', '-u', 'origin', head], {
         cwd: input.cwd,
         ...(input.signal ? { signal: input.signal } : {}),
       });

@@ -402,7 +402,11 @@ async function resolveRebaseConflicts(
 ): Promise<PushResult> {
   const cwd = { cwd: checkoutPath };
   const abortAndBlock = async (reason: string): Promise<PushResult> => {
-    await runCmd('git', ['rebase', '--abort'], cwd);
+    const abort = await runCmd('git', ['rebase', '--abort'], cwd);
+    if (abort.exitCode !== 0) {
+      // Retry with fresh stderr in case the first attempt left residual state
+      await runCmd('git', ['rebase', '--abort'], cwd);
+    }
     return { kind: 'blocked', reason };
   };
 

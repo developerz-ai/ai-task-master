@@ -19,9 +19,9 @@
 // — a ScoutRunner seam is injected (the adapter wires the real read-only agent; tests wire a stub).
 
 import { createSubagent, runPool, runWithSchemaRetry } from '@developerz.ai/ai-claude-compat';
-import { type LanguageModel, tool } from 'ai';
+import { tool } from 'ai';
 import { z } from 'zod';
-import { AGENT_STEP_BACKSTOP, type OnUsage, type SubagentInit } from './factory.ts';
+import { AGENT_STEP_BACKSTOP, forwardInit, type SubagentInit } from './factory.ts';
 import type { PlannerTools } from './planner.ts';
 
 // A scout's tool-loop cap is the shared runaway backstop, not a work budget — it surveys until it
@@ -127,13 +127,15 @@ export type ScoutRunner = (lens: ScoutLens, ctx: ScoutContext) => Promise<ScoutF
 // Everything the real ScoutRunner needs to build and drive a read-only scout agent. The read-only
 // PlannerTools are shared across all lenses — they are stateless (readFile/grep/glob), so concurrent
 // scouts reading at once is safe. `systemPrompt` is the scout role frame the adapter already builds.
-export type ScoutAgentInit = {
-  model: LanguageModel;
-  tools: PlannerTools;
-  systemPrompt: string;
-  timeout?: SubagentInit<PlannerTools>['timeout'];
-  onUsage?: OnUsage;
-};
+// A scout is a Planner-shaped subagent with a narrower dial set, so the fields are PICKED from
+// SubagentInit rather than restated — restating them let the two drift (and breaks assignability
+// under exactOptionalPropertyTypes, since an indexed `T[k]` widens with `undefined`). `signal` is
+// run-scoped cancellation: scouts run concurrently and outside the Planner's own generate, so
+// without it an abort would leave a whole wave of in-flight surveys running.
+export type ScoutAgentInit = Pick<
+  SubagentInit<PlannerTools>,
+  'model' | 'tools' | 'systemPrompt' | 'timeout' | 'onUsage' | 'signal'
+>;
 
 // A ScoutRunner backed by a real read-only agent: one fresh agent per lens (so concurrent lenses do
 // not share a conversation), driven through the schema-retry kernel like the Planner itself. Returns
@@ -150,7 +152,7 @@ export function createScoutRunner(init: ScoutAgentInit): ScoutRunner {
           inputSchema: ScoutFindingSchema,
           execute: async (finding: ScoutFinding) => finding,
         }),
-        ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
+        ...forwardInit(init),
       },
       SCOUT_MAX_STEPS,
     );

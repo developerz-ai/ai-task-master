@@ -2856,3 +2856,31 @@ test('runWorker: a failed pre-planning snapshot disables the inline skip — fan
     'the fanout ran; summary from editor',
   );
 });
+
+test('createWorkerAgent forwards the run signal → an abort cancels the in-flight manifest generation', async () => {
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const controller = new AbortController();
+  const { tools } = makeTools();
+  const agent = createWorkerAgent({
+    model: stalling,
+    tools,
+    systemPrompt: WORKER_SYSTEM_PREFIX,
+    signal: controller.signal,
+    // Safety net: an unwired signal must fail the test rather than hang it forever.
+    timeout: { stepMs: 2_000 },
+  });
+  setTimeout(() => controller.abort(), 5);
+  const result = await runWorker(agent, baseInput());
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') {
+    assert.match(result.error, /abort/i);
+    assert.doesNotMatch(result.error, /deadline/, 'a cancel is never a deadline breach');
+  }
+});

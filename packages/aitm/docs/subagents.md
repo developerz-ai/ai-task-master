@@ -89,6 +89,19 @@ Every subagent terminates when it calls `submit` (`createSubagent` pairs `stepCo
 
 Editor leaves are the one exception to "terminate on submit": a leaf has no `submit` tool, so it ends on a plain text response or the backstop. A leaf that keeps calling tools without finishing is exactly the runaway the backstop catches.
 
+## Cancellation
+
+One `AbortSignal` — the CLI's SIGINT/SIGTERM handle, carried as `RunLoopInput.signal` — reaches every subagent through its init (`SubagentInit.signal`, `ScoutAgentInit.signal`) and is forwarded to `createSubagent`, which applies it to **every** generate that agent makes.
+
+Agent-scoped rather than per-call, because the calls that matter are not all driven by the caller: `runWithSchemaRetry` owns its own re-invocations (Planner, Reviewer, scouts), so a signal handed in at the call site could never reach them. It **composes** instead of replacing:
+
+- with the configured per-step deadline (`llmStepTimeoutMs`) — whichever fires first aborts the step, and a cancel is never relabelled as a deadline breach;
+- with a per-call `abortSignal` — both are honored, so a call that brings its own signal is still cancellable by one Ctrl-C.
+
+It also ends the retry kernel: an aborted run never sits out a backoff window nobody is waiting for.
+
+The optional half of a `SubagentInit` is forwarded through one helper (`forwardInit`), so every role passes the same dial set — before it, each factory hand-rolled the spread and quietly dropped fields the others forwarded.
+
 ## Throughput guards
 
 Three mechanical limits, each traced to an observed waste:

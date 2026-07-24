@@ -55,6 +55,9 @@ type CommonDeps = {
   // Checkout cwd for each subagent's `<env>` block (buildRolePrompt reads it). All three subagents
   // operate in the same checkout, so it lives on the shared base.
   checkoutPath: string;
+  // Run-scoped cancellation forwarded to every subagent this orchestrator spawns (see
+  // SubagentInit.signal) — one run, one signal, so it lives on the shared base too. Unset → none.
+  signal?: AbortSignal;
 };
 
 export type PlannerToolDeps = CommonDeps & {
@@ -113,6 +116,7 @@ export function makePlannerTool(deps: PlannerToolDeps): Tool<PlannerToolInput, P
           roleGuidance: PLANNER_SYSTEM_PREFIX,
           cwd: deps.checkoutPath,
         }),
+        ...(deps.signal ? { signal: deps.signal } : {}),
       });
       return runPlanner(agent, {
         goal: input.goal,
@@ -144,6 +148,7 @@ export function makeWorkerTool(deps: WorkerToolDeps): Tool<EmptyInput, WorkerRes
         ...(deps.timeout !== undefined ? { timeout: deps.timeout } : {}),
         ...(deps.providerOptions !== undefined ? { providerOptions: deps.providerOptions } : {}),
         ...(deps.onUsage ? { onUsage: deps.onUsage } : {}),
+        ...(deps.signal ? { signal: deps.signal } : {}),
       });
       return runWorker(agent, {
         group: deps.group,
@@ -173,6 +178,7 @@ export function makeReviewerTool(deps: ReviewerToolDeps): Tool<EmptyInput, Revie
           roleGuidance: REVIEWER_SYSTEM_PREFIX,
           cwd: deps.checkoutPath,
         }),
+        ...(deps.signal ? { signal: deps.signal } : {}),
       });
       return runReviewer(agent, {
         pr: deps.pr,

@@ -867,3 +867,30 @@ test('reviewer tool: toModelOutput collapses zero-resolution ok, blocked + error
   assert.equal(err.type, 'text');
   if (err.type === 'text') assert.match(err.value, /^reviewer \[error\]: gh failed$/);
 });
+
+test('planner tool: forwards deps.signal to the subagent → an abort cancels the in-flight run', async () => {
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const { provider } = recordingProvider(stalling);
+  const controller = new AbortController();
+  const t = makePlannerTool({
+    credentials: provider,
+    styleContents: '',
+    rollingContext: '',
+    checkoutPath: '/tmp/wt',
+    plannerTools: {},
+    signal: controller.signal,
+  });
+  const exec = t.execute;
+  if (typeof exec !== 'function') throw new Error('no execute');
+  setTimeout(() => controller.abort(), 5);
+  const out = await exec({ goal: 'g', maxPrs: 3 }, { toolCallId: 'tc', messages: [] });
+  assert.equal(out.kind, 'error');
+  if (out.kind === 'error') assert.match(out.error, /abort/i);
+});

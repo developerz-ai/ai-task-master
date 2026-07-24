@@ -136,6 +136,9 @@ export type FixSessionInput = {
   // Handle from this group's previous CI-fix pass (#107). When set, the fix Worker continues that
   // manifest-planning conversation — it remembers what earlier passes already tried.
   priorHandle?: SubagentHandle<WorkerTools>;
+  // Run-scoped cancellation, forwarded to the fix Worker agent (see SubagentInit.signal) so an abort
+  // tears its in-flight generation down. Mirrors TakeOverFlowInput.signal. Unset → no signal.
+  signal?: AbortSignal;
 };
 
 export type FixSessionResult =
@@ -296,6 +299,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     ...(subagents.onRetry ? { onRetry: subagents.onRetry } : {}),
     ...(subagents.onStream ? { onStream: subagents.onStream } : {}),
     ...(subagents.streamWatchdog ? { streamWatchdog: subagents.streamWatchdog } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   // priorHandle precedence (issue #108): an in-memory handle from an earlier pass this run wins;
   // otherwise, resume from an interrupted transcript's messages (built against this fresh agent).

@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { MockLanguageModelV3 } from 'ai/test';
 import {
   buildScoutPrompt,
+  createScoutRunner,
   SCOUT_LENSES,
   SCOUT_REPO_FILE_FLOOR,
+  SCOUT_SYSTEM_PREFIX,
   type ScoutFinding,
   type ScoutLens,
   type ScoutRunner,
@@ -109,4 +112,32 @@ test('SCOUT_LENSES: the built-in lenses are distinct and non-empty', () => {
   for (const l of SCOUT_LENSES) {
     assert.ok(l.focus.length > 20, `${l.key} has a substantive focus`);
   }
+});
+
+test('createScoutRunner: forwards the run signal → an abort cancels an in-flight scout survey', async () => {
+  // Scouts sweep concurrently outside the Planner's own generate, so without the signal an abort
+  // would leave a whole wave of surveys running until each provider answered.
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const controller = new AbortController();
+  const runScout = createScoutRunner({
+    model: stalling,
+    tools: {},
+    systemPrompt: SCOUT_SYSTEM_PREFIX,
+    signal: controller.signal,
+    // Safety net: an unwired signal must fail the test rather than hang it forever.
+    timeout: { stepMs: 2_000 },
+  });
+  setTimeout(() => controller.abort(), 5);
+  await assert.rejects(runScout(lens('architecture'), { goal: 'x' }), (err: unknown) => {
+    assert.match((err as Error).message, /abort/i);
+    assert.doesNotMatch((err as Error).message, /deadline/, 'a cancel is not a deadline breach');
+    return true;
+  });
 });

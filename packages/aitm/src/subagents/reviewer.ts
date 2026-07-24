@@ -27,6 +27,7 @@ import type { ReviewThread } from '../github/schema.ts';
 import {
   AGENT_STEP_BACKSTOP,
   appendReminderBlock,
+  forwardInit,
   prependContextBlock,
   type SubagentInit,
 } from './factory.ts';
@@ -130,13 +131,7 @@ export function createReviewerAgent(init: SubagentInit<ReviewerTools>): Reviewer
         inputSchema: ThreadResolutionOutputSchema,
         execute: async (resolution) => resolution,
       }),
-      ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
-      ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
-      ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
-      ...(init.onStepFinish ? { onStepFinish: init.onStepFinish } : {}),
-      ...(init.onRetry ? { onRetry: init.onRetry } : {}),
-      ...(init.onStream ? { onStream: init.onStream } : {}),
-      ...(init.streamWatchdog ? { streamWatchdog: init.streamWatchdog } : {}),
+      ...forwardInit(init),
     },
     REVIEWER_MAX_STEPS,
   );

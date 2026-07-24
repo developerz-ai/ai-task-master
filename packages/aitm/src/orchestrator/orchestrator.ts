@@ -147,6 +147,9 @@ export type OrchestratorBuildContext = {
   group: PrGroup;
   pr: number;
   threads: ReviewThread[];
+  // Run-scoped cancellation, handed to every subagent tool this build wires (see
+  // SubagentInit.signal). Unset → subagent generations are not cancellable.
+  signal?: AbortSignal;
 };
 
 export type OrchestratorTools = {
@@ -716,6 +719,7 @@ export class Orchestrator {
       styleContents: this.styleContents(),
       rollingContext: this.init.rollingContext,
       checkoutPath: context.checkoutPath,
+      ...(context.signal ? { signal: context.signal } : {}),
     };
     const tools: OrchestratorTools = {
       planner: makePlannerTool({ ...commonDeps, plannerTools: context.plannerTools }),

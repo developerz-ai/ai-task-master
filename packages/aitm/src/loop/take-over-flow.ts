@@ -349,6 +349,7 @@ async function runReviewerThreads(
     ...(input.subagents.onReviewerStepFinish
       ? { onStepFinish: input.subagents.onReviewerStepFinish }
       : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   return runReviewer(agent, {
     pr: input.pr,
@@ -416,6 +417,7 @@ async function runWorkerCiFix(
     ...(input.subagents.onEditorStepFinish
       ? { onEditorStepFinish: input.subagents.onEditorStepFinish }
       : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   return runWorker(agent, workerInput);
 }

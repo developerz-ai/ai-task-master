@@ -494,3 +494,33 @@ test('runReviewer processes threads sequentially in input order', async () => {
   assert.equal(result.kind, 'ok');
   assert.deepEqual(order, ['T1', 'T2', 'T3']);
 });
+
+test('createReviewerAgent forwards the run signal → an abort cancels the in-flight thread resolution', async () => {
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const controller = new AbortController();
+  const agent = createReviewerAgent({
+    model: stalling,
+    tools: makeTools().tools,
+    systemPrompt: REVIEWER_SYSTEM_PREFIX,
+    signal: controller.signal,
+    // Safety net: an unwired signal must fail the test rather than hang it forever.
+    timeout: { stepMs: 2_000 },
+  });
+  setTimeout(() => controller.abort(), 5);
+  const result = await runReviewer(agent, {
+    ...baseInput([thread('T1', 'fix this')]),
+    headBranch: 'aitm/g1',
+  });
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') {
+    assert.match(result.error, /abort/i);
+    assert.doesNotMatch(result.error, /deadline/, 'a cancel is never a deadline breach');
+  }
+});

@@ -173,6 +173,13 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   // post-finish grace window, and (test seam) the timer factory. Only consulted on the streaming path
   // (onStream set); ignored otherwise. Omitted → production defaults (see STREAM_INACTIVITY_MS).
   streamWatchdog?: StreamWatchdogConfig;
+  // Run-scoped cancellation (e.g. the CLI's SIGINT handle). An agent is built per run leg, so the
+  // signal belongs to its whole lifetime: it is applied to EVERY generate this agent makes, which is
+  // the only way cancellation reaches calls the caller does not drive directly — the schema-retry
+  // loop (runWithSchemaRetry) owns its own generations. It COMPOSES with a per-call `abortSignal`
+  // (both tear the step down) and with the configured `timeout` — see armStepTimeout. Omitted → no
+  // signal, behavior byte-identical.
+  signal?: AbortSignal;
 };
 
 // Wrap a ToolLoopAgent: register the caller's tools plus the `submit` tool, and stop when the step
@@ -200,8 +207,8 @@ export function createSubagent<TOOLS extends ToolSet>(
   if (config.onStream !== undefined) {
     armStreaming(agent, config.onStream, resolveStreamWatchdog(config.streamWatchdog));
   }
-  if (config.timeout !== undefined || config.onRetry !== undefined) {
-    armStepTimeout(agent, config.timeout, config.onRetry);
+  if (config.timeout !== undefined || config.onRetry !== undefined || config.signal !== undefined) {
+    armStepTimeout(agent, config.timeout, config.onRetry, config.signal);
   }
   return agent;
 }
@@ -225,21 +232,46 @@ function armStepTimeout<TOOLS extends ToolSet>(
   agent: ToolLoopAgent<never, TOOLS>,
   timeout: TimeoutConfiguration | undefined,
   onRetry: RetryOptions['onRetry'],
+  runSignal: AbortSignal | undefined,
 ): void {
   type Generate = ToolLoopAgent<never, TOOLS>['generate'];
   const original = agent.generate.bind(agent) as Generate;
-  const wrapped: Generate = (params) => {
-    if (params.timeout !== undefined) return original(params);
-    return callWithStepTimeout(
-      () => original(timeout === undefined ? params : { ...params, timeout }),
-      timeout,
-      {
-        ...(onRetry === undefined ? {} : { onRetry }),
-        ...(params.abortSignal === undefined ? {} : { signal: params.abortSignal }),
-      },
-    );
+  const wrapped: Generate = async (params) => {
+    // The agent's run-scoped signal rides on every call, so a generation the caller does not drive
+    // itself (the schema-retry loop's re-invocations) is cancellable too.
+    const { signal, release } = mergeSignals(params.abortSignal, runSignal);
+    const call = signal === undefined ? params : { ...params, abortSignal: signal };
+    try {
+      if (call.timeout !== undefined) return await original(call);
+      return await callWithStepTimeout(
+        () => original(timeout === undefined ? call : { ...call, timeout }),
+        timeout,
+        {
+          ...(onRetry === undefined ? {} : { onRetry }),
+          ...(signal === undefined ? {} : { signal }),
+        },
+      );
+    } finally {
+      release();
+    }
   };
   agent.generate = wrapped;
+}
+
+// Both a per-call `abortSignal` and the agent's run-scoped signal are cancellation, so BOTH must tear
+// the step down — preferring one would let a Ctrl-C be swallowed by a call that brought its own
+// signal. Only one in play → it is used as-is (no bridge, no listener); both → a linked controller,
+// whose `release` must run once the call settles (a run signal outlives many generations, so a
+// listener kept per call leaks the finished controller and trips the max-listener warning).
+function mergeSignals(
+  perCall: AbortSignal | undefined,
+  run: AbortSignal | undefined,
+): { signal: AbortSignal | undefined; release: () => void } {
+  if (perCall === undefined || run === undefined || perCall === run) {
+    return { signal: perCall ?? run, release: () => {} };
+  }
+  const { controller, release } = linkController(perCall, run);
+  return { signal: controller.signal, release };
 }
 
 // Route the agent's generate funnel through streamText so a live sink observes text and tool-call
@@ -354,25 +386,33 @@ const defaultStreamTimer: StreamTimerFactory = (ms) => {
   };
 };
 
-// An AbortController whose signal also fires when an outer caller-supplied signal does, so the watchdog
-// owns its own abort while still honoring a caller cancel. Portable — avoids AbortSignal.any, which is
-// unavailable on Node 20.0–20.2. `release` unhooks the bridge: a caller signal is run-scoped and
+// An AbortController whose signal also fires when any of the outer signals does, so the watchdog owns
+// its own abort while still honoring a caller cancel. Portable — avoids AbortSignal.any, which is
+// unavailable on Node 20.0–20.2. `release` unhooks the bridge: an outer signal is run-scoped and
 // outlives many generations, so a listener retained per stream both leaks the finished controller and
 // trips the runtime's max-listener warning on a long run.
-function linkController(outer: AbortSignal | undefined): {
+function linkController(...outers: Array<AbortSignal | undefined>): {
   controller: AbortController;
   release: () => void;
 } {
   const controller = new AbortController();
-  const unlinked = { controller, release: () => {} };
-  if (outer === undefined) return unlinked;
-  if (outer.aborted) {
-    controller.abort(outer.reason);
-    return unlinked;
+  const present = outers.filter((s): s is AbortSignal => s !== undefined);
+  const aborted = present.find((s) => s.aborted);
+  if (aborted !== undefined) {
+    controller.abort(aborted.reason);
+    return { controller, release: () => {} };
   }
-  const onAbort = () => controller.abort(outer.reason);
-  outer.addEventListener('abort', onAbort, { once: true });
-  return { controller, release: () => outer.removeEventListener('abort', onAbort) };
+  const unlink = present.map((outer) => {
+    const onAbort = () => controller.abort(outer.reason);
+    outer.addEventListener('abort', onAbort, { once: true });
+    return () => outer.removeEventListener('abort', onAbort);
+  });
+  return {
+    controller,
+    release: () => {
+      for (const unhook of unlink) unhook();
+    },
+  };
 }
 
 // Drive a live stream through the two-regime stall watchdog (see STREAM_INACTIVITY_MS). Each awaited

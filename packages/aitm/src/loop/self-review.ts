@@ -121,6 +121,9 @@ export type SelfReviewInput = {
   // spawning a process.
   runCmd?: RunCmd;
   logger?: LoggerLike;
+  // Run-scoped cancellation, forwarded to the review Worker agent (see SubagentInit.signal) so an
+  // abort tears its in-flight generation down. Mirrors FixSessionInput.signal. Unset → no signal.
+  signal?: AbortSignal;
 };
 
 export type SelfReviewResult =
@@ -232,6 +235,7 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     ...(subagents.onRetry ? { onRetry: subagents.onRetry } : {}),
     ...(subagents.onStream ? { onStream: subagents.onStream } : {}),
     ...(subagents.streamWatchdog ? { streamWatchdog: subagents.streamWatchdog } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   return runWorker(agent, baseInput);
 }

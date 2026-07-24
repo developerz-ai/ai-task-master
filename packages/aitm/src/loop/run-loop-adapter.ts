@@ -908,6 +908,7 @@ async function surveyRepoForPlanner(params: {
     }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   const ctx = {
     goal: input.goal,
@@ -979,6 +980,7 @@ async function defaultPlanGroups(
     ...(streaming
       ? { onStream: createLiveStreamRenderer(plannerLabel, plannerTag, plannerHeartbeatSink) }
       : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   // Parallel pre-planning survey (planner-scouts.ts): on a big enough repo, a pool of read-only
   // scouts sweeps distinct lenses concurrently and hands the Planner a map, so its own steps go to
@@ -1330,6 +1332,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       ...(reviewerStreaming
         ? { onStream: createLiveStreamRenderer(reviewerLabel, reviewerTag, reviewerHeartbeatSink) }
         : {}),
+      ...(input.signal ? { signal: input.signal } : {}),
     });
     const stopReviewerHeartbeat = startHeartbeat(reviewerLabel, reviewerHeartbeatSink);
     let result: Awaited<ReturnType<typeof runReviewerSubagent>>;
@@ -1483,6 +1486,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
               ),
             }
           : {}),
+        ...(input.signal ? { signal: input.signal } : {}),
       });
       const stopWorkerHeartbeat = startHeartbeat(workerAgentLabel, workerHeartbeatSink);
       let result: Awaited<ReturnType<typeof runWorkerSubagent>>;
@@ -1645,6 +1649,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           baseBranch,
           checkoutPath: checkout.path,
           ...(verifyCommand ? { verifyCommand } : {}),
+          ...(input.signal ? { signal: input.signal } : {}),
         });
       } finally {
         stopSelfReviewHeartbeat();
@@ -1768,6 +1773,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           checkoutPath: checkout.path,
           allowForcePush: input.resolved.allowForcePush,
           ...(priorHandle ? { priorHandle } : {}),
+          ...(input.signal ? { signal: input.signal } : {}),
         });
       } finally {
         stopCiFixHeartbeat();

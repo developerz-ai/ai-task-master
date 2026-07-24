@@ -211,11 +211,18 @@ export function exploreReadTools(cwd: string): ToolSet {
 
 // The explore tool for an agent rooted at `cwd`: a fast-tier child surveying the checkout-confined
 // read trio (issue #126). Built per call site (Planner at the repo root, Worker at its group
-// checkout) so the child never escapes the invoking agent's cwd.
-function buildExploreFor(input: RunLoopInput, cwd: string): Tool<AgentToolInput, string> {
+// checkout) so the child never escapes the invoking agent's cwd. Timeout and onUsage are threaded from
+// the parent agent so the explore child is covered by per-step deadlines and cost ceilings.
+function buildExploreFor(
+  input: RunLoopInput,
+  cwd: string,
+  onUsage?: OnUsage,
+): Tool<AgentToolInput, string> {
   return buildExploreTool({
     model: input.credentials.modelForCapability('fast'),
     readTools: exploreReadTools(cwd),
+    timeout: { stepMs: input.resolved.llmStepTimeoutMs },
+    ...(onUsage !== undefined ? { onUsage } : {}),
   });
 }
 
@@ -929,7 +936,7 @@ async function surveyRepoForPlanner(params: {
         mcp.toolsForRole('planner'),
         input.cwd,
         fetchHtmlAvailable,
-        buildExploreFor(input, input.cwd),
+        buildExploreFor(input, input.cwd, plannerUsage),
       ),
       input,
       input.cwd,
@@ -995,7 +1002,7 @@ async function defaultPlanGroups(
         mcp.toolsForRole('planner'),
         input.cwd,
         fetchHtmlAvailable,
-        buildExploreFor(input, input.cwd),
+        buildExploreFor(input, input.cwd, plannerUsage),
       ),
       input,
       input.cwd,
@@ -1402,6 +1409,25 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       stopReviewerHeartbeat();
     }
     await recorder?.end(runEndOutcome(result.kind));
+    // Report a summary of the review outcome with partial resolution count.
+    if (result.kind === 'ok') {
+      const partialCount = result.resolutions.filter((r) => r.kind === 'replied').length;
+      const fixedCount = result.resolutions.filter((r) => r.kind === 'fixed').length;
+      const wontfixCount = result.resolutions.filter((r) => r.kind === 'wontfix').length;
+      if (fixedCount > 0 || partialCount > 0 || wontfixCount > 0) {
+        const summary = [
+          fixedCount > 0 && `${fixedCount} fixed`,
+          partialCount > 0 && `${partialCount} partial`,
+          wontfixCount > 0 && `${wontfixCount} wontfix`,
+        ]
+          .filter(Boolean)
+          .join(', ');
+        harnessProgress(
+          `group ${checkout.groupId}: reviewed ${threads.length} thread(s) — ${summary}`,
+          { phase: 'reviewing', ...reviewerCounter },
+        );
+      }
+    }
     return result;
   };
 
@@ -1425,7 +1451,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             checkout.path,
             input.resolved.bashRules,
             fetchHtmlAvailable,
-            buildExploreFor(input, checkout.path),
+            buildExploreFor(input, checkout.path, workerUsage),
             memoryToolFor(state),
             background,
           ),
@@ -1662,7 +1688,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
                 checkout.path,
                 input.resolved.bashRules,
                 fetchHtmlAvailable,
-                buildExploreFor(input, checkout.path),
+                buildExploreFor(input, checkout.path, selfReviewUsage),
                 memoryToolFor(state),
                 background,
               ),
@@ -1759,7 +1785,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           checkout.path,
           input.resolved.bashRules,
           fetchHtmlAvailable,
-          buildExploreFor(input, checkout.path),
+          buildExploreFor(input, checkout.path, ciFixUsage),
           memoryToolFor(state),
           background,
         ),

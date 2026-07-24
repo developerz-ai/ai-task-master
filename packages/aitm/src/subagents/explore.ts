@@ -12,7 +12,8 @@ import {
   type AgentToolInput,
   makeAgentTool,
 } from '@developerz.ai/ai-claude-compat';
-import type { LanguageModel, Tool, ToolSet } from 'ai';
+import type { LanguageModel, TimeoutConfiguration, Tool, ToolSet } from 'ai';
+import type { OnUsage } from './factory.ts';
 import { EXPLORE_SYSTEM_PROMPT } from './prompts/role-guidance.ts';
 
 // The tool name the model invokes and the ToolSet key it mounts under.
@@ -34,6 +35,10 @@ const EXPLORE_DESCRIPTION =
 export type ExploreToolInit = {
   model: LanguageModel;
   readTools: ToolSet;
+  // Optional per-step LLM request deadline (issue #129). Unset → no deadline.
+  timeout?: TimeoutConfiguration;
+  // Optional token-usage sink (issue #114). Fire-and-forget, never breaks the run.
+  onUsage?: OnUsage;
 };
 
 export function buildExploreTool(init: ExploreToolInit): Tool<AgentToolInput, string> {
@@ -52,6 +57,12 @@ export function buildExploreTool(init: ExploreToolInit): Tool<AgentToolInput, st
       description: EXPLORE_DESCRIPTION,
       systemPrompt: EXPLORE_SYSTEM_PROMPT,
     },
-    { model: init.model, tools: init.readTools, allowedTools: [...EXPLORE_ALLOWED_TOOLS] },
+    {
+      model: init.model,
+      tools: init.readTools,
+      allowedTools: [...EXPLORE_ALLOWED_TOOLS],
+      ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
+      ...(init.onUsage !== undefined ? { onUsage: init.onUsage } : {}),
+    },
   );
 }

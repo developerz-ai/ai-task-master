@@ -107,6 +107,21 @@ function parseGhJson(command: string, stdout: string): unknown {
   }
 }
 
+// GitHub can replay an already-returned page when its pagination cursor stops advancing. Filtering
+// each page by id keeps a replayed page from leaking duplicate thread/comment records into
+// `listUnresolvedThreads`, which does no dedup of its own.
+function collectUnseen<T extends { id: string }>(
+  collected: T[],
+  seen: Set<string>,
+  nodes: readonly T[],
+): void {
+  for (const node of nodes) {
+    if (seen.has(node.id)) continue;
+    seen.add(node.id);
+    collected.push(node);
+  }
+}
+
 export async function paginateReviewThreads(
   runCmd: RunCmd,
   cwd: string,
@@ -116,6 +131,7 @@ export async function paginateReviewThreads(
   onWarn: (message: string) => void,
 ): Promise<RawReviewThread[]> {
   const collected: RawReviewThread[] = [];
+  const seen = new Set<string>();
   let cursor: string | null = null;
   let pageCount = 0;
   let prevEndCursor: string | null = null;
@@ -143,8 +159,9 @@ export async function paginateReviewThreads(
     const conn = parsed.data.repository.pullRequest.reviewThreads;
     pageCount++;
     // Keep this page's threads before deciding whether to stop — both a terminal page and a
-    // broken-pagination page carry real threads that must not be dropped.
-    collected.push(...conn.nodes);
+    // broken-pagination page carry real threads that must not be dropped. Dedup by id so a
+    // replayed page (non-advancing cursor) can't leak duplicate threads downstream.
+    collectUnseen(collected, seen, conn.nodes);
     if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) {
       return collected;
     }
@@ -174,6 +191,7 @@ export async function paginateThreadComments(
   onWarn: (message: string) => void,
 ): Promise<RawReviewComment[]> {
   const collected: RawReviewComment[] = [];
+  const seen = new Set<string>();
   let cursor: string = startCursor;
   let pageCount = 0;
   let prevEndCursor: string | null = null;
@@ -201,8 +219,9 @@ export async function paginateThreadComments(
     const conn = parsed.data.node.comments;
     pageCount++;
     // Keep this page's comments before deciding whether to stop — both a terminal page and a
-    // broken-pagination page carry real comments that must not be dropped.
-    collected.push(...conn.nodes);
+    // broken-pagination page carry real comments that must not be dropped. Dedup by id so a
+    // replayed page (non-advancing cursor) can't leak duplicate comments downstream.
+    collectUnseen(collected, seen, conn.nodes);
     if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) {
       return collected;
     }

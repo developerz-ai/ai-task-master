@@ -252,6 +252,30 @@ test('paginateReviewThreads keeps the stuck page and warns on a non-advancing cu
   assert.match(warnings[0] ?? '', /PR #7/);
 });
 
+test('paginateReviewThreads dedupes threads a replayed page returns again', async () => {
+  const thread = {
+    id: 'PRRT_dup',
+    isResolved: false,
+    path: 'a.ts',
+    comments: {
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [{ id: 'IC_1', body: 'x', author: { login: 'r' } }],
+    },
+  };
+  // GitHub replays the same thread on a non-advancing cursor — the id must not leak twice.
+  const page1 = threadsResponse([thread], { hasNextPage: true, endCursor: 'stuck-cursor' });
+  const page2 = threadsResponse([thread], { hasNextPage: true, endCursor: 'stuck-cursor' });
+  const { run, calls } = makeRun([{ stdout: page1 }, { stdout: page2 }]);
+  const threads = await paginateReviewThreads(run, '/tmp/repo', 'org', 'repo', 7, noopWarn);
+
+  assert.deepEqual(
+    threads.map((t) => t.id),
+    ['PRRT_dup'],
+    'the replayed thread is collected once',
+  );
+  assert.equal(calls.length, 2, 'stops after the non-advancing page');
+});
+
 test('paginateReviewThreads warns when hitting the page cap', async () => {
   let callCount = 0;
   // Every page advertises another with an advancing cursor, so pagination stops only when it
@@ -358,6 +382,22 @@ test('paginateThreadComments breaks on a non-advancing cursor', async () => {
   assert.equal(warnings.length, 1, 'a truncation warning is surfaced');
   assert.match(warnings[0] ?? '', /non-advancing pagination cursor/);
   assert.match(warnings[0] ?? '', /PRRT_long/);
+});
+
+test('paginateThreadComments dedupes comments a replayed page returns again', async () => {
+  const comment = { id: 'IC_dup', body: 'second', author: { login: 'r' } };
+  // Same comment replayed on a non-advancing cursor — collected once, not twice.
+  const page1 = commentsResponse([comment], { hasNextPage: true, endCursor: 'stuck-cursor' });
+  const page2 = commentsResponse([comment], { hasNextPage: true, endCursor: 'stuck-cursor' });
+  const { run, calls } = makeRun([{ stdout: page1 }, { stdout: page2 }]);
+  const comments = await paginateThreadComments(run, '/tmp/repo', 'PRRT_long', 'c-1', noopWarn);
+
+  assert.deepEqual(
+    comments.map((c) => c.id),
+    ['IC_dup'],
+    'the replayed comment is collected once',
+  );
+  assert.equal(calls.length, 2, 'stops after the non-advancing page');
 });
 
 test('paginateThreadComments warns when hitting the comment page cap', async () => {

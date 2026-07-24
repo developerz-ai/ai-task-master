@@ -164,6 +164,13 @@ function guardResult(name: string): GuardResult {
   };
 }
 
+function notExecutableResult(name: string): GuardResult {
+  return {
+    [DEFERRED_GUARD_MARKER]: true,
+    error: `${name} is not executable — it has no implementation.`,
+  };
+}
+
 function isGuardResult(v: unknown): v is GuardResult {
   return typeof v === 'object' && v !== null && DEFERRED_GUARD_MARKER in v;
 }
@@ -171,19 +178,19 @@ function isGuardResult(v: unknown): v is GuardResult {
 // Wrap a deferred tool so a call before its name is activated short-circuits to the fetch-first
 // result (with the same guidance rendered as the model-visible text), and a call after activation
 // runs the real executor. Preserves the base tool's own toModelOutput for genuine results.
-export function guardDeferred(
+export function guardDeferred<const T extends AnyTool>(
   name: string,
-  base: AnyTool,
+  base: T,
   activated: ReadonlySet<string>,
-): AnyTool {
+): T {
   const baseExecute = base.execute;
   const baseToModelOutput = base.toModelOutput;
   const inputSchema = base.inputSchema;
-  return {
+  const wrapped = {
     ...base,
     execute: async (input: unknown, options: ToolCallOptions) => {
       if (!activated.has(name)) return guardResult(name);
-      if (!baseExecute) return guardResult(name);
+      if (!baseExecute) return notExecutableResult(name);
       // Narrow via the tool's own input schema if available, else pass through
       const narrowedInput =
         inputSchema && 'parseAsync' in inputSchema ? await inputSchema.parseAsync(input) : input;
@@ -197,5 +204,6 @@ export function guardDeferred(
       const out = options.output;
       return { type: 'text', value: typeof out === 'string' ? out : JSON.stringify(out) };
     },
-  } as AnyTool;
+  };
+  return wrapped as T;
 }

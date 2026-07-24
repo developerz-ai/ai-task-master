@@ -72,6 +72,10 @@ export const PrGroupSchema = z.object({
   // auto-rescheduled on resume (normalizeResumeStatus skips it) — unlike a transient provider block,
   // which a resume retries. Optional — legacy state loads as not-human-needed. See issue #128.
   humanNeeded: z.boolean().optional(),
+  // Set once the review-comments grace sleep has been applied after CI passes. Prevents re-sleeping on
+  // every waiting-ci pass when the loop revisits this stage (e.g. after addressing reviews and
+  // re-polling CI). Optional — legacy state loads as false (grace will re-fire, a safe degradation). Task #46.
+  reviewGraceApplied: z.boolean().default(false),
 });
 export type PrGroup = z.infer<typeof PrGroupSchema>;
 

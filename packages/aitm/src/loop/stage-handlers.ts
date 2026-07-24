@@ -29,6 +29,7 @@ import {
 } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { GroupStage, PrGroup, RunState } from '../state/schema.ts';
+import { type CiRoute, routeCiPoll } from './ci-outcome-policy.ts';
 import { REVIEW_COMMENTS_GRACE } from './constants.ts';
 
 // Subset of GitHubClient the stage machine drives. The merge method is a run option, not a
@@ -150,29 +151,52 @@ export const handlePrOpen: StageHandler = async (deps, group) => {
 export const handleWaitingCi: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'waiting-ci');
   if (deps.signal?.aborted) return 'waiting-ci';
+  let route: CiRoute;
   try {
     const result = await deps.github.waitForChecks(pr, deps.signal);
-    // A cancelled poll returns early WITHOUT a verdict ('pending'), which the branch below would
+    // A cancelled poll returns early WITHOUT a verdict ('pending'), which the fix route below would
     // read as "CI is not green" and route to ci-failed — persisting a stage a resume would act on
     // by running a fix session against a PR whose CI never actually failed.
     if (deps.signal?.aborted) return 'waiting-ci';
-    const { state } = result;
     // One line, once, when CI settles — the checks and their final buckets, so the operator sees
     // WHAT passed/failed without watching GitHub or reading a poll spam.
     const summary = formatCheckSummary(result.checks);
-    if (summary !== '') deps.progress?.(`group ${group.id}: CI ${state} — ${summary}`);
-    if (state !== 'success') return 'ci-failed';
-    // Review bots (CodeRabbit) post their comments a little *after* CI completes rather than as a
-    // blocking status check. Give them a grace window to land before waiting-reviews reads the
-    // unresolved threads — otherwise we'd advance to merge ahead of the review.
-    await (deps.sleep ?? defaultSleep)(REVIEW_COMMENTS_GRACE, deps.signal);
-    // The grace resolves early on abort; advancing then would hand the cancelled run to
-    // waiting-reviews, one transition away from merging a PR the operator stopped.
-    if (deps.signal?.aborted) return 'waiting-ci';
-    return 'waiting-reviews';
+    if (summary !== '') deps.progress?.(`group ${group.id}: CI ${result.state} — ${summary}`);
+    route = routeCiPoll(result.state, pr, deps.adminMerge ?? false);
   } catch (err) {
-    if (err instanceof CiFailed) return deps.adminMerge ? 'waiting-reviews' : 'blocked';
-    throw err;
+    if (!(err instanceof CiFailed)) throw err;
+    route = routeCiPoll(null, pr, deps.adminMerge ?? false);
+  }
+  switch (route.kind) {
+    case 'fix':
+      return 'ci-failed';
+    // A timeout without --admin blocks; the dispatcher fills the human reason via blockReasonFor.
+    // (The policy's block reason serves autoMergeFlow, which has no such fallback.)
+    case 'block':
+      return 'blocked';
+    case 'advance':
+      return 'waiting-reviews';
+    default: {
+      // Review bots (CodeRabbit) post their comments a little *after* CI completes rather than as a
+      // blocking status check. Give them a grace window to land before waiting-reviews reads the
+      // unresolved threads — otherwise we'd advance to merge ahead of the review. Only sleep once per
+      // group, since the waiting-ci handler may be called again if the loop revisits this stage
+      // (e.g. after addressing reviews and re-polling CI).
+      if (!group.reviewGraceApplied) {
+        await (deps.sleep ?? defaultSleep)(REVIEW_COMMENTS_GRACE, deps.signal);
+        // The grace resolves early on abort; advancing then would hand the cancelled run to
+        // waiting-reviews, one transition away from merging a PR the operator stopped.
+        if (deps.signal?.aborted) return 'waiting-ci';
+        // Mark the grace as applied so re-visits to this stage don't sleep again.
+        await deps.state.update((s) => ({
+          ...s,
+          prGroups: s.prGroups.map((g) =>
+            g.id === group.id ? { ...g, reviewGraceApplied: true } : g,
+          ),
+        }));
+      }
+      return 'waiting-reviews';
+    }
   }
 };
 

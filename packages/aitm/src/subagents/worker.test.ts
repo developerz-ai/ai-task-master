@@ -194,6 +194,7 @@ function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {
     pr: null,
     status: 'pending',
     stage: 'pending',
+    reviewGraceApplied: false,
     ...overrides,
   };
 }

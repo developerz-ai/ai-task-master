@@ -46,7 +46,8 @@ export async function mergeFlowAdapter(input: RunMergeFlowInput): Promise<WorkLo
     subagents: {
       reviewerModel: input.credentials.modelFor('reviewer'),
       reviewerTools: { ...workerTools, github },
-      workerModel: input.credentials.modelFor('worker'),
+      // The shared CI-fix session selects the coding tier itself (modelForCapability('coding')).
+      credentials: input.credentials,
       workerTools,
       styleContents,
       timeout: { stepMs: input.resolved.llmStepTimeoutMs },

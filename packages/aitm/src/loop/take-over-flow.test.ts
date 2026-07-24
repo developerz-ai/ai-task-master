@@ -1,13 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { LanguageModel } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { CiFailed } from '../github/errors.ts';
 import type { CiResult, RunCmd, RunCmdResult } from '../github/github-client.ts';
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerInput, WorkerResult } from '../subagents/worker.ts';
+import type { FixSessionModelSelector } from './ci-fix.ts';
 import { REVIEW_COMMENTS_GRACE } from './constants.ts';
-import { runTakeOverFlow, type TakeOverFlowInput, type TakeOverGithub } from './take-over-flow.ts';
+import {
+  type PrContextPort,
+  runTakeOverFlow,
+  type TakeOverFlowInput,
+  type TakeOverGithub,
+} from './take-over-flow.ts';
 
 type GhCall =
   | { method: 'waitForChecks' }
@@ -59,6 +66,9 @@ function fakeGithub(opts: {
       resolveThread: async (threadId) => {
         calls.push({ method: 'resolve', threadId });
       },
+      // Read only by runFixSession on the CI-red path; kept out of `calls` so the green-path call-
+      // sequence assertions stay unaffected.
+      getFailedCiLogs: async () => [],
     },
   };
 }
@@ -82,6 +92,34 @@ function recordingRunCmd(plan: (args: readonly string[]) => Partial<RunCmdResult
 // Shared subagent stubs — neither model is invoked because we always pass *Override.
 const dummyModel = new MockLanguageModelV3();
 
+// The take-over CI-fix path now runs through ci-fix.ts's runFixSession, which selects the coding
+// tier itself — so tests supply a model selector instead of a bare worker handle.
+const fakeCredentials = (model: LanguageModel): FixSessionModelSelector => ({
+  modelForCapability: () => model,
+  modelIdForCapability: () => 'test/coding-model',
+});
+const dummyCredentials = fakeCredentials(dummyModel);
+
+// runFixSession clears + writes the downloaded CI context through this port; a no-op stub is enough
+// since the CI-fix tests drive the Worker via runWorkerOverride. The addressed-thread ledger is
+// backed by a real in-memory Set per instance so dedup tests can observe it working across
+// iterations, mirroring how PrContextStore actually persists it.
+function fakePrContext(): PrContextPort {
+  const addressed = new Map<number, Set<string>>();
+  return {
+    clearCi: async () => {},
+    clearComments: async () => {},
+    saveCiFailures: async () => null,
+    saveComments: async () => null,
+    readAddressedThreads: async (pr) => new Set(addressed.get(pr) ?? []),
+    recordAddressedThreads: async (pr, ids) => {
+      const set = addressed.get(pr) ?? new Set<string>();
+      for (const id of ids) set.add(id);
+      addressed.set(pr, set);
+    },
+  };
+}
+
 function baseInput(
   github: TakeOverGithub,
   overrides: Partial<TakeOverFlowInput> = {},
@@ -91,6 +129,7 @@ function baseInput(
     checkoutPath: '/tmp/repo',
     baseBranch: 'main',
     github,
+    prContext: fakePrContext(),
     mergeMethod: 'squash',
     runCmd: recordingRunCmd().runCmd,
     cooldownMs: 0,
@@ -98,7 +137,7 @@ function baseInput(
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       runReviewerOverride: async () =>
@@ -149,7 +188,7 @@ test('runTakeOverFlow: unresolved threads → invokes Reviewer, pushes, then mer
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       runReviewerOverride: async (rin) => {
@@ -178,6 +217,94 @@ test('runTakeOverFlow: unresolved threads → invokes Reviewer, pushes, then mer
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 1);
 });
 
+test('runTakeOverFlow: replied-only thread is recorded as addressed → not re-fed to the Reviewer', async () => {
+  // GitHub never marks the thread resolved (only a reply, by design for "replied"), so
+  // listUnresolvedThreads keeps returning it forever. Without the addressed-thread dedup this
+  // would loop the Reviewer over the same thread every iteration.
+  const threads: ReviewThread[] = [
+    {
+      id: 'TH_D',
+      isResolved: false,
+      path: 'src/a.ts',
+      comments: [{ id: 'C_D', body: 'why?', author: 'rabbit' }],
+    },
+  ];
+  const gh = fakeGithub({ checks: ['success', 'success'], threads: [threads] });
+  let reviewerInvocations = 0;
+  const input = baseInput(gh.github, {
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      credentials: dummyCredentials,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runReviewerOverride: async () => {
+        reviewerInvocations++;
+        return { kind: 'ok', resolutions: [{ threadId: 'TH_D', kind: 'replied' }] };
+      },
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'merged');
+  // The Reviewer ran exactly once — the second iteration's freshThreads filtered TH_D out even
+  // though listUnresolvedThreads keeps reporting it unresolved.
+  assert.equal(reviewerInvocations, 1);
+  if (result.kind === 'merged') assert.equal(result.iterations, 1);
+});
+
+test('runTakeOverFlow: review grace re-arms after a push', async () => {
+  const threads: ReviewThread[] = [
+    {
+      id: 'TH_G',
+      isResolved: false,
+      path: 'src/a.ts',
+      comments: [{ id: 'C_G', body: 'fix', author: 'rabbit' }],
+    },
+  ];
+  // 1st iteration: green CI + a thread the Reviewer fixes → pushes. 2nd iteration: green + clean.
+  const gh = fakeGithub({ checks: ['success', 'success'], threads: [threads, []] });
+  const graceSleeps: number[] = [];
+  const input = baseInput(gh.github, {
+    sleep: async (ms) => {
+      if (ms === REVIEW_COMMENTS_GRACE) graceSleeps.push(ms);
+    },
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      credentials: dummyCredentials,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runReviewerOverride: async () => ({
+        kind: 'ok',
+        resolutions: [{ threadId: 'TH_G', kind: 'fixed', commitSha: 'abc' }],
+      }),
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'merged');
+  // The grace fired once before the fixing pass and a second time after the push re-armed it —
+  // a once-only grace would have only ever waited for review bots against the pre-push head.
+  assert.equal(graceSleeps.length, 2);
+});
+
+test('runTakeOverFlow: CI stays pending → retries without reading threads, then blocks', async () => {
+  // waitForChecks only ever returns 'pending' on a cancelled poll, but a non-aborted 'pending' can
+  // still theoretically reach the loop (a race between the abort check and the signal firing) — it
+  // must be treated as "not settled yet", not fall through to the Reviewer/merge logic below it.
+  const gh = fakeGithub({ checks: ['pending'], threads: [[]] });
+  const result = await runTakeOverFlow(baseInput(gh.github, { maxIterations: 2 }));
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /CI pending after 2 iteration/i);
+    assert.equal(result.iterations, 2);
+  }
+  assert.deepEqual(
+    gh.calls.map((c) => c.method),
+    ['waitForChecks', 'waitForChecks', 'waitForChecks', 'listUnresolvedThreads'],
+    'threads are only read on the final settle check, never mid-loop while CI is pending',
+  );
+});
+
 test('runTakeOverFlow: CI failure → invokes Worker, blocks if Worker blocked', async () => {
   const gh = fakeGithub({ checks: ['throw-cifailed'], threads: [[]] });
   const result = await runTakeOverFlow(baseInput(gh.github));
@@ -199,7 +326,7 @@ test('runTakeOverFlow: CI red + Worker returns no-changes → blocks, no force-p
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       runWorkerOverride: async () =>
@@ -237,7 +364,7 @@ test('runTakeOverFlow: threads timeout into the real take-over Worker → a stal
       subagents: {
         reviewerModel: dummyModel,
         reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-        workerModel: stalling,
+        credentials: fakeCredentials(stalling),
         workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
         styleContents: '',
         timeout: { stepMs: 40 },
@@ -255,7 +382,7 @@ test('runTakeOverFlow: threads verifyCommand into the CI-fix Worker input (issue
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       formatCommand: 'bun run lint:fix',
@@ -285,7 +412,7 @@ test('runTakeOverFlow: threads the run signal into the CI-fix Worker input', asy
       subagents: {
         reviewerModel: dummyModel,
         reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-        workerModel: dummyModel,
+        credentials: dummyCredentials,
         workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
         styleContents: '',
         runWorkerOverride: async (win) => {
@@ -309,9 +436,9 @@ test('runTakeOverFlow: max iterations exhausted with threads remaining → block
     },
   ];
   const gh = fakeGithub({
-    // Always green CI, but threads never go away. Reviewer "fixes" them but our stubbed
-    // listUnresolvedThreads keeps returning them — simulating Reviewer not actually
-    // resolving on the API. Flow should bail with a max-iterations message.
+    // Always green CI, but the thread never gets recorded as addressed (empty resolutions below) —
+    // the addressed-thread dedup only drops a thread once the Reviewer actually reports handling it,
+    // so an empty pass leaves it fresh forever. Flow should bail with a max-iterations message.
     checks: ['success'],
     threads: [threads],
   });
@@ -320,13 +447,12 @@ test('runTakeOverFlow: max iterations exhausted with threads remaining → block
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
-      runReviewerOverride: async () => ({
-        kind: 'ok',
-        resolutions: [{ threadId: 'TH_X', kind: 'fixed', commitSha: 'def456' }],
-      }),
+      // Reports no resolutions at all — nothing to record as addressed, nothing to push — so the
+      // thread stays fresh and the loop keeps re-polling it until maxIterations.
+      runReviewerOverride: async () => ({ kind: 'ok', resolutions: [] }),
     },
   });
   const result = await runTakeOverFlow(input);
@@ -371,7 +497,7 @@ test('runTakeOverFlow: signal aborted mid-flow → cancelled, no merge', async (
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       runReviewerOverride: async () => ({
@@ -414,7 +540,7 @@ test('runTakeOverFlow: abort during the CI poll → cancelled before the Reviewe
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       runReviewerOverride: async () => {
@@ -466,7 +592,7 @@ test('runTakeOverFlow: Reviewer error → blocked, no merge', async () => {
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       runReviewerOverride: async () => ({
@@ -498,7 +624,7 @@ test('runTakeOverFlow: Reviewer errors mid-pass with completed fixes → pushes 
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       // The pass threw on a later thread, but TH_E was already fixed + committed locally first.
@@ -549,7 +675,7 @@ test('runTakeOverFlow: rebase conflict on push → blocked, aborts, never force-
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       runReviewerOverride: async () => ({
@@ -593,7 +719,7 @@ test('runTakeOverFlow: rebase conflict + AI resolver resolves → continues, for
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       runReviewerOverride: async () => ({
@@ -635,7 +761,7 @@ test('runTakeOverFlow: conflict + resolver gives up → aborts + blocks, never m
     subagents: {
       reviewerModel: dummyModel,
       reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
-      workerModel: dummyModel,
+      credentials: dummyCredentials,
       workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
       styleContents: '',
       runReviewerOverride: async () => ({

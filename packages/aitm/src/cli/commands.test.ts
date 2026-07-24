@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import type { LlmFetch } from '../credentials/llm-fetch.ts';
 import { acquireRunLock } from '../state/run-lock.ts';
 import { CURRENT_SCHEMA_VERSION, type PrGroup, type RunState } from '../state/schema.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
@@ -173,6 +174,71 @@ test('runStart: releases the run lock when the run ends', async () => {
       /ENOENT/,
       'lock released so the next run can start',
     );
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+// A stand-in for the keep-alive transport handle, counting releases. The real one owns an undici
+// pool whose idle sockets hold the event loop open, so "was it closed" is the behaviour to pin.
+function countingLlmFetch(): { make: () => Promise<LlmFetch>; closes: () => number } {
+  let closes = 0;
+  const handle: LlmFetch = {
+    fetch: () => Promise.resolve(new Response('ok')),
+    close: async () => {
+      closes += 1;
+    },
+  };
+  return { make: async () => handle, closes: () => closes };
+}
+
+test('runStart: releases the keep-alive transport when the run ends', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const llm = countingLlmFetch();
+  try {
+    const result = await runStart(
+      { kind: 'start', goal: 'add jwt auth' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        makeLlmFetch: llm.make,
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(llm.closes(), 1, 'the undici pool is closed, not leaked past the run');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: a throwing loop still releases the keep-alive transport', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const llm = countingLlmFetch();
+  try {
+    const result = await runStart(
+      { kind: 'start', goal: 'add jwt auth' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        makeLlmFetch: llm.make,
+        runLoop: async () => {
+          throw new Error('loop exploded');
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.equal(llm.closes(), 1);
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -1136,6 +1202,32 @@ test('runMergePr: happy path with --pr override', async () => {
     assert.equal(captured?.pr, 99);
     assert.equal(captured?.resume, true);
     assert.equal(captured?.styleDigest, STUB_DIGEST, 'resolved digest threaded to merge flow');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: releases the keep-alive transport when the flow ends', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  const llm = countingLlmFetch();
+  try {
+    await seedState(repo.path);
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 99 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        makeLlmFetch: llm.make,
+        runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(llm.closes(), 1);
   } finally {
     await repo.cleanup();
     await home.cleanup();

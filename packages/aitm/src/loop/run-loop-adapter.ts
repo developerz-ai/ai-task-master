@@ -144,6 +144,7 @@ import { commitsAheadOfBase, runGit } from '../workspace/git-exec.ts';
 import { InPlaceCheckout } from '../workspace/in-place-checkout.ts';
 import { runFixSession } from './ci-fix.ts';
 import { buildConflictResolver } from './conflict-resolution.ts';
+import { Disposer, disposeQuietly } from './disposer.ts';
 import { makeProgressTee } from './progress-file.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
 import { runSelfReviewSession } from './self-review.ts';
@@ -617,28 +618,40 @@ export async function runLoopAdapter(
 
   // One ProcessManager per run, bound to the repo root the single in-place checkout also uses, so a
   // `bash({ run_in_background: true })` (dev server, log tailer) actually backgrounds instead of
-  // degrading to the foreground (issue #103). The adapter OWNS its lifecycle: killAll() on abort and
-  // in the finally reaps every process a worker/reviewer left running.
+  // degrading to the foreground (issue #103). The adapter OWNS its lifecycle: killAll() reaps every
+  // process a worker/reviewer left running.
   const background = seams.makeBackground?.(input) ?? backgroundProcessTools({ cwd: input.cwd });
+
+  // One release stack for the whole run: the `finally` below and the abort reaper both drain THIS
+  // disposer, so every run-scoped acquisition has exactly one registered release and neither exit
+  // path can forget one. LIFO, so the order below is the reverse of the teardown order.
+  const disposer = new Disposer();
+  // Registered BEFORE connectAll: a transport constructor that throws mid-list rejects connectAll
+  // with servers 1..N-1 already connected, and the `mcpConnected` flag this replaces was never set
+  // on that path — their stdio children survived to process exit. close() is idempotent, so
+  // registering it for a run that never connects costs nothing.
+  disposer.add(() => mcp.close());
+  disposer.add(() => background.manager.killAll());
 
   // Reap the MCP stdio children (Experimental_StdioMCPTransport spawns them, mcp-client.ts) AND any
   // leftover background processes the instant the run is aborted. A second Ctrl-C force-exits the
   // process (cli.ts installSignalHandlers) and Node's default signal termination skips the `finally`
-  // below, so relying on it alone orphans them — reap eagerly on abort while we still can. Both are
-  // idempotent (close() swaps out its server list before awaiting; killAll() only signals still-running
-  // procs), so the finally repeats are harmless; the listener is detached in the finally so a
-  // normally-completing run never leaks it.
+  // below, so relying on it alone orphans them — reap eagerly on abort while we still can. Draining
+  // twice is safe: the second drain finds an emptied stack, and a drain started while another is in
+  // flight queues behind it, so the `finally` awaits the abort-time teardown instead of racing it.
   const reapOnAbort = () => {
-    void mcp.close();
-    background.manager.killAll();
+    void disposeQuietly(disposer);
   };
   input.signal?.addEventListener('abort', reapOnAbort, { once: true });
+  // Registered last → released first, so teardown detaches the listener before the reaping it would
+  // otherwise re-trigger. A normally-completing run never leaks it.
+  disposer.add(() => {
+    input.signal?.removeEventListener('abort', reapOnAbort);
+  });
 
-  let mcpConnected = false;
   try {
     if (usesMcp && !seams.makeMcp) {
       await mcp.connectAll();
-      mcpConnected = true;
     }
 
     const current = await state.read();
@@ -761,11 +774,7 @@ export async function runLoopAdapter(
     });
     return await loop.run();
   } finally {
-    input.signal?.removeEventListener('abort', reapOnAbort);
-    background.manager.killAll();
-    if (mcpConnected) {
-      await mcp.close();
-    }
+    await disposeQuietly(disposer);
   }
 }
 
@@ -1000,6 +1009,10 @@ async function defaultPlanGroups(
   });
 
   const stopPlannerHeartbeat = startHeartbeat(plannerLabel, plannerHeartbeatSink);
+  // The transcript is closed in the `finally` below, not after it: a planner that throws (provider
+  // 5xx, step timeout) would otherwise leave an open 'working' record behind forever — the planner
+  // stage is documented as never-resumed, so nothing would ever come back to end it.
+  let plannerOutcome: RunEndOutcome = 'error';
   let result: PlannerResult;
   try {
     result = await runPlanner(agent, {
@@ -1013,10 +1026,11 @@ async function defaultPlanGroups(
       ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
       ...(surveyBrief !== undefined ? { surveyBrief } : {}),
     });
+    plannerOutcome = runEndOutcome(result.kind);
   } finally {
     stopPlannerHeartbeat();
+    await plannerRecorder?.end(plannerOutcome);
   }
-  await plannerRecorder?.end(runEndOutcome(result.kind));
   if (result.kind === 'ok') {
     // One remote read per run, here at first branch assignment — the only moment a branch name is
     // chosen. A resume never reaches this path, so a persisted branch is never renamed underneath a
@@ -1844,6 +1858,13 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         }
       }
       return { kind: 'ok' };
+    },
+    // Drop the group's carried conversations once the WorkLoop is done with it. Both maps hold whole
+    // ModelMessage[] histories — the largest per-group allocation the run makes — and a finished group
+    // is never rescheduled, so keeping them is pure accumulation across a many-group run.
+    releaseGroup: (groupId) => {
+      workerHandles.delete(groupId);
+      ciFixHandles.delete(groupId);
     },
   };
 }

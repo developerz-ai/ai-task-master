@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import {
+  type BrowserLauncher,
   LOOPBACK_HOST,
   loopbackCallbackUrl,
   type OAuthConfig,
   type OAuthOptions,
+  openBrowser,
   performOAuthFlow,
 } from './oauth.ts';
 
@@ -99,4 +102,27 @@ test('OAuthOptions has correct structure', () => {
   assert.strictEqual(options.callbackUrl, 'http://127.0.0.1:8787/callback');
   assert.strictEqual(options.port, 8787);
   assert.strictEqual(options.timeout, 30000);
+});
+
+test('openBrowser swallows spawn errors on headless hosts', async () => {
+  const emitter = new EventEmitter();
+  let unrefed = false;
+  const launcher: BrowserLauncher = () => ({
+    on: (event, listener) => {
+      emitter.on(event, listener);
+    },
+    unref: () => {
+      unrefed = true;
+    },
+  });
+
+  await openBrowser('https://example.com', launcher);
+
+  // Emitting 'error' on an EventEmitter with no listener throws; this passes only because the
+  // production handler in openBrowser is registered — deleting it would fail this test.
+  assert.doesNotThrow(
+    () => emitter.emit('error', new Error('spawn ENOENT')),
+    'openBrowser must absorb spawn failures via its error handler',
+  );
+  assert.ok(unrefed, 'openBrowser must unref the detached process');
 });

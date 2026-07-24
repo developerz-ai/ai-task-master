@@ -5,7 +5,7 @@
 // real stack end-to-end.
 
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -16,7 +16,7 @@ import {
   SUBMIT_TOOL_NAME,
   SYSTEM_REMINDER_CONTRACT,
 } from '@developerz.ai/ai-claude-compat';
-import type { LanguageModelUsage, ToolSet } from 'ai';
+import type { LanguageModelUsage, ModelMessage, ToolSet } from 'ai';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
@@ -1282,6 +1282,69 @@ test('defaultMakeOrchestrator.runWorker: resuming a recordingFailed transcript s
   }
 });
 
+test('defaultMakeOrchestrator.releaseGroup: drops the group carry-over so the next pass cold-starts', async () => {
+  // The Coordinator conversation is carried task→task through workerHandles (issue #107). Once the
+  // WorkLoop is done with the group nothing can reuse it, so releaseGroup must drop it — otherwise a
+  // many-group run ends holding every group's full ModelMessage[].
+  const model = emptyManifestModel();
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: () => 'openai/gpt-5',
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const priorHandles: Array<{ messages: ModelMessage[] } | undefined> = [];
+  const workerRunner = async (
+    agent: unknown,
+    workerInput: { priorHandle?: { messages: ModelMessage[] } },
+  ): Promise<WorkerResult> => {
+    priorHandles.push(workerInput.priorHandle);
+    return {
+      kind: 'ok',
+      delivery: delivery(),
+      handle: { agent, messages: [{ role: 'assistant', content: 'carried' }] },
+    } as never;
+  };
+  const orch = defaultMakeOrchestrator({
+    input: {
+      cwd: '/tmp/adapter-release-group',
+      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
+      credentials,
+      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+      github: {},
+      goal: 'g',
+      criteria: undefined,
+      branch: undefined,
+      state: {},
+    },
+    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
+    rollingContext: '',
+    state: {},
+    stepCounter: () => undefined,
+    workerRunner,
+  } as never);
+
+  const invoke = () =>
+    orch.runWorker({
+      group: group('core'),
+      checkout: { path: '/tmp/wt' },
+      baseBranch: 'main',
+    } as never);
+
+  await invoke();
+  await invoke();
+  orch.releaseGroup?.('core');
+  await invoke();
+
+  assert.equal(priorHandles[0], undefined, 'first task of a group cold-starts');
+  assert.deepEqual(
+    priorHandles[1]?.messages,
+    [{ role: 'assistant', content: 'carried' }],
+    'the second task continues the first task’s conversation',
+  );
+  assert.equal(priorHandles[2], undefined, 'after releaseGroup the carry-over is gone');
+});
+
 // Note (issue #129): the adapter threads `{ stepMs: resolved.llmStepTimeoutMs }` into every agent
 // `defaultMakeOrchestrator` builds (worker/reviewer/orchestrator/compactor + the CI-fix subagents).
 // A behavioral end-to-end assertion here would have to drive `defaultMakeOrchestrator`, which always
@@ -1871,20 +1934,96 @@ test('runLoopAdapter: aborting the run closes MCP to reap stdio children and sur
   assert.equal(closes(), 1, 'MCP client closed once when the run aborts');
 });
 
-test('runLoopAdapter: a completed run without abort never fires the reap listener', async () => {
+test('runLoopAdapter: a completed run closes MCP once and detaches the reap listener', async () => {
+  const controller = new AbortController();
   const { mcp, closes } = countingMcp();
   await mcp.connectAll();
   const { state } = makeState();
 
   const result = await runLoopAdapter(
-    { ...makeInput(), signal: new AbortController().signal },
+    { ...makeInput(), signal: controller.signal },
     seams({ state, makeMcp: () => mcp }),
   );
 
   assert.equal(result.kind, 'success');
-  // A seam-provided MCP is owned by the caller (the adapter never connected it), so the normal path
-  // leaves it open; only an abort reaps it. This guards the listener against firing unconditionally.
-  assert.equal(closes(), 0, 'no abort → seam-owned MCP left untouched');
+  assert.equal(closes(), 1, 'the run releases the MCP manager it drove, exactly once');
+  // Aborting AFTER the run must reap nothing: the disposer released the listener, so a signal the
+  // caller keeps alive (the CLI's run-wide controller) can no longer re-enter the adapter's teardown.
+  controller.abort();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(closes(), 1, 'listener detached at run end → a later abort reaps nothing');
+});
+
+test('defaultPlanGroups: a throw during the planner call still ends its transcript', async () => {
+  // The planner stage is recorded but never resumed, so an unfinished record is dead weight nothing
+  // ever closes. The `end()` therefore rides the same finally as the heartbeat stop. Injected through
+  // the one input the planner call reads and nothing before it does — `criteria` — because runPlanner
+  // itself is total; the guarantee under test is structural, not a specific failure mode.
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-planner-transcript-'));
+  try {
+    const input: RunLoopInput = { ...makeInput(), cwd: dir, state: new StateStore(dir) };
+    Object.defineProperty(input, 'criteria', {
+      get: () => {
+        throw new Error('planner input exploded');
+      },
+    });
+
+    await assert.rejects(
+      // No planGroups seam → the real defaultPlanGroups runs; the MCP seam keeps it off any transport.
+      runLoopAdapter(
+        input,
+        seams({ planGroups: undefined, makeMcp: () => new McpClientManager({ servers: {} }) }),
+      ),
+      /planner input exploded/,
+    );
+
+    const transcript = await readFile(
+      join(dir, 'transcripts', 'planner', 'planner-1.jsonl'),
+      'utf8',
+    );
+    const records = transcript
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line): { kind?: string; outcome?: string } => JSON.parse(line));
+    assert.deepEqual(
+      records.filter((r) => r.kind === 'run-end').map((r) => r.outcome),
+      ['error'],
+      'the planner transcript is closed exactly once, as an error',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('runLoopAdapter: a run that throws still releases MCP and the background processes', async () => {
+  // Teardown hangs off the run's disposer, not off a flag set on the happy path: whatever the run
+  // dies of — here a planner throw, in production an MCP transport that rejects connectAll with
+  // earlier servers already connected — the stdio children and background processes still get reaped.
+  const { mcp, closes } = countingMcp();
+  await mcp.connectAll();
+  const bg = backgroundProcessTools({ cwd: process.cwd() });
+  const leftover = bg.manager.start('sleep 30');
+  assert.equal(leftover.running, true, 'leftover process started');
+
+  try {
+    await assert.rejects(
+      runLoopAdapter(
+        makeInput(),
+        seams({
+          makeMcp: () => mcp,
+          makeBackground: () => bg,
+          planGroups: async () => {
+            throw new Error('planner exploded');
+          },
+        }),
+      ),
+      /planner exploded/,
+    );
+    assert.equal(closes(), 1, 'MCP closed on the failure path');
+    await until(() => bg.manager.list().every((p) => !p.running));
+  } finally {
+    bg.manager.killAll('SIGKILL');
+  }
 });
 
 // ---- recordStepDeltas: per-step transcript deltas from cumulative SDK events (issue #175) ----

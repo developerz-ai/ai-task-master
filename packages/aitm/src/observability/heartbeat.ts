@@ -54,6 +54,7 @@ export type ScheduleInterval = (onTick: () => void, intervalMs: number) => () =>
 
 const defaultSchedule: ScheduleInterval = (onTick, intervalMs) => {
   const handle = setInterval(onTick, intervalMs);
+  handle.unref();
   return () => clearInterval(handle);
 };
 

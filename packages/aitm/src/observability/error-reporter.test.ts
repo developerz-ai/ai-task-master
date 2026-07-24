@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { clearRegisteredSecrets, registerSecretValues } from '../logger/secret-registry.ts';
-import { dsnFromEnv, initErrorReporter, scrubEvent } from './error-reporter.ts';
+import { dsnFromEnv, initErrorReporter, type SentrySdk, scrubEvent } from './error-reporter.ts';
 
 test('dsnFromEnv: AITM_SENTRY_DSN takes precedence over SENTRY_DSN', () => {
   assert.equal(
@@ -25,6 +25,31 @@ test('initErrorReporter: no DSN → safe no-op reporter (never throws, never loa
   // The no-op reporter must tolerate use without a DSN or installed SDK.
   assert.doesNotThrow(() => reporter.captureException(new Error('boom')));
   await assert.doesNotReject(reporter.flush());
+});
+
+test('initErrorReporter: flush drains via a single bounded Sentry.close(2000)', async () => {
+  const closeCalls: Array<number | undefined> = [];
+  let awaited = false;
+  const sentry: SentrySdk = {
+    init: () => undefined,
+    captureException: () => undefined,
+    close: async (timeout) => {
+      closeCalls.push(timeout);
+      await Promise.resolve();
+      awaited = true;
+      return true;
+    },
+  };
+
+  const reporter = await initErrorReporter(
+    { AITM_SENTRY_DSN: 'https://k@glitchtip/1' },
+    async () => sentry,
+  );
+  await reporter.flush();
+
+  // Exactly one bounded close, no separate unbounded flush/close that could block past 2s.
+  assert.deepEqual(closeCalls, [2000]);
+  assert.ok(awaited, 'flush must await Sentry.close');
 });
 
 test('scrubEvent: redacts secret-shaped substrings in the top-level message', () => {

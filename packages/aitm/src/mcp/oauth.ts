@@ -96,18 +96,41 @@ async function findAvailablePort(start: number, end: number): Promise<number> {
   });
 }
 
-// Browser launching by platform.
-async function openBrowser(url: string): Promise<void> {
-  const { spawn } = await import('node:child_process');
+// The minimal launched-process surface `openBrowser` touches. `ChildProcess` satisfies it
+// structurally, so the default launcher needs no cast (strict TS bans `as unknown as`).
+type LaunchedProcess = {
+  on(event: 'error', listener: (err: Error) => void): void;
+  unref(): void;
+};
 
+// Spawn seam: turns the resolved platform command into a launched process. Injectable so the
+// headless-host error handling below is driven by tests without a real spawn.
+export type BrowserLauncher = (command: string, args: string[]) => LaunchedProcess;
+
+async function defaultBrowserLauncher(): Promise<BrowserLauncher> {
+  const { spawn } = await import('node:child_process');
+  return (command, args) =>
+    spawn(command, args, {
+      detached: true,
+      shell: process.platform === 'win32',
+      stdio: 'ignore',
+    });
+}
+
+// Browser launching by platform. Exported so the spawn-error path is exercised through this real
+// handler rather than a test-local reimplementation.
+export async function openBrowser(url: string, launcher?: BrowserLauncher): Promise<void> {
   const platform = process.platform;
   const command = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
   const args = platform === 'win32' ? ['/D', url] : [url];
 
-  const proc = spawn(command, args, {
-    detached: true,
-    shell: platform === 'win32',
-    stdio: 'ignore',
+  const launch = launcher ?? (await defaultBrowserLauncher());
+  const proc = launch(command, args);
+
+  proc.on('error', () => {
+    // Silently ignore spawn errors (common on headless hosts where browser launchers
+    // like xdg-open don't exist). The OAuth flow can continue; the user can open the
+    // URL manually if needed.
   });
 
   proc.unref();

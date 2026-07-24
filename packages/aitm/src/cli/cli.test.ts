@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import type { ErrorReporter } from '../observability/error-reporter.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
-import type { MainCtx, SignalProcess } from './cli.ts';
-import { installSignalHandlers, isEntrypoint, main } from './cli.ts';
+import type { EntrypointProcess, MainCtx } from './cli.ts';
+import { forceExit, installSignalHandlers, isEntrypoint, main, runEntrypoint } from './cli.ts';
 
 const FAKE_KEY = 'sk-or-fake-test-key';
 
@@ -512,22 +513,26 @@ test('main: start cancelled (code 2, message) routes to stderr, not stdout', asy
 // ---- signal handling: abort-then-force-exit --------------------------------
 
 type FakeProc = {
-  proc: SignalProcess;
+  proc: EntrypointProcess;
   handlers: Map<string, () => void>;
   fire: (name: string) => void;
   errs: string[];
   exits: number[];
 };
 
-// A structural SignalProcess whose exit() throws (like a real process.exit that never returns)
-// so the abort/force-exit branches are observable without touching the test-runner process.
+// A structural process whose exit() throws (like a real process.exit that never returns) so the
+// abort/force-exit branches are observable without touching the test-runner process. `off` removes
+// its own handler so the entrypoint's post-run detach is observable via `handlers`.
 function fakeSignalProc(): FakeProc {
   const handlers = new Map<string, () => void>();
   const errs: string[] = [];
   const exits: number[] = [];
-  const proc: SignalProcess = {
+  const proc: EntrypointProcess = {
     on(signal, listener) {
       handlers.set(signal, listener);
+    },
+    off(signal, listener) {
+      if (handlers.get(signal) === listener) handlers.delete(signal);
     },
     exit(code): never {
       exits.push(code);
@@ -553,16 +558,34 @@ function fakeSignalProc(): FakeProc {
   };
 }
 
+// A reporter that counts flushes and remembers the last capture — the shutdown's observable seam.
+function fakeReporter(): { reporter: ErrorReporter; rec: { flushed: number; captured: unknown } } {
+  const rec: { flushed: number; captured: unknown } = { flushed: 0, captured: undefined };
+  return {
+    rec,
+    reporter: {
+      captureException: (error) => {
+        rec.captured = error;
+      },
+      flush: async () => {
+        rec.flushed += 1;
+      },
+    },
+  };
+}
+
+const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5));
+
 test('installSignalHandlers: registers SIGINT and SIGTERM', () => {
   const fake = fakeSignalProc();
-  installSignalHandlers(new AbortController(), fake.proc);
+  installSignalHandlers(new AbortController(), { proc: fake.proc });
   assert.deepEqual([...fake.handlers.keys()].sort(), ['SIGINT', 'SIGTERM']);
 });
 
 test('installSignalHandlers: first SIGINT aborts + warns, second force-exits 130', () => {
   const controller = new AbortController();
   const fake = fakeSignalProc();
-  installSignalHandlers(controller, fake.proc);
+  installSignalHandlers(controller, { proc: fake.proc });
 
   assert.equal(controller.signal.aborted, false);
   fake.fire('SIGINT');
@@ -577,12 +600,91 @@ test('installSignalHandlers: first SIGINT aborts + warns, second force-exits 130
 test('installSignalHandlers: second SIGTERM force-exits 143', () => {
   const controller = new AbortController();
   const fake = fakeSignalProc();
-  installSignalHandlers(controller, fake.proc);
+  installSignalHandlers(controller, { proc: fake.proc });
 
   fake.fire('SIGTERM');
   assert.equal(controller.signal.aborted, true);
   assert.throws(() => fake.fire('SIGTERM'), /forced-exit:143/);
   assert.deepEqual(fake.exits, [143]);
+});
+
+test('installSignalHandlers: the remover detaches every handler', () => {
+  const fake = fakeSignalProc();
+  const remove = installSignalHandlers(new AbortController(), { proc: fake.proc });
+  assert.equal(fake.handlers.size, 2);
+  remove();
+  assert.equal(fake.handlers.size, 0);
+});
+
+test('installSignalHandlers: second signal routes to onForceExit, not a bare exit', () => {
+  const controller = new AbortController();
+  const fake = fakeSignalProc();
+  const forced: number[] = [];
+  installSignalHandlers(controller, { proc: fake.proc, onForceExit: (code) => forced.push(code) });
+
+  fake.fire('SIGINT'); // first: abort + warn
+  assert.equal(controller.signal.aborted, true);
+  fake.fire('SIGINT'); // second: hand off to onForceExit
+  assert.deepEqual(forced, [130]);
+  assert.deepEqual(fake.exits, [], 'proc.exit must not be called when onForceExit is given');
+});
+
+test('forceExit: flushes the reporter exactly once, then exits with the code', async () => {
+  const { reporter, rec } = fakeReporter();
+  const exits: number[] = [];
+  forceExit(reporter, 143, { exit: (code) => exits.push(code) });
+  await tick();
+  assert.equal(rec.flushed, 1);
+  assert.deepEqual(exits, [143]);
+});
+
+test('forceExit: exits within the budget even when the flush never resolves', async () => {
+  const exits: number[] = [];
+  const stuck: ErrorReporter = {
+    captureException: () => {},
+    flush: () => new Promise<void>(() => {}), // never settles
+  };
+  forceExit(stuck, 130, { exit: (code) => exits.push(code) }, 1);
+  await tick();
+  assert.deepEqual(exits, [130]);
+});
+
+test('runEntrypoint: sets process.exitCode from main, never hard-exits, flushes + detaches', async () => {
+  const fake = fakeSignalProc();
+  const { reporter, rec } = fakeReporter();
+  await runEntrypoint(reporter, ['whatever'], fake.proc, async () => 0);
+  assert.equal(fake.proc.exitCode, 0);
+  assert.equal(rec.flushed, 1);
+  assert.deepEqual(fake.exits, [], 'the normal path must not call process.exit');
+  assert.equal(fake.handlers.size, 0, 'handlers are removed once main resolves');
+});
+
+test('runEntrypoint: a throwing main → exitCode 1, captured, message on stderr, still flushes', async () => {
+  const fake = fakeSignalProc();
+  const { reporter, rec } = fakeReporter();
+  const boom = new Error('boom');
+  await runEntrypoint(reporter, ['whatever'], fake.proc, async () => {
+    throw boom;
+  });
+  assert.equal(fake.proc.exitCode, 1);
+  assert.equal(rec.captured, boom);
+  assert.match(fake.errs.join(''), /boom/);
+  assert.equal(rec.flushed, 1);
+  assert.deepEqual(fake.exits, []);
+});
+
+test('runEntrypoint: the first signal aborts the run, handlers gone after it resolves', async () => {
+  const fake = fakeSignalProc();
+  const { reporter } = fakeReporter();
+  let sawAbort = false;
+  await runEntrypoint(reporter, ['whatever'], fake.proc, async (_argv, runCtx) => {
+    fake.fire('SIGINT'); // user hits Ctrl-C mid-run
+    sawAbort = runCtx.signal?.aborted === true;
+    return 2;
+  });
+  assert.equal(sawAbort, true, 'main sees the controller abort on the first signal');
+  assert.equal(fake.proc.exitCode, 2);
+  assert.equal(fake.handlers.size, 0);
 });
 
 test('main: --version prints the installed version and exits 0', async () => {

@@ -105,6 +105,12 @@ export type WorkLoopOrchestrator = {
   // addressing-reviews stage + autoMergeFlow: run the Reviewer over the given threads and push its
   // code fixes to the remote. ok → threads handled (any fix pushed); blocked → reviewer/push error.
   addressReviews(input: ReviewerInvocation): Promise<StageWorkResult>;
+  // The run is finished with this group — merged, blocked, or handed over to the merge-pr flow — and
+  // will never schedule it again (ready() only picks 'pending' groups). Whatever the orchestrator
+  // cached for it can go: the real bridge holds a full Worker conversation and a CI-fix handle per
+  // group, so without this a twenty-group run ends holding twenty conversations it can never reuse.
+  // Optional: stubs that cache nothing omit it.
+  releaseGroup?(groupId: string): void;
 };
 
 export type WorkLoopGithub = {
@@ -540,6 +546,10 @@ export class WorkLoop {
         /* swallow secondary failures */
       }
       this.outcomes.push({ groupId: group.id, status: 'blocked', reason });
+    } finally {
+      // Every exit — merged, blocked, awaiting-pr, cancelled, or the rethrown run precondition — is
+      // the last this run sees of the group, so this is where its cached conversations are dropped.
+      this.deps.orchestrator.releaseGroup?.(group.id);
     }
   }
 

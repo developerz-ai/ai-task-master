@@ -850,6 +850,48 @@ test('rebaseAndForcePush: rebase conflict → blocked, aborts, never pushes', as
   assert.ok(!commands.some((c) => c.includes('push')));
 });
 
+test('rebaseAndForcePush: first `git rebase --abort` fails, retry succeeds → keeps the original reason', async () => {
+  let aborts = 0;
+  const { runCmd } = recordingRunCmd((args) => {
+    if (args[0] === 'rebase' && args[1] === '--abort') {
+      return ++aborts === 1 ? { exitCode: 1, stderr: 'residual state' } : {};
+    }
+    return args[0] === 'rebase' && args[1]?.startsWith('origin/')
+      ? { exitCode: 1, stderr: 'CONFLICT (content): Merge conflict in src/a.ts' }
+      : {};
+  });
+  const result = await rebaseAndForcePush(runCmd, '/tmp/wt', 'main', 9, undefined);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /manual resolution/i);
+    // A recovered cleanup must not masquerade as a double failure.
+    assert.doesNotMatch(result.reason, /failed twice/);
+  }
+});
+
+test('rebaseAndForcePush: both `git rebase --abort` attempts fail → blocked reason reports the stranded cleanup', async () => {
+  const { runCmd, commands } = recordingRunCmd((args) => {
+    if (args[0] === 'rebase' && args[1] === '--abort') {
+      return { exitCode: 1, stderr: 'fatal: could not abort rebase' };
+    }
+    return args[0] === 'rebase' && args[1]?.startsWith('origin/')
+      ? { exitCode: 1, stderr: 'CONFLICT (content): Merge conflict in src/a.ts' }
+      : {};
+  });
+  const result = await rebaseAndForcePush(runCmd, '/tmp/wt', 'main', 9, undefined);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /manual resolution/i);
+    assert.match(result.reason, /git rebase --abort failed twice: fatal: could not abort rebase/);
+  }
+  assert.equal(
+    commands.filter((c) => c === 'git rebase --abort').length,
+    2,
+    'retries the abort exactly once before giving up',
+  );
+  assert.ok(!commands.some((c) => c.includes('push')), 'never force-pushes a stranded checkout');
+});
+
 test('rebaseAndForcePush: push rejected → blocked, surfaces the git error', async () => {
   const { runCmd } = recordingRunCmd((args) =>
     args[0] === 'push' ? { exitCode: 1, stderr: 'stale info; remote moved' } : {},

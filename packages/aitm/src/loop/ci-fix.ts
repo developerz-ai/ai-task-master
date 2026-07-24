@@ -404,8 +404,16 @@ async function resolveRebaseConflicts(
   const abortAndBlock = async (reason: string): Promise<PushResult> => {
     const abort = await runCmd('git', ['rebase', '--abort'], cwd);
     if (abort.exitCode !== 0) {
-      // Retry with fresh stderr in case the first attempt left residual state
-      await runCmd('git', ['rebase', '--abort'], cwd);
+      // Retry with fresh stderr in case the first attempt left residual state. If the retry also
+      // fails the checkout is stranded mid-rebase, so report that explicitly instead of returning
+      // the original reason as if cleanup had succeeded.
+      const retry = await runCmd('git', ['rebase', '--abort'], cwd);
+      if (retry.exitCode !== 0) {
+        return {
+          kind: 'blocked',
+          reason: `${reason}; git rebase --abort failed twice: ${gitErr(retry)}`,
+        };
+      }
     }
     return { kind: 'blocked', reason };
   };

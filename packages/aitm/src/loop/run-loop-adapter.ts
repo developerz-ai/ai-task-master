@@ -668,6 +668,7 @@ export async function runLoopAdapter(
 
     // ---- Plan (fresh) or resume (prior prGroups present) -------------------
     let groups: PrGroup[];
+    let freshPlan = false;
     if (current.prGroups.length > 0) {
       // Resume: a run interrupted mid-lifecycle persisted its groups as 'in-progress'/'awaiting-pr',
       // which PlanGraph.ready() won't schedule. Normalize them back to 'pending' (preserving stage +
@@ -694,7 +695,7 @@ export async function runLoopAdapter(
         return { kind: 'blocked', reason: 'planner produced no PR groups', outcomes: [] };
       }
       groups = outcome.groups;
-      await state.update((s) => ({ ...s, status: 'working', prGroups: groups }));
+      freshPlan = true;
     }
 
     // Step counter over the plan (claudetm parity): group N/M in group-mode, task N/M in prPerTask.
@@ -712,6 +713,12 @@ export async function runLoopAdapter(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { kind: 'blocked', reason: msg, outcomes: [] };
+    }
+    // Persist a freshly-planned roster only after it validates. Writing it before validation would
+    // leave a structurally-invalid plan in resumable state: every later run would take the resume
+    // branch, re-reject the same plan, and never replan.
+    if (freshPlan) {
+      await state.update((s) => ({ ...s, status: 'working', prGroups: groups }));
     }
     // PlanGraph captures its groups at construction, so rebuild it per call against the
     // mirror that workLoopState keeps in sync after every persisted update.

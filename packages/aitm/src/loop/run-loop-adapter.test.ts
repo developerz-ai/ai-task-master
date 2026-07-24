@@ -542,6 +542,23 @@ test('planner returns zero groups → blocked', async () => {
   if (result.kind === 'blocked') assert.match(result.reason, /no PR groups/);
 });
 
+test('fresh plan that fails validation → blocked, and is never persisted as resumable state', async () => {
+  // A structurally-invalid plan (here: a dangling dependency) must be rejected BEFORE it is written
+  // to state. Persisting it first would strand every later run on the resume branch, re-rejecting the
+  // same plan instead of replanning — so prGroups must stay empty.
+  const { state, current } = makeState();
+  const result = await runLoopAdapter(
+    makeInput(),
+    seams({
+      state,
+      planGroups: async () => ({ kind: 'ok', groups: [group('a', { dependsOn: ['ghost'] })] }),
+    }),
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /unknown group 'ghost'/);
+  assert.equal(current().prGroups.length, 0, 'rejected plan must not become resumable state');
+});
+
 // ---- Branch: success -------------------------------------------------------
 
 test('autoMerge success path → success; plan persisted to state', async () => {

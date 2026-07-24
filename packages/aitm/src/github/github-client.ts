@@ -169,6 +169,14 @@ export const CHECKS_TIMEOUT_MS = 120 * 60_000;
 export const CHECKS_START_WAIT_MS = 60_000;
 export const CHECKS_EMPTY_GRACE_MS = 60_000;
 
+// A single unparseable/failed `gh pr checks` read is noise — a truncated stdout, a network blip, a
+// transient gh error — and must not abandon a wait that can legitimately run for the full 120-minute
+// budget. waitForChecks tolerates this many CONSECUTIVE bad reads (any good read resets the count),
+// polling through them on the same backoff, and only then gives up with GhCommandFailed. A genuinely
+// broken environment (auth revoked mid-run, gh removed) fails every read and so still surfaces fast.
+// A checkless PR is NOT a failed read — see readCheckRows — so it never counts toward this.
+export const CHECKS_MAX_CONSECUTIVE_FAILURES = 5;
+
 // waitForChecks collapses the per-check buckets into one of three states; callers branch on it
 // instead of catching a throw. failedChecks is populated only when state is 'failure' (one entry
 // per failed/cancelled check) for diagnostics — the fix loop re-downloads full logs via
@@ -195,11 +203,14 @@ export class GitHubClient {
   // `signal` is the run's abort handle: it is bound into every child spawn (see withSignal), so a
   // SIGINT kills an in-flight `gh` rather than orphaning it. Poll cancellation is separate —
   // waitForChecks takes its own signal, since a caller may cancel a wait without ending the run.
+  // `now` is the wall clock waitForChecks anchors its timeout budget on. Optional — defaults to
+  // Date.now; tests inject a stepped fake so the 120-minute budget is reachable without real time.
   constructor(
     private readonly cwd: string,
     runCmd: RunCmd = defaultRunCmd,
     private readonly sleep: Sleep = defaultSleep,
     signal?: AbortSignal,
+    private readonly now: () => number = () => Date.now(),
   ) {
     this.runCmd = signal ? withSignal(runCmd, signal) : runCmd;
   }
@@ -312,12 +323,17 @@ export class GitHubClient {
   // abort, and the poll then returns a NON-VERDICT `pending` result instead of a settled one.
   // Callers must re-check the signal before acting on the result — see handleWaitingCi.
   async waitForChecks(pr: number, signal?: AbortSignal): Promise<CiResult> {
+    // The timeout budget is wall-clock, anchored here. Accumulating only the backoff `delay` (as this
+    // once did) left the 60s start grace below and every poll's subprocess wall-time uncounted, so a
+    // run of slow or near-deadline (5-min) `gh pr checks` calls could outlast the 120-minute ceiling
+    // many times over. `now()` includes all of it.
+    const start = this.now();
     // Let CI register its checks before the first poll, so a just-pushed PR doesn't read as
     // "passed" off an empty check set — see CHECKS_START_WAIT_MS.
     await this.sleep(CHECKS_START_WAIT_MS, signal);
     let delay = CHECKS_INITIAL_DELAY_MS;
-    let waited = 0;
     let emptyWaited = 0;
+    let consecutiveFailures = 0;
     while (true) {
       // A cancelled run stops here. The sleeps RESOLVE on abort rather than rejecting (see
       // defaultSleep), so without this check a SIGINT would only make the loop spin faster —
@@ -331,33 +347,43 @@ export class GitHubClient {
       // An abort kills the child mid-flight, so its stdout is truncated or empty — parsing it would
       // report "gh pr checks failed" for what is really a cancellation. Same non-verdict as above.
       if (signal?.aborted) return { state: 'pending', failedChecks: [], checks: [] };
-      // `gh pr checks` exits 8 when any check fails but still emits JSON on stdout. Treat any
-      // exit code as "command ran" if stdout parses; otherwise propagate the failure.
-      const rows = tryParseChecks(r.stdout);
-      if (!rows) {
-        throw new GhCommandFailed('gh pr checks', r);
+      // A checkless PR (→ empty set) and a transient read failure (→ null) are the two non-JSON
+      // exits; readCheckRows tells them apart so neither is misread as the other.
+      const rows = readCheckRows(r);
+      let sawEmptyRows = false;
+      if (rows) {
+        consecutiveFailures = 0;
+        const status = aggregateChecks(rows);
+        if (status === 'failure' || status === 'cancelled') {
+          return {
+            state: 'failure',
+            failedChecks: collectFailedChecks(rows),
+            checks: summarize(rows),
+          };
+        }
+        if (status !== 'pending')
+          return { state: 'success', failedChecks: [], checks: summarize(rows) };
+        // An empty check set aggregates to pending: CI still hasn't registered, or the PR has none.
+        // Once it has stayed empty past the grace, the PR genuinely has no checks and is mergeable.
+        if (rows.length === 0 && emptyWaited >= CHECKS_EMPTY_GRACE_MS) {
+          return { state: 'success', failedChecks: [], checks: [] };
+        }
+        sawEmptyRows = rows.length === 0;
+      } else {
+        // One unparseable read is noise; a run of them is a real break. Poll through up to
+        // CHECKS_MAX_CONSECUTIVE_FAILURES in a row, then surface the last failure.
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= CHECKS_MAX_CONSECUTIVE_FAILURES) {
+          throw new GhCommandFailed('gh pr checks', r);
+        }
       }
-      const status = aggregateChecks(rows);
-      if (status === 'failure' || status === 'cancelled') {
-        return {
-          state: 'failure',
-          failedChecks: collectFailedChecks(rows),
-          checks: summarize(rows),
-        };
-      }
-      if (status !== 'pending')
-        return { state: 'success', failedChecks: [], checks: summarize(rows) };
-      // An empty check set aggregates to pending: CI still hasn't registered. Once it has stayed
-      // empty past the grace, the PR genuinely has no checks configured and is mergeable.
-      if (rows.length === 0 && emptyWaited >= CHECKS_EMPTY_GRACE_MS) {
-        return { state: 'success', failedChecks: [], checks: [] };
-      }
-      if (waited >= CHECKS_TIMEOUT_MS) {
-        throw new CiFailed(`PR #${pr} checks still pending after ${Math.round(waited / 1000)}s`);
+      const elapsed = this.now() - start;
+      if (elapsed >= CHECKS_TIMEOUT_MS) {
+        throw new CiFailed(`PR #${pr} checks still pending after ${Math.round(elapsed / 1000)}s`);
       }
       await this.sleep(delay, signal);
-      waited += delay;
-      emptyWaited = rows.length === 0 ? emptyWaited + delay : 0;
+      // A failed read is not an empty check set, so it resets the empty grace rather than advancing it.
+      emptyWaited = sawEmptyRows ? emptyWaited + delay : 0;
       delay = Math.min(delay * 2, CHECKS_MAX_DELAY_MS);
     }
   }
@@ -783,6 +809,24 @@ function tryParseChecks(stdout: string): CheckRow[] | null {
   }
   const parsed = ChecksResponseSchema.safeParse(raw);
   return parsed.success ? parsed.data : null;
+}
+
+// A PR with no checks configured is not a failed poll. `gh pr checks --json` prints its rows to
+// stdout for every real check state (even exit 8 when one fails), but for a checkless PR it writes
+// nothing to stdout and exits non-zero with "no checks reported on the '<branch>' branch" on stderr.
+// Match that exact case so it becomes an empty row set — anything else with an empty/garbage stdout
+// (an auth or network error) must stay a failure, not be waved through as a mergeable "no checks".
+function isNoChecksReported(r: RunCmdResult): boolean {
+  return r.exitCode !== 0 && r.stdout.trim() === '' && /no checks reported/i.test(r.stderr);
+}
+
+// One poll's rows, or null when the read itself failed and should be retried. Collapses a checkless
+// PR to an empty set (→ enters CHECKS_EMPTY_GRACE_MS) and leaves genuine read failures as null (→
+// counted against CHECKS_MAX_CONSECUTIVE_FAILURES), so waitForChecks never confuses the two.
+function readCheckRows(r: RunCmdResult): CheckRow[] | null {
+  const rows = tryParseChecks(r.stdout);
+  if (rows) return rows;
+  return isNoChecksReported(r) ? [] : null;
 }
 
 const BUCKET_TO_STATUS: Record<CheckBucket, CheckStatus> = {

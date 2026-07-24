@@ -4,6 +4,7 @@ import { CiFailed, GhCliMissing, MergeConflict } from './errors.ts';
 import {
   CHECKS_EMPTY_GRACE_MS,
   CHECKS_INITIAL_DELAY_MS,
+  CHECKS_MAX_CONSECUTIVE_FAILURES,
   CHECKS_MAX_DELAY_MS,
   CHECKS_START_WAIT_MS,
   CHECKS_TIMEOUT_MS,
@@ -61,6 +62,27 @@ function makeSleep(onSleep?: (ms: number) => void): {
     onSleep?.(ms);
   };
   return { sleep, delays, signals };
+}
+
+// A sleep whose delays also advance a fake wall clock, paired with the `now` to inject as the
+// client's clock — so waitForChecks' Date.now-anchored timeout budget is reachable in tests without
+// real time. `advance` models non-sleep wall-time (e.g. a slow subprocess) crossing the budget.
+function makeClock(): {
+  sleep: Sleep;
+  now: () => number;
+  delays: number[];
+  advance: (ms: number) => void;
+} {
+  let clock = 0;
+  const delays: number[] = [];
+  const advance = (ms: number): void => {
+    clock += ms;
+  };
+  const sleep: Sleep = async (ms) => {
+    delays.push(ms);
+    advance(ms);
+  };
+  return { sleep, now: () => clock, delays, advance };
 }
 
 function findFieldValue(args: readonly string[], flag: '-f' | '-F', key: string): string | null {
@@ -589,13 +611,12 @@ test('waitForChecks reports a cancelled bucket as a failure CiResult', async () 
 });
 
 test('waitForChecks throws CiFailed once the poll timeout budget is exhausted', async () => {
-  // Feed only-pending replies so accumulated backoff crosses CHECKS_TIMEOUT_MS and the poll
-  // gives up. CiFailed is now reserved strictly for this terminal case.
+  // Only-pending replies: the injected wall clock advances through the start grace and each backoff
+  // until it crosses CHECKS_TIMEOUT_MS and the poll gives up. CiFailed is reserved strictly for this.
   const pending = JSON.stringify([{ bucket: 'pending', name: 'test', state: 'IN_PROGRESS' }]);
-  const count = Math.ceil(CHECKS_TIMEOUT_MS / CHECKS_MAX_DELAY_MS) + 10;
-  const { run } = makeRun(Array.from({ length: count }, () => ({ stdout: pending })));
-  const { sleep, delays } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
+  const { run } = makeRun(() => ({ stdout: pending }));
+  const { sleep, now, delays } = makeClock();
+  const g = new GitHubClient('/tmp/repo', run, sleep, undefined, now);
   await assert.rejects(() => g.waitForChecks(1), CiFailed);
   assert.ok(
     delays.reduce((sum, d) => sum + d, 0) >= CHECKS_TIMEOUT_MS,
@@ -639,11 +660,101 @@ test('waitForChecks: abort mid-poll → stops after the in-flight poll, never ti
   );
 });
 
-test('waitForChecks throws on unparseable stdout', async () => {
-  const { run } = makeRun([{ exitCode: 1, stdout: '', stderr: 'auth required' }]);
+test('waitForChecks: a transient unparseable read is tolerated, not fatal', async () => {
+  // One bad read — a truncated stdout, a network blip — must not abandon a wait that can run for the
+  // full 120-minute budget. Poll through it and let the next good read settle the verdict.
+  const passing = JSON.stringify([{ bucket: 'pass', name: 'test', state: 'SUCCESS' }]);
+  const { run, calls } = makeRun([
+    { exitCode: 1, stdout: '', stderr: 'error connecting to api.github.com' },
+    { stdout: passing },
+  ]);
+  const { sleep } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  const result = await g.waitForChecks(1);
+  assert.equal(result.state, 'success');
+  assert.equal(calls.length, 2, 'retried the failed read instead of throwing on it');
+});
+
+test('waitForChecks: throws GhCommandFailed after N consecutive failed reads', async () => {
+  // A persistent break (garbage every poll: an auth revocation, a wedged network) surfaces once the
+  // consecutive-failure budget is spent — not silently waved through as a mergeable "no checks".
+  const { run, calls } = makeRun(() => ({
+    exitCode: 1,
+    stdout: '',
+    stderr: 'error connecting to api.github.com',
+  }));
   const { sleep } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
   await assert.rejects(() => g.waitForChecks(1), /gh pr checks failed/);
+  assert.equal(
+    calls.length,
+    CHECKS_MAX_CONSECUTIVE_FAILURES,
+    'gave up only after N consecutive failures',
+  );
+});
+
+test('waitForChecks: a good read resets the consecutive-failure count', async () => {
+  // N-1 failures, one pending success, then N-1 more failures must NOT throw — the good poll resets
+  // the run, so neither burst on its own reaches the threshold.
+  const fail: Reply = { exitCode: 1, stdout: '', stderr: 'error connecting to api.github.com' };
+  const pending: Reply = {
+    stdout: JSON.stringify([{ bucket: 'pending', name: 'test', state: 'QUEUED' }]),
+  };
+  const passing: Reply = {
+    stdout: JSON.stringify([{ bucket: 'pass', name: 'test', state: 'SUCCESS' }]),
+  };
+  const replies: Reply[] = [];
+  for (let i = 0; i < CHECKS_MAX_CONSECUTIVE_FAILURES - 1; i++) replies.push({ ...fail });
+  replies.push(pending);
+  for (let i = 0; i < CHECKS_MAX_CONSECUTIVE_FAILURES - 1; i++) replies.push({ ...fail });
+  replies.push(passing);
+  const { run } = makeRun(replies);
+  const { sleep } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  const result = await g.waitForChecks(1);
+  assert.equal(result.state, 'success');
+});
+
+test('waitForChecks: a checkless PR (gh "no checks reported") resolves to success after the grace', async () => {
+  // gh exits non-zero with an empty stdout and "no checks reported on the '<branch>' branch" on
+  // stderr for a PR with no checks configured. That is an empty row set, not a failure: it must
+  // wait out the empty grace and then be mergeable — never throw, never insta-succeed.
+  const { run, calls } = makeRun(() => ({
+    exitCode: 1,
+    stdout: '',
+    stderr: "no checks reported on the 'feature/x' branch",
+  }));
+  const { sleep, delays } = makeSleep();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  const result = await g.waitForChecks(3);
+  assert.equal(result.state, 'success');
+  assert.deepEqual(result.checks, []);
+  assert.ok(calls.length > 1, 'did not insta-succeed on the first empty read');
+  const emptyPollWait = delays.slice(1).reduce((sum, d) => sum + d, 0);
+  assert.ok(
+    emptyPollWait >= CHECKS_EMPTY_GRACE_MS,
+    'waited the full empty grace before deeming the PR checkless',
+  );
+});
+
+test('waitForChecks: the timeout budget counts the start grace and subprocess wall-time, not just backoff', async () => {
+  // Model each `gh pr checks` as a near-deadline (5-min) subprocess by advancing the clock inside the
+  // run stub. Anchored on the wall clock, that subprocess time (plus the 60s start grace) crosses
+  // CHECKS_TIMEOUT_MS even though the accumulated backoff alone never would — the exact accounting
+  // gap (`waited += delay`) this guards against.
+  const pending = JSON.stringify([{ bucket: 'pending', name: 'test', state: 'IN_PROGRESS' }]);
+  const { sleep, now, delays, advance } = makeClock();
+  const run: RunCmd = async () => {
+    advance(DEFAULT_CMD_TIMEOUT_MS);
+    return { stdout: pending, stderr: '', exitCode: 0 };
+  };
+  const g = new GitHubClient('/tmp/repo', run, sleep, undefined, now);
+  await assert.rejects(() => g.waitForChecks(1), CiFailed);
+  const backoffOnly = delays.slice(1).reduce((sum, d) => sum + d, 0);
+  assert.ok(
+    backoffOnly < CHECKS_TIMEOUT_MS,
+    'backoff sleeps alone never reached the budget — subprocess and start-grace time did',
+  );
 });
 
 type GqlThread = {

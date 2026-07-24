@@ -190,12 +190,74 @@ test('saveCiFailures: a crash mid-write leaves no partial or orphan-tmp file (at
   }
 });
 
-test('clear removes a PR context dir', async () => {
+const oneThread: ReviewThread[] = [
+  {
+    id: 't1',
+    isResolved: false,
+    path: 'src/a.ts',
+    comments: [{ id: 'c1', body: 'fix this', author: 'rabbit' }],
+  },
+];
+
+test('clearCi removes only the ci/ dir, leaving comments/ and the ledger', async () => {
   const dir = await tempDir();
   try {
     const store = new PrContextStore(dir.path);
     await store.saveCiFailures(9, [{ check: 'x', logs: 'y' }]);
-    await store.clear(9);
+    await store.saveComments(9, oneThread);
+    await store.recordAddressedThreads(9, ['t1']);
+
+    await store.clearCi(9);
+
+    await assert.rejects(() => readdir(join(store.prDir(9), 'ci')), 'ci/ is gone');
+    assert.ok((await readdir(join(store.prDir(9), 'comments'))).length > 0, 'comments/ survives');
+    assert.deepEqual([...(await store.readAddressedThreads(9))], ['t1'], 'ledger survives');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('clearComments removes only the comments/ dir, leaving ci/ and the ledger', async () => {
+  const dir = await tempDir();
+  try {
+    const store = new PrContextStore(dir.path);
+    await store.saveCiFailures(9, [{ check: 'x', logs: 'y' }]);
+    await store.saveComments(9, oneThread);
+    await store.recordAddressedThreads(9, ['t1']);
+
+    await store.clearComments(9);
+
+    await assert.rejects(() => readdir(join(store.prDir(9), 'comments')), 'comments/ is gone');
+    assert.ok((await readdir(join(store.prDir(9), 'ci'))).length > 0, 'ci/ survives');
+    assert.deepEqual([...(await store.readAddressedThreads(9))], ['t1'], 'ledger survives');
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('clearCi/clearComments preserve the addressed-thread ledger across a re-download', async () => {
+  const dir = await tempDir();
+  try {
+    const store = new PrContextStore(dir.path);
+    await store.recordAddressedThreads(9, ['t1', 't2']);
+    // One CI-fix pass: clear both subdirs, then re-download fresh context.
+    await store.clearCi(9);
+    await store.clearComments(9);
+    await store.saveCiFailures(9, [{ check: 'x', logs: 'y' }]);
+    // The ledger written before the pass is still readable — freshThreads keeps skipping t1/t2.
+    assert.deepEqual([...(await store.readAddressedThreads(9))].sort(), ['t1', 't2']);
+  } finally {
+    await dir.cleanup();
+  }
+});
+
+test('clearCi/clearComments are no-ops when nothing was downloaded', async () => {
+  const dir = await tempDir();
+  try {
+    const store = new PrContextStore(dir.path);
+    // rm force:true → clearing a never-written PR must not throw.
+    await store.clearCi(9);
+    await store.clearComments(9);
     await assert.rejects(() => readdir(store.prDir(9)));
   } finally {
     await dir.cleanup();

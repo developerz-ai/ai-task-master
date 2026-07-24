@@ -71,7 +71,8 @@ export type TakeOverGithub = {
 // satisfies this; tests pass a stub. Optional on the flow input — when omitted, nothing is
 // downloaded and the CI-fix Worker falls back to its generic "read the CI logs via gh" task.
 export type PrContextPort = {
-  clear(pr: number): Promise<void>;
+  clearCi(pr: number): Promise<void>;
+  clearComments(pr: number): Promise<void>;
   saveCiFailures(
     pr: number,
     failures: ReadonlyArray<{ check: string; logs: string }>,
@@ -218,7 +219,9 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
     //    Re-downloaded each iteration so the Worker never reads stale logs from a prior push.
     let ciLogsDir: string | null = null;
     if (input.prContext) {
-      await input.prContext.clear(input.pr);
+      // Scoped clears so the addressed-thread ledger survives the re-download each iteration.
+      await input.prContext.clearCi(input.pr);
+      await input.prContext.clearComments(input.pr);
       if ((ciStatus === 'failure' || ciStatus === 'cancelled') && input.github.getFailedCiLogs) {
         const failures = await input.github.getFailedCiLogs(input.pr);
         ciLogsDir = await input.prContext.saveCiFailures(input.pr, failures);

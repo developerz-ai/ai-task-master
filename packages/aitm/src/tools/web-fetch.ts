@@ -148,14 +148,50 @@ function isPrivateOrLoopbackHost(h: string): boolean {
     // Unrecognized ::ffff: form — block as a safety net rather than fall through.
     return true;
   }
+  // NAT64 (64:ff9b::/96) embeds an IPv4 address in the low 32 bits — same shape as ::ffff:.
+  if (h.startsWith('64:ff9b::')) {
+    const tail = h.slice(9);
+    const dotted = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(tail);
+    if (dotted?.[1]) return isPrivateOrLoopbackHost(dotted[1]);
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+    if (hex?.[1] && hex[2]) {
+      const high = parseInt(hex[1], 16);
+      const low = parseInt(hex[2], 16);
+      const ipv4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+      return isPrivateOrLoopbackHost(ipv4);
+    }
+    // Unrecognized NAT64 form — block as a safety net rather than fall through.
+    return true;
+  }
+  // 6to4 (2002::/16) embeds an IPv4 address in the next 32 bits after the prefix.
+  if (h.startsWith('2002:')) {
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})/.exec(h.slice(5));
+    if (hex?.[1] && hex[2]) {
+      const high = parseInt(hex[1], 16);
+      const low = parseInt(hex[2], 16);
+      const ipv4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+      return isPrivateOrLoopbackHost(ipv4);
+    }
+    // Unrecognized 6to4 form — block as a safety net rather than fall through.
+    return true;
+  }
   const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
   if (ipv4) {
     const a = Number(ipv4[1]);
     const b = Number(ipv4[2]);
+    const c = Number(ipv4[3]);
     if (a === 0 || a === 10 || a === 127) return true;
     if (a === 169 && b === 254) return true;
     if (a === 172 && b >= 16 && b <= 31) return true;
     if (a === 192 && b === 168) return true;
+    // CGNAT (100.64.0.0/10) — carrier-grade NAT space, not publicly routable.
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    // IETF protocol assignments (192.0.0.0/24).
+    if (a === 192 && b === 0 && c === 0) return true;
+    // Benchmarking (198.18.0.0/15).
+    if (a === 198 && (b === 18 || b === 19)) return true;
+    // Multicast (224.0.0.0/4) and reserved/future use (240.0.0.0/4, includes 255.255.255.255).
+    if (a >= 224) return true;
   }
   // IPv6 unique-local fc00::/7, link-local fe80::/10 — only meaningful on IPv6 literals,
   // otherwise we'd block valid public domains like `fc-example.com`.

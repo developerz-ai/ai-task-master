@@ -4,7 +4,7 @@
 // Every failure degrades to a no-op: observability must never break a run.
 
 import type { EventHint, ErrorEvent as SentryEvent } from '@sentry/node';
-import { scrubSecrets } from '../logger/secret-scrubber.ts';
+import { redactInPlace } from '../logger/redact.ts';
 
 export type ErrorReporter = {
   // Record an error for delivery. A no-op when reporting is disabled.
@@ -25,27 +25,14 @@ export function dsnFromEnv(env: Record<string, string | undefined>): string | un
   return dsn !== undefined && dsn.trim() !== '' ? dsn : undefined;
 }
 
-// Scrub secret-shaped substrings (tokens, bearer/basic headers, token-bearing URLs) out of an
-// event before it leaves the process. Key-name redaction (Logger.redact) catches structured
-// fields; this catches secrets embedded in free text — error messages, stack frames, request
-// URLs — which GlitchTip events carry plenty of. Exported for unit testing.
+// Apply the shared redaction policy to every field of an event before it leaves the process:
+// key-name redaction for structured payloads (`extra`, `tags`, `contexts`, `user`, request
+// headers/cookies, stack-frame locals — where a credential sits under its own name), plus
+// free-text scrubbing of every remaining string (messages, frame paths, source context, URLs).
+// `beforeSend` is the only egress filter, so the walk is exhaustive rather than field-by-field:
+// any field a future SDK version adds is covered by construction. Exported for unit testing.
 export function scrubEvent(event: SentryEvent): SentryEvent {
-  if (event.message !== undefined) {
-    event.message = scrubSecrets(event.message);
-  }
-  for (const exception of event.exception?.values ?? []) {
-    if (exception.value !== undefined) {
-      exception.value = scrubSecrets(exception.value);
-    }
-  }
-  if (event.request?.url !== undefined) {
-    event.request.url = scrubSecrets(event.request.url);
-  }
-  for (const breadcrumb of event.breadcrumbs ?? []) {
-    if (breadcrumb.message !== undefined) {
-      breadcrumb.message = scrubSecrets(breadcrumb.message);
-    }
-  }
+  redactInPlace(event);
   return event;
 }
 

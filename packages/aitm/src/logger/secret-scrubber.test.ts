@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { clearRegisteredSecrets, registerSecretValues } from './secret-registry.ts';
 import { scrubSecrets } from './secret-scrubber.ts';
 
 test('scrubSecrets: redacts Bearer token, keeps the scheme prefix', () => {
@@ -33,6 +34,72 @@ test('scrubSecrets: redacts basic-auth URL credentials, keeps scheme and host', 
     scrubSecrets('cloning https://user:hunter2@github.com/org/repo.git'),
     'cloning https://[REDACTED]github.com/org/repo.git',
   );
+});
+
+test('scrubSecrets: redacts GitHub PAT tokens', () => {
+  assert.equal(
+    scrubSecrets('token github_pat_abc123def456ghi789jkl012mnopqrstuv used'),
+    'token github_pat_[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts Stripe _live_ and _test_ variants', () => {
+  assert.equal(
+    scrubSecrets('key sk_live_abc123def456ghij leaked'),
+    'key sk_live_[REDACTED] leaked',
+  );
+  assert.equal(
+    scrubSecrets('key pk_test_abc123def456ghi789jkl012mnopqrstuv leaked'),
+    'key pk_test_[REDACTED] leaked',
+  );
+});
+
+test('scrubSecrets: redacts Slack xapp- app tokens', () => {
+  assert.equal(
+    scrubSecrets('token xapp-abc123def456ghi789jkl012mnopqrstuv used'),
+    'token xapp-[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts GitLab glpat- tokens', () => {
+  assert.equal(
+    scrubSecrets('token glpat-abc123def456ghi789jkl012mnopqrstuv used'),
+    'token glpat-[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts Google AIza API keys', () => {
+  assert.equal(
+    scrubSecrets('key AIza_abc123def456ghi789jkl012mnopqrstuv used'),
+    'key AIza[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts Hugging Face hf_ tokens', () => {
+  assert.equal(
+    scrubSecrets('token hf_abc123def456ghi789jkl012mnopqrstuv used'),
+    'token hf_[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts npm_ tokens', () => {
+  assert.equal(
+    scrubSecrets('token npm_abc123def456ghi789jkl012mnopqrstuv used'),
+    'token npm_[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts a registered literal key alongside pattern matches', () => {
+  clearRegisteredSecrets();
+  try {
+    registerSecretValues(['9c14b7ad2e5f4801']);
+    assert.equal(
+      scrubSecrets('POST https://llm.internal/v1 key=9c14b7ad2e5f4801 auth=Bearer sk-abcdef123456'),
+      'POST https://llm.internal/v1 key=[REDACTED] auth=Bearer [REDACTED]',
+    );
+  } finally {
+    clearRegisteredSecrets();
+  }
 });
 
 test('scrubSecrets: plain text with no secrets passes through unchanged', () => {

@@ -61,7 +61,10 @@ Not used. Ever. `aitm` does not call Anthropic, does not read `~/.claude/.creden
 
 ## Security
 
-- Keys never logged. `Logger` redacts any field whose name matches `/key|token|secret|authorization/i`.
+- Keys never logged. Three layers, all sharing one scrubber, cover every output channel (logs, the progress stream, GlitchTip error reports):
+  1. **Key-name redaction** — any field whose name matches `/key|token|secret|authorization/i` is dropped.
+  2. **Shape matching** — secret-shaped substrings in free text (`Bearer …`, `sk-…`, `ghp_…`, JWTs, `?api_key=…`, URL basic-auth) are redacted wherever they appear.
+  3. **Literal-value redaction** — at startup `ConfigLoader.resolve` registers the exact provider keys this machine is configured with (`OPENROUTER_API_KEY`, the global `openrouterApiKey`, and **every** profile's key, not just the active one). This is what covers keys from arbitrary OpenAI-compatible endpoints, which have no shape to match on. A project config's `openrouterApiKey` is deliberately **not** registered: it is attacker-controlled, and registering it would let a hostile repo blank arbitrary text out of the operator's logs.
 - `config.snapshot.json` in `.ai-task-master/` stores the key **with the value redacted** — only the resolution source is recorded for debugging.
 - SRP: only `ConfigLoader` reads the JSON config files; only `Credentials` constructs model handles; only `GitHubClient` shells `gh`. No module crosses these boundaries.
 

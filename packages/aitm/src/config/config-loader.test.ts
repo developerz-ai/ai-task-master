@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
+import { clearRegisteredSecrets } from '../logger/secret-registry.ts';
+import { scrubSecrets } from '../logger/secret-scrubber.ts';
 import { ConfigLoader, DEFAULT_BASH_RULES } from './config-loader.ts';
 
 type Temp = { path: string; cleanup: () => Promise<void> };
@@ -1588,4 +1590,52 @@ test('profile: no activeProfile leaves resolution identical to before (back-comp
   assert.equal(resolved.apiKeySource, 'env');
   assert.equal(resolved.activeProfile, undefined);
   assert.deepEqual(resolved.models, DEFAULT_MODELS);
+});
+
+test('resolve: registers env + global + every profile key for literal redaction, never the project key', async () => {
+  // Keys for arbitrary OpenAI-compatible endpoints have no vendor shape, so the scrubber can only
+  // catch them once resolve() has registered their literal values.
+  const envKey = 'env-2f8c41a9be07d365';
+  const globalKey = 'global-7b1e40dc92a5f6';
+  const activeKey = 'active-58ae19f3c60b74';
+  const idleKey = 'idle-c3d70a4e15f8b29';
+  const projectKey = 'project-9e2f7c50ab134d';
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    clearRegisteredSecrets();
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: globalKey,
+      activeProfile: 'live',
+      profiles: {
+        live: { openrouterApiKey: activeKey },
+        spare: { openrouterApiKey: idleKey },
+      },
+    });
+    await writeProjectConfig(cwd.path, { openrouterApiKey: projectKey });
+    const loader = new ConfigLoader(
+      cwd.path,
+      home.path,
+      { OPENROUTER_API_KEY: envKey },
+      {
+        warn: () => {},
+      },
+    );
+    await loader.resolve({});
+
+    for (const key of [envKey, globalKey, activeKey, idleKey]) {
+      assert.equal(scrubSecrets(`calling with ${key}`), 'calling with [REDACTED]');
+    }
+    // A project config is attacker-controlled: registering its literal would let a hostile repo
+    // blank arbitrary text out of the operator's logs.
+    assert.equal(
+      scrubSecrets(`calling with ${projectKey}`),
+      `calling with ${projectKey}`,
+      'project-scope key is never registered',
+    );
+  } finally {
+    clearRegisteredSecrets();
+    await home.cleanup();
+    await cwd.cleanup();
+  }
 });

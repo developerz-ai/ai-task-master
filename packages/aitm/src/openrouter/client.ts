@@ -96,6 +96,31 @@ export function parseModelCatalog(json: unknown): OpenRouterModel[] {
   return models;
 }
 
+// Shared fetch helper for model catalogs. Handles signal composition, error checking, and parsing.
+// `label` is used in error messages to identify which catalog failed.
+export async function fetchModelCatalog(
+  url: string,
+  headers: Record<string, string>,
+  label: string,
+  signal?: AbortSignal,
+): Promise<OpenRouterModel[]> {
+  const fetchSignal = catalogFetchSignal(signal);
+  try {
+    const res = await fetch(url, {
+      headers,
+      signal: fetchSignal.signal,
+    });
+    if (!res.ok) {
+      const excerpt = (await res.text()).slice(0, 500);
+      throw new Error(`${label} failed: ${res.status} ${res.statusText} — ${excerpt}`);
+    }
+    const json: unknown = await res.json();
+    return parseModelCatalog(json);
+  } finally {
+    fetchSignal.release();
+  }
+}
+
 // Both catalog fetches run at startup (ModelLimitsRegistry.preload), and an endpoint that accepts
 // the connection and then stalls would hang the whole run before the first task — fillFromReference's
 // try/catch guards a rejection, never a hang. Twenty seconds is generous for one keyless GET.
@@ -138,20 +163,11 @@ export class OpenRouterClient {
   ) {}
 
   async listModels(): Promise<OpenRouterModel[]> {
-    const fetchSignal = catalogFetchSignal(this.signal);
-    try {
-      const res = await fetch(`${this.baseUrl}/models`, {
-        headers: { Authorization: `Bearer ${this.apiKey}` },
-        signal: fetchSignal.signal,
-      });
-      if (!res.ok) {
-        const excerpt = (await res.text()).slice(0, 500);
-        throw new Error(`OpenRouter /models failed: ${res.status} ${res.statusText} — ${excerpt}`);
-      }
-      const json: unknown = await res.json();
-      return parseModelCatalog(json);
-    } finally {
-      fetchSignal.release();
-    }
+    return fetchModelCatalog(
+      `${this.baseUrl}/models`,
+      { Authorization: `Bearer ${this.apiKey}` },
+      'OpenRouter /models',
+      this.signal,
+    );
   }
 }

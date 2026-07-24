@@ -215,6 +215,25 @@ test('ModelLimitsRegistry: a partially-published catalog keeps its window and bo
   assert.equal(limits.pricingSource, 'reference');
 });
 
+test('ModelLimitsRegistry: missing maxOutputTokens is filled from reference', async () => {
+  // Some providers publish everything except max_completion_tokens, so it must be fetched from reference.
+  const registry = new ModelLimitsRegistry(
+    stubCatalog([
+      { id: 'm', context_length: 100_000, pricing: { prompt: '0.001', completion: '0.002' } },
+    ]),
+    stubCatalog([
+      {
+        id: 'x/m',
+        context_length: 100_000,
+        max_completion_tokens: 8_192,
+        pricing: { prompt: '0.001', completion: '0.002' },
+      },
+    ]),
+  );
+  const limits = await registry.forModel('m');
+  assert.equal(limits.maxOutputTokens, 8_192);
+});
+
 test('ModelLimitsRegistry: pricing is taken as a whole sheet, never half from each source', async () => {
   // A provider prompt rate paired with an OpenRouter completion rate describes no real price list.
   const registry = new ModelLimitsRegistry(
@@ -244,7 +263,14 @@ test('ModelLimitsRegistry: with nothing missing the reference is never fetched',
   // A native OpenRouter profile must pay no extra request.
   let fetched = 0;
   const registry = new ModelLimitsRegistry(
-    stubCatalog([{ id: 'm', context_length: 10, pricing: { prompt: '0.1', completion: '0.2' } }]),
+    stubCatalog([
+      {
+        id: 'm',
+        context_length: 10,
+        max_completion_tokens: 5,
+        pricing: { prompt: '0.1', completion: '0.2' },
+      },
+    ]),
     {
       listModels: async () => {
         fetched += 1;

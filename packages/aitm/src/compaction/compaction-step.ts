@@ -12,12 +12,8 @@
 import type { ModelMessage, ToolLoopAgentSettings, ToolSet } from 'ai';
 import type { LoggerLike } from '../logger/logger.ts';
 import { reportedInputTokens } from '../observability/usage-tracker.ts';
-import {
-  type Compactor,
-  effectiveInputTokens,
-  type LiveContextSize,
-  safeStringify,
-} from './compactor.ts';
+import { safeStringify } from '../serialization/safe-stringify.ts';
+import { type Compactor, effectiveInputTokens, type LiveContextSize } from './compactor.ts';
 
 // The concrete (non-optional) prepareStep function type for a given tool set — extracted from the
 // SDK's own settings so it matches createSubagent's field exactly (see the note in subagent.ts on

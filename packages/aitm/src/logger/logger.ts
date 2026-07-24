@@ -4,6 +4,7 @@
 
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { safeStringify } from '../serialization/safe-stringify.ts';
 import { redactCopy } from './redact.ts';
 import { scrubSecrets } from './secret-scrubber.ts';
 
@@ -103,7 +104,7 @@ export class Logger implements LoggerLike {
         ts,
         runId: this.runId,
       };
-      return `${JSON.stringify(record, bigintReplacer)}\n`;
+      return `${safeStringify(record, bigintReplacer)}\n`;
     } catch (err) {
       const fallback: LogRecord = {
         level: 'error',
@@ -113,7 +114,7 @@ export class Logger implements LoggerLike {
         originalMsg: msg,
         serializationError: err instanceof Error ? err.message : String(err),
       };
-      return `${JSON.stringify(fallback)}\n`;
+      return `${safeStringify(fallback)}\n`;
     }
   }
 

@@ -7,7 +7,6 @@ import {
   Compactor,
   effectiveInputTokens,
   type LiveContextSize,
-  safeStringify,
   usableInputTokens,
 } from './compactor.ts';
 
@@ -363,16 +362,4 @@ test('compact survives circular references in messages', async () => {
   b.self = a; // cycle: a.self -> b.self -> a
   const summary = await c.compact([a, b]);
   assert.equal(summary, '- summary');
-});
-
-// Issue #251: same false-cycle family as Logger.redact — a shared reference must serialize
-// normally; only a value that is its own ancestor is a cycle.
-test('safeStringify keeps shared references and replaces only true cycles', () => {
-  const shared = { reused: true };
-  const dag = { a: shared, b: shared };
-  assert.deepEqual(JSON.parse(safeStringify(dag)), { a: { reused: true }, b: { reused: true } });
-
-  const node: Record<string, unknown> = { name: 'root' };
-  node.self = node;
-  assert.deepEqual(JSON.parse(safeStringify(node)), { name: 'root', self: '[CYCLE]' });
 });

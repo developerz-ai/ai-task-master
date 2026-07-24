@@ -10,10 +10,12 @@
 
 import { access, mkdir, open, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import process from 'node:process';
 import type { LanguageModelUsage, ModelMessage } from 'ai';
 import { modelMessageSchema } from 'ai';
 import type { GroupStage } from '../domain/pr-group.ts';
 import { Logger } from '../logger/logger.ts';
+import { sanitizeFsToken } from './fs-safe-token.ts';
 
 const TRANSCRIPTS_DIR = 'transcripts';
 const PLANNER_SUBDIR = 'planner';
@@ -46,17 +48,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-// Filesystem-safe token from a planner-supplied group id (no separators/traversal), mirroring
-// PrContextStore.sanitize.
-function sanitize(s: string): string {
-  return s.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'unnamed';
-}
-
 // (subdir under transcripts/, filename prefix) for a target.
 function locate(target: TranscriptTarget): { subdir: string; prefix: string } {
   return 'planner' in target
     ? { subdir: PLANNER_SUBDIR, prefix: PLANNER_SUBDIR }
-    : { subdir: sanitize(target.group), prefix: target.stage };
+    : { subdir: sanitizeFsToken(target.group), prefix: target.stage };
 }
 
 function ordinalOf(file: string, prefix: string): number | null {

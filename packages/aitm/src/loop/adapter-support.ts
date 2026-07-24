@@ -4,6 +4,7 @@
 // its own leaf module (no imports from the other loop/* wiring files) so those three can depend on
 // it without forming an import cycle.
 
+import process from 'node:process';
 import {
   loadMemoryIndex,
   type MemoryIndexEntry,

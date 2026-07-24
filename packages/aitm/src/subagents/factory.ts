@@ -13,25 +13,14 @@ import type {
   SubagentConfig,
   SubagentStreamSink,
 } from '@developerz.ai/ai-claude-compat';
-import type {
-  LanguageModel,
-  LanguageModelUsage,
-  ProviderMetadata,
-  TimeoutConfiguration,
-  ToolLoopAgentSettings,
-  ToolSet,
-} from 'ai';
+import type { LanguageModel, TimeoutConfiguration, ToolLoopAgentSettings, ToolSet } from 'ai';
+import { type OnUsage, reportUsage } from '../observability/usage-sink.ts';
 
-// A subagent-usage sink (issue #114). Fired once per generate call with the result's `totalUsage`
-// (all steps), `response.modelId`, and the result's `providerMetadata` (issue #114 amendment, slice
-// 04b) — the channel a provider-reported `cache_discount`/cache-write rides beyond what
-// `LanguageModelUsage` carries. Fire-and-forget: a recording error must never break the run, so the
-// accumulation side (UsageTracker.record) swallows and this stays a plain void callback.
-export type OnUsage = (
-  usage: LanguageModelUsage,
-  modelId: string | undefined,
-  providerMetadata?: ProviderMetadata,
-) => void;
+// Re-exported so every existing importer of the subagent-usage sink (issue #114) keeps working —
+// the type and its dispatcher now live in observability/usage-sink.ts, a leaf module agent-config/
+// can depend on without reaching into subagents/. See that module for the full doc comment.
+export type { OnUsage };
+export { reportUsage };
 
 // Runaway backstop for a subagent's tool loop — NOT a work budget. Every subagent terminates when it
 // calls `submit` (`hasToolCall(SUBMIT_TOOL_NAME)` in createSubagent's stopWhen), so this cap only
@@ -139,24 +128,4 @@ export function prependContextBlock(contextBlock: string | undefined, prompt: st
 // the cached prefix (slice 04 §4). Shared by the planner/worker/reviewer prompt builders.
 export function appendReminderBlock(prompt: string, trailingBlock: string | undefined): string {
   return trailingBlock ? `${prompt}\n\n${trailingBlock}` : prompt;
-}
-
-// Feed a generate result's total usage + resolved model id + provider metadata to an optional sink
-// (issue #114, slice 04b). For the direct generateText / agent.generate call sites (worker editor +
-// manifest, orchestrator, style distiller); the schema-retry path meters inside compat.
-// Fire-and-forget — never breaks the run.
-export function reportUsage(
-  onUsage: OnUsage | undefined,
-  result: {
-    totalUsage: LanguageModelUsage;
-    response: { modelId: string };
-    providerMetadata?: ProviderMetadata | undefined;
-  },
-): void {
-  if (!onUsage) return;
-  try {
-    onUsage(result.totalUsage, result.response.modelId, result.providerMetadata);
-  } catch {
-    // observability must never break the run
-  }
 }

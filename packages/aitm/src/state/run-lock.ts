@@ -17,6 +17,7 @@ import type { FileHandle } from 'node:fs/promises';
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
+import process from 'node:process';
 import { z } from 'zod';
 
 export const RUN_LOCK_FILE = 'run.lock';

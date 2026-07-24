@@ -26,6 +26,8 @@ export type ToleratedFailure = {
   match?: 'exact' | 'contains';
 };
 
+import process from 'node:process';
+
 // The shape both predicates take: a check's reported name and its optional free-text description.
 export type ToleratedCheck = { name: string; description?: string | undefined };
 

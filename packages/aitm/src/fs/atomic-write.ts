@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import type { FileHandle } from 'node:fs/promises';
 import { open, rename, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import process from 'node:process';
 
 export async function atomicWrite(path: string, contents: string): Promise<void> {
   const tmp = `${path}.${randomUUID()}.tmp`;

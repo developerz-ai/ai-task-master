@@ -1,6 +1,7 @@
 // docs/github-integration.md, docs/auth.md §"GitHub"
 // Only module allowed to shell out to gh. Uses execa (docs/runtime.md — Bun.$ forbidden in src/).
 
+import process from 'node:process';
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
 import {

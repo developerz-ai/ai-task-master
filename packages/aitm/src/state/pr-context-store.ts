@@ -19,6 +19,7 @@ import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import type { ReviewThread } from '../github/schema.ts';
+import { sanitizeFsToken } from './fs-safe-token.ts';
 
 export type CiFailure = { check: string; logs: string };
 
@@ -60,7 +61,7 @@ export class PrContextStore {
     await mkdir(ciDir, { recursive: true });
     const used = new Map<string, number>();
     for (const { check, logs } of failures) {
-      const base = sanitize(check);
+      const base = sanitizeFsToken(check);
       // Disambiguate two jobs that sanitize to the same name (e.g. matrix legs).
       const n = used.get(base) ?? 0;
       used.set(base, n + 1);
@@ -91,7 +92,7 @@ export class PrContextStore {
         .join(`\n${'-'.repeat(40)}\n`);
       const header = `Review thread on ${path} (thread ${thread.id})\nPR: #${pr}\n${'='.repeat(60)}\n\n`;
       await atomicWrite(
-        join(commentsDir, `${String(i).padStart(3, '0')}_${sanitize(path)}.txt`),
+        join(commentsDir, `${String(i).padStart(3, '0')}_${sanitizeFsToken(path)}.txt`),
         header + body,
       );
     }
@@ -149,9 +150,4 @@ export class PrContextStore {
   private commentsDir(pr: number): string {
     return join(this.prDir(pr), 'comments');
   }
-}
-
-// Filesystem-safe token from a check name / file path.
-function sanitize(s: string): string {
-  return s.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'unnamed';
 }

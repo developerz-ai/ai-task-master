@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { LanguageModelUsage } from 'ai';
 import { DEFAULT_LLM_STEP_TIMEOUT_MS } from '../config/defaults.ts';
 import {
   appendReminderBlock,
   forwardInit,
   prependContextBlock,
-  reportUsage,
   type SubagentFactory,
   type SubagentInit,
   type WorkerSubagentInit,
@@ -23,44 +21,6 @@ test('SubagentInit / SubagentFactory types are exported (compile-time check)', (
 test('DEFAULT_LLM_STEP_TIMEOUT_MS is 900_000 and clears the 600s bash ceiling (issue #129)', () => {
   assert.equal(DEFAULT_LLM_STEP_TIMEOUT_MS, 900_000);
   assert.ok(DEFAULT_LLM_STEP_TIMEOUT_MS > 600_000, 'must exceed MAX_BASH_TIMEOUT_MS');
-});
-
-test('reportUsage forwards usage + modelId, and swallows a throwing sink (issue #114)', () => {
-  const result = {
-    totalUsage: { inputTokens: 10, outputTokens: 2 } as LanguageModelUsage,
-    response: { modelId: 'anthropic/opus' },
-  };
-  const seen: Array<{ usage: LanguageModelUsage; modelId: string | undefined }> = [];
-  reportUsage((usage, modelId) => seen.push({ usage, modelId }), result);
-  assert.equal(seen.length, 1);
-  assert.equal(seen[0]?.modelId, 'anthropic/opus');
-  assert.equal(seen[0]?.usage.inputTokens, 10);
-  // A throwing sink must never propagate — observability can't break a run.
-  assert.doesNotThrow(() =>
-    reportUsage(() => {
-      throw new Error('sink boom');
-    }, result),
-  );
-  // No sink → no-op.
-  assert.doesNotThrow(() => reportUsage(undefined, result));
-});
-
-test('reportUsage forwards providerMetadata when present, undefined when absent (slice 04b)', () => {
-  const withMeta = {
-    totalUsage: { inputTokens: 10, outputTokens: 2 } as LanguageModelUsage,
-    response: { modelId: 'anthropic/opus' },
-    providerMetadata: { openrouter: { usage: { cacheDiscount: 0.001 } } },
-  };
-  const seen: unknown[] = [];
-  reportUsage((_usage, _modelId, providerMetadata) => seen.push(providerMetadata), withMeta);
-  assert.deepEqual(seen[0], { openrouter: { usage: { cacheDiscount: 0.001 } } });
-
-  const withoutMeta = {
-    totalUsage: { inputTokens: 10, outputTokens: 2 } as LanguageModelUsage,
-    response: { modelId: 'anthropic/opus' },
-  };
-  reportUsage((_usage, _modelId, providerMetadata) => seen.push(providerMetadata), withoutMeta);
-  assert.equal(seen[1], undefined);
 });
 
 test('prependContextBlock: prepends the block with a blank-line separator, or returns the prompt unchanged (issue #106)', () => {

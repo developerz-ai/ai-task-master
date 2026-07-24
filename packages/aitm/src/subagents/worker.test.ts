@@ -21,6 +21,7 @@ import {
   labelEditorGroups,
   MANIFEST_SURVEY_BUDGET,
   MAX_FILES_PER_EDITOR,
+  parsePorcelainZ,
   type ReadFileInput,
   type ReadFileOutput,
   readOnlyStreak,
@@ -287,6 +288,42 @@ test('EDITOR_TOOL_ALLOWLIST lists every WorkerTools field (allowlist is the full
     ],
   );
   assert.equal(new Set(EDITOR_TOOL_ALLOWLIST).size, EDITOR_TOOL_ALLOWLIST.length, 'no duplicates');
+});
+
+test('parsePorcelainZ: regular changes yield one path each', () => {
+  assert.deepEqual(parsePorcelainZ(' M src/a.ts\0?? src/b.ts\0'), ['src/a.ts', 'src/b.ts']);
+});
+
+test('parsePorcelainZ: rename record returns BOTH dest and source (issue: -z rename handling)', () => {
+  // `git status --porcelain -z` emits a rename as `XY <dest>\0<src>\0` — the source is a BARE field
+  // with no `XY ` prefix. Slicing it like a status entry would corrupt or drop it; both paths must
+  // land in dirtyPaths so everyPlannedFileTouched sees the real baseline.
+  assert.deepEqual(parsePorcelainZ('R  src/new.ts\0src/old.ts\0'), ['src/new.ts', 'src/old.ts']);
+});
+
+test('parsePorcelainZ: copy record returns both dest and source', () => {
+  assert.deepEqual(parsePorcelainZ('C  dst.ts\0orig.ts\0'), ['dst.ts', 'orig.ts']);
+});
+
+test('parsePorcelainZ: rename detected in the work-tree column is handled too', () => {
+  assert.deepEqual(parsePorcelainZ(' R after.ts\0before.ts\0'), ['after.ts', 'before.ts']);
+});
+
+test('parsePorcelainZ: a rename does not swallow a following regular entry', () => {
+  assert.deepEqual(parsePorcelainZ('R  n.ts\0o.ts\0 M keep.ts\0'), ['n.ts', 'o.ts', 'keep.ts']);
+});
+
+test('parsePorcelainZ: a short bare source path is kept, not dropped by length', () => {
+  // The bare source is consumed as a whole field, so even a ≤3-char source survives (the old
+  // slice-every-field parser dropped it).
+  assert.deepEqual(parsePorcelainZ('R  newfile.ts\0ab\0'), ['newfile.ts', 'ab']);
+});
+
+test('parsePorcelainZ: paths with spaces survive unquoted (the point of -z)', () => {
+  assert.deepEqual(parsePorcelainZ('R  new file.ts\0old file.ts\0'), [
+    'new file.ts',
+    'old file.ts',
+  ]);
 });
 
 test('runWorker: prepends the contextBlock to the manifest (first user) message, ahead of the task text (issue #106)', async () => {

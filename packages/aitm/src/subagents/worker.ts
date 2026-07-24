@@ -880,23 +880,33 @@ type EditorOutcome = { changed: true; change: FileChange } | { changed: false; p
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
-// Parse porcelain output with `-z` flag (null-byte-separated format). Handles renames and quoted
-// paths correctly, unlike the newline-based format which breaks on special characters and renames.
-// Format: "XY<space>path<NUL>" for regular changes, "XY<space>oldpath<NUL>newpath<NUL>" for renames.
-// Returns all affected paths (both old and new for renames).
-function parsePorcelainZ(porcelainOutput: string): readonly string[] {
-  const entries = porcelainOutput.split('\0').filter((e) => e !== '');
+// Parse porcelain output from `git status --porcelain=v1 -z` (NUL-separated). Handles renames/copies
+// and quoted paths correctly, unlike the newline format which breaks on special characters and renames.
+// A regular change is one status field `XY<space>path`. A rename/copy is a status field naming the
+// DESTINATION followed by a BARE field (no `XY ` prefix) naming the source —
+// `XY<space><dest><NUL><src><NUL>` (with `-z` git emits destination first, then source). Returns every
+// affected path (both dest and src for renames/copies) so `dirtyPaths` builds the full baseline.
+// Exported for the unit test of the rename/copy case.
+export function parsePorcelainZ(porcelainOutput: string): readonly string[] {
+  const fields = porcelainOutput.split('\0').filter((f) => f !== '');
   const paths: string[] = [];
 
-  for (const entry of entries) {
-    if (entry.length <= 3) {
-      // Bare entry with no path (shouldn't happen, but skip if it does)
+  for (let i = 0; i < fields.length; i++) {
+    const entry = fields[i];
+    if (entry === undefined || entry.length <= 3) {
+      // A status field is `XY ` plus at least one path char; anything shorter is malformed — skip it.
       continue;
     }
-    // Status is first 2 chars, space is 3rd char. Path starts at index 3.
-    const path = entry.slice(3);
-    if (path !== '') {
-      paths.push(path);
+    // Status is the first 2 chars, a space is the 3rd; the path starts at index 3.
+    const status = entry.slice(0, 2);
+    const dest = entry.slice(3);
+    if (dest !== '') paths.push(dest);
+    // A rename (`R`) or copy (`C`) in either the index or work-tree column is followed by a bare
+    // source-path field with no `XY ` prefix — consume it whole and skip it so it is not mis-sliced.
+    if (status.includes('R') || status.includes('C')) {
+      const src = fields[i + 1];
+      if (src !== undefined && src !== '') paths.push(src);
+      i++;
     }
   }
 

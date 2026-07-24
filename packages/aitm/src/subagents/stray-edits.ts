@@ -5,6 +5,7 @@
 // never auto-resets uncommitted changes — a later `checkout -B` carries them onto whatever branch
 // comes next — so a stray edit surfaces post-merge as an uncommitted file unless it is dropped here.
 
+import { randomUUID } from 'node:crypto';
 import type { BashInput, BashOutput } from '@developerz.ai/ai-claude-compat';
 import type { Tool } from 'ai';
 import { STATE_DIR } from '../workspace/dirty-tree.ts';
@@ -30,7 +31,7 @@ export async function discardStrayEdits(
       command: `git -C ${wt} status --porcelain`,
       description: 'check for stray edits left by a non-committing subagent pass',
     },
-    { toolCallId: `stray-edits-status-${Date.now()}`, messages: [] },
+    { toolCallId: `stray-edits-status-${randomUUID()}`, messages: [] },
   );
   if (isAsyncIterable(out)) return;
   if (out.exitCode !== 0) return;
@@ -62,7 +63,7 @@ async function runBash(
 ): Promise<void> {
   const out = await exec(
     { command, description: 'stray-edit cleanup git step' },
-    { toolCallId: `stray-edits-bash-${Date.now()}`, messages: [] },
+    { toolCallId: `stray-edits-bash-${randomUUID()}`, messages: [] },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');

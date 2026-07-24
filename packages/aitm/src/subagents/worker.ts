@@ -426,7 +426,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
     if (input.verifyCommand) {
       // Verify gate: format + verify, one bounded fix pass, commit only when green. A red diff
       // never reaches the remote when the operator has configured a verify command (issue #122).
-      const gated = await commitWithVerify(agent, init, input, branch, planned.draftCommitMessage);
+      const gated = await commitWithVerify(agent, init, input, branch, planned);
       if (gated.kind === 'blocked') {
         // The verify gate's failed fix left its edits uncommitted — restore a clean tree.
         await discardStrayEdits(init.tools.bash, input.checkoutPath);
@@ -468,6 +468,11 @@ type PlanEditResult =
   | { kind: 'no-changes'; reason: string }
   | { kind: 'blocked'; reason: string }
   | { kind: 'error'; error: string };
+
+// A completed plan+edit pass: its recorded changes, draft message, and the conversation handle. The
+// verify gate needs all three — the handle to continue the fix pass from, the changes and message to
+// reconcile against what the commit ships.
+type PlannedEdit = Extract<PlanEditResult, { kind: 'ok' }>;
 
 // Phase 1 + Phase 2 only: plan the file manifest, then fan editors out over it. No verify, no
 // commit. Shared by the main pass and the single bounded verify fix pass — because the fix pass
@@ -607,7 +612,7 @@ async function commitWithVerify(
   init: WorkerSubagentInit<WorkerTools>,
   input: WorkerInput,
   branch: string,
-  message: string,
+  planned: PlannedEdit,
 ): Promise<{ kind: 'ok'; extraChanges: FileChange[] } | { kind: 'blocked'; reason: string }> {
   const exec = requireExec(init.tools.bash);
   // The group branch was already created by the first planAndEdit pass (branch-before-edit); verify
@@ -642,21 +647,25 @@ async function commitWithVerify(
     });
   }
 
-  let extraChanges: FileChange[] = [];
+  let fixChanges: FileChange[] = [];
   if (out.exitCode !== 0) {
     // One bounded fix pass. planAndEdit never verifies, so this cannot recurse. Its edits are
     // captured for the delivery; an empty/blocked fix manifest simply makes zero edits, and the
     // re-verify below is still authoritative (per the spec, a still-red gate blocks on the tail).
+    // Continue THIS pass's conversation (planned.handle), not input.priorHandle — that is an earlier
+    // CI-fix pass's handle (or unset), so replaying it would re-plan the fix from a conversation two
+    // passes stale instead of building on the manifest the first pass just produced (issue #107).
     const fixed = await planAndEdit(
       agent,
       init,
       {
         ...input,
         task: buildVerifyFixTask(input.group.id, out),
+        priorHandle: planned.handle,
       },
       branch,
     );
-    if (fixed.kind === 'ok') extraChanges = fixed.changes;
+    if (fixed.kind === 'ok') fixChanges = fixed.changes;
     await runFormat(exec, input);
     started = Date.now();
     out = await runVerify(exec, input);
@@ -669,8 +678,85 @@ async function commitWithVerify(
     }
   }
 
-  await stageAndCommit(exec, input, message);
-  return { kind: 'ok', extraChanges };
+  await stageAndCommit(exec, input, planned.draftCommitMessage);
+  // stageAndCommit commits the WHOLE tree, so the fix manifest is not the authoritative list of what
+  // shipped: a fix-pass editor's write, the formatter, or a phantom-adjacent edit all land in the
+  // commit even when no manifest named them, and a blocked/no-changes fix pass reports no changes yet
+  // may still have left committed edits. Derive the extras from the commit's own tree diff so
+  // delivery.changes names every committed file the first pass didn't already record (audit).
+  const committed = await committedFileChanges(exec, input.checkoutPath);
+  return { kind: 'ok', extraChanges: deriveExtraChanges(committed, planned.changes, fixChanges) };
+}
+
+// One committed file from the verify-gate commit's tree diff: its path and the change kind git
+// recorded (authoritative over any manifest's declared kind).
+type CommittedFile = { path: string; kind: FileChange['kind'] };
+
+// The files in the just-created verify-gate commit (HEAD vs its parent). stageAndCommit adds the whole
+// tree, so this — not the fix manifest — is the record of what actually shipped. Rename detection is
+// off (no -M), so a moved file reads as a delete plus a create, both kept.
+async function committedFileChanges(
+  exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
+  checkoutPath: string,
+): Promise<CommittedFile[]> {
+  const out = await exec(
+    {
+      command: `git -C ${shQuote(checkoutPath)} --no-optional-locks diff-tree --no-commit-id --name-status -r HEAD`,
+      description: 'list the files in the verify-gate commit',
+    },
+    { toolCallId: `worker-difftree-${Date.now()}`, messages: [] },
+  );
+  if (isAsyncIterable(out)) {
+    throw new Error('bash tool returned an async iterable; expected a single result');
+  }
+  if (out.exitCode !== 0) {
+    throw new Error(`git diff-tree failed (${out.exitCode})\n${out.stderr}`);
+  }
+  const committed: CommittedFile[] = [];
+  for (const line of out.stdout.split('\n')) {
+    const tab = line.indexOf('\t');
+    if (tab === -1) continue;
+    const path = line.slice(tab + 1).trim();
+    if (path === '') continue;
+    committed.push({ path, kind: statusToKind(line.slice(0, tab)) });
+  }
+  return committed;
+}
+
+// git diff-tree --name-status status letter → FileChange kind. `A` is a create and `D` a delete;
+// `M`/`R`/`C`/`T` and anything else are a modification of existing content for the delivery's purposes.
+function statusToKind(status: string): FileChange['kind'] {
+  const letter = status.trim().charAt(0);
+  if (letter === 'A') return 'create';
+  if (letter === 'D') return 'delete';
+  return 'modify';
+}
+
+// The summary attached to a committed file the fix manifest never named — the formatter's or a
+// phantom-adjacent write's doing. Files the fix manifest did name carry its own per-file summary.
+const VERIFY_FIX_SUMMARY = 'Changed by the verify fix pass';
+
+// Reconcile the committed tree diff against what the first pass already recorded: every committed file
+// the first pass did not name becomes an "extra" the delivery must carry. Prefer the fix manifest's
+// own summary for it, falling back to a generic note; the committed kind wins, since it is what git
+// recorded. Paths already in planned.changes are dropped — the first pass carries those.
+function deriveExtraChanges(
+  committed: readonly CommittedFile[],
+  plannedChanges: readonly FileChange[],
+  fixChanges: readonly FileChange[],
+): FileChange[] {
+  const plannedPaths = new Set(plannedChanges.map((c) => c.path));
+  const fixSummaries = new Map(fixChanges.map((c) => [c.path, c.summary]));
+  const extra: FileChange[] = [];
+  for (const file of committed) {
+    if (plannedPaths.has(file.path)) continue;
+    extra.push({
+      path: file.path,
+      kind: file.kind,
+      summary: fixSummaries.get(file.path) ?? VERIFY_FIX_SUMMARY,
+    });
+  }
+  return extra;
 }
 
 // Retries a botched `submit` up to this many times (matches the runWithSchemaRetry default).

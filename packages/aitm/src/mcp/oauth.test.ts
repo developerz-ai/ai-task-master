@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import {
@@ -14,30 +14,6 @@ import {
   parseCallback,
   performOAuthFlow,
 } from './oauth.ts';
-
-test('generateState produces cryptographically random values', () => {
-  const states = new Set<string>();
-  for (let i = 0; i < 100; i++) {
-    const state = randomBytes(32).toString('base64url');
-    states.add(state);
-    assert.strictEqual(state.length, 43);
-  }
-  assert.strictEqual(states.size, 100);
-});
-
-test('OAuthConfig has correct structure', () => {
-  const config: OAuthConfig = {
-    name: 'test-server',
-    type: 'http',
-    url: 'https://test.com',
-    headers: { Authorization: 'Bearer test-token' },
-  };
-
-  assert.strictEqual(config.name, 'test-server');
-  assert.strictEqual(config.type, 'http');
-  assert.strictEqual(config.url, 'https://test.com');
-  assert.strictEqual(config.headers.Authorization, 'Bearer test-token');
-});
 
 test('loopback host is the IPv4 literal, not localhost', () => {
   assert.strictEqual(LOOPBACK_HOST, '127.0.0.1');
@@ -138,30 +114,6 @@ test('performOAuthFlow sends the S256 code_verifier bound to the challenge on to
   } finally {
     globalThis.fetch = realFetch;
   }
-});
-
-test('OAuthOptions has correct structure', () => {
-  const options: OAuthOptions = {
-    serverUrl: 'https://example.com/mcp',
-    authUrl: 'https://example.com/oauth/authorize',
-    tokenUrl: 'https://example.com/oauth/token',
-    clientId: 'test-client',
-    clientSecret: 'test-secret',
-    scope: 'read write',
-    callbackUrl: 'http://127.0.0.1:8787/callback',
-    port: 8787,
-    timeout: 30000,
-  };
-
-  assert.strictEqual(options.serverUrl, 'https://example.com/mcp');
-  assert.strictEqual(options.authUrl, 'https://example.com/oauth/authorize');
-  assert.strictEqual(options.tokenUrl, 'https://example.com/oauth/token');
-  assert.strictEqual(options.clientId, 'test-client');
-  assert.strictEqual(options.clientSecret, 'test-secret');
-  assert.strictEqual(options.scope, 'read write');
-  assert.strictEqual(options.callbackUrl, 'http://127.0.0.1:8787/callback');
-  assert.strictEqual(options.port, 8787);
-  assert.strictEqual(options.timeout, 30000);
 });
 
 test('openBrowser swallows spawn errors on headless hosts', async () => {

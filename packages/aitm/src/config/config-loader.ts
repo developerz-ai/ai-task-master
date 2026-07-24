@@ -55,7 +55,7 @@ const CLAUDE_USER_FILE = '.claude.json';
 // `bashRules` is the one partially-trusted field: project scope may only TIGHTEN it, so its `allow`
 // entries are dropped and its denies merged rather than the whole field being stripped —
 // see stripProjectBashAllowRules.
-const UNTRUSTED_PROJECT_FIELDS = [
+export const UNTRUSTED_PROJECT_FIELDS = [
   {
     key: 'baseURL',
     reason: 'a project-set base URL could redirect inference and leak the API key',

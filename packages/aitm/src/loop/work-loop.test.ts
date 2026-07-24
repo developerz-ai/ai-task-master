@@ -403,6 +403,7 @@ function makeDeps(
     ...(overrides.prContext !== undefined ? { prContext: overrides.prContext } : {}),
     ...(overrides.selfReview !== undefined ? { selfReview: overrides.selfReview } : {}),
     ...(overrides.prPerTask !== undefined ? { prPerTask: overrides.prPerTask } : {}),
+    ...(overrides.adminMerge !== undefined ? { adminMerge: overrides.adminMerge } : {}),
     ...(overrides.mergeMethod !== undefined ? { mergeMethod: overrides.mergeMethod } : {}),
     ...(overrides.initialSessionCount !== undefined
       ? { initialSessionCount: overrides.initialSessionCount }
@@ -1404,6 +1405,101 @@ test('prPerTask + autoMerge: an unaddressable review thread blocks the group wit
   assert.equal(ghCalls.mergePr.length, 0, 'no merge while the thread is unaddressed');
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((p) => p.id === 'solo')?.status, 'blocked');
+});
+
+test('prPerTask + autoMerge: a persistently red PR blocks after maxCiFixAttempts fixes, not one', async () => {
+  // Regression: autoMergeFlow ran exactly one runCiFix + one recheck, ignoring maxCiFixAttempts. It
+  // now loops the shared ciOutcomePolicy like driveStages — up to the cap — before blocking, so
+  // prPerTask and the group-as-PR stage machine cap the recovery loop identically.
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
+  const { github, calls: ghCalls } = makeGithub({ checks: Array(5).fill(ciFailure), threads: [] });
+  const { state, updates } = makeState([group('solo')]);
+  const loop = new WorkLoop(
+    makeDeps({
+      orchestrator,
+      github,
+      state,
+      autoMerge: true,
+      prPerTask: true,
+      maxCiFixAttempts: 2,
+    }),
+  );
+  await loop.runGroup(group('solo'));
+
+  assert.equal(calls.runCiFix.length, 2, 'the fix loops up to the cap, not exactly once');
+  assert.equal(ghCalls.waitForChecks.length, 3, 'CI polled once before each fix, cap + 1 times');
+  assert.equal(ghCalls.mergePr.length, 0, 'a still-red PR is never merged');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'solo')?.status, 'blocked');
+});
+
+test('prPerTask + autoMerge: a red PR that goes green on the last allowed fix merges (cap boundary)', async () => {
+  // The cap allows N fixes, not N − 1: with maxCiFixAttempts 2 a PR that recovers on the 2nd fix
+  // must merge, not strand. Guards the same off-by-one the stage machine's cap-boundary test guards.
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
+  const { github, calls: ghCalls } = makeGithub({
+    checks: [ciFailure, ciFailure, ciSuccess],
+    threads: [],
+  });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, autoMerge: true, prPerTask: true, maxCiFixAttempts: 2 }),
+  );
+  await loop.runGroup(group('solo'));
+
+  assert.equal(calls.runCiFix.length, 2, 'both allowed fixes run');
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [7],
+    'the recovered PR merges on the last allowed attempt',
+  );
+});
+
+test('prPerTask + autoMerge: a CI poll timeout blocks the group (no --admin)', async () => {
+  // A waitForChecks CiFailed (checks never settled) blocks rather than merging a PR whose CI never
+  // completed — and, unlike the old one-shot flow, without spending a fix pass on a timeout.
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 9 });
+  const { github, calls: ghCalls } = makeGithub({
+    checks: [new CiFailed('checks did not settle')],
+    threads: [],
+  });
+  const { state, updates } = makeState([group('solo')]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prPerTask: true }),
+  );
+  await loop.runGroup(group('solo'));
+
+  assert.equal(calls.runCiFix.length, 0, 'a timeout blocks — no fix pass runs');
+  assert.equal(ghCalls.mergePr.length, 0, 'a PR whose CI never settled is never merged');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'solo')?.status, 'blocked');
+});
+
+test('prPerTask + autoMerge + --admin: a CI poll timeout skips past CI to review, then merges', async () => {
+  // The --admin CI-timeout override, previously honored only by the stage machine: a timeout
+  // force-advances past CI to reviews instead of blocking. Shared via ciOutcomePolicy.
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 9 });
+  const { github, calls: ghCalls } = makeGithub({
+    checks: [new CiFailed('checks did not settle')],
+    threads: [],
+  });
+  const loop = new WorkLoop(
+    makeDeps({
+      orchestrator,
+      github,
+      autoMerge: true,
+      prPerTask: true,
+      adminMerge: true,
+    }),
+  );
+  await loop.runGroup(group('solo'));
+
+  assert.equal(ghCalls.waitForChecks.length, 1, 'the timeout is not re-polled — it advances');
+  assert.equal(calls.runCiFix.length, 0, 'a timeout advances past CI, it does not run a fix');
+  assert.deepEqual(
+    ghCalls.mergePr.map((c) => c.pr),
+    [9],
+    '--admin force-advances the timeout to review and merges',
+  );
 });
 
 test('autoMerge: success path runs waitForChecks → mergePr and marks merged', async () => {

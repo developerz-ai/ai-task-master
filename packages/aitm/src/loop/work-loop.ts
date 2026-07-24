@@ -24,6 +24,7 @@ import { type BranchCleanup, branchCleanupMessage } from '../workspace/branch-cl
 import { perTaskBranch } from '../workspace/branch-name.ts';
 import { DirtyWorkingTree } from '../workspace/dirty-tree.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
+import { type CiRoute, chargeCiFixAttempt, routeCiPoll } from './ci-outcome-policy.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
 import { Mutex } from './mutex.ts';
 import type { SelfReviewResult } from './self-review.ts';
@@ -674,10 +675,15 @@ export class WorkLoop {
       if (stage === 'ci-failed') {
         // Charge one durable fix-attempt slot BEFORE dispatching the fix, so a crash mid-fix can't
         // hand the resumed run a fresh budget — the count is consumed at dispatch and persisted.
-        ctx.fixAttempts += 1;
+        const charge = chargeCiFixAttempt(
+          ctx.fixAttempts,
+          this.maxCiFixAttempts,
+          prNumberOf(ctx.group),
+        );
+        ctx.fixAttempts = charge.spent;
         ctx.group = { ...ctx.group, ciFixAttempts: ctx.fixAttempts };
-        if (ctx.fixAttempts > this.maxCiFixAttempts) {
-          ctx.blockedReason = `CI fix attempts exhausted after ${this.maxCiFixAttempts} passes for PR #${prNumberOf(ctx.group)} — needs human attention`;
+        if (charge.kind === 'exhausted') {
+          ctx.blockedReason = charge.reason;
           // Flag human-needed so a resume never resurrects this block (normalizeResumeStatus skips
           // it); a transient block, by contrast, is retried on the next `aitm start`.
           ctx.group = { ...ctx.group, stage: 'blocked', humanNeeded: true };
@@ -1141,28 +1147,42 @@ export class WorkLoop {
     baseBranch: string,
   ): Promise<void> {
     const { orchestrator, github } = this.deps;
-
-    // CI: wait for checks. On failure, run the shared fix session (Worker → rebase onto
-    // origin/<base> → force-with-lease push) so the fix reaches the remote BEFORE the recheck
-    // re-polls; without the push the recheck would poll stale CI and the merge would land the
-    // unfixed remote. runCiFix pushes; the old runWorker + finalizeCommit `--amend` only rewrote
-    // history locally, diverging from the pushed branch. A poll timeout (CiFailed) propagates; a
-    // fix that can't land, or still-red CI after it, is fatal for this flow.
     const signal = this.deps.signal;
-    const ci = await github.waitForChecks(pr.number, signal);
-    // A cancelled wait comes back 'pending', which reads as "not failing" and would fall straight
-    // through to the merge below. Stop the group instead.
-    this.throwIfCancelled();
-    if (ci.state === 'failure') {
+    const adminMerge = this.deps.adminMerge ?? false;
+
+    // CI recovery loop — the prPerTask twin of driveStages' waiting-ci ⇄ ci-failed cycle, sharing its
+    // ciOutcomePolicy so both honor --admin's CI-timeout override and the maxCiFixAttempts cap. Wait →
+    // route → maybe fix → re-wait, until CI is green (or --admin skips a timeout past CI), the fix
+    // can't land, or the budget is spent. The fix session pushes (Worker → rebase onto origin/<base> →
+    // force-with-lease) so each recheck polls the pushed fix, not stale remote CI. Each task PR gets a
+    // fresh budget: it merges before the next task runs, so there is nothing to carry across tasks
+    // (unlike the stage machine's single per-group PR, whose count persists onto PrGroup.ciFixAttempts).
+    let fixSpent = 0;
+    while (true) {
+      let route: CiRoute;
+      let timeout: CiFailed | undefined;
+      try {
+        const ci = await github.waitForChecks(pr.number, signal);
+        // A cancelled wait comes back 'pending', which would route as not-green and fall through to a
+        // fix (or past it to the merge). Stop the group instead.
+        this.throwIfCancelled();
+        route = routeCiPoll(ci.state, pr.number, adminMerge);
+      } catch (err) {
+        if (!(err instanceof CiFailed)) throw err;
+        timeout = err;
+        route = routeCiPoll(null, pr.number, adminMerge);
+      }
+      // green, or --admin force-advancing a timeout past CI → proceed to reviews/merge.
+      if (route.kind === 'proceed' || route.kind === 'advance') break;
+      // Timeout without --admin: block on the original CiFailed (its message names the poll window).
+      if (route.kind === 'block') throw timeout ?? new CiFailed(route.reason);
+      // route.kind === 'fix': charge the budget BEFORE spending an LLM call / a push, so an
+      // unfixable red PR blocks after maxCiFixAttempts passes instead of looping forever.
+      const charge = chargeCiFixAttempt(fixSpent, this.maxCiFixAttempts, pr.number);
+      fixSpent = charge.spent;
+      if (charge.kind === 'exhausted') throw new CiFailed(charge.reason);
       const fix = await orchestrator.runCiFix({ group, pr: pr.number, checkout, baseBranch });
-      if (fix.kind !== 'ok') {
-        throw ciFixFailedError(fix);
-      }
-      const recheck = await github.waitForChecks(pr.number, signal);
-      this.throwIfCancelled();
-      if (recheck.state === 'failure') {
-        throw new CiFailed(`PR #${pr.number} still failing after worker CI fix`);
-      }
+      if (fix.kind !== 'ok') throw ciFixFailedError(fix);
     }
 
     // Review: address any unresolved threads via the Reviewer. addressReviews pushes the Reviewer's

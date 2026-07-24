@@ -144,7 +144,7 @@ import { commitsAheadOfBase, runGit } from '../workspace/git-exec.ts';
 import { InPlaceCheckout } from '../workspace/in-place-checkout.ts';
 import { runFixSession } from './ci-fix.ts';
 import { buildConflictResolver } from './conflict-resolution.ts';
-import { Disposer } from './disposer.ts';
+import { Disposer, disposeQuietly } from './disposer.ts';
 import { makeProgressTee } from './progress-file.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
 import { runSelfReviewSession } from './self-review.ts';
@@ -775,17 +775,6 @@ export async function runLoopAdapter(
     return await loop.run();
   } finally {
     await disposeQuietly(disposer);
-  }
-}
-
-// Drain the run's releases without ever replacing the run's own outcome: a throw out of the adapter's
-// `finally` would swap a real result (or a real error) for a cleanup failure, and the abort reaper has
-// no caller left to catch anything at all. Report and move on.
-async function disposeQuietly(disposer: Disposer): Promise<void> {
-  try {
-    await disposer.disposeAll();
-  } catch (err) {
-    process.stderr.write(`warning: run cleanup failed: ${describeError(err).message}\n`);
   }
 }
 

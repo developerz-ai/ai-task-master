@@ -21,8 +21,9 @@ import { type AddProfileInput, ProfileManager } from '../config/profiles.ts';
 import type { CliOverrides, ConfigFile, Profile, ResolvedConfig } from '../config/schema.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
-import { createLlmFetch } from '../credentials/llm-fetch.ts';
+import { createLlmFetch, type LlmFetch } from '../credentials/llm-fetch.ts';
 import { defaultRunCmd, defaultSleep, GitHubClient } from '../github/github-client.ts';
+import { Disposer, disposeQuietly } from '../loop/disposer.ts';
 import { mergeFlowAdapter } from '../loop/merge-flow-adapter.ts';
 import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
@@ -150,6 +151,9 @@ export type StartCtx = {
   // the run's ModelLimitsRegistry, which fetches the provider catalog. Injected so tests that assert
   // on stdout don't depend on a network round-trip whose success changes what gets printed.
   modelBanner?: () => Promise<string>;
+  // The run's keep-alive transport factory. Defaults to `createLlmFetch`; injected so tests can pin
+  // that the handle is released on every exit path without opening a real socket pool.
+  makeLlmFetch?: () => Promise<LlmFetch | undefined>;
 };
 
 // Minimal slice of GitHubClient used during the take-over precondition path (branch
@@ -171,6 +175,8 @@ export type MergePrCtx = {
   // Abort handle, threaded into the take-over loop. When aborted, the flow returns `cancelled`
   // → exit code 2. The CLI can wire this to a SIGINT handler; tests drive it directly.
   signal?: AbortSignal;
+  // See StartCtx.makeLlmFetch — same keep-alive transport seam for the take-over flow.
+  makeLlmFetch?: () => Promise<LlmFetch | undefined>;
 };
 
 export type ConfigCtx = {
@@ -425,6 +431,11 @@ export async function runStart(
     return { code: 1, message: errMsg(err) };
   }
 
+  // Command-scoped release stack, drained in the finally below. Wider than the loop adapter's own
+  // disposer: what is acquired here (the keep-alive transport) is built before the loop and used by
+  // steps that run outside it, so it cannot hang off a disposer that dies with the loop.
+  const disposer = new Disposer();
+
   try {
     // Resume detection: if a previous run left a valid state.json, skip re-init so
     // runId and prGroups are preserved. Only fall back on expected "missing/invalid
@@ -491,9 +502,12 @@ export async function runStart(
     // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Sourced from the
     // persisted state.runId (fresh or resumed), so a resumed run reuses the same id and keeps warm.
     // Keep-alive transport (plan slice 04b): a tuned undici dispatcher on Node, undefined elsewhere
-    // (Bun/Deno pool natively, or undici unavailable) → provider keeps its default fetch.
-    const llmFetch = await createLlmFetch();
-    const credentials = new Credentials(resolved, sessionId, llmFetch);
+    // (Bun/Deno pool natively, or undici unavailable) → provider keeps its default fetch. Its pool
+    // outlives the loop — the style digest and planner use it too — so its release belongs on this
+    // command's disposer, not the adapter's.
+    const llmFetch = await (ctx.makeLlmFetch ?? createLlmFetch)();
+    if (llmFetch) disposer.add(() => llmFetch.close());
+    const credentials = new Credentials(resolved, sessionId, llmFetch?.fetch);
 
     // Planning phase (issue #17): a one-shot step that runs the Planner once, before the loop,
     // so `prGroups` is populated and the loop has something to iterate. Gated on whether a plan
@@ -628,6 +642,7 @@ export async function runStart(
 
     return mapResultToExit(result);
   } finally {
+    await disposeQuietly(disposer);
     await lock.release();
   }
 }
@@ -715,6 +730,11 @@ export async function runMergePr(
     return { code: 1, message: errMsg(err) };
   }
 
+  // Command-scoped release stack, drained in the finally below. Wider than the loop adapter's own
+  // disposer: what is acquired here (the keep-alive transport) is built before the loop and used by
+  // steps that run outside it, so it cannot hang off a disposer that dies with the loop.
+  const disposer = new Disposer();
+
   try {
     const github = ctx.github ?? new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal);
 
@@ -762,8 +782,9 @@ export async function runMergePr(
     // Run-scoped session id → sticky routing + prompt-cache key (plan slice 04a). Take-over reuses the
     // resolved (or freshly synthesized) state.runId so repeat merge-pr calls share one cache session.
     // Keep-alive transport (plan slice 04b) — see the start path; undefined off-Node keeps the default.
-    const llmFetch = await createLlmFetch();
-    const credentials = new Credentials(resolved, runState.runId, llmFetch);
+    const llmFetch = await (ctx.makeLlmFetch ?? createLlmFetch)();
+    if (llmFetch) disposer.add(() => llmFetch.close());
+    const credentials = new Credentials(resolved, runState.runId, llmFetch?.fetch);
 
     const pr = args.pr ?? runState.currentPr ?? undefined;
     if (pr === undefined) {
@@ -840,6 +861,7 @@ export async function runMergePr(
     }
     return mapResultToExit(result);
   } finally {
+    await disposeQuietly(disposer);
     await lock.release();
   }
 }

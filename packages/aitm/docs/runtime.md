@@ -26,6 +26,23 @@ Bun is a convenience, not a dependency.
 
 Bun-only APIs are allowed in `scripts/` and in test setup gated behind `if (process.versions.bun)`. They are never allowed in `src/`.
 
+## HTTP transport
+
+Inference calls go through the transport `createLlmFetch()` builds (`src/credentials/llm-fetch.ts`).
+On **Node** that is the global `fetch` with a tuned undici `Agent` pinned as its dispatcher — 60s
+keep-alive, 16 connections — so a run's hundreds of sequential calls to one OpenRouter host reuse
+connections across the model's think/tool gaps instead of re-handshaking. On **Bun** and **Deno**, and
+on Node without the optional `undici` dep, it returns `undefined`; the provider then keeps its own
+default `fetch` and the request path is byte-identical.
+
+Two rules for callers:
+
+- **The handle is owned.** `createLlmFetch()` returns `{ fetch, close }`. Its pool holds idle sockets
+  open for the keep-alive window, which keeps Node's event loop alive that long past the run, so the
+  owner registers `close` on the run's `Disposer` (`runStart`/`runMergePr` do). `close` is idempotent.
+- **A caller's own `dispatcher` wins.** The keep-alive dispatcher is only filled in when
+  `init.dispatcher` is unset, so passing a proxy agent or a test transport is never silently dropped.
+
 ## Git safety
 
 aitm shells out to `git` directly rather than running inside a sandbox, so git mutations route

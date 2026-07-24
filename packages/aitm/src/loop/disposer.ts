@@ -45,3 +45,15 @@ export class Disposer {
     }
   }
 }
+
+// Drain a run's releases without ever replacing the run's own outcome: a throw out of a `finally`
+// would swap a real result (or a real error) for a cleanup failure, and an abort-time reaper has no
+// caller left to catch anything at all. Report and move on.
+export async function disposeQuietly(disposer: Disposer): Promise<void> {
+  try {
+    await disposer.disposeAll();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`warning: run cleanup failed: ${message}\n`);
+  }
+}

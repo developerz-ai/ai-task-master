@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { Disposer } from './disposer.ts';
+import { Disposer, disposeQuietly } from './disposer.ts';
 
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -136,4 +136,55 @@ test('disposer: a failing drain does not wedge later disposeAll calls', async ()
   });
   await disposer.disposeAll();
   assert.deepEqual(released, ['after']);
+});
+
+// Capture what disposeQuietly writes to stderr without letting it reach the test reporter.
+async function captureStderr(run: () => Promise<void>): Promise<string> {
+  const original = process.stderr.write.bind(process.stderr);
+  let captured = '';
+  process.stderr.write = (chunk: string | Uint8Array): boolean => {
+    captured += typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk);
+    return true;
+  };
+  try {
+    await run();
+  } finally {
+    process.stderr.write = original;
+  }
+  return captured;
+}
+
+test('disposer: disposeQuietly drains and stays silent when every release succeeds', async () => {
+  const disposer = new Disposer();
+  const released: string[] = [];
+  disposer.add(() => {
+    released.push('one');
+  });
+
+  const stderr = await captureStderr(() => disposeQuietly(disposer));
+  assert.deepEqual(released, ['one']);
+  assert.equal(stderr, '');
+});
+
+test('disposer: disposeQuietly reports a failed release instead of throwing at the caller', async () => {
+  const disposer = new Disposer();
+  const released: string[] = [];
+  disposer.add(() => {
+    released.push('survivor');
+  });
+  disposer.add(() => {
+    throw new Error('socket close failed');
+  });
+
+  const stderr = await captureStderr(() => disposeQuietly(disposer));
+  assert.deepEqual(released, ['survivor'], 'a failing release never strands the rest');
+  assert.match(stderr, /warning: run cleanup failed: /);
+});
+
+test('disposer: disposeQuietly renders a non-Error rejection as text', async () => {
+  const disposer = new Disposer();
+  disposer.add(() => Promise.reject('nope'));
+
+  const stderr = await captureStderr(() => disposeQuietly(disposer));
+  assert.match(stderr, /warning: run cleanup failed: .+\n$/);
 });

@@ -5,7 +5,7 @@
 import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { initErrorReporter } from '../observability/error-reporter.ts';
+import { type ErrorReporter, initErrorReporter } from '../observability/error-reporter.ts';
 import { parseArgs } from './args.ts';
 import type { CleanCtx, McpLoginCtx, MergePrCtx, ProfileCtx, StartCtx } from './commands.ts';
 import {
@@ -189,33 +189,20 @@ Exit codes:
 
 Docs: docs/commands/start.md, docs/commands/merge-pr.md, docs/commands/config.md, docs/commands/profile.md`;
 
-// Entry-point: when invoked as a script (via the `aitm` bin), parse process.argv
-// and propagate the exit code. When imported (e.g. from tests), this is skipped. A crash is
-// reported to GlitchTip when a DSN is configured (no-op otherwise), then flushed before exit.
-if (isEntrypoint(import.meta.url, process.argv[1])) {
-  void (async () => {
-    const reporter = await initErrorReporter();
-    const controller = new AbortController();
-    installSignalHandlers(controller);
-    try {
-      const code = await main(process.argv.slice(2), { signal: controller.signal });
-      await reporter.flush();
-      process.exit(code);
-    } catch (err: unknown) {
-      reporter.captureException(err);
-      await reporter.flush();
-      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-      process.exit(1);
-    }
-  })();
-}
-
-// Minimal process surface the signal wiring touches. Injectable so the abort/force-exit
-// branches are unit-testable without attaching handlers to the real test-runner process.
+// Minimal process surface the shutdown wiring touches. Injectable so the abort, force-exit and
+// exit-code branches are unit-testable without attaching handlers to — or calling `exit`/`exitCode`
+// on — the real test-runner process. `exit` is typed `void` (not `never`): the handlers `return`
+// after it rather than leaning on it to terminate, so a test double can record a call and carry on.
 export type SignalProcess = {
   on(signal: NodeJS.Signals, listener: () => void): unknown;
-  exit(code: number): never;
+  off?(signal: NodeJS.Signals, listener: () => void): unknown;
+  exit(code: number): void;
   stderr: { write(chunk: string): boolean };
+};
+
+// The entrypoint also sets `exitCode`; widened to Node's own union so the real `process` satisfies it.
+export type EntrypointProcess = SignalProcess & {
+  exitCode?: number | string | null | undefined;
 };
 
 const CANCEL_SIGNALS: ReadonlyArray<{ name: NodeJS.Signals; signo: number }> = [
@@ -223,19 +210,88 @@ const CANCEL_SIGNALS: ReadonlyArray<{ name: NodeJS.Signals; signo: number }> = [
   { name: 'SIGTERM', signo: 15 },
 ];
 
+// A force-quit still tries to flush the crash report, but only for this long: the user hit Ctrl-C a
+// second time because something is wedged, so the reporter must never trap them. Matches the
+// reporter's own internal flush budget — a healthy drain finishes well inside it.
+const FORCE_EXIT_FLUSH_MS = 2000;
+
+// Second-signal force-quit: flush the reporter (bounded), then exit with the conventional 128+signo
+// code no matter what. Whichever of the flush and the deadline settles first triggers the single
+// exit; the timer is unref'd so it can never itself hold the process open past the flush.
+export function forceExit(
+  reporter: Pick<ErrorReporter, 'flush'>,
+  code: number,
+  proc: Pick<SignalProcess, 'exit'> = process,
+  flushBudgetMs: number = FORCE_EXIT_FLUSH_MS,
+): void {
+  let exited = false;
+  const exit = (): void => {
+    if (exited) return;
+    exited = true;
+    proc.exit(code);
+  };
+  const timer = setTimeout(exit, flushBudgetMs);
+  (timer as { unref?: () => void }).unref?.();
+  void reporter.flush().finally(() => {
+    clearTimeout(timer);
+    exit();
+  });
+}
+
 // First SIGINT/SIGTERM aborts the run so an in-flight flow unwinds to `{ kind: 'cancelled' }`
-// (exit 2, wired through the merge-pr take-over loop); a second one force-exits with the
-// conventional 128+signo code so a wedged flow can't trap the user.
+// (exit 2, wired through the merge-pr take-over loop); a second one force-exits — via `onForceExit`
+// when given, so the crash report still flushes, else a bare `exit`. Returns a remover the entrypoint
+// calls once `main` resolves, so a late Ctrl-C during the final flush can't re-abort or print a
+// meaningless "Cancelling".
 export function installSignalHandlers(
   controller: AbortController,
-  proc: SignalProcess = process,
-): void {
+  opts: { proc?: SignalProcess; onForceExit?: (code: number) => void } = {},
+): () => void {
+  const proc = opts.proc ?? process;
+  const installed: Array<{ name: NodeJS.Signals; listener: () => void }> = [];
   for (const { name, signo } of CANCEL_SIGNALS) {
-    proc.on(name, () => {
-      if (controller.signal.aborted) proc.exit(128 + signo);
+    const listener = (): void => {
+      if (controller.signal.aborted) {
+        if (opts.onForceExit) opts.onForceExit(128 + signo);
+        else proc.exit(128 + signo);
+        return;
+      }
       proc.stderr.write('\nCancelling — interrupt again to force-quit.\n');
       controller.abort();
-    });
+    };
+    proc.on(name, listener);
+    installed.push({ name, listener });
+  }
+  return () => {
+    for (const { name, listener } of installed) proc.off?.(name, listener);
+  };
+}
+
+// One shutdown path for every exit. `main`'s code becomes `process.exitCode` — not a hard
+// `process.exit` — so buffered stdout/stderr and any pending state/log writes drain before the
+// process ends instead of being truncated mid-pipe; the `finally` removes the signal handlers and
+// flushes the reporter on the normal, error AND first-signal (graceful `cancelled`) paths alike. The
+// second-signal force-quit is the only hard exit, and it still flushes (bounded) via `forceExit`.
+export async function runEntrypoint(
+  reporter: ErrorReporter,
+  argv: ReadonlyArray<string>,
+  proc: EntrypointProcess = process,
+  run: (argv: ReadonlyArray<string>, ctx: MainCtx) => Promise<number> = main,
+): Promise<void> {
+  const controller = new AbortController();
+  const removeSignalHandlers = installSignalHandlers(controller, {
+    proc,
+    onForceExit: (code) => forceExit(reporter, code, proc),
+  });
+  try {
+    proc.exitCode = await run(argv, { signal: controller.signal });
+  } catch (err: unknown) {
+    reporter.captureException(err);
+    proc.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    proc.exitCode = 1;
+  } finally {
+    removeSignalHandlers();
+    await reporter.flush();
   }
 }
 
@@ -250,4 +306,14 @@ export function isEntrypoint(metaUrl: string, argv1: string | undefined): boolea
   } catch {
     return false;
   }
+}
+
+// Entry-point: when invoked as a script (via the `aitm` bin), drive the unified shutdown over
+// process.argv. When imported (e.g. from tests), this is skipped. A crash is reported to GlitchTip
+// when a DSN is configured (no-op otherwise) and flushed on the way out.
+if (isEntrypoint(import.meta.url, process.argv[1])) {
+  void (async () => {
+    const reporter = await initErrorReporter();
+    await runEntrypoint(reporter, process.argv.slice(2));
+  })();
 }

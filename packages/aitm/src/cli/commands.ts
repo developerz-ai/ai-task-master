@@ -338,6 +338,11 @@ export function usageSummaryLine(totals: UsageTotals): string {
   return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached, ${cacheHitPct(overall)} cache hit), ${cost}${discount}${perRole ? ` — ${perRole}` : ''}\n`;
 }
 
+// Non-fatal warnings go to stderr so they never contaminate the plain-status stdout contract.
+const warnToStderr = (message: string): void => {
+  process.stderr.write(`${message}\n`);
+};
+
 // AgentConfigDetector options from the CLI's stylePath sources + the homeDir seam (issue #117):
 // the user-global CLAUDE.md lives in <homeDir>/.claude, and a nested-file budget overflow is logged
 // to stderr. `--style-path` (start) wins over resolved config; merge-pr passes only its persisted
@@ -423,7 +428,14 @@ export async function runStart(
   }
   // The run's abort handle is bound in here so a SIGINT kills an in-flight `gh` child, not just the
   // poll loops around it (see GitHubClient's constructor).
-  const github = new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal);
+  const github = new GitHubClient(
+    cwd,
+    defaultRunCmd,
+    defaultSleep,
+    ctx.signal,
+    undefined,
+    warnToStderr,
+  );
 
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
@@ -742,7 +754,9 @@ export async function runMergePr(
   const disposer = new Disposer();
 
   try {
-    const github = ctx.github ?? new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal);
+    const github =
+      ctx.github ??
+      new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal, undefined, warnToStderr);
 
     // Take-over flow: `aitm merge-pr` (no args, no prior state) should work against any PR
     // the user built by hand — e.g. via Claude Code or `gh pr create`. We mirror the

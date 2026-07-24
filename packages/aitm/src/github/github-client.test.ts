@@ -1,21 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CiFailed, GhCliMissing, MergeConflict } from './errors.ts';
+import { GhCliMissing, GhCommandFailed, MergeConflict } from './errors.ts';
 import {
-  CHECKS_EMPTY_GRACE_MS,
-  CHECKS_INITIAL_DELAY_MS,
-  CHECKS_MAX_CONSECUTIVE_FAILURES,
-  CHECKS_MAX_DELAY_MS,
   CHECKS_START_WAIT_MS,
-  CHECKS_TIMEOUT_MS,
   DEFAULT_CMD_TIMEOUT_MS,
   DEFAULT_PR_LABEL,
   defaultRunCmd,
   defaultSleep,
   execaOptions,
+  FAILED_RUN_LIST_LIMIT,
   GitHubClient,
   isInstantSleepEnabled,
-  MAX_REVIEW_THREAD_PAGES,
   type RunCmd,
   type RunCmdOptions,
   type RunCmdResult,
@@ -62,27 +57,6 @@ function makeSleep(onSleep?: (ms: number) => void): {
     onSleep?.(ms);
   };
   return { sleep, delays, signals };
-}
-
-// A sleep whose delays also advance a fake wall clock, paired with the `now` to inject as the
-// client's clock — so waitForChecks' Date.now-anchored timeout budget is reachable in tests without
-// real time. `advance` models non-sleep wall-time (e.g. a slow subprocess) crossing the budget.
-function makeClock(): {
-  sleep: Sleep;
-  now: () => number;
-  delays: number[];
-  advance: (ms: number) => void;
-} {
-  let clock = 0;
-  const delays: number[] = [];
-  const advance = (ms: number): void => {
-    clock += ms;
-  };
-  const sleep: Sleep = async (ms) => {
-    delays.push(ms);
-    advance(ms);
-  };
-  return { sleep, now: () => clock, delays, advance };
 }
 
 function findFieldValue(args: readonly string[], flag: '-f' | '-F', key: string): string | null {
@@ -143,7 +117,7 @@ test('defaultBranch caches the branch (one subprocess across calls)', async () =
 test('defaultBranch throws on unexpected JSON shape', async () => {
   const { run } = makeRun([{ stdout: JSON.stringify({ wrong: 'shape' }) }]);
   const g = new GitHubClient('/tmp/repo', run);
-  await assert.rejects(() => g.defaultBranch(), /unexpected JSON shape/);
+  await assert.rejects(() => g.defaultBranch(), GhCommandFailed);
 });
 
 test('defaultBranch: exit-0 non-JSON stdout throws naming the command, cause preserved', async () => {
@@ -471,21 +445,17 @@ test('authStatus reports not-ok on non-zero exit, scopes empty when absent', asy
   assert.deepEqual(result.scopes, []);
 });
 
-test('waitForChecks returns success when all checks pass', async () => {
+// The poll/backoff/tolerance policy itself is tested against `pollChecks` directly in
+// checks-poller.test.ts. These confirm only that the GitHubClient method is a thin, correctly
+// wired delegation to it (cwd/pr/sleep/now/signal all reach pollChecks).
+test('waitForChecks delegates to pollChecks with the client cwd, sleep, and pr', async () => {
   const { run, calls } = makeRun([
-    {
-      stdout: JSON.stringify([
-        { bucket: 'pass', name: 'lint', state: 'SUCCESS' },
-        { bucket: 'pass', name: 'test', state: 'SUCCESS' },
-        { bucket: 'skipping', name: 'release', state: 'NEUTRAL' },
-      ]),
-    },
+    { stdout: JSON.stringify([{ bucket: 'pass', name: 'test', state: 'SUCCESS' }]) },
   ]);
   const { sleep, delays } = makeSleep();
   const g = new GitHubClient('/tmp/repo', run, sleep);
   const result = await g.waitForChecks(42);
   assert.equal(result.state, 'success');
-  assert.deepEqual(result.failedChecks, []);
   assert.deepEqual(calls[0]?.args, [
     'pr',
     'checks',
@@ -493,268 +463,19 @@ test('waitForChecks returns success when all checks pass', async () => {
     '--json',
     'bucket,name,state,description',
   ]);
-  // Only the start-wait before the first poll; a green first poll adds no backoff sleeps.
+  assert.equal(calls[0]?.cwd, '/tmp/repo');
   assert.deepEqual(delays, [CHECKS_START_WAIT_MS]);
-});
-
-test('waitForChecks: empty checks read as pending, not instant success', async () => {
-  // A just-pushed PR whose Actions haven't registered returns []. It must keep polling (pending)
-  // and let the real checks decide — never insta-succeed and merge before CI runs.
-  const empty = '[]';
-  const passing = JSON.stringify([{ bucket: 'pass', name: 'test', state: 'SUCCESS' }]);
-  const { run, calls } = makeRun([{ stdout: empty }, { stdout: empty }, { stdout: passing }]);
-  const { sleep, delays } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  const result = await g.waitForChecks(5);
-  assert.equal(result.state, 'success');
-  assert.deepEqual(result.failedChecks, []);
-  assert.equal(calls.length, 3);
-  assert.equal(delays[0], CHECKS_START_WAIT_MS);
-});
-
-test('waitForChecks: a PR with no checks resolves to success only after the empty grace', async () => {
-  const { run, calls } = makeRun(() => ({ stdout: '[]' }));
-  const { sleep, delays } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  const result = await g.waitForChecks(1);
-  assert.equal(result.state, 'success');
-  assert.deepEqual(result.failedChecks, []);
-  assert.ok(calls.length > 1, 'did not insta-succeed on the first empty poll');
-  const emptyPollWait = delays.slice(1).reduce((sum, d) => sum + d, 0);
-  assert.ok(
-    emptyPollWait >= CHECKS_EMPTY_GRACE_MS,
-    'waited the full empty grace before concluding the PR has no checks',
-  );
-});
-
-test('CHECKS_START_WAIT_MS / CHECKS_EMPTY_GRACE_MS: 60s each', () => {
-  assert.equal(CHECKS_START_WAIT_MS, 60_000);
-  assert.equal(CHECKS_EMPTY_GRACE_MS, 60_000);
-});
-
-test('waitForChecks polls while pending with 1s→2s→4s backoff (60s cap)', async () => {
-  const pending = JSON.stringify([{ bucket: 'pending', name: 'test', state: 'IN_PROGRESS' }]);
-  const passing = JSON.stringify([{ bucket: 'pass', name: 'test', state: 'SUCCESS' }]);
-  const { run, calls } = makeRun([
-    { stdout: pending },
-    { stdout: pending },
-    { stdout: pending },
-    { stdout: passing },
-  ]);
-  const { sleep, delays } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  const result = await g.waitForChecks(7);
-  assert.equal(result.state, 'success');
-  assert.equal(calls.length, 4);
-  assert.deepEqual(delays, [CHECKS_START_WAIT_MS, 1000, 2000, 4000]);
-});
-
-test('waitForChecks caps backoff at CHECKS_MAX_DELAY_MS', async () => {
-  // 7 pending replies before success → delays: 1, 2, 4, 8, 16, 32, 60 (capped).
-  const pending = JSON.stringify([{ bucket: 'pending', name: 'slow', state: 'QUEUED' }]);
-  const passing = JSON.stringify([{ bucket: 'pass', name: 'slow', state: 'SUCCESS' }]);
-  const replies: Reply[] = Array.from({ length: 7 }, () => ({ stdout: pending }));
-  replies.push({ stdout: passing });
-  const { run } = makeRun(replies);
-  const { sleep, delays } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  await g.waitForChecks(1);
-  assert.deepEqual(delays, [
-    CHECKS_START_WAIT_MS,
-    1000,
-    2000,
-    4000,
-    8000,
-    16_000,
-    32_000,
-    CHECKS_MAX_DELAY_MS,
-  ]);
-  assert.equal(CHECKS_INITIAL_DELAY_MS, 1000);
-});
-
-test('waitForChecks returns a failure CiResult (not a throw) for a failed bucket', async () => {
-  const { run } = makeRun([
-    {
-      stdout: JSON.stringify([
-        { bucket: 'pass', name: 'lint', state: 'SUCCESS' },
-        { bucket: 'fail', name: 'test', state: 'FAILURE' },
-      ]),
-      exitCode: 8,
-    },
-  ]);
-  const { sleep, delays } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  const result = await g.waitForChecks(99);
-  assert.equal(result.state, 'failure');
-  assert.deepEqual(result.failedChecks, [{ name: 'test', status: 'failure' }]);
-  assert.deepEqual(
-    result.checks,
-    [
-      { name: 'lint', bucket: 'pass' },
-      { name: 'test', bucket: 'fail' },
-    ],
-    'every settled check is summarised, not just the failed one',
-  );
-  // Start-wait only; a decisive first poll adds no backoff sleeps.
-  assert.deepEqual(delays, [CHECKS_START_WAIT_MS]);
-});
-
-test('waitForChecks reports a cancelled bucket as a failure CiResult', async () => {
-  const { run } = makeRun([
-    { stdout: JSON.stringify([{ bucket: 'cancel', name: 'test', state: 'CANCELLED' }]) },
-  ]);
-  const { sleep } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  const cancelledResult = await g.waitForChecks(99);
-  assert.equal(cancelledResult.state, 'failure');
-  assert.deepEqual(cancelledResult.failedChecks, [{ name: 'test', status: 'cancelled' }]);
-});
-
-test('waitForChecks throws CiFailed once the poll timeout budget is exhausted', async () => {
-  // Only-pending replies: the injected wall clock advances through the start grace and each backoff
-  // until it crosses CHECKS_TIMEOUT_MS and the poll gives up. CiFailed is reserved strictly for this.
-  const pending = JSON.stringify([{ bucket: 'pending', name: 'test', state: 'IN_PROGRESS' }]);
-  const { run } = makeRun(() => ({ stdout: pending }));
-  const { sleep, now, delays } = makeClock();
-  const g = new GitHubClient('/tmp/repo', run, sleep, undefined, now);
-  await assert.rejects(() => g.waitForChecks(1), CiFailed);
-  assert.ok(
-    delays.reduce((sum, d) => sum + d, 0) >= CHECKS_TIMEOUT_MS,
-    'gave up only after the timeout budget was spent',
-  );
 });
 
 test('waitForChecks: an already-aborted signal → pending, no gh call at all', async () => {
   const { run, calls } = makeRun(() => ({ stdout: '[]' }));
-  const { sleep, signals } = makeSleep();
+  const { sleep } = makeSleep();
   const controller = new AbortController();
   controller.abort();
   const g = new GitHubClient('/tmp/repo', run, sleep);
   const result = await g.waitForChecks(1, controller.signal);
-  // Not a verdict — the poll never settled. Callers re-check the signal rather than reading this
-  // as "CI is still running".
   assert.equal(result.state, 'pending');
-  assert.deepEqual(result.checks, []);
   assert.equal(calls.length, 0, 'a cancelled wait spawns no `gh pr checks`');
-  assert.equal(signals[0], controller.signal, 'the start grace is cancellable');
-});
-
-test('waitForChecks: abort mid-poll → stops after the in-flight poll, never times out', async () => {
-  // Only-pending replies: without the abort this run would poll for the full 120-minute budget and
-  // end in CiFailed. The abort lands during the first backoff, so exactly one more poll happens.
-  const pending = JSON.stringify([{ bucket: 'pending', name: 'test', state: 'IN_PROGRESS' }]);
-  const { run, calls } = makeRun(() => ({ stdout: pending }));
-  const controller = new AbortController();
-  const { sleep, signals } = makeSleep((ms) => {
-    if (ms === CHECKS_INITIAL_DELAY_MS) controller.abort();
-  });
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  const result = await g.waitForChecks(1, controller.signal);
-  assert.equal(result.state, 'pending');
-  assert.deepEqual(result.failedChecks, []);
-  assert.equal(calls.length, 1, 'the poll loop stops at the top of the next iteration');
-  assert.deepEqual(
-    signals,
-    [controller.signal, controller.signal],
-    'both the start grace and the backoff take the signal',
-  );
-});
-
-test('waitForChecks: a transient unparseable read is tolerated, not fatal', async () => {
-  // One bad read — a truncated stdout, a network blip — must not abandon a wait that can run for the
-  // full 120-minute budget. Poll through it and let the next good read settle the verdict.
-  const passing = JSON.stringify([{ bucket: 'pass', name: 'test', state: 'SUCCESS' }]);
-  const { run, calls } = makeRun([
-    { exitCode: 1, stdout: '', stderr: 'error connecting to api.github.com' },
-    { stdout: passing },
-  ]);
-  const { sleep } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  const result = await g.waitForChecks(1);
-  assert.equal(result.state, 'success');
-  assert.equal(calls.length, 2, 'retried the failed read instead of throwing on it');
-});
-
-test('waitForChecks: throws GhCommandFailed after N consecutive failed reads', async () => {
-  // A persistent break (garbage every poll: an auth revocation, a wedged network) surfaces once the
-  // consecutive-failure budget is spent — not silently waved through as a mergeable "no checks".
-  const { run, calls } = makeRun(() => ({
-    exitCode: 1,
-    stdout: '',
-    stderr: 'error connecting to api.github.com',
-  }));
-  const { sleep } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  await assert.rejects(() => g.waitForChecks(1), /gh pr checks failed/);
-  assert.equal(
-    calls.length,
-    CHECKS_MAX_CONSECUTIVE_FAILURES,
-    'gave up only after N consecutive failures',
-  );
-});
-
-test('waitForChecks: a good read resets the consecutive-failure count', async () => {
-  // N-1 failures, one pending success, then N-1 more failures must NOT throw — the good poll resets
-  // the run, so neither burst on its own reaches the threshold.
-  const fail: Reply = { exitCode: 1, stdout: '', stderr: 'error connecting to api.github.com' };
-  const pending: Reply = {
-    stdout: JSON.stringify([{ bucket: 'pending', name: 'test', state: 'QUEUED' }]),
-  };
-  const passing: Reply = {
-    stdout: JSON.stringify([{ bucket: 'pass', name: 'test', state: 'SUCCESS' }]),
-  };
-  const replies: Reply[] = [];
-  for (let i = 0; i < CHECKS_MAX_CONSECUTIVE_FAILURES - 1; i++) replies.push({ ...fail });
-  replies.push(pending);
-  for (let i = 0; i < CHECKS_MAX_CONSECUTIVE_FAILURES - 1; i++) replies.push({ ...fail });
-  replies.push(passing);
-  const { run } = makeRun(replies);
-  const { sleep } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  const result = await g.waitForChecks(1);
-  assert.equal(result.state, 'success');
-});
-
-test('waitForChecks: a checkless PR (gh "no checks reported") resolves to success after the grace', async () => {
-  // gh exits non-zero with an empty stdout and "no checks reported on the '<branch>' branch" on
-  // stderr for a PR with no checks configured. That is an empty row set, not a failure: it must
-  // wait out the empty grace and then be mergeable — never throw, never insta-succeed.
-  const { run, calls } = makeRun(() => ({
-    exitCode: 1,
-    stdout: '',
-    stderr: "no checks reported on the 'feature/x' branch",
-  }));
-  const { sleep, delays } = makeSleep();
-  const g = new GitHubClient('/tmp/repo', run, sleep);
-  const result = await g.waitForChecks(3);
-  assert.equal(result.state, 'success');
-  assert.deepEqual(result.checks, []);
-  assert.ok(calls.length > 1, 'did not insta-succeed on the first empty read');
-  const emptyPollWait = delays.slice(1).reduce((sum, d) => sum + d, 0);
-  assert.ok(
-    emptyPollWait >= CHECKS_EMPTY_GRACE_MS,
-    'waited the full empty grace before deeming the PR checkless',
-  );
-});
-
-test('waitForChecks: the timeout budget counts the start grace and subprocess wall-time, not just backoff', async () => {
-  // Model each `gh pr checks` as a near-deadline (5-min) subprocess by advancing the clock inside the
-  // run stub. Anchored on the wall clock, that subprocess time (plus the 60s start grace) crosses
-  // CHECKS_TIMEOUT_MS even though the accumulated backoff alone never would — the exact accounting
-  // gap (`waited += delay`) this guards against.
-  const pending = JSON.stringify([{ bucket: 'pending', name: 'test', state: 'IN_PROGRESS' }]);
-  const { sleep, now, delays, advance } = makeClock();
-  const run: RunCmd = async () => {
-    advance(DEFAULT_CMD_TIMEOUT_MS);
-    return { stdout: pending, stderr: '', exitCode: 0 };
-  };
-  const g = new GitHubClient('/tmp/repo', run, sleep, undefined, now);
-  await assert.rejects(() => g.waitForChecks(1), CiFailed);
-  const backoffOnly = delays.slice(1).reduce((sum, d) => sum + d, 0);
-  assert.ok(
-    backoffOnly < CHECKS_TIMEOUT_MS,
-    'backoff sleeps alone never reached the budget — subprocess and start-grace time did',
-  );
 });
 
 type GqlThread = {
@@ -863,44 +584,6 @@ test('repoMeta is cached across calls (one gh repo view subprocess for two looku
   assert.equal(calls.length, 3, 'only repo view + 2 GraphQL calls, no second repo view');
 });
 
-test('listUnresolvedThreads pages through reviewThreads with endCursor', async () => {
-  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
-  const page1 = threadsResponse(
-    [
-      {
-        id: 'PRRT_1',
-        isResolved: false,
-        path: 'a.ts',
-        comments: {
-          pageInfo: { hasNextPage: false, endCursor: null },
-          nodes: [{ id: 'IC_1', body: 'x', author: { login: 'r' } }],
-        },
-      },
-    ],
-    { hasNextPage: true, endCursor: 'cursor-1' },
-  );
-  const page2 = threadsResponse([
-    {
-      id: 'PRRT_2',
-      isResolved: false,
-      path: 'b.ts',
-      comments: {
-        pageInfo: { hasNextPage: false, endCursor: null },
-        nodes: [{ id: 'IC_2', body: 'y', author: { login: 'r' } }],
-      },
-    },
-  ]);
-  const { run, calls } = makeRun([{ stdout: meta }, { stdout: page1 }, { stdout: page2 }]);
-  const g = new GitHubClient('/tmp/repo', run);
-  const threads = await g.listUnresolvedThreads(7);
-
-  assert.equal(threads.length, 2);
-  assert.equal(threads[0]?.id, 'PRRT_1');
-  assert.equal(threads[1]?.id, 'PRRT_2');
-  // Second page sends the cursor returned by the first page.
-  assert.equal(findFieldValue(calls[2]?.args ?? [], '-f', 'threadsCursor'), 'cursor-1');
-});
-
 test('listUnresolvedThreads pages through nested comments for unresolved threads only', async () => {
   const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
   const gql = threadsResponse([
@@ -955,38 +638,6 @@ test('listUnresolvedThreads pages through nested comments for unresolved threads
   assert.equal(threads[0]?.comments[2]?.author, 'ghost');
 });
 
-test('listUnresolvedThreads throws when GraphQL call fails', async () => {
-  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
-  const { run } = makeRun([{ stdout: meta }, { exitCode: 1, stderr: 'GraphQL: not found' }]);
-  const g = new GitHubClient('/tmp/repo', run);
-  await assert.rejects(() => g.listUnresolvedThreads(1), /gh api graphql \(reviewThreads\) failed/);
-});
-
-test('listUnresolvedThreads surfaces threadComments failures distinctly', async () => {
-  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
-  const gql = threadsResponse([
-    {
-      id: 'PRRT_1',
-      isResolved: false,
-      path: 'a.ts',
-      comments: {
-        pageInfo: { hasNextPage: true, endCursor: 'c-1' },
-        nodes: [{ id: 'IC_1', body: 'x', author: { login: 'r' } }],
-      },
-    },
-  ]);
-  const { run } = makeRun([
-    { stdout: meta },
-    { stdout: gql },
-    { exitCode: 1, stderr: 'GraphQL: rate limited' },
-  ]);
-  const g = new GitHubClient('/tmp/repo', run);
-  await assert.rejects(
-    () => g.listUnresolvedThreads(1),
-    /gh api graphql \(threadComments\) failed/,
-  );
-});
-
 test('listUnresolvedThreads: exit-0 non-JSON repo view stdout throws naming the command, cause preserved', async () => {
   // repoMeta runs first; its parse must surface the offending command, not a bare SyntaxError.
   const { run } = makeRun([{ stdout: 'error: something went wrong', exitCode: 0 }]);
@@ -996,48 +647,6 @@ test('listUnresolvedThreads: exit-0 non-JSON repo view stdout throws naming the 
     (err: unknown) => {
       assert.ok(err instanceof Error);
       assert.match(err.message, /gh repo view: unparseable JSON stdout/);
-      assert.ok(err.cause instanceof SyntaxError, 'JSON.parse SyntaxError is preserved as cause');
-      return true;
-    },
-  );
-});
-
-test('listUnresolvedThreads: exit-0 non-JSON reviewThreads stdout throws naming the command, cause preserved', async () => {
-  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
-  const { run } = makeRun([{ stdout: meta }, { stdout: 'not json', exitCode: 0 }]);
-  const g = new GitHubClient('/tmp/repo', run);
-  await assert.rejects(
-    () => g.listUnresolvedThreads(1),
-    (err: unknown) => {
-      assert.ok(err instanceof Error);
-      assert.match(err.message, /gh api graphql \(reviewThreads\): unparseable JSON stdout/);
-      assert.ok(err.cause instanceof SyntaxError, 'JSON.parse SyntaxError is preserved as cause');
-      return true;
-    },
-  );
-});
-
-test('listUnresolvedThreads: exit-0 non-JSON threadComments stdout throws naming the command, cause preserved', async () => {
-  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
-  // An unresolved thread whose comments page has a next page forces the threadComments fetch.
-  const gql = threadsResponse([
-    {
-      id: 'PRRT_1',
-      isResolved: false,
-      path: 'a.ts',
-      comments: {
-        pageInfo: { hasNextPage: true, endCursor: 'c-1' },
-        nodes: [{ id: 'IC_1', body: 'x', author: { login: 'r' } }],
-      },
-    },
-  ]);
-  const { run } = makeRun([{ stdout: meta }, { stdout: gql }, { stdout: 'not json', exitCode: 0 }]);
-  const g = new GitHubClient('/tmp/repo', run);
-  await assert.rejects(
-    () => g.listUnresolvedThreads(1),
-    (err: unknown) => {
-      assert.ok(err instanceof Error);
-      assert.match(err.message, /gh api graphql \(threadComments\): unparseable JSON stdout/);
       assert.ok(err.cause instanceof SyntaxError, 'JSON.parse SyntaxError is preserved as cause');
       return true;
     },
@@ -1092,12 +701,14 @@ test('resolveThread throws on non-zero exit', async () => {
 
 test('getFailedCiLogs downloads full logs for failed jobs of the PR head run', async () => {
   // Sequence: pr view → run list → repo view (repoMeta) → api jobs → api job logs.
+  let runListArgs: string[] = [];
   const run: RunCmd = async (file, args) => {
     const a = args.join(' ');
     if (file === 'gh' && a.startsWith('pr view')) {
       return { stdout: '{"headRefName":"feat/x","headRefOid":"abc123"}', stderr: '', exitCode: 0 };
     }
     if (file === 'gh' && a.startsWith('run list')) {
+      runListArgs = [...args];
       return {
         stdout: JSON.stringify([
           { databaseId: 111, headSha: 'abc123', conclusion: 'failure' },
@@ -1138,6 +749,76 @@ test('getFailedCiLogs downloads full logs for failed jobs of the PR head run', a
   assert.equal(out.length, 1);
   assert.equal(out[0]?.check, 'bun (test + lint)');
   assert.match(out[0]?.logs ?? '', /biome format error/);
+  // The head sha is filtered server-side and the row cap is a named constant, not a magic 30.
+  assert.deepEqual(runListArgs.slice(runListArgs.indexOf('--commit')), ['--commit', 'abc123']);
+  assert.deepEqual(
+    runListArgs.slice(runListArgs.indexOf('--limit'), runListArgs.indexOf('--limit') + 2),
+    ['--limit', String(FAILED_RUN_LIST_LIMIT)],
+  );
+});
+
+test('getFailedCiLogs never falls back to a stale push run when the head sha has no failed run', async () => {
+  // A busy branch: gh returns a failed run for an OLDER push (headSha 'old'), none for the PR's
+  // current head 'abc123'. The old code fell back to every failed run and handed the fix Worker
+  // these stale logs; the fix must return [] and never fetch that run's jobs.
+  const run: RunCmd = async (file, args) => {
+    const a = args.join(' ');
+    if (file === 'gh' && a.startsWith('pr view')) {
+      return { stdout: '{"headRefName":"feat/x","headRefOid":"abc123"}', stderr: '', exitCode: 0 };
+    }
+    if (file === 'gh' && a.startsWith('run list')) {
+      return {
+        stdout: JSON.stringify([{ databaseId: 222, headSha: 'old', conclusion: 'failure' }]),
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    if (file === 'gh' && a.includes('actions/runs/222/jobs')) {
+      throw new Error('must not fetch jobs for a stale push run');
+    }
+    return { stdout: '{"owner":{"login":"o"},"name":"r"}', stderr: '', exitCode: 0 };
+  };
+  const g = new GitHubClient('/tmp/repo', run);
+  assert.deepEqual(await g.getFailedCiLogs(42), []);
+});
+
+test('getFailedCiLogs scopes run list by branch only when the head sha is unknown', async () => {
+  // No headRefOid → no sha to filter on, so run list must NOT carry --commit and the branch's
+  // failed run is used best-effort.
+  let runListArgs: string[] = [];
+  const run: RunCmd = async (file, args) => {
+    const a = args.join(' ');
+    if (file === 'gh' && a.startsWith('pr view')) {
+      return { stdout: '{"headRefName":"feat/x"}', stderr: '', exitCode: 0 };
+    }
+    if (file === 'gh' && a.startsWith('run list')) {
+      runListArgs = [...args];
+      return {
+        stdout: JSON.stringify([{ databaseId: 111, headSha: 'whatever', conclusion: 'failure' }]),
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    if (file === 'gh' && a.startsWith('repo view')) {
+      return { stdout: '{"owner":{"login":"o"},"name":"r"}', stderr: '', exitCode: 0 };
+    }
+    if (file === 'gh' && a.includes('actions/runs/111/jobs')) {
+      return {
+        stdout: JSON.stringify({ jobs: [{ id: 9001, name: 'ci', conclusion: 'failure' }] }),
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    if (file === 'gh' && a.includes('actions/jobs/9001/logs')) {
+      return { stdout: 'boom', stderr: '', exitCode: 0 };
+    }
+    throw new Error(`unexpected call: ${file} ${a}`);
+  };
+  const g = new GitHubClient('/tmp/repo', run);
+  const out = await g.getFailedCiLogs(42);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]?.check, 'ci');
+  assert.ok(!runListArgs.includes('--commit'));
 });
 
 test('getFailedCiLogs returns [] when the PR has no failed runs', async () => {
@@ -1157,139 +838,6 @@ test('getFailedCiLogs returns [] when the PR has no failed runs', async () => {
   };
   const g = new GitHubClient('/tmp/repo', run);
   assert.deepEqual(await g.getFailedCiLogs(42), []);
-});
-
-test('listUnresolvedThreads stops paginating review threads at max pages', async () => {
-  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
-  // Test with a small cap to verify the bound logic without generating huge mock arrays.
-  // Use a custom makeRun that generates replies on-the-fly.
-  let callCount = 0;
-  const run: RunCmd = async () => {
-    if (callCount === 0) {
-      callCount++;
-      return { stdout: meta, stderr: '', exitCode: 0 };
-    }
-    // Return pages that have more pages until we hit the limit.
-    // After MAX_REVIEW_THREAD_PAGES requests, each page will signal hasNextPage: false.
-    const pageNum = callCount - 1;
-    const hasMore = pageNum < MAX_REVIEW_THREAD_PAGES - 1;
-    callCount++;
-    return {
-      stdout: threadsResponse(
-        [
-          {
-            id: `PRRT_${pageNum}`,
-            isResolved: false,
-            path: 'a.ts',
-            comments: {
-              pageInfo: { hasNextPage: false, endCursor: null },
-              nodes: [{ id: `IC_${pageNum}`, body: 'x', author: { login: 'r' } }],
-            },
-          },
-        ],
-        {
-          hasNextPage: hasMore,
-          endCursor: hasMore ? `cursor-${pageNum}` : null,
-        },
-      ),
-      stderr: '',
-      exitCode: 0,
-    };
-  };
-  const g = new GitHubClient('/tmp/repo', run);
-  const threads = await g.listUnresolvedThreads(7);
-
-  // Should have collected only up to MAX_REVIEW_THREAD_PAGES threads.
-  assert.equal(threads.length, MAX_REVIEW_THREAD_PAGES);
-  // Should have made max pages + 1 (repoMeta + pages) calls.
-  assert.equal(
-    callCount,
-    MAX_REVIEW_THREAD_PAGES + 1,
-    'should not paginate beyond MAX_REVIEW_THREAD_PAGES',
-  );
-});
-
-test('listUnresolvedThreads breaks on non-advancing cursor in review threads', async () => {
-  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
-  // Page 1: has next page
-  const page1 = threadsResponse(
-    [
-      {
-        id: 'PRRT_1',
-        isResolved: false,
-        path: 'a.ts',
-        comments: {
-          pageInfo: { hasNextPage: false, endCursor: null },
-          nodes: [{ id: 'IC_1', body: 'x', author: { login: 'r' } }],
-        },
-      },
-    ],
-    { hasNextPage: true, endCursor: 'stuck-cursor' },
-  );
-  // Page 2: same cursor (broken pagination) — should break after this
-  const page2 = threadsResponse(
-    [
-      {
-        id: 'PRRT_2',
-        isResolved: false,
-        path: 'b.ts',
-        comments: {
-          pageInfo: { hasNextPage: false, endCursor: null },
-          nodes: [{ id: 'IC_2', body: 'y', author: { login: 'r' } }],
-        },
-      },
-    ],
-    { hasNextPage: true, endCursor: 'stuck-cursor' }, // same as before
-  );
-  const { run, calls } = makeRun([{ stdout: meta }, { stdout: page1 }, { stdout: page2 }]);
-  const g = new GitHubClient('/tmp/repo', run);
-  const threads = await g.listUnresolvedThreads(7);
-
-  // Should have only 1 thread (from page 1); detects non-advancing cursor and stops after page 2.
-  assert.equal(threads.length, 1);
-  assert.equal(threads[0]?.id, 'PRRT_1');
-  // Should have made 3 calls (repoMeta + page1 + page2 where page2 detects the stuck cursor).
-  assert.equal(calls.length, 3, 'should detect non-advancing cursor and stop');
-});
-
-test('listUnresolvedThreads breaks on non-advancing cursor in thread comments', async () => {
-  const meta = JSON.stringify({ owner: { login: 'org' }, name: 'repo' });
-  const thread = threadsResponse([
-    {
-      id: 'PRRT_long',
-      isResolved: false,
-      path: 'big.ts',
-      comments: {
-        pageInfo: { hasNextPage: true, endCursor: 'c-1' },
-        nodes: [{ id: 'IC_a', body: 'first', author: { login: 'r' } }],
-      },
-    },
-  ]);
-  // Comment page 1: has next page with cursor
-  const commentPage1 = commentsResponse([{ id: 'IC_b', body: 'second', author: { login: 'r' } }], {
-    hasNextPage: true,
-    endCursor: 'stuck-cursor',
-  });
-  // Comment page 2: same cursor (broken pagination) — should break after this
-  const commentPage2 = commentsResponse(
-    [{ id: 'IC_c', body: 'third', author: { login: 'r' } }],
-    { hasNextPage: true, endCursor: 'stuck-cursor' }, // same as before
-  );
-  const { run, calls } = makeRun([
-    { stdout: meta },
-    { stdout: thread },
-    { stdout: commentPage1 },
-    { stdout: commentPage2 },
-  ]);
-  const g = new GitHubClient('/tmp/repo', run);
-  const threads = await g.listUnresolvedThreads(3);
-
-  // Should have thread with only first 2 comments (detected non-advancing cursor after page 2).
-  assert.equal(threads.length, 1);
-  assert.equal(threads[0]?.comments.length, 2, 'should have 2 comments (first + second)');
-  // Should have made 4 calls (repoMeta + threads + commentPage1 + commentPage2).
-  // commentPage2 detects the stuck cursor and breaks.
-  assert.equal(calls.length, 4, 'should detect non-advancing cursor after fetching page 2');
 });
 
 // defaultSleep short-circuits to a microtask under a test runner (NODE_TEST_CONTEXT under

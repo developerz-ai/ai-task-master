@@ -250,12 +250,22 @@ const configCases: Case[] = [
   {
     name: 'config list global',
     argv: ['config', 'list'],
-    expected: { kind: 'config-list', scope: 'global' },
+    expected: { kind: 'config-list', scope: 'global', effective: false },
   },
   {
     name: 'config list --project',
     argv: ['config', 'list', '--project'],
-    expected: { kind: 'config-list', scope: 'project' },
+    expected: { kind: 'config-list', scope: 'project', effective: false },
+  },
+  {
+    name: 'config list --effective',
+    argv: ['config', 'list', '--effective'],
+    expected: { kind: 'config-list', scope: 'global', effective: true },
+  },
+  {
+    name: 'config list --project --effective (both toggles, any order)',
+    argv: ['config', 'list', '--effective', '--project'],
+    expected: { kind: 'config-list', scope: 'project', effective: true },
   },
   {
     name: 'config set: -- sentinel lets a value begin with --',
@@ -468,6 +478,21 @@ const usageErrorCases: Case[] = [
   {
     name: 'config list: stray positional',
     argv: ['config', 'list', 'oops'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'config list: --effective takes no value',
+    argv: ['config', 'list', '--effective=1'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'config set: --effective is list-only, not a set flag',
+    argv: ['config', 'set', 'k', 'v', '--effective'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'config get: --effective is list-only, not a get flag',
+    argv: ['config', 'get', 'k', '--effective'],
     expected: { kind: 'usage-error' },
   },
   {

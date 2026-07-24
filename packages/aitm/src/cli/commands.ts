@@ -48,6 +48,8 @@ import type { RunLockHandle } from '../state/run-lock.ts';
 import { CURRENT_SCHEMA_VERSION, type PrGroup, type RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import type { CleanArgs, ParsedArgs } from './args.ts';
+import { formatEffectiveConfig } from './effective-config.ts';
+import { maskSecret } from './mask-secret.ts';
 import { type BannerEntry, modelBanner } from './model-banner.ts';
 
 export type CommandExit = { code: 0 | 1 | 2; message?: string };
@@ -204,7 +206,12 @@ export type MergePrCtx = {
 export type ConfigCtx = {
   cwd?: string;
   homeDir?: string;
+  // Read by `config list --effective` to resolve the merged config (env is a credential source).
+  env?: Record<string, string | undefined>;
   stdout?: (chunk: string) => void;
+  // Where `config list --effective`'s resolution warnings go (stale baseURL, stripped project fields
+  // — the very warnings that explain a surprising precedence outcome). Defaults to process.stderr.
+  stderr?: (chunk: string) => void;
 };
 
 export type CleanCtx = {
@@ -1017,7 +1024,9 @@ export async function runConfig(
 ): Promise<CommandExit> {
   const cwd = ctx.cwd ?? process.cwd();
   const homeDir = ctx.homeDir ?? homedir();
+  const env = ctx.env ?? process.env;
   const stdout = ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk));
+  const stderr = ctx.stderr ?? ((chunk: string) => process.stderr.write(chunk));
   const writer = new ConfigWriter(cwd, homeDir);
 
   try {
@@ -1034,6 +1043,17 @@ export async function runConfig(
         return { code: 0 };
       }
       case 'config-list': {
+        if (args.effective) {
+          // `--scope` is meaningless for the merged view — it always resolves across every layer.
+          // Resolution warnings (stale baseURL, stripped project fields) explain surprising
+          // precedence, so route them to stderr rather than swallowing them.
+          const loader = new ConfigLoader(cwd, homeDir, env, {
+            warn: (m) => stderr(`${m}\n`),
+          });
+          const { resolved, sources } = await loader.resolveWithSources({});
+          stdout(formatEffectiveConfig(resolved, sources));
+          return { code: 0 };
+        }
         const file = await writer.list(args.scope);
         // Never dump API keys in cleartext — `config list` output lands in terminals/logs.
         // Masks both the top-level key and any keys nested inside `profiles`.
@@ -1334,10 +1354,6 @@ function isMissingOrInvalidState(err: unknown, stateDir: string): boolean {
 
 // Mask a secret for display: keep the non-secret `sk-or-` prefix + last 4 chars so the user can
 // confirm WHICH key is set without exposing it. Short values are fully hidden.
-function maskSecret(value: string): string {
-  return value.length <= 12 ? '***' : `${value.slice(0, 6)}…${value.slice(-4)}`;
-}
-
 function formatConfigValue(value: unknown): string {
   if (value === undefined) return '';
   if (typeof value === 'string') return value;

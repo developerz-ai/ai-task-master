@@ -371,3 +371,17 @@ export type ResolvedConfig = {
 };
 
 export type McpServerSource = 'aitm-global' | 'aitm-project' | 'claude-mcp-project' | 'claude-user';
+
+// Which layer supplied a resolved value, low→high precedence: default < profile < global < project <
+// CLI. 'profile' applies only to provider-shaped keys (openrouterApiKey/baseURL/models/…); a run
+// setting never reads a profile. 'env' applies only to the two credential keys sourced from the
+// environment (OPENROUTER_API_KEY/OPENROUTER_BASE_URL). Surfaced by `aitm config list --effective` so
+// the precedence outcome of every key is visible without starting a run and reading the snapshot.
+export type ConfigSource = 'cli' | 'project' | 'global' | 'profile' | 'env' | 'default';
+
+// Per-key provenance for a resolved config, keyed by ResolvedConfig field name — dotted for the
+// per-tier composites ('models.coding', 'reasoningEffort.smart'). bashRules (a first-match-wins merge
+// of several layers) and mcpServers (its own McpServerSource per entry) carry provenance elsewhere and
+// are deliberately absent here. Built alongside resolution by ConfigLoader.resolveWithSources, so it
+// can never drift from the values it labels.
+export type ConfigSourceMap = Record<string, ConfigSource>;

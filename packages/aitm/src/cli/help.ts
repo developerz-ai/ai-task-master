@@ -57,7 +57,10 @@ export const CLI_COMMANDS: readonly CommandSpec[] = [
   { invocation: 'aitm config set <key> <value>', flags: [{ tokens: ['--project'] }] },
   { invocation: 'aitm config unset <key>', flags: [{ tokens: ['--project'] }] },
   { invocation: 'aitm config get <key>', flags: [{ tokens: ['--project'] }] },
-  { invocation: 'aitm config list', flags: [{ tokens: ['--project'] }] },
+  {
+    invocation: 'aitm config list',
+    flags: [{ tokens: ['--project'] }, { tokens: ['--effective'] }],
+  },
   { invocation: 'aitm profile list' },
   { invocation: 'aitm profile use <name>' },
   {

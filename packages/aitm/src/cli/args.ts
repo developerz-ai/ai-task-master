@@ -46,7 +46,7 @@ export type ConfigArgs =
   | { kind: 'config-set'; scope: 'global' | 'project'; key: string; value: string }
   | { kind: 'config-unset'; scope: 'global' | 'project'; key: string }
   | { kind: 'config-get'; scope: 'global' | 'project'; key: string }
-  | { kind: 'config-list'; scope: 'global' | 'project' };
+  | { kind: 'config-list'; scope: 'global' | 'project'; effective: boolean };
 
 export type ProfileArgs =
   | { kind: 'profile-list' }
@@ -417,12 +417,18 @@ function parseConfig(args: ReadonlyArray<string>): ParsedArgs {
   if (sub === undefined) return USAGE_ERROR;
   const tail = args.slice(1);
   let scope: 'global' | 'project' = 'global';
+  let effective = false;
   // Same grammar as `profile set` (via collectPositionals): honor `--`, reject stray `--`-flags.
-  // `--project` is config's one recognized flag (a scope toggle); `--project=anything` is a usage
-  // error since it's boolean.
+  // `--project` is a scope toggle recognized by every subcommand; `--effective` is a `list`-only
+  // toggle (merged-view rendering), so it is a usage error on set/unset/get. Boolean flags, so
+  // `--project=x`/`--effective=x` are usage errors too.
   const positionals = collectPositionals(tail, (flag) => {
     if (flag === '--project') {
       scope = 'project';
+      return true;
+    }
+    if (flag === '--effective' && sub === 'list') {
+      effective = true;
       return true;
     }
     return false;
@@ -449,7 +455,7 @@ function parseConfig(args: ReadonlyArray<string>): ParsedArgs {
     }
     case 'list': {
       if (positionals.length !== 0) return USAGE_ERROR;
-      return { kind: 'config-list', scope };
+      return { kind: 'config-list', scope, effective };
     }
     default:
       return USAGE_ERROR;

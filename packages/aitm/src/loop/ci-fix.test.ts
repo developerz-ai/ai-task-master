@@ -10,6 +10,7 @@ import type { RunCmd, RunCmdResult } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
 import type { PrGroup } from '../state/schema.ts';
+import { harnessContextBlock } from '../subagents/role-prompt.ts';
 import type { FileManifest, WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
 import {
   type FixSessionGithub,
@@ -134,6 +135,27 @@ function submitManifestModel(manifest: FileManifest): MockLanguageModelV3 {
     }),
   });
 }
+
+test('runFixSession: the fix Worker carries the #106 context block, mirroring the main-loop Worker (issue #141)', async () => {
+  let captured: WorkerInput | null = null;
+  const result = await runFixSession(
+    baseInput({
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'fixed');
+  assert.ok(captured, 'fix worker was invoked');
+  assert.equal(
+    (captured as WorkerInput).contextBlock,
+    harnessContextBlock(),
+    'the advisory date context block is threaded into the fix Worker input',
+  );
+});
 
 test('runFixSession: CI failure → saves logs+comments to disk, fix prompt references those dirs, rebases + force-with-lease', async () => {
   const stateDir = await mkdtemp(join(tmpdir(), 'aitm-cifix-'));

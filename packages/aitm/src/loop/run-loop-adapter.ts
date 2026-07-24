@@ -21,7 +21,6 @@ import {
   backgroundProcessTools,
   bashTool,
   type CommandRule,
-  contextReminder,
   editFileTool,
   FileStateTracker,
   globTool,
@@ -36,7 +35,6 @@ import {
   readFileTool,
   SUBMIT_TOOL_NAME,
   type SubagentHandle,
-  SYSTEM_REMINDER_CONTRACT,
   type ToolHooks,
   withHooks,
   withReminders,
@@ -117,7 +115,7 @@ import {
   type ReviewerTools,
   runReviewer as runReviewerSubagent,
 } from '../subagents/reviewer.ts';
-import { buildRolePrompt, type RolePromptInput } from '../subagents/role-prompt.ts';
+import { harnessContextBlock, reminderAgentSystemPrompt } from '../subagents/role-prompt.ts';
 import { bootstrapSpecialists } from '../subagents/specialist-bootstrap.ts';
 import {
   buildSpecialistSignal,
@@ -439,22 +437,10 @@ function capRawStyle(contents: string): string {
   return contents.slice(0, budget) + STYLE_TRUNCATION_MARKER;
 }
 
-// The BYTE-STABLE leading context block prepended to every subagent's first user message: today's
-// date, framed as advisory <system-reminder> context (issue #106). It carries no per-step content, so
-// the leading prompt prefix is identical across every call in a conversation (and across a run's calls
-// within a day) — the provider's prompt cache holds instead of being invalidated by a moving prefix
-// (slice 04 §4). The date stays day-granular for the same reason (stable within a day).
-//
-// Two things stay OUT of this block on purpose:
-//   - the run's Step N/M position — a per-call mutation that, sitting right after the cached prefix,
-//     would bust the cache every step. It rides a TRAILING reminder (runProgressReminder) appended to
-//     the END of the first message instead, where it can never reach the prefix.
-//   - the target-repo style digest — already single-sourced in the subagent's system prompt
-//     (buildRolePrompt's `style` slot, via reminderAgentSystemPrompt), a cacheable block built once per
-//     call. Repeating it here paid for the same tokens twice on every step.
-export function harnessContextBlock(): string {
-  return contextReminder([{ label: 'currentDate', body: new Date().toISOString().slice(0, 10) }]);
-}
+// The reminder-channel prompt helpers (issue #106) now live in role-prompt.ts so the CI-fix worker
+// and the take-over reviewer (issue #141) can reuse them without importing back into this adapter
+// (import cycle). Re-exported here for the callers and tests that reach them through the adapter.
+export { harnessContextBlock, reminderAgentSystemPrompt };
 
 // The run's phase + N/M position as a standalone TRAILING `<system-reminder>`, appended to the END of a
 // subagent's first user message (slice 04 §4) so the model still knows where it is in the run without
@@ -475,13 +461,6 @@ export function runStepContextLine(step: RunStep): string {
     return step.phase ? `${base} — ${step.phase}` : base;
   }
   return step.phase ? `Phase: ${step.phase}` : '';
-}
-
-// System prompt for a main-loop agent whose tool set is decorated with reminders (issue #106): the
-// role's block-pipeline prompt (issue #105) plus the provenance contract, so the model treats
-// <system-reminder> content as advisory harness context, not user intent.
-export function reminderAgentSystemPrompt(input: RolePromptInput): string {
-  return `${buildRolePrompt(input)}\n\n${SYSTEM_REMINDER_CONTRACT}`;
 }
 
 // Narrow state surface the adapter drives. StateStore satisfies it; tests pass an in-memory stub.

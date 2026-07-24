@@ -6,6 +6,7 @@ import { CiFailed } from '../github/errors.ts';
 import type { CiResult, RunCmd, RunCmdResult } from '../github/github-client.ts';
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
+import { harnessContextBlock } from '../subagents/role-prompt.ts';
 import type { WorkerInput, WorkerResult } from '../subagents/worker.ts';
 import type { FixSessionModelSelector } from './ci-fix.ts';
 import { REVIEW_COMMENTS_GRACE } from './constants.ts';
@@ -195,6 +196,13 @@ test('runTakeOverFlow: unresolved threads → invokes Reviewer, pushes, then mer
         reviewerInvocations++;
         assert.equal(rin.pr, 42);
         assert.equal(rin.threads.length, 1);
+        // The take-over Reviewer runs on the reminder-decorated worker tool set, so it gets the same
+        // #106 advisory date context block the main-loop Reviewer does (issue #141).
+        assert.equal(
+          rin.contextBlock,
+          harnessContextBlock(),
+          'reviewer gets the #106 context block',
+        );
         return {
           kind: 'ok',
           resolutions: [{ threadId: 'TH_1', kind: 'fixed', commitSha: 'abc123' }],

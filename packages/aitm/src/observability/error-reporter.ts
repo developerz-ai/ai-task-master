@@ -18,6 +18,19 @@ const NOOP_REPORTER: ErrorReporter = {
   flush: async () => {},
 };
 
+// Narrow view of the `@sentry/node` surface this module uses. A DSN-configured run loads the real
+// package; tests inject a fake, so the bounded-shutdown path is covered without a live transport.
+// `flush` is intentionally absent: `close(timeout)` already drains then disables, so shutdown must
+// route through it alone — reintroducing a separate `flush` here would fail to type-check.
+type SentryModule = typeof import('@sentry/node');
+export type SentrySdk = {
+  init(options: Parameters<SentryModule['init']>[0]): unknown;
+  captureException(error: unknown): unknown;
+  close(timeout?: number): Promise<boolean>;
+};
+
+const defaultLoadSentry = (): Promise<SentrySdk> => import('@sentry/node');
+
 // Resolve the GlitchTip/Sentry DSN from the environment. `AITM_SENTRY_DSN` takes precedence over a
 // generic `SENTRY_DSN`; blank/whitespace counts as unset. Exported for unit testing.
 export function dsnFromEnv(env: Record<string, string | undefined>): string | undefined {
@@ -41,11 +54,12 @@ export function scrubEvent(event: SentryEvent): SentryEvent {
 // lives in the tool's own runtime env (aitm is standalone, not a cluster app), per issue #70.
 export async function initErrorReporter(
   env: Record<string, string | undefined> = process.env,
+  loadSentry: () => Promise<SentrySdk> = defaultLoadSentry,
 ): Promise<ErrorReporter> {
   const dsn = dsnFromEnv(env);
   if (dsn === undefined) return NOOP_REPORTER;
   try {
-    const Sentry = await import('@sentry/node');
+    const Sentry = await loadSentry();
     Sentry.init({
       dsn,
       environment: env.AITM_ENV ?? 'production',
@@ -68,8 +82,10 @@ export async function initErrorReporter(
       },
       flush: async () => {
         try {
-          await Sentry.flush(2000);
-          Sentry.close();
+          // `close(2000)` drains pending events then disables the SDK, bounded to 2s. flush() runs
+          // only on the terminal shutdown path, so a single bounded close is both sufficient and
+          // safe — a bare close() after flush() would re-drain with no timeout.
+          await Sentry.close(2000);
         } catch {
           // ignore — observability must never break the run
         }

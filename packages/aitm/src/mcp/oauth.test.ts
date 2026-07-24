@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import type { ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import {
+  type BrowserLauncher,
   LOOPBACK_HOST,
   loopbackCallbackUrl,
   type OAuthConfig,
   type OAuthOptions,
+  openBrowser,
   performOAuthFlow,
 } from './oauth.ts';
 
@@ -102,26 +104,25 @@ test('OAuthOptions has correct structure', () => {
   assert.strictEqual(options.timeout, 30000);
 });
 
-test('openBrowser handles spawn errors on headless hosts', async () => {
-  const errorEmittingBrowser = async (_url: string): Promise<void> => {
-    const { spawn } = await import('node:child_process');
+test('openBrowser swallows spawn errors on headless hosts', async () => {
+  const emitter = new EventEmitter();
+  let unrefed = false;
+  const launcher: BrowserLauncher = () => ({
+    on: (event, listener) => {
+      emitter.on(event, listener);
+    },
+    unref: () => {
+      unrefed = true;
+    },
+  });
 
-    // Simulate a spawn error by using a non-existent command
-    const proc = spawn('/nonexistent/command/that/does/not/exist', [], {
-      detached: true,
-      stdio: 'ignore',
-    }) as unknown as ChildProcess;
+  await openBrowser('https://example.com', launcher);
 
-    let errorHandled = false;
-    proc.on('error', () => {
-      errorHandled = true;
-    });
-
-    // Wait briefly to ensure the error handler fires
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.ok(errorHandled, 'spawn error should have been handled');
-  };
-
-  // This should not throw even though the browser launcher fails
-  await errorEmittingBrowser('https://example.com');
+  // Emitting 'error' on an EventEmitter with no listener throws; this passes only because the
+  // production handler in openBrowser is registered — deleting it would fail this test.
+  assert.doesNotThrow(
+    () => emitter.emit('error', new Error('spawn ENOENT')),
+    'openBrowser must absorb spawn failures via its error handler',
+  );
+  assert.ok(unrefed, 'openBrowser must unref the detached process');
 });

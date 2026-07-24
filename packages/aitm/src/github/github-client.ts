@@ -3,14 +3,44 @@
 
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
-import { isToleratedFailure } from './check-tolerance.ts';
-import { CiFailed, GhCliMissing, GhCommandFailed, MergeConflict } from './errors.ts';
 import {
-  type CheckStatus,
-  type PullRequest,
-  PullRequestSchema,
-  type ReviewThread,
-} from './schema.ts';
+  CHECKS_EMPTY_GRACE_MS,
+  CHECKS_INITIAL_DELAY_MS,
+  CHECKS_MAX_CONSECUTIVE_FAILURES,
+  CHECKS_MAX_DELAY_MS,
+  CHECKS_START_WAIT_MS,
+  CHECKS_TIMEOUT_MS,
+  type CheckSummary,
+  type CiResult,
+  type CiState,
+  type FailedCheck,
+  pollChecks,
+} from './checks-poller.ts';
+import { GhCliMissing, GhCommandFailed, MergeConflict } from './errors.ts';
+import {
+  MAX_REVIEW_THREAD_PAGES,
+  MAX_THREAD_COMMENT_PAGES,
+  paginateReviewThreads,
+  paginateThreadComments,
+} from './review-threads.ts';
+import { type PullRequest, PullRequestSchema, type ReviewThread } from './schema.ts';
+
+// Re-exported so existing callers/tests importing the poll and pagination constants/types from
+// this module keep working — checks-poller.ts and review-threads.ts own the implementations.
+export {
+  CHECKS_EMPTY_GRACE_MS,
+  CHECKS_INITIAL_DELAY_MS,
+  CHECKS_MAX_CONSECUTIVE_FAILURES,
+  CHECKS_MAX_DELAY_MS,
+  CHECKS_START_WAIT_MS,
+  CHECKS_TIMEOUT_MS,
+  type CheckSummary,
+  type CiResult,
+  type CiState,
+  type FailedCheck,
+  MAX_REVIEW_THREAD_PAGES,
+  MAX_THREAD_COMMENT_PAGES,
+};
 
 export type CreatePrInput = {
   title: string;
@@ -146,58 +176,10 @@ export const defaultSleep: Sleep = (ms, signal) => {
   });
 };
 
-// GraphQL pagination bounds: GitHub caps at 100 nodes/page; these bounds prevent infinite loops
-// on broken pagination (non-advancing cursor, infinite pages) while allowing very large PRs.
-export const MAX_REVIEW_THREAD_PAGES = 100; // ≈ 10k threads (extremely conservative upper bound)
-export const MAX_THREAD_COMMENT_PAGES = 100; // ≈ 10k comments per thread (idem)
-
-export const CHECKS_INITIAL_DELAY_MS = 1000;
-export const CHECKS_MAX_DELAY_MS = 60_000;
-// Hard ceiling on how long waitForChecks polls before giving up — ports claude-task-master's
-// CI_POLL_TIMEOUT (120 min). Big CIs can run for a long time; reaching this is the only remaining
-// throw path now that failures are returned, not thrown (hence CiFailed is kept strictly for the
-// timeout case). On timeout the caller blocks rather than merging a PR whose CI never finished,
-// unless --admin is set — see handleWaitingCi.
-export const CHECKS_TIMEOUT_MS = 120 * 60_000;
-
-// A push doesn't register its CI checks instantly. Polling immediately would see an empty check
-// set, and an empty set has nothing failing or pending — so it would read "CI hasn't started" as
-// "CI passed" and merge before a single job runs. waitForChecks sleeps CHECKS_START_WAIT_MS before
-// the first poll to let Actions register, and keeps treating an empty set as pending until
-// CHECKS_EMPTY_GRACE_MS of polling has also elapsed; only then is the PR deemed to genuinely have
-// no checks and reported mergeable.
-export const CHECKS_START_WAIT_MS = 60_000;
-export const CHECKS_EMPTY_GRACE_MS = 60_000;
-
-// A single unparseable/failed `gh pr checks` read is noise — a truncated stdout, a network blip, a
-// transient gh error — and must not abandon a wait that can legitimately run for the full 120-minute
-// budget. waitForChecks tolerates this many CONSECUTIVE bad reads (any good read resets the count),
-// polling through them on the same backoff, and only then gives up with GhCommandFailed. A genuinely
-// broken environment (auth revoked mid-run, gh removed) fails every read and so still surfaces fast.
-// A checkless PR is NOT a failed read — see readCheckRows — so it never counts toward this.
-export const CHECKS_MAX_CONSECUTIVE_FAILURES = 5;
-
 // gh caps `run list` at this many rows. getFailedCiLogs also passes `--commit <headSha>` so gh
 // filters to the PR's exact head commit server-side — without it, a busy branch's newer/older
 // pushes could fill this window and truncate the head's own runs off the list entirely.
 export const FAILED_RUN_LIST_LIMIT = 30;
-
-// waitForChecks collapses the per-check buckets into one of three states; callers branch on it
-// instead of catching a throw. failedChecks is populated only when state is 'failure' (one entry
-// per failed/cancelled check) for diagnostics — the fix loop re-downloads full logs via
-// getFailedCiLogs(pr) rather than relying on these names.
-export type CiState = 'success' | 'failure' | 'pending';
-export type FailedCheck = { name: string; status: 'failure' | 'cancelled' };
-// One settled check: its name and gh's bucket ('pass' | 'fail' | 'skipping' | 'cancel' | …). Carried
-// so the caller can print ONE summary line of what CI showed when it settled, without re-querying.
-export type CheckSummary = { name: string; bucket: string };
-export type CiResult = {
-  state: CiState;
-  failedChecks: FailedCheck[];
-  // The final check rows at settle time, for a one-time summary. Optional so existing stubs/callers
-  // that only branch on `state`/`failedChecks` stay valid.
-  checks?: CheckSummary[];
-};
 
 export class GitHubClient {
   // Capability matrix — docs/github-integration.md §"Capabilities".
@@ -338,71 +320,10 @@ export class GitHubClient {
 
   // `signal` cancels the wait (SIGINT): both the start grace and the backoff resolve early on
   // abort, and the poll then returns a NON-VERDICT `pending` result instead of a settled one.
-  // Callers must re-check the signal before acting on the result — see handleWaitingCi.
+  // Callers must re-check the signal before acting on the result — see handleWaitingCi. The
+  // poll/backoff/tolerance policy itself lives in checks-poller.ts; this is transport wiring only.
   async waitForChecks(pr: number, signal?: AbortSignal): Promise<CiResult> {
-    // The timeout budget is wall-clock, anchored here. Accumulating only the backoff `delay` (as this
-    // once did) left the 60s start grace below and every poll's subprocess wall-time uncounted, so a
-    // run of slow or near-deadline (5-min) `gh pr checks` calls could outlast the 120-minute ceiling
-    // many times over. `now()` includes all of it.
-    const start = this.now();
-    // Let CI register its checks before the first poll, so a just-pushed PR doesn't read as
-    // "passed" off an empty check set — see CHECKS_START_WAIT_MS.
-    await this.sleep(CHECKS_START_WAIT_MS, signal);
-    let delay = CHECKS_INITIAL_DELAY_MS;
-    let emptyWaited = 0;
-    let consecutiveFailures = 0;
-    while (true) {
-      // A cancelled run stops here. The sleeps RESOLVE on abort rather than rejecting (see
-      // defaultSleep), so without this check a SIGINT would only make the loop spin faster —
-      // spawning a `gh pr checks` subprocess per tick until the 120-minute timeout.
-      if (signal?.aborted) return { state: 'pending', failedChecks: [], checks: [] };
-      const r = await this.runCmd(
-        'gh',
-        ['pr', 'checks', String(pr), '--json', 'bucket,name,state,description'],
-        { cwd: this.cwd },
-      );
-      // An abort kills the child mid-flight, so its stdout is truncated or empty — parsing it would
-      // report "gh pr checks failed" for what is really a cancellation. Same non-verdict as above.
-      if (signal?.aborted) return { state: 'pending', failedChecks: [], checks: [] };
-      // A checkless PR (→ empty set) and a transient read failure (→ null) are the two non-JSON
-      // exits; readCheckRows tells them apart so neither is misread as the other.
-      const rows = readCheckRows(r);
-      let sawEmptyRows = false;
-      if (rows) {
-        consecutiveFailures = 0;
-        const status = aggregateChecks(rows);
-        if (status === 'failure' || status === 'cancelled') {
-          return {
-            state: 'failure',
-            failedChecks: collectFailedChecks(rows),
-            checks: summarize(rows),
-          };
-        }
-        if (status !== 'pending')
-          return { state: 'success', failedChecks: [], checks: summarize(rows) };
-        // An empty check set aggregates to pending: CI still hasn't registered, or the PR has none.
-        // Once it has stayed empty past the grace, the PR genuinely has no checks and is mergeable.
-        if (rows.length === 0 && emptyWaited >= CHECKS_EMPTY_GRACE_MS) {
-          return { state: 'success', failedChecks: [], checks: [] };
-        }
-        sawEmptyRows = rows.length === 0;
-      } else {
-        // One unparseable read is noise; a run of them is a real break. Poll through up to
-        // CHECKS_MAX_CONSECUTIVE_FAILURES in a row, then surface the last failure.
-        consecutiveFailures += 1;
-        if (consecutiveFailures >= CHECKS_MAX_CONSECUTIVE_FAILURES) {
-          throw new GhCommandFailed('gh pr checks', r);
-        }
-      }
-      const elapsed = this.now() - start;
-      if (elapsed >= CHECKS_TIMEOUT_MS) {
-        throw new CiFailed(`PR #${pr} checks still pending after ${Math.round(elapsed / 1000)}s`);
-      }
-      await this.sleep(delay, signal);
-      // A failed read is not an empty check set, so it resets the empty grace rather than advancing it.
-      emptyWaited = sawEmptyRows ? emptyWaited + delay : 0;
-      delay = Math.min(delay * 2, CHECKS_MAX_DELAY_MS);
-    }
+    return pollChecks(this.runCmd, this.cwd, pr, this.sleep, this.now, signal);
   }
 
   // Download the FULL logs of every failed CI job for a PR — no truncation, no ZIP. Mirrors
@@ -497,14 +418,25 @@ export class GitHubClient {
   async listUnresolvedThreads(pr: number): Promise<ReviewThread[]> {
     const { owner, name } = await this.repoMeta();
     // GitHub caps connections at 100 nodes per page — page through threads and
-    // their comments to avoid silently dropping data on large PRs.
-    const threads = await this.paginateReviewThreads(owner, name, pr);
+    // their comments to avoid silently dropping data on large PRs. Pagination itself lives in
+    // review-threads.ts; this method owns only repo-meta resolution and the response shape.
+    const threads = await paginateReviewThreads(
+      this.runCmd,
+      this.cwd,
+      owner,
+      name,
+      pr,
+      this.onWarn,
+    );
     const unresolved = threads.filter((t) => !t.isResolved);
     for (const thread of unresolved) {
       if (thread.comments.pageInfo.hasNextPage && thread.comments.pageInfo.endCursor) {
-        const rest = await this.paginateThreadComments(
+        const rest = await paginateThreadComments(
+          this.runCmd,
+          this.cwd,
           thread.id,
           thread.comments.pageInfo.endCursor,
+          this.onWarn,
         );
         thread.comments.nodes.push(...rest);
       }
@@ -519,117 +451,6 @@ export class GitHubClient {
         author: c.author?.login ?? 'ghost',
       })),
     }));
-  }
-
-  private async paginateReviewThreads(
-    owner: string,
-    repo: string,
-    pr: number,
-  ): Promise<RawReviewThread[]> {
-    const collected: RawReviewThread[] = [];
-    let cursor: string | null = null;
-    let pageCount = 0;
-    let prevEndCursor: string | null = null;
-    while (pageCount < MAX_REVIEW_THREAD_PAGES) {
-      const args: string[] = [
-        'api',
-        'graphql',
-        '-f',
-        `owner=${owner}`,
-        '-f',
-        `repo=${repo}`,
-        '-F',
-        `pr=${pr}`,
-        '-f',
-        `query=${REVIEW_THREADS_QUERY}`,
-      ];
-      if (cursor) args.push('-f', `threadsCursor=${cursor}`);
-      const r = await this.runCmd('gh', args, { cwd: this.cwd });
-      if (r.exitCode !== 0) {
-        throw new GhCommandFailed('gh api graphql (reviewThreads)', r);
-      }
-      const parsed = GqlReviewThreadsResponseSchema.parse(
-        parseGhJson('gh api graphql (reviewThreads)', r.stdout),
-      );
-      const conn = parsed.data.repository.pullRequest.reviewThreads;
-      pageCount++;
-      // Keep this page's threads before deciding whether to stop — both a terminal page and a
-      // broken-pagination page carry real threads that must not be dropped.
-      collected.push(...conn.nodes);
-      if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) {
-        return collected;
-      }
-      // Non-advancing cursor → GitHub's pagination is broken; stop after keeping this page.
-      if (conn.pageInfo.endCursor === prevEndCursor) {
-        this.onWarn(
-          `listUnresolvedThreads: review threads for PR #${pr} truncated after ${pageCount} pages` +
-            ' — GitHub returned a non-advancing pagination cursor',
-        );
-        return collected;
-      }
-      prevEndCursor = conn.pageInfo.endCursor;
-      cursor = conn.pageInfo.endCursor;
-    }
-    this.onWarn(
-      `listUnresolvedThreads: review threads for PR #${pr} truncated at the ` +
-        `${MAX_REVIEW_THREAD_PAGES}-page cap — some threads were not fetched`,
-    );
-    return collected;
-  }
-
-  private async paginateThreadComments(
-    threadId: string,
-    startCursor: string,
-  ): Promise<RawReviewComment[]> {
-    const collected: RawReviewComment[] = [];
-    let cursor: string = startCursor;
-    let pageCount = 0;
-    let prevEndCursor: string | null = null;
-    while (pageCount < MAX_THREAD_COMMENT_PAGES) {
-      const r = await this.runCmd(
-        'gh',
-        [
-          'api',
-          'graphql',
-          '-f',
-          `threadId=${threadId}`,
-          '-f',
-          `commentsCursor=${cursor}`,
-          '-f',
-          `query=${THREAD_COMMENTS_QUERY}`,
-        ],
-        { cwd: this.cwd },
-      );
-      if (r.exitCode !== 0) {
-        throw new GhCommandFailed('gh api graphql (threadComments)', r);
-      }
-      const parsed = GqlThreadCommentsResponseSchema.parse(
-        parseGhJson('gh api graphql (threadComments)', r.stdout),
-      );
-      const conn = parsed.data.node.comments;
-      pageCount++;
-      // Keep this page's comments before deciding whether to stop — both a terminal page and a
-      // broken-pagination page carry real comments that must not be dropped.
-      collected.push(...conn.nodes);
-      if (!conn.pageInfo.hasNextPage || !conn.pageInfo.endCursor) {
-        return collected;
-      }
-      // Non-advancing cursor → GitHub's pagination is broken; stop after keeping this page.
-      if (conn.pageInfo.endCursor === prevEndCursor) {
-        this.onWarn(
-          `listUnresolvedThreads: comments for thread ${threadId} truncated after ${pageCount} ` +
-            'pages — GitHub returned a non-advancing pagination cursor',
-        );
-        return collected;
-      }
-      prevEndCursor = conn.pageInfo.endCursor;
-      cursor = conn.pageInfo.endCursor;
-    }
-    this.onWarn(
-      `listUnresolvedThreads: comments for thread ${threadId} truncated at the ` +
-        `${MAX_THREAD_COMMENT_PAGES}-page cap — some comments were not fetched`,
-    );
-    return collected;
   }
 
   async replyToThread(threadId: string, body: string): Promise<void> {
@@ -782,8 +603,9 @@ function safeJson(s: string): unknown {
 // gh can exit 0 yet print non-JSON to stdout — a deprecation banner, an HTML error page, an empty
 // body. A bare JSON.parse then throws a context-free SyntaxError with no clue which command emitted
 // it. The strict parse sites route through this so the throw names the gh command and shows a
-// stdout excerpt, keeping the SyntaxError as `cause`. Mirrors safeJson/tryParseChecks but surfaces
-// the failure instead of degrading to null — these callers must not proceed on garbage.
+// stdout excerpt, keeping the SyntaxError as `cause`. Mirrors safeJson but surfaces the failure
+// instead of degrading to null — these callers must not proceed on garbage. review-threads.ts has
+// its own copy for the same reason (transport stays here; that module owns pagination only).
 const GH_STDOUT_EXCERPT_LIMIT = 500;
 
 function parseGhJson(command: string, stdout: string): unknown {
@@ -824,104 +646,6 @@ function parseScopes(text: string): string[] {
   return scopes;
 }
 
-// Wire shapes for `gh pr checks --json bucket,name,state,description`. The bucket field is the
-// gh CLI's normalized status across providers (Actions, Circle, etc.); CheckStatus is our domain.
-// `description` is the reporting service's free-text reason — the only way to tell a tolerated
-// failure (see check-tolerance.ts) from a real one.
-const CheckBucketSchema = z.enum(['pass', 'fail', 'pending', 'cancel', 'skipping']);
-type CheckBucket = z.infer<typeof CheckBucketSchema>;
-const CheckRowSchema = z.object({
-  bucket: CheckBucketSchema,
-  name: z.string(),
-  state: z.string(),
-  description: z.string().optional(),
-});
-const ChecksResponseSchema = z.array(CheckRowSchema);
-type CheckRow = z.infer<typeof CheckRowSchema>;
-
-function tryParseChecks(stdout: string): CheckRow[] | null {
-  if (!stdout.trim()) return null;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(stdout);
-  } catch {
-    return null;
-  }
-  const parsed = ChecksResponseSchema.safeParse(raw);
-  return parsed.success ? parsed.data : null;
-}
-
-// A PR with no checks configured is not a failed poll. `gh pr checks --json` prints its rows to
-// stdout for every real check state (even exit 8 when one fails), but for a checkless PR it writes
-// nothing to stdout and exits non-zero with "no checks reported on the '<branch>' branch" on stderr.
-// Match that exact case so it becomes an empty row set — anything else with an empty/garbage stdout
-// (an auth or network error) must stay a failure, not be waved through as a mergeable "no checks".
-function isNoChecksReported(r: RunCmdResult): boolean {
-  return r.exitCode !== 0 && r.stdout.trim() === '' && /no checks reported/i.test(r.stderr);
-}
-
-// One poll's rows, or null when the read itself failed and should be retried. Collapses a checkless
-// PR to an empty set (→ enters CHECKS_EMPTY_GRACE_MS) and leaves genuine read failures as null (→
-// counted against CHECKS_MAX_CONSECUTIVE_FAILURES), so waitForChecks never confuses the two.
-function readCheckRows(r: RunCmdResult): CheckRow[] | null {
-  const rows = tryParseChecks(r.stdout);
-  if (rows) return rows;
-  return isNoChecksReported(r) ? [] : null;
-}
-
-const BUCKET_TO_STATUS: Record<CheckBucket, CheckStatus> = {
-  pass: 'success',
-  fail: 'failure',
-  pending: 'pending',
-  cancel: 'cancelled',
-  skipping: 'skipped',
-};
-
-// A failed row whose (name, description) pair is whitelisted counts as skipped, so a rate-limited
-// review bot can neither fail the PR nor be reported as something to fix.
-function effectiveStatus(row: CheckRow): CheckStatus {
-  const status = BUCKET_TO_STATUS[row.bucket];
-  if ((status === 'failure' || status === 'cancelled') && isToleratedFailure(row)) return 'skipped';
-  return status;
-}
-
-function aggregateChecks(rows: CheckRow[]): CheckStatus {
-  // No rows is not success: right after a push, CI may not have registered its checks yet, so
-  // nothing has run. Report pending; waitForChecks bounds how long an empty set stays pending
-  // before deciding the PR truly has no checks.
-  if (rows.length === 0) return 'pending';
-  let pending = false;
-  for (const row of rows) {
-    const status = effectiveStatus(row);
-    if (status === 'failure') return 'failure';
-    if (status === 'cancelled') return 'cancelled';
-    if (status === 'pending') pending = true;
-  }
-  return pending ? 'pending' : 'success';
-}
-
-// The settled rows as {name, bucket} for a one-line CI summary. Dedupes by name (gh can list a matrix
-// job's shards separately) keeping the first, so the summary reads one line per named check.
-function summarize(rows: CheckRow[]): CheckSummary[] {
-  const seen = new Set<string>();
-  const out: CheckSummary[] = [];
-  for (const row of rows) {
-    if (seen.has(row.name)) continue;
-    seen.add(row.name);
-    out.push({ name: row.name, bucket: row.bucket });
-  }
-  return out;
-}
-
-function collectFailedChecks(rows: CheckRow[]): FailedCheck[] {
-  const out: FailedCheck[] = [];
-  for (const row of rows) {
-    const status = effectiveStatus(row);
-    if (status === 'failure' || status === 'cancelled') out.push({ name: row.name, status });
-  }
-  return out;
-}
-
 // `gh repo view --json owner,name` returns `{ owner: { login }, name }`.
 const RepoOwnerNameSchema = z.object({
   owner: z.object({ login: z.string() }),
@@ -937,36 +661,6 @@ const DefaultBranchRefSchema = z.object({
     .nullable(),
 });
 
-const REVIEW_THREADS_QUERY = `query($owner: String!, $repo: String!, $pr: Int!, $threadsCursor: String) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $pr) {
-      reviewThreads(first: 100, after: $threadsCursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          isResolved
-          path
-          comments(first: 100) {
-            pageInfo { hasNextPage endCursor }
-            nodes { id body author { login } }
-          }
-        }
-      }
-    }
-  }
-}`;
-
-const THREAD_COMMENTS_QUERY = `query($threadId: ID!, $commentsCursor: String) {
-  node(id: $threadId) {
-    ... on PullRequestReviewThread {
-      comments(first: 100, after: $commentsCursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes { id body author { login } }
-      }
-    }
-  }
-}`;
-
 const REPLY_THREAD_MUTATION = `mutation($threadId: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
     comment { id }
@@ -978,50 +672,3 @@ const RESOLVE_THREAD_MUTATION = `mutation($threadId: ID!) {
     thread { id isResolved }
   }
 }`;
-
-const GqlPageInfoSchema = z.object({
-  hasNextPage: z.boolean(),
-  endCursor: z.string().nullable(),
-});
-
-const GqlReviewCommentSchema = z.object({
-  id: z.string(),
-  body: z.string(),
-  author: z.object({ login: z.string() }).nullable(),
-});
-type RawReviewComment = z.infer<typeof GqlReviewCommentSchema>;
-
-const GqlReviewThreadSchema = z.object({
-  id: z.string(),
-  isResolved: z.boolean(),
-  path: z.string().nullable(),
-  comments: z.object({
-    pageInfo: GqlPageInfoSchema,
-    nodes: z.array(GqlReviewCommentSchema),
-  }),
-});
-type RawReviewThread = z.infer<typeof GqlReviewThreadSchema>;
-
-const GqlReviewThreadsResponseSchema = z.object({
-  data: z.object({
-    repository: z.object({
-      pullRequest: z.object({
-        reviewThreads: z.object({
-          pageInfo: GqlPageInfoSchema,
-          nodes: z.array(GqlReviewThreadSchema),
-        }),
-      }),
-    }),
-  }),
-});
-
-const GqlThreadCommentsResponseSchema = z.object({
-  data: z.object({
-    node: z.object({
-      comments: z.object({
-        pageInfo: GqlPageInfoSchema,
-        nodes: z.array(GqlReviewCommentSchema),
-      }),
-    }),
-  }),
-});

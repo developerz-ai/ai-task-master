@@ -632,6 +632,28 @@ test('self-review "unclean" outcome still opens the PR and records the reason on
   assert.ok(progress.some((p) => /could not fully clean the diff \(typecheck still red\)/.test(p)));
 });
 
+test('self-review "error" outcome still opens the PR and is surfaced distinctly (not as clean)', async () => {
+  const progress: string[] = [];
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 7,
+    selfReviewResult: { kind: 'error', reason: 'provider 503: upstream timeout' },
+  });
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, autoMerge: false, progress: (m) => progress.push(m) }),
+  );
+  await loop.runGroup(group('alpha'));
+
+  assert.equal(calls.openPr.length, 1, 'a review that never ran still opens the PR (non-fatal)');
+  assert.ok(
+    progress.some((p) => /self-review errored \(provider 503: upstream timeout\)/.test(p)),
+    'the review error reads as errored, never as clean',
+  );
+  assert.ok(
+    !progress.some((p) => /self-review clean/.test(p)),
+    'an errored review must not emit the clean line',
+  );
+});
+
 test('runGroup persists status transitions to state for the matching group id', async () => {
   const { orchestrator } = makeOrchestrator({ prNumber: 9 });
   const initial: RunState = { ...baseState(), prGroups: [group('beta')] };

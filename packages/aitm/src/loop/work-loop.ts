@@ -1370,14 +1370,17 @@ function prNumberOf(group: PrGroup): number {
   return group.pr;
 }
 
-// One progress line summarizing the pre-PR self-review outcome. `unclean` is the only case that
-// carries a reason (a red diff shipped to the PR anyway) — the others just note clean vs. fixed.
+// One progress line summarizing the pre-PR self-review outcome. `unclean` and `error` both carry a
+// reason — `unclean` is a red diff shipped anyway, `error` is a review that never completed (it must
+// not read as clean); the others just note clean vs. fixed.
 function selfReviewProgress(groupId: string, result: SelfReviewResult): string {
   switch (result.kind) {
     case 'clean':
       return `group ${groupId}: self-review clean — opening PR`;
     case 'reviewed':
       return `group ${groupId}: self-review applied fixes — opening PR`;
+    case 'error':
+      return `group ${groupId}: self-review errored (${result.reason}) — opening PR anyway (external CI is the backstop)`;
     default:
       return `group ${groupId}: self-review could not fully clean the diff (${result.reason}) — opening PR anyway (external CI is the backstop)`;
   }

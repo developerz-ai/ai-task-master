@@ -300,3 +300,43 @@ test('mergeFlowAdapter: no usage tracker → onUsage seams omitted (no accountin
   assert.equal(subagents.onWorkerUsage, undefined);
   assert.equal(subagents.onReviewerUsage, undefined);
 });
+
+// --- run-level cost/token ceiling (issue #190) ---
+
+test('mergeFlowAdapter: a tracker + a configured ceiling → wires a budget check that reports usage', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const tracker = new UsageTracker(noLimits);
+  const resolved = baseResolved({ maxTotalTokens: 100 });
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  await mergeFlowAdapter(baseInput({ github, resolved, usage: tracker }), flow.seams);
+  const { budget } = flow.captured();
+
+  assert.equal(typeof budget, 'function');
+  assert.equal((await budget?.())?.exceeded, false);
+
+  // Same ledger the role-usage sinks feed — recording spend through them trips the ceiling.
+  const { subagents } = flow.captured();
+  subagents.onWorkerUsage?.(usageOf(80, 30), 'coding-model');
+  const status = await budget?.();
+  assert.equal(status?.exceeded, true);
+  if (status?.exceeded) assert.match(status.reason, /token ceiling reached/);
+});
+
+test('mergeFlowAdapter: no ceiling configured → budget seam omitted', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const tracker = new UsageTracker(noLimits);
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  await mergeFlowAdapter(baseInput({ github, usage: tracker }), flow.seams);
+  assert.equal(flow.captured().budget, undefined);
+});
+
+test('mergeFlowAdapter: a ceiling but no tracker → budget seam omitted (nothing to measure against)', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const resolved = baseResolved({ maxCostUsd: 5 });
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  await mergeFlowAdapter(baseInput({ github, resolved }), flow.seams);
+  assert.equal(flow.captured().budget, undefined);
+});

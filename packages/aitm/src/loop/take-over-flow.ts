@@ -53,6 +53,7 @@ import {
   runFixSession,
 } from './ci-fix.ts';
 import { DEFAULT_MAX_ITERATIONS, REVIEW_COMMENTS_GRACE } from './constants.ts';
+import type { BudgetStatus } from './work-loop.ts';
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
 export type TakeOverGithub = {
@@ -164,6 +165,12 @@ export type TakeOverFlowInput = {
   // after a push. Default 5s. Tests inject a 0-ms sleep.
   cooldownMs?: number;
   sleep?: Sleep;
+  // Run-level cost/token ceiling (issue #190), consulted at each iteration boundary BEFORE any new
+  // CI-fix or Reviewer work is dispatched — mirrors WorkLoop's group-batch-boundary budget check
+  // (work-loop.ts's `run()`), so `merge-pr` stops opening new spend the same way `start` does.
+  // Built by merge-flow-adapter's makeBudgetCheck from the usage ledger + resolved ceilings. Unset →
+  // no ceiling, byte-identical to before.
+  budget?: () => Promise<BudgetStatus>;
   // git/gh shim — defaults to execa. Stubbed in unit tests to assert command shape without
   // spawning git. Every push after Reviewer/Worker commits goes through the shared
   // rebaseAndForcePush helper (ci-fix.ts): fetch origin <base> → rebase → push --force-with-lease.
@@ -205,6 +212,20 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   let ciFixHandle: SubagentHandle<WorkerTools> | undefined;
   for (; iteration < maxIterations; iteration++) {
     if (input.signal?.aborted) return cancelled();
+
+    // Run-level cost/token ceiling (issue #190): consult the live usage ledger BEFORE this
+    // iteration's CI-fix/Reviewer work can spend anything further. A crossed ceiling blocks the run
+    // here rather than mid-fix-session.
+    if (input.budget) {
+      const status = await input.budget();
+      // A SIGINT during the async ledger lookup must still report cancelled (exit 2), not a budget
+      // block — mirror WorkLoop's post-check re-check of signal.
+      if (input.signal?.aborted) return cancelled();
+      if (status.exceeded) {
+        return { kind: 'blocked', reason: status.reason, iterations: iteration };
+      }
+    }
+
     log?.info('take-over: iteration start', { pr: input.pr, iteration });
 
     // 1. Wait for CI to settle. observeCheckStatus maps a CI failure (or a poll timeout) to

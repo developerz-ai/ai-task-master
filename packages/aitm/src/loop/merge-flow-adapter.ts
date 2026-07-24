@@ -16,7 +16,7 @@ import { PrContextStore } from '../state/pr-context-store.ts';
 import { isFetchHtmlAvailable } from '../tools/fetch-html.ts';
 import { githubThreadTool } from '../tools/github-thread-tool.ts';
 import { buildConflictResolver } from './conflict-resolution.ts';
-import { applyHooks, resolveWorkerTools } from './run-loop-adapter.ts';
+import { applyHooks, makeBudgetCheck, resolveWorkerTools } from './run-loop-adapter.ts';
 import { runTakeOverFlow } from './take-over-flow.ts';
 import type { WorkLoopResult } from './work-loop.ts';
 
@@ -74,6 +74,14 @@ export async function mergeFlowAdapter(
     input.credentials.modelIdFor('reviewer'),
   );
 
+  // Run-level cost/token ceiling (issue #190), shared with `aitm start`'s WorkLoop budget seam.
+  // undefined when no ceiling is configured or there is no tracker, so the flow runs unbounded.
+  const budget = makeBudgetCheck(
+    input.usage,
+    input.resolved.maxCostUsd,
+    input.resolved.maxTotalTokens,
+  );
+
   try {
     const result = await runTakeOver({
       pr: input.pr,
@@ -86,6 +94,7 @@ export async function mergeFlowAdapter(
       allowForcePush: input.resolved.allowForcePush,
       ...(input.maxIterations !== undefined ? { maxIterations: input.maxIterations } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
+      ...(budget ? { budget } : {}),
       // Pushes go through take-over-flow's shared rebaseAndForcePush helper (rebase onto
       // origin/<base> → `git push --force-with-lease`); `runCmd` defaults to real git via execa.
       subagents: {

@@ -463,6 +463,78 @@ test('runTakeOverFlow: max iterations exhausted with threads remaining → block
   }
 });
 
+test('runTakeOverFlow: budget exceeded before the first iteration → blocked, no CI poll', async () => {
+  const gh = fakeGithub({ checks: ['success'], threads: [[]] });
+  const result = await runTakeOverFlow(
+    baseInput(gh.github, {
+      budget: async () => ({
+        exceeded: true,
+        reason: 'cost ceiling reached ($5.0000 ≥ maxCostUsd $5)',
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /cost ceiling reached/);
+    assert.equal(result.iterations, 0);
+  }
+  // Blocked before any GitHub call — the ceiling is consulted before this iteration's work starts.
+  assert.deepEqual(gh.calls, []);
+});
+
+test('runTakeOverFlow: budget exceeded only on a later iteration → runs the earlier ones, then blocks', async () => {
+  const threads: ReviewThread[] = [
+    {
+      id: 'TH_B',
+      isResolved: false,
+      path: 'src/a.ts',
+      comments: [{ id: 'C_B', body: 'fix', author: 'rabbit' }],
+    },
+  ];
+  const gh = fakeGithub({ checks: ['success', 'success'], threads: [threads, threads] });
+  let calls = 0;
+  const input = baseInput(gh.github, {
+    budget: async () => {
+      calls++;
+      return calls > 1 ? { exceeded: true, reason: 'token ceiling reached' } : { exceeded: false };
+    },
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      credentials: dummyCredentials,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runReviewerOverride: async () => ({
+        kind: 'ok',
+        resolutions: [{ threadId: 'TH_B', kind: 'fixed', commitSha: 'abc' }],
+      }),
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /token ceiling reached/);
+    // Blocked at the top of the second iteration — before it polled CI or read threads again.
+    assert.equal(result.iterations, 1);
+  }
+  assert.equal(calls, 2);
+});
+
+test('runTakeOverFlow: signal aborts during the budget check → cancelled, not blocked', async () => {
+  const gh = fakeGithub({ checks: ['success'], threads: [[]] });
+  const controller = new AbortController();
+  const result = await runTakeOverFlow(
+    baseInput(gh.github, {
+      signal: controller.signal,
+      budget: async () => {
+        controller.abort();
+        return { exceeded: true, reason: 'should not surface' };
+      },
+    }),
+  );
+  assert.equal(result.kind, 'cancelled');
+});
+
 test('runTakeOverFlow: aborted signal → cancelled before any merge', async () => {
   const gh = fakeGithub({ checks: ['success'], threads: [[]] });
   const controller = new AbortController();

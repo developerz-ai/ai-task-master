@@ -31,15 +31,12 @@ export type { RunState } from './state/schema.ts';
 export { StateStore } from './state/state-store.ts';
 export { datetimeTool } from './tools/datetime.ts';
 export {
-  DEFAULT_IMPERSONATE_TARGETS,
   type FetchHtmlInput,
   fetchHtmlTool,
   isFetchHtmlAvailable,
 } from './tools/fetch-html.ts';
-export { DEFAULT_STEALTH_HEADERS, webFetchTool } from './tools/web-fetch.ts';
+export { webFetchTool } from './tools/web-fetch.ts';
 export {
-  decodeDdgHref,
-  parseDuckDuckGoHtml,
   type WebSearchInput,
   type WebSearchOutput,
   type WebSearchResult,

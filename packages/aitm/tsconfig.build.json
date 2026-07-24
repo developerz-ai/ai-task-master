@@ -11,5 +11,5 @@
   },
   "references": [{ "path": "../ai-claude-compat" }],
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts", "dist", "node_modules"]
+  "exclude": ["src/**/*.test.ts", "src/testing", "dist", "node_modules"]
 }

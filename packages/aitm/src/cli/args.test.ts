@@ -141,6 +141,21 @@ const startCases: Case[] = [
     argv: ['start', 'goal', '--max-fix-attempts=5'],
     expected: { kind: 'start', goal: 'goal', maxFixAttempts: 5 },
   },
+  {
+    name: 'start: -- sentinel lets a goal begin with a dash',
+    argv: ['start', '--', '-fix the parser'],
+    expected: { kind: 'start', goal: '-fix the parser' },
+  },
+  {
+    name: 'start: -- sentinel after flags keeps them, goal may start with --',
+    argv: ['start', '--max-prs', '2', '--', '--dashed-goal'],
+    expected: { kind: 'start', goal: '--dashed-goal', maxPrs: 2 },
+  },
+  {
+    name: 'start: bare -- then an ordinary goal',
+    argv: ['start', '--', 'normal goal'],
+    expected: { kind: 'start', goal: 'normal goal' },
+  },
 ];
 
 const mergeCases: Case[] = [
@@ -241,6 +256,16 @@ const configCases: Case[] = [
     name: 'config list --project',
     argv: ['config', 'list', '--project'],
     expected: { kind: 'config-list', scope: 'project' },
+  },
+  {
+    name: 'config set: -- sentinel lets a value begin with --',
+    argv: ['config', 'set', 'key', '--', '--dashed'],
+    expected: { kind: 'config-set', scope: 'global', key: 'key', value: '--dashed' },
+  },
+  {
+    name: 'config set: --project honored alongside a -- value sentinel',
+    argv: ['config', 'set', 'key', '--project', '--', '--dashed'],
+    expected: { kind: 'config-set', scope: 'project', key: 'key', value: '--dashed' },
   },
 ];
 
@@ -450,6 +475,21 @@ const usageErrorCases: Case[] = [
     argv: ['config', 'set', 'k', 'v', '--global'],
     expected: { kind: 'usage-error' },
   },
+  {
+    name: 'start: two positionals after -- is still too many',
+    argv: ['start', '--', '-a', '-b'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'resume: -- does not conjure a goal (resume takes no positional)',
+    argv: ['resume', '--', 'goal'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'config set: a --flag-like value without -- is a usage error',
+    argv: ['config', 'set', 'key', '--dashed'],
+    expected: { kind: 'usage-error' },
+  },
 ];
 
 const profileCases: Case[] = [
@@ -500,6 +540,26 @@ const profileCases: Case[] = [
     argv: ['profile', 'add', 'z.ai', '--preset', 'zai', '--api-key-stdin'],
     expected: { kind: 'profile-add', name: 'z.ai', preset: 'zai', apiKeyStdin: true },
   },
+  {
+    name: 'profile set: -- sentinel lets a value begin with --',
+    argv: ['profile', 'set', 'z.ai', 'models.fast', '--', '--dashed'],
+    expected: { kind: 'profile-set', name: 'z.ai', key: 'models.fast', value: '--dashed' },
+  },
+  {
+    name: 'profile get: -- sentinel lets a key begin with --',
+    argv: ['profile', 'get', 'z.ai', '--', '--weird.key'],
+    expected: { kind: 'profile-get', name: 'z.ai', key: '--weird.key' },
+  },
+  {
+    name: 'profile use: -- sentinel before the name',
+    argv: ['profile', 'use', '--', 'z.ai'],
+    expected: { kind: 'profile-use', name: 'z.ai' },
+  },
+  {
+    name: 'profile add: -- sentinel lets a name begin with a dash',
+    argv: ['profile', 'add', '--', '-oddname'],
+    expected: { kind: 'profile-add', name: '-oddname' },
+  },
   // error / HELP cases
   {
     name: 'profile add: --api-key and --api-key-stdin are mutually exclusive',
@@ -535,6 +595,16 @@ const profileCases: Case[] = [
   {
     name: 'profile set: too few args',
     argv: ['profile', 'set', 'a', 'b'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'profile set: a --flag-like value without -- is a usage error (was silently stored)',
+    argv: ['profile', 'set', 'p', 'models.fast', '--foo'],
+    expected: { kind: 'usage-error' },
+  },
+  {
+    name: 'profile get: a --flag-like key without -- is a usage error',
+    argv: ['profile', 'get', 'p', '--foo'],
     expected: { kind: 'usage-error' },
   },
   {
@@ -690,6 +760,32 @@ test('mcp-login: invalid timeout is usage error', () => {
   });
   assert.deepEqual(parseArgs(['mcp-login', 'https://my-mcp.com', '--timeout', '-100']), {
     kind: 'usage-error',
+  });
+});
+
+test('mcp-login: -- sentinel before the server URL', () => {
+  assert.deepEqual(parseArgs(['mcp-login', '--', 'https://my-mcp.com']), {
+    kind: 'mcp-login',
+    serverUrl: 'https://my-mcp.com',
+  });
+});
+
+test('config set and profile set share one value grammar (twin-grammar parity)', () => {
+  // Both twins reject a stray --flag in the value slot ...
+  assert.deepEqual(parseArgs(['config', 'set', 'k', '--v']), { kind: 'usage-error' });
+  assert.deepEqual(parseArgs(['profile', 'set', 'p', 'k', '--v']), { kind: 'usage-error' });
+  // ... and both accept the same token verbatim once a `--` sentinel precedes it.
+  assert.deepEqual(parseArgs(['config', 'set', 'k', '--', '--v']), {
+    kind: 'config-set',
+    scope: 'global',
+    key: 'k',
+    value: '--v',
+  });
+  assert.deepEqual(parseArgs(['profile', 'set', 'p', 'k', '--', '--v']), {
+    kind: 'profile-set',
+    name: 'p',
+    key: 'k',
+    value: '--v',
   });
 });
 

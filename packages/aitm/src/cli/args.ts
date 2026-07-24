@@ -8,7 +8,9 @@ export type StartArgs = {
   goal: string;
   criteria?: string;
   maxPrs?: number;
-  maxSessions?: number | null;
+  // Parsed as a non-negative int (0 = unlimited). The 0→null "unlimited" mapping lives in
+  // toCliOverrides; the parsed arg never carries null, so `| null` belongs on CliOverrides, not here.
+  maxSessions?: number;
   autoMerge?: boolean;
   // Force-merge past base-branch protection via `gh pr merge --admin`. From `--admin`.
   adminMerge?: boolean;
@@ -16,7 +18,9 @@ export type StartArgs = {
   // `--allow-dirty`. Without it a dirty tree at run entry is refused (workspace/dirty-tree.ts).
   allowDirty?: boolean;
   prPerTask?: boolean;
-  stylePath?: string | null;
+  // The parser only ever yields a path string or leaves it absent; `null` (explicit "no style")
+  // is a CliOverrides concern, not something argv can express, so no `| null` here.
+  stylePath?: string;
   model?: string;
   concurrency?: number;
   // Cap on CI-fix passes per PR group before it blocks for a human. From `--max-fix-attempts`. #128.
@@ -138,9 +142,20 @@ function parseMcpLogin(args: ReadonlyArray<string>): ParsedArgs {
   let timeout: number | undefined;
 
   let i = 0;
+  let endOfOptions = false;
   while (i < args.length) {
     const raw = args[i];
     if (raw === undefined) break;
+    if (endOfOptions) {
+      positionals.push(raw);
+      i += 1;
+      continue;
+    }
+    if (raw === '--') {
+      endOfOptions = true;
+      i += 1;
+      continue;
+    }
     const { flag, inlineValue, consumed } = splitFlag(raw);
     if (flag === '--callback-url') {
       const v = takeValue(args, i, inlineValue);
@@ -203,9 +218,22 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   let branch: string | undefined;
 
   let i = 0;
+  let endOfOptions = false;
   while (i < args.length) {
     const raw = args[i];
     if (raw === undefined) break;
+    if (endOfOptions) {
+      positionals.push(raw);
+      i += 1;
+      continue;
+    }
+    if (raw === '--') {
+      // End-of-options sentinel: everything after is a positional, so a goal starting with `-`
+      // (`aitm start -- -fix the parser`) is representable instead of a usage error.
+      endOfOptions = true;
+      i += 1;
+      continue;
+    }
     const { flag, inlineValue, consumed } = splitFlag(raw);
     if (flag === '--criteria') {
       const v = takeValue(args, i, inlineValue);
@@ -369,18 +397,18 @@ function parseConfig(args: ReadonlyArray<string>): ParsedArgs {
   const sub = args[0];
   if (sub === undefined) return USAGE_ERROR;
   const tail = args.slice(1);
-  const positionals: string[] = [];
   let scope: 'global' | 'project' = 'global';
-  for (const arg of tail) {
-    if (arg === '--project') {
+  // Same grammar as `profile set` (via collectPositionals): honor `--`, reject stray `--`-flags.
+  // `--project` is config's one recognized flag (a scope toggle); `--project=anything` is a usage
+  // error since it's boolean.
+  const positionals = collectPositionals(tail, (flag) => {
+    if (flag === '--project') {
       scope = 'project';
-    } else if (arg.startsWith('--')) {
-      // `--project=anything` is a usage error: --project is a boolean flag.
-      return USAGE_ERROR;
-    } else {
-      positionals.push(arg);
+      return true;
     }
-  }
+    return false;
+  });
+  if (positionals === null) return USAGE_ERROR;
   switch (sub) {
     case 'set': {
       if (positionals.length !== 2) return USAGE_ERROR;
@@ -430,23 +458,19 @@ function parseProfile(args: ReadonlyArray<string>): ParsedArgs {
       return name === null ? USAGE_ERROR : { kind: 'profile-show', name };
     }
     case 'get': {
-      if (tail.length !== 2) return USAGE_ERROR;
-      const [name, key] = tail;
-      if (
-        name === undefined ||
-        key === undefined ||
-        name.startsWith('--') ||
-        key.startsWith('--')
-      ) {
-        return USAGE_ERROR;
-      }
+      const positionals = collectPositionals(tail);
+      if (positionals === null || positionals.length !== 2) return USAGE_ERROR;
+      const [name, key] = positionals;
+      if (name === undefined || key === undefined) return USAGE_ERROR;
       return { kind: 'profile-get', name, key };
     }
     case 'set': {
-      if (tail.length !== 3) return USAGE_ERROR;
-      const [name, key, value] = tail;
+      // Same grammar as `config set`: collectPositionals rejects a stray `--foo` in the value
+      // slot (previously silently stored as the literal value) unless it follows a `--` sentinel.
+      const positionals = collectPositionals(tail);
+      if (positionals === null || positionals.length !== 3) return USAGE_ERROR;
+      const [name, key, value] = positionals;
       if (name === undefined || key === undefined || value === undefined) return USAGE_ERROR;
-      if (name.startsWith('--') || key.startsWith('--')) return USAGE_ERROR;
       return { kind: 'profile-set', name, key, value };
     }
     case 'add':
@@ -463,9 +487,20 @@ function parseProfileAdd(tail: ReadonlyArray<string>): ParsedArgs {
   let apiKey: string | undefined;
   let apiKeyStdin = false;
   let i = 0;
+  let endOfOptions = false;
   while (i < tail.length) {
     const raw = tail[i];
     if (raw === undefined) break;
+    if (endOfOptions) {
+      positionals.push(raw);
+      i += 1;
+      continue;
+    }
+    if (raw === '--') {
+      endOfOptions = true;
+      i += 1;
+      continue;
+    }
     const { flag, inlineValue, consumed } = splitFlag(raw);
     if (flag === '--preset') {
       const v = takeValue(tail, i, inlineValue);
@@ -507,12 +542,38 @@ function parseProfileAdd(tail: ReadonlyArray<string>): ParsedArgs {
   return out;
 }
 
-// Exactly one positional name, no flags. Returns null on any deviation (→ usage-error).
+// Exactly one positional name, no flags. Honors `--`, so `profile use -- <name>` works too.
+// Returns null on any deviation (→ usage-error).
 function onlyName(tail: ReadonlyArray<string>): string | null {
-  if (tail.length !== 1) return null;
-  const name = tail[0];
-  if (name === undefined || name.startsWith('--')) return null;
-  return name;
+  const positionals = collectPositionals(tail);
+  if (positionals === null || positionals.length !== 1) return null;
+  return positionals[0] ?? null;
+}
+
+// Split tokens into positionals under the one grammar shared by `config set`/`profile set` and the
+// single-name profile subcommands, so their value handling can't drift. A bare `--` is the
+// end-of-options sentinel: every token after it is a positional verbatim (values may start with
+// `-`). Before the sentinel a `--`-prefixed token must be consumed by `recognizeFlag`, else it is a
+// usage error (null return). Single-dash tokens stay positionals — keys/names/values never collide
+// with a real flag there, and it keeps values like `-5` passable without a sentinel.
+function collectPositionals(
+  tokens: ReadonlyArray<string>,
+  recognizeFlag?: (flag: string) => boolean,
+): string[] | null {
+  const positionals: string[] = [];
+  let endOfOptions = false;
+  for (const tok of tokens) {
+    if (endOfOptions) {
+      positionals.push(tok);
+    } else if (tok === '--') {
+      endOfOptions = true;
+    } else if (tok.startsWith('--')) {
+      if (recognizeFlag?.(tok) !== true) return null;
+    } else {
+      positionals.push(tok);
+    }
+  }
+  return positionals;
 }
 
 function parseNonNegativeInt(s: string | null | undefined): number | null {

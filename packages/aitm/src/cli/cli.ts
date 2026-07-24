@@ -65,6 +65,7 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
     case 'profile-set':
     case 'profile-get':
     case 'profile-remove':
+    case 'profile-rename':
     case 'profile-show':
       return emit(await runProfile(parsed, buildProfileCtx(ctx, stdout)), stdout, stderr);
     case 'clean':

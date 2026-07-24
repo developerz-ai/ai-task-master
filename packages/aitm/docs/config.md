@@ -20,10 +20,39 @@ The project file is read by `ConfigLoader` *before* `StateStore` initializes the
 1. Built-in defaults.
 2. `~/.aitm.json`.
 3. `./.ai-task-master/config.json` (project override).
-4. Environment variables (e.g., `OPENROUTER_API_KEY`).
+4. Environment variables — `OPENROUTER_API_KEY` / `OPENROUTER_BASE_URL` (provider credentials; see
+   [auth.md](./auth.md) §"Base URL" for their own precedence, which is a separate resolution from
+   the one below) plus a bounded set of `AITM_*` run-setting overrides (see
+   [Environment variable overrides](#environment-variable-overrides)).
 5. CLI flags.
 
 The merged result is what every other module sees. A frozen snapshot is written to `.ai-task-master/config.snapshot.json` at run start so a resumed run reproduces the same behavior even if the source files have changed.
+
+## Environment variable overrides
+
+CI wrappers that don't want to write `.ai-task-master/config.json` can set these instead. Each
+mirrors its config-file key one-for-one, wins over both config files, and is itself overridden by
+the equivalent CLI flag when one exists. Unset or blank → falls through to project/global/default
+as usual; a set-but-invalid value (wrong type, out-of-range, unrecognized enum member) is a hard
+error, same as a malformed config file.
+
+| Env var | Key | Notes |
+| --- | --- | --- |
+| `AITM_MAX_PRS` | `maxPrs` | Positive integer. |
+| `AITM_MAX_SESSIONS` | `maxSessions` | Non-negative integer; `0` means unlimited (`null`), matching `--max-sessions 0`. |
+| `AITM_MAX_CI_FIX_ATTEMPTS` | `maxCiFixAttempts` | Positive integer. |
+| `AITM_CONCURRENCY` | `concurrency` | Positive integer. |
+| `AITM_AUTO_MERGE` | `autoMerge` | `true`/`false` (or `1`/`0`). |
+| `AITM_PR_PER_TASK` | `prPerTask` | `true`/`false` (or `1`/`0`). |
+| `AITM_SELF_REVIEW` | `selfReview` | `true`/`false` (or `1`/`0`). |
+| `AITM_MERGE_METHOD` | `mergeMethod` | `squash` \| `merge` \| `rebase`. |
+| `AITM_LOG_LEVEL` | `logLevel` | `debug` \| `info` \| `warn` \| `error`. |
+
+This list is deliberately not every key: CLI-only settings (`adminMerge`, `allowDirty`) stay
+CLI-only — force-merging past branch protection and discarding uncommitted work should each be an
+explicit, per-invocation decision — and per-repo toggles with no CLI flag either
+(`resolveConflicts`, `generateSpecialists`, `editorConcurrency`, …) have no env override, since
+they're a property of the repo, not a knob a CI job tunes per run.
 
 ## Schema
 
@@ -91,15 +120,15 @@ code-execution surfaces). Keys absent from a file fall through per the
 
 | Key | Type | Default | Scope | Purpose |
 | --- | --- | --- | --- | --- |
-| `maxPrs` | int > 0 | `5` | project + global, CLI `--max-prs` | Cap on PR groups opened in one run. |
-| `maxSessions` | int > 0 or `null` | `null` (unlimited) | project + global, CLI `--max-sessions` | Cap on work sessions before the run stops. |
-| `maxCiFixAttempts` | int > 0 | `3` | project + global, CLI `--max-fix-attempts` | CI-fix passes per PR group before it blocks. See [maxCiFixAttempts](#maxcifixattempts). |
+| `maxPrs` | int > 0 | `5` | project + global, env `AITM_MAX_PRS`, CLI `--max-prs` | Cap on PR groups opened in one run. |
+| `maxSessions` | int > 0 or `null` | `null` (unlimited) | project + global, env `AITM_MAX_SESSIONS`, CLI `--max-sessions` | Cap on work sessions before the run stops. |
+| `maxCiFixAttempts` | int > 0 | `3` | project + global, env `AITM_MAX_CI_FIX_ATTEMPTS`, CLI `--max-fix-attempts` | CI-fix passes per PR group before it blocks. See [maxCiFixAttempts](#maxcifixattempts). |
 | `maxCostUsd` | number > 0 | unset (no ceiling) | project + global | Run-level cost ceiling; stops opening new PR groups when crossed. See [maxCostUsd and maxTotalTokens](#maxcostusd-and-maxtotaltokens). |
 | `maxTotalTokens` | int > 0 | unset (no ceiling) | project + global | Run-level token ceiling; stops opening new PR groups when crossed. See [maxCostUsd and maxTotalTokens](#maxcostusd-and-maxtotaltokens). |
 | `llmStepTimeoutMs` | int ≥ 1000 | `900000` (15 min) | project + global | Per-step LLM request deadline. See [llmStepTimeoutMs](#llmsteptimeoutms). |
-| `concurrency` | int > 0 | `1` | project + global, CLI `--concurrency` | PR groups worked in parallel. See [concurrency and editorConcurrency](#concurrency-and-editorconcurrency). |
+| `concurrency` | int > 0 | `1` | project + global, env `AITM_CONCURRENCY`, CLI `--concurrency` | PR groups worked in parallel. See [concurrency and editorConcurrency](#concurrency-and-editorconcurrency). |
 | `editorConcurrency` | int ≥ 1 | `4` | project + global | Editor files fanned out per Worker. See [concurrency and editorConcurrency](#concurrency-and-editorconcurrency). |
-| `logLevel` | `debug \| info \| warn \| error` | `info` | project + global | Log verbosity. |
+| `logLevel` | `debug \| info \| warn \| error` | `info` | project + global, env `AITM_LOG_LEVEL` | Log verbosity. |
 | `streaming` | boolean | `false` | project + global | Stream subagent output live. See [streaming](#streaming). |
 
 ### Worker commit and PR gates
@@ -108,7 +137,7 @@ code-execution surfaces). Keys absent from a file fall through per the
 | --- | --- | --- | --- | --- |
 | `formatCommand` | string | unset | project + global | Formatter run before `git add`. See [formatCommand](#formatcommand). |
 | `verifyCommand` | string | unset | project + global | Test/lint gate run before commit. See [verifyCommand](#verifycommand). |
-| `selfReview` | boolean | `true` | project + global | Pre-PR adversarial self-review + verify + fix pass. See [selfReview](#selfreview). |
+| `selfReview` | boolean | `true` | project + global, env `AITM_SELF_REVIEW` | Pre-PR adversarial self-review + verify + fix pass. See [selfReview](#selfreview). |
 | `webSearch` | boolean \| object | unset (CI-fix only) | project + global | OpenRouter `web_search` on Worker calls (tri-state) + optional domain filters. See [webSearch](#websearch). |
 | `generateSpecialists` | boolean | `true` | project + global | Generate a specialist team when the repo ships no `.claude/agents`. See [generateSpecialists](#generatespecialists). |
 | `prBodySections` | string[] | Summary / Changes / Testing | project + global | PR body headings. See [prBodySections](#prbodysections). |
@@ -117,8 +146,8 @@ code-execution surfaces). Keys absent from a file fall through per the
 
 | Key | Type | Default | Scope | Purpose |
 | --- | --- | --- | --- | --- |
-| `autoMerge` | boolean | `true` | project + global, CLI `--no-automerge` | Auto-merge a green PR. See [start.md](./commands/start.md#auto-merge). |
-| `mergeMethod` | `squash \| merge \| rebase` | `squash` | project + global | Merge strategy for `gh pr merge`. |
+| `autoMerge` | boolean | `true` | project + global, env `AITM_AUTO_MERGE`, CLI `--no-automerge` | Auto-merge a green PR. See [start.md](./commands/start.md#auto-merge). |
+| `mergeMethod` | `squash \| merge \| rebase` | `squash` | project + global, env `AITM_MERGE_METHOD` | Merge strategy for `gh pr merge`. |
 | `allowForcePush` | boolean | `true` | project + global | Permit `--force-with-lease`. See [allowForcePush](#allowforcepush). |
 | `resolveConflicts` | boolean | `true` | project + global | Hand a rebase/merge conflict to an AI subagent before blocking. See [resolveConflicts](#resolveconflicts). |
 | `stylePath` | string or `null` | detected | project + global, CLI `--style` | Coding-style file override. See [coding-style.md](./coding-style.md). |

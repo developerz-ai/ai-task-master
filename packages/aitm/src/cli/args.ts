@@ -62,6 +62,7 @@ export type ProfileArgs =
   | { kind: 'profile-set'; name: string; key: string; value: string }
   | { kind: 'profile-get'; name: string; key: string }
   | { kind: 'profile-remove'; name: string }
+  | { kind: 'profile-rename'; from: string; to: string }
   | { kind: 'profile-show'; name?: string };
 
 // Mirrors claudetm's `clean` command: wipe .ai-task-master/ to start fresh. `force` skips the
@@ -488,6 +489,14 @@ function parseProfile(args: ReadonlyArray<string>): ParsedArgs {
       const [name, key] = positionals;
       if (name === undefined || key === undefined) return USAGE_ERROR;
       return { kind: 'profile-get', name, key };
+    }
+    case 'rename': {
+      // Same two-positional grammar as `profile get` (honors `--`, rejects a stray `--foo`).
+      const positionals = collectPositionals(tail);
+      if (positionals === null || positionals.length !== 2) return USAGE_ERROR;
+      const [from, to] = positionals;
+      if (from === undefined || to === undefined) return USAGE_ERROR;
+      return { kind: 'profile-rename', from, to };
     }
     case 'set': {
       // Same grammar as `config set`: collectPositionals rejects a stray `--foo` in the value

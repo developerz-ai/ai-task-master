@@ -18,6 +18,7 @@ aitm profile add <name> [--preset openrouter|zai] [--base-url <url>]
 aitm profile set <name> <key> <value>
 aitm profile get <name> <key>
 aitm profile remove <name>
+aitm profile rename <from> <to>
 aitm profile show [<name>]
 ```
 
@@ -38,6 +39,7 @@ own-property only — an inherited key is never mistaken for a profile.
 | `set <name> <key> <value>` | Set one field. Value is JSON-parsed (bare strings stay literal), like `config set`. |
 | `get <name> <key>` | Print one field's value. |
 | `remove <name>` | Delete the profile. If it was active, `activeProfile` is cleared. |
+| `rename <from> <to>` | Rename a profile in place, keeping every field. Errors if `<from>` doesn't exist or `<to>` already does. If `<from>` was active, `activeProfile` is repointed at `<to>`. |
 | `show [<name>]` | Print a profile as JSON with the key **masked**. Defaults to the active profile. |
 
 ## Presets

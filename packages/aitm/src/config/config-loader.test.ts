@@ -600,6 +600,164 @@ test('resolve: maxCiFixAttempts follows CLI > project > global > default precede
   }
 });
 
+test('resolve: AITM_* env overrides win over project + global but lose to CLI (issue #94)', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-global',
+      maxPrs: 2,
+      logLevel: 'warn',
+    });
+    await writeProjectConfig(cwd.path, { maxPrs: 4 });
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_MAX_PRS: '9',
+      AITM_MAX_SESSIONS: '3',
+      AITM_MAX_CI_FIX_ATTEMPTS: '7',
+      AITM_CONCURRENCY: '5',
+      AITM_AUTO_MERGE: 'false',
+      AITM_PR_PER_TASK: 'true',
+      AITM_SELF_REVIEW: 'false',
+      AITM_MERGE_METHOD: 'rebase',
+      AITM_LOG_LEVEL: 'debug',
+    });
+
+    const resolved = await loader.resolve({});
+    assert.equal(resolved.maxPrs, 9, 'env beats project + global');
+    assert.equal(resolved.maxSessions, 3);
+    assert.equal(resolved.maxCiFixAttempts, 7);
+    assert.equal(resolved.concurrency, 5);
+    assert.equal(resolved.autoMerge, false);
+    assert.equal(resolved.prPerTask, true);
+    assert.equal(resolved.selfReview, false);
+    assert.equal(resolved.mergeMethod, 'rebase');
+    assert.equal(resolved.logLevel, 'debug', 'env beats global logLevel');
+
+    // An explicit CLI flag still wins over the env override.
+    const withCli = await loader.resolve({ maxPrs: 1, autoMerge: true, mergeMethod: 'merge' });
+    assert.equal(withCli.maxPrs, 1);
+    assert.equal(withCli.autoMerge, true);
+    assert.equal(withCli.mergeMethod, 'merge');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: AITM_MAX_SESSIONS=0 means unlimited (null), matching --max-sessions 0', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_MAX_SESSIONS: '0',
+    });
+    assert.equal((await loader.resolve({})).maxSessions, null);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: blank/whitespace-only AITM_* env vars are treated as unset', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global', maxPrs: 6 });
+    const loader = new ConfigLoader(cwd.path, home.path, { AITM_MAX_PRS: '   ' });
+    assert.equal((await loader.resolve({})).maxPrs, 6);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: an out-of-range AITM_* int env var throws', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_MAX_PRS: 'not-a-number',
+    });
+    await assert.rejects(() => loader.resolve({}), /AITM_MAX_PRS must be a positive integer/);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: an invalid AITM_* boolean env var throws', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_AUTO_MERGE: 'yes-please',
+    });
+    await assert.rejects(() => loader.resolve({}), /AITM_AUTO_MERGE must be "true"\/"false"/);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: an invalid AITM_MERGE_METHOD / AITM_LOG_LEVEL enum throws', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    const badMethod = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_MERGE_METHOD: 'octopus',
+    });
+    await assert.rejects(() => badMethod.resolve({}), /AITM_MERGE_METHOD must be one of/);
+
+    const badLevel = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_LOG_LEVEL: 'verbose',
+    });
+    await assert.rejects(() => badLevel.resolve({}), /AITM_LOG_LEVEL must be one of/);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: adminMerge and allowDirty have no env override — CLI-only stays CLI-only', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    // These aren't real config-file keys, but the env vars must be inert either way: no
+    // AITM_ADMIN_MERGE/AITM_ALLOW_DIRTY var is read at all.
+    const loader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_ADMIN_MERGE: 'true',
+      AITM_ALLOW_DIRTY: 'true',
+    });
+    const resolved = await loader.resolve({});
+    assert.equal(resolved.adminMerge, false);
+    assert.equal(resolved.allowDirty, false);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolveWithSources: env-overridden keys are labeled "env" in provenance', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global', maxPrs: 2 });
+    const loader = new ConfigLoader(cwd.path, home.path, { AITM_MAX_PRS: '9' });
+    const { sources } = await loader.resolveWithSources({});
+    assert.equal(sources.maxPrs, 'env');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('resolve: llmStepTimeoutMs follows project > global > default (config-only, no CLI flag) (issue #129)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');

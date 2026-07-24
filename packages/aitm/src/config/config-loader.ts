@@ -1,6 +1,9 @@
 // docs/config.md §"Resolution order", docs/auth.md §"LLM provider"
 // Only module allowed to read ~/.aitm.json and .ai-task-master/config.json.
-// Run settings merge low→high: defaults < global < project < CLI flags.
+// Run settings merge low→high: defaults < global < project < env < CLI flags. `env` here is the
+// bounded AITM_* set resolveEnvOverrides() reads (maxPrs/maxSessions/maxCiFixAttempts/concurrency/
+// autoMerge/prPerTask/selfReview/mergeMethod/logLevel) — CI wrappers that can't/won't write
+// .ai-task-master/config.json tune these without one. Everything else stays project/global-only.
 // Provider credentials (openrouterApiKey, baseURL) are USER-OWNED ONLY: they resolve
 // global > profile > env — user config wins, env is the fallback — and are stripped from project
 // scope, so an untrusted repo can neither redirect inference nor swap the key (see
@@ -29,10 +32,84 @@ import {
   ConfigFileSchema,
   type ConfigSource,
   type ConfigSourceMap,
+  LogLevelSchema,
   type McpServerSource,
+  MergeMethodSchema,
   type Profile,
   type ResolvedConfig,
 } from './schema.ts';
+
+// The env-overridable subset of run settings, one field per AITM_* var resolveEnvOverrides()
+// reads. `undefined` per field means "that var was unset/blank" — see the individual parse
+// helpers below.
+type EnvOverrides = {
+  maxPrs: number | undefined;
+  maxSessions: number | null | undefined;
+  maxCiFixAttempts: number | undefined;
+  concurrency: number | undefined;
+  autoMerge: boolean | undefined;
+  prPerTask: boolean | undefined;
+  selfReview: boolean | undefined;
+  mergeMethod: ResolvedConfig['mergeMethod'] | undefined;
+  logLevel: ResolvedConfig['logLevel'] | undefined;
+};
+
+// A positive integer env var (maxPrs, maxCiFixAttempts, concurrency). Blank/unset → no override;
+// anything else that doesn't parse as one throws, matching resolveBaseURL's "validate the env
+// value the same way the config-file value is validated" convention.
+function parseEnvInt(name: string, raw: string | undefined): number | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  const parsed = z.coerce.number().int().positive().safeParse(trimmed);
+  if (!parsed.success) {
+    throw new Error(`${name} must be a positive integer, got ${JSON.stringify(raw)}`);
+  }
+  return parsed.data;
+}
+
+// maxSessions is the one int-typed override that is also nullable: 0 means "unlimited" (null),
+// mirroring toCliOverrides's --max-sessions 0 → null mapping in cli/commands.ts.
+function parseEnvMaxSessions(raw: string | undefined): number | null | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  const parsed = z.coerce.number().int().nonnegative().safeParse(trimmed);
+  if (!parsed.success) {
+    throw new Error(`AITM_MAX_SESSIONS must be a non-negative integer, got ${JSON.stringify(raw)}`);
+  }
+  return parsed.data === 0 ? null : parsed.data;
+}
+
+function parseEnvBool(name: string, raw: string | undefined): boolean | undefined {
+  const trimmed = raw?.trim().toLowerCase();
+  if (!trimmed) return undefined;
+  if (trimmed === 'true' || trimmed === '1') return true;
+  if (trimmed === 'false' || trimmed === '0') return false;
+  throw new Error(`${name} must be "true"/"false" (or "1"/"0"), got ${JSON.stringify(raw)}`);
+}
+
+function parseEnvMergeMethod(raw: string | undefined): ResolvedConfig['mergeMethod'] | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  const parsed = MergeMethodSchema.safeParse(trimmed);
+  if (!parsed.success) {
+    throw new Error(
+      `AITM_MERGE_METHOD must be one of ${MergeMethodSchema.options.join(', ')}, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return parsed.data;
+}
+
+function parseEnvLogLevel(raw: string | undefined): ResolvedConfig['logLevel'] | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  const parsed = LogLevelSchema.safeParse(trimmed);
+  if (!parsed.success) {
+    throw new Error(
+      `AITM_LOG_LEVEL must be one of ${LogLevelSchema.options.join(', ')}, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return parsed.data;
+}
 
 const GLOBAL_FILE = '.aitm.json';
 const PROJECT_DIR = '.ai-task-master';
@@ -147,28 +224,36 @@ export class ConfigLoader {
     cliOverrides: CliOverrides,
   ): Promise<{ resolved: ResolvedConfig; sources: ConfigSourceMap }> {
     const sources: ConfigSourceMap = {};
-    // Record the winning layer for a key beside pick()/pickNullable(): both read the same
-    // cli/project/global arguments in the same order, so value and label stay in lockstep.
+    // Every layer below reads the same cli/env/project/global arguments in the same order as
+    // pick()/pickNullable(), so a source label can never drift from the value it names. `env` is
+    // undefined for keys with no env override (docs/config.md §"Resolution order": cli > env >
+    // project > global > default) — see resolveEnvOverrides.
     const track = <T>(
       key: string,
       cli: T | undefined,
+      env: T | undefined,
       project: T | undefined,
       global: T | undefined,
       fallback: T,
     ): T => {
-      sources[key] = layerOf(cli, project, global);
-      return pick(cli, project, global, fallback);
+      sources[key] = layerOf(cli, env, project, global);
+      return pick(cli, env, project, global, fallback);
     };
     const trackNullable = <T>(
       key: string,
       cli: T | null | undefined,
+      env: T | null | undefined,
       project: T | null | undefined,
       global: T | null | undefined,
       fallback: T | null,
     ): T | null => {
-      sources[key] = layerOf(cli, project, global);
-      return pickNullable(cli, project, global, fallback);
+      sources[key] = layerOf(cli, env, project, global);
+      return pickNullable(cli, env, project, global, fallback);
     };
+    // CI wrappers that can't/won't write a config file still need to set the run settings they
+    // most commonly tune — bounded to the keys below (issue: findings/03-cli-config.md). Anything
+    // not listed here has no env override; pass `undefined` at its track() call site.
+    const envOverrides = this.resolveEnvOverrides();
 
     const global = await this.readGlobal();
     this.registerProviderSecrets(global);
@@ -247,6 +332,7 @@ export class ConfigLoader {
       maxPrs: track(
         'maxPrs',
         cliOverrides.maxPrs,
+        envOverrides.maxPrs,
         project?.maxPrs,
         global?.maxPrs,
         DEFAULTS.maxPrs,
@@ -254,6 +340,7 @@ export class ConfigLoader {
       maxSessions: trackNullable(
         'maxSessions',
         cliOverrides.maxSessions,
+        envOverrides.maxSessions,
         project?.maxSessions,
         global?.maxSessions,
         DEFAULTS.maxSessions,
@@ -261,13 +348,15 @@ export class ConfigLoader {
       maxCiFixAttempts: track(
         'maxCiFixAttempts',
         cliOverrides.maxCiFixAttempts,
+        envOverrides.maxCiFixAttempts,
         project?.maxCiFixAttempts,
         global?.maxCiFixAttempts,
         DEFAULTS.maxCiFixAttempts,
       ),
-      // Config-only (no CLI flag): project > global > default.
+      // Config-only (no CLI flag, no env override): project > global > default.
       llmStepTimeoutMs: track(
         'llmStepTimeoutMs',
+        undefined,
         undefined,
         project?.llmStepTimeoutMs,
         global?.llmStepTimeoutMs,
@@ -276,6 +365,7 @@ export class ConfigLoader {
       autoMerge: track(
         'autoMerge',
         cliOverrides.autoMerge,
+        envOverrides.autoMerge,
         project?.autoMerge,
         global?.autoMerge,
         DEFAULTS.autoMerge,
@@ -283,6 +373,7 @@ export class ConfigLoader {
       prPerTask: track(
         'prPerTask',
         cliOverrides.prPerTask,
+        envOverrides.prPerTask,
         undefined,
         undefined,
         DEFAULTS.prPerTask,
@@ -290,23 +381,29 @@ export class ConfigLoader {
       mergeMethod: track(
         'mergeMethod',
         cliOverrides.mergeMethod,
+        envOverrides.mergeMethod,
         project?.mergeMethod,
         global?.mergeMethod,
         DEFAULTS.mergeMethod,
       ),
-      // CLI-only (per run): not read from config files, so no project/global layer.
+      // CLI-only (per run): not read from config files, so no project/global layer. No env
+      // override — force-merging past branch protection should stay an explicit, per-invocation
+      // decision, not something a stray environment variable can flip.
       adminMerge: track(
         'adminMerge',
         cliOverrides.adminMerge,
         undefined,
         undefined,
+        undefined,
         DEFAULTS.adminMerge,
       ),
       // CLI-only for a stronger reason than adminMerge: a checked-in project config that could set
-      // this would let an untrusted repo authorize wiping the operator's uncommitted work.
+      // this would let an untrusted repo authorize wiping the operator's uncommitted work. Same
+      // reasoning keeps it off the env-override list.
       allowDirty: track(
         'allowDirty',
         cliOverrides.allowDirty,
+        undefined,
         undefined,
         undefined,
         DEFAULTS.allowDirty,
@@ -318,6 +415,7 @@ export class ConfigLoader {
         'stylePath',
         cliOverrides.stylePath,
         undefined,
+        undefined,
         global?.stylePath,
         DEFAULTS.stylePath,
       ),
@@ -328,6 +426,7 @@ export class ConfigLoader {
         'formatCommand',
         undefined,
         undefined,
+        undefined,
         global?.formatCommand,
         DEFAULTS.formatCommand,
       ),
@@ -335,37 +434,46 @@ export class ConfigLoader {
         'verifyCommand',
         undefined,
         undefined,
+        undefined,
         global?.verifyCommand,
         DEFAULTS.verifyCommand,
       ),
-      // selfReview defaults ON (project > global). No CLI flag: it is a safety gate, toggled per repo.
+      // selfReview defaults ON (project > global). No CLI flag, but env-overridable: it is a
+      // safety/cost knob CI wrappers commonly want to toggle without a config file.
       selfReview: track(
         'selfReview',
         undefined,
+        envOverrides.selfReview,
         project?.selfReview,
         global?.selfReview,
         DEFAULTS.selfReview,
       ),
-      // resolveConflicts defaults ON (project > global). No CLI flag — a per-repo capability toggle.
+      // resolveConflicts defaults ON (project > global). No CLI flag, no env override — a per-repo
+      // capability toggle, not a per-run one.
       resolveConflicts: track(
         'resolveConflicts',
+        undefined,
         undefined,
         project?.resolveConflicts,
         global?.resolveConflicts,
         DEFAULTS.resolveConflicts,
       ),
-      // generateSpecialists defaults ON (project > global). No CLI flag — a per-repo toggle.
+      // generateSpecialists defaults ON (project > global). No CLI flag, no env override — a
+      // per-repo toggle, not a per-run one.
       generateSpecialists: track(
         'generateSpecialists',
+        undefined,
         undefined,
         project?.generateSpecialists,
         global?.generateSpecialists,
         DEFAULTS.generateSpecialists,
       ),
-      // logLevel is not exposed via CliOverrides — project/global only.
+      // logLevel is not exposed via CliOverrides, but is env-overridable — the canonical "CI
+      // wrapper needs this without writing a file" case (findings/03-cli-config.md).
       logLevel: track(
         'logLevel',
         undefined,
+        envOverrides.logLevel,
         project?.logLevel,
         global?.logLevel,
         DEFAULTS.logLevel,
@@ -373,21 +481,24 @@ export class ConfigLoader {
       concurrency: track(
         'concurrency',
         cliOverrides.concurrency,
+        envOverrides.concurrency,
         project?.concurrency,
         global?.concurrency,
         DEFAULTS.concurrency,
       ),
-      // editorConcurrency is not exposed via CliOverrides — project/global only.
+      // editorConcurrency is not exposed via CliOverrides or env — project/global only.
       editorConcurrency: track(
         'editorConcurrency',
+        undefined,
         undefined,
         project?.editorConcurrency,
         global?.editorConcurrency,
         DEFAULTS.editorConcurrency,
       ),
-      // allowForcePush is not exposed via CliOverrides — project/global only.
+      // allowForcePush is not exposed via CliOverrides or env — project/global only.
       allowForcePush: track(
         'allowForcePush',
+        undefined,
         undefined,
         project?.allowForcePush,
         global?.allowForcePush,
@@ -421,6 +532,7 @@ export class ConfigLoader {
       mcpDeferToolsOver: track(
         'mcpDeferToolsOver',
         undefined,
+        undefined,
         project?.mcpDeferToolsOver,
         global?.mcpDeferToolsOver,
         DEFAULTS.mcpDeferToolsOver,
@@ -433,6 +545,7 @@ export class ConfigLoader {
       // streaming is not exposed via CliOverrides — project/global only (slice 07).
       streaming: track(
         'streaming',
+        undefined,
         undefined,
         project?.streaming,
         global?.streaming,
@@ -767,6 +880,28 @@ export class ConfigLoader {
     return { apiKey: undefined, apiKeySource: undefined };
   }
 
+  // Env overrides for the run settings a CI wrapper most commonly needs to tune without writing
+  // `.ai-task-master/config.json` (findings/03-cli-config.md: "only OPENROUTER_API_KEY/
+  // OPENROUTER_BASE_URL exist as env overrides"). Deliberately NOT exhaustive: CLI-only settings
+  // (adminMerge, allowDirty) stay CLI-only on purpose (see their track() call sites), and per-repo
+  // toggles (resolveConflicts, generateSpecialists, editorConcurrency, …) have no per-run env knob.
+  // Each var is validated the same way its config-file counterpart is; an unset or blank-string env
+  // var means "no override" (falls through to project/global/default), never a parse error.
+  private resolveEnvOverrides(): EnvOverrides {
+    return {
+      maxPrs: parseEnvInt('AITM_MAX_PRS', this.env.AITM_MAX_PRS),
+      // 0 means unlimited (null), matching --max-sessions's own 0 → null convention.
+      maxSessions: parseEnvMaxSessions(this.env.AITM_MAX_SESSIONS),
+      maxCiFixAttempts: parseEnvInt('AITM_MAX_CI_FIX_ATTEMPTS', this.env.AITM_MAX_CI_FIX_ATTEMPTS),
+      concurrency: parseEnvInt('AITM_CONCURRENCY', this.env.AITM_CONCURRENCY),
+      autoMerge: parseEnvBool('AITM_AUTO_MERGE', this.env.AITM_AUTO_MERGE),
+      prPerTask: parseEnvBool('AITM_PR_PER_TASK', this.env.AITM_PR_PER_TASK),
+      selfReview: parseEnvBool('AITM_SELF_REVIEW', this.env.AITM_SELF_REVIEW),
+      mergeMethod: parseEnvMergeMethod(this.env.AITM_MERGE_METHOD),
+      logLevel: parseEnvLogLevel(this.env.AITM_LOG_LEVEL),
+    };
+  }
+
   // Layer order (lowest → highest): defaults < active profile < global < project < CLI.
   // The profile fills tiers it specifies; explicit config still overrides per tier. `sources` records
   // the last layer that set each tier (independent per tier), for `config list --effective`.
@@ -861,13 +996,16 @@ export class ConfigLoader {
   }
 }
 
-// The layer a pick(cli, project, global, fallback) resolved to, by the same first-defined rule.
+// The layer a pick(cli, env, project, global, fallback) resolved to, by the same first-defined
+// rule. cli > env > project > global > default (docs/config.md §"Resolution order").
 function layerOf<T>(
   cli: T | undefined,
+  env: T | undefined,
   project: T | undefined,
   global: T | undefined,
 ): ConfigSource {
   if (cli !== undefined) return 'cli';
+  if (env !== undefined) return 'env';
   if (project !== undefined) return 'project';
   if (global !== undefined) return 'global';
   return 'default';
@@ -895,11 +1033,13 @@ function pgpSource<T>(
 
 function pick<T>(
   cli: T | undefined,
+  env: T | undefined,
   project: T | undefined,
   global: T | undefined,
   fallback: T,
 ): T {
   if (cli !== undefined) return cli;
+  if (env !== undefined) return env;
   if (project !== undefined) return project;
   if (global !== undefined) return global;
   return fallback;
@@ -907,11 +1047,13 @@ function pick<T>(
 
 function pickNullable<T>(
   cli: T | null | undefined,
+  env: T | null | undefined,
   project: T | null | undefined,
   global: T | null | undefined,
   fallback: T | null,
 ): T | null {
   if (cli !== undefined) return cli;
+  if (env !== undefined) return env;
   if (project !== undefined) return project;
   if (global !== undefined) return global;
   return fallback;

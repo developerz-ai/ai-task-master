@@ -104,6 +104,32 @@ export class ProfileManager {
     return getDotted(profile as Record<string, unknown>, splitKey(key));
   }
 
+  // Rename a profile, keeping every field (including its position in file iteration order isn't
+  // guaranteed by JS object semantics anyway, so we don't try to preserve it). If it was active,
+  // `activeProfile` is repointed at the new name so the switch is transparent to the running
+  // config — otherwise the rename would silently deactivate the profile.
+  async rename(from: string, to: string): Promise<Profile> {
+    assertProfileName(from);
+    assertProfileName(to);
+    const file = await this.readRaw();
+    const profiles = asObject(file.profiles);
+    if (!Object.hasOwn(profiles, from)) {
+      throw new Error(unknownProfileMessage(from, Object.keys(profiles)));
+    }
+    if (from === to) return this.validate(file).profiles?.[from] ?? {};
+    if (Object.hasOwn(profiles, to)) {
+      throw new Error(
+        `Profile "${to}" already exists. Remove it first or choose a different name.`,
+      );
+    }
+    const profile = profiles[from];
+    delete profiles[from];
+    profiles[to] = profile;
+    if (file.activeProfile === from) file.activeProfile = to;
+    const validated = await this.persist(file);
+    return validated.profiles?.[to] ?? {};
+  }
+
   // Delete a profile. If it was active, clear `activeProfile` so the next run falls back
   // cleanly to top-level config / env rather than dangling at a removed name.
   async remove(name: string): Promise<void> {

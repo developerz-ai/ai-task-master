@@ -1184,6 +1184,10 @@ export async function runProfile(
         await manager.remove(args.name);
         stdout(`Removed profile "${args.name}".\n`);
         return { code: 0 };
+      case 'profile-rename':
+        await manager.rename(args.from, args.to);
+        stdout(`Renamed profile "${args.from}" to "${args.to}".\n`);
+        return { code: 0 };
       case 'profile-show': {
         const { name, profile } = await manager.show(args.name);
         stdout(`${name}\n${JSON.stringify(redactProfile(profile), null, 2)}\n`);

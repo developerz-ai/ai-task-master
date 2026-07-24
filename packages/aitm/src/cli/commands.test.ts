@@ -2279,6 +2279,55 @@ test('runProfile: get returns a single field value', async () => {
   }
 });
 
+test('runProfile: rename renames the profile and reports success', async () => {
+  const home = await tempHome();
+  try {
+    await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    const sink = collectStdout();
+    const res = await runProfile(
+      { kind: 'profile-rename', from: 'z.ai', to: 'zed' },
+      { homeDir: home.path, stdout: sink.out },
+    );
+    assert.equal(res.code, 0);
+    assert.match(sink.text(), /Renamed profile "z\.ai" to "zed"/);
+    const listSink = collectStdout();
+    await runProfile({ kind: 'profile-list' }, { homeDir: home.path, stdout: listSink.out });
+    assert.match(listSink.text(), /\* zed/);
+    assert.doesNotMatch(
+      listSink.text(),
+      /^[* ] z\.ai\t/m,
+      'the old profile name must be gone from the listing',
+    );
+  } finally {
+    await home.cleanup();
+  }
+});
+
+test('runProfile: rename to an existing name exits 1', async () => {
+  const home = await tempHome();
+  try {
+    await runProfile(
+      { kind: 'profile-add', name: 'z.ai', preset: 'zai' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    await runProfile(
+      { kind: 'profile-add', name: 'openrouter', preset: 'openrouter' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    const res = await runProfile(
+      { kind: 'profile-rename', from: 'z.ai', to: 'openrouter' },
+      { homeDir: home.path, stdout: () => {} },
+    );
+    assert.equal(res.code, 1);
+    assert.match(res.message ?? '', /already exists/);
+  } finally {
+    await home.cleanup();
+  }
+});
+
 test('runProfile: add message reflects auto-activation of the first profile only', async () => {
   const home = await tempHome();
   try {

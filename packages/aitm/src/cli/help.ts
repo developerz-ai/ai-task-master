@@ -75,6 +75,7 @@ export const CLI_COMMANDS: readonly CommandSpec[] = [
   { invocation: 'aitm profile set <name> <key> <value>' },
   { invocation: 'aitm profile get <name> <key>' },
   { invocation: 'aitm profile remove <name>' },
+  { invocation: 'aitm profile rename <from> <to>' },
   { invocation: 'aitm profile show [<name>]' },
   {
     invocation: 'aitm mcp-login <server-url>',

@@ -182,3 +182,46 @@ test('isFetchHtmlAvailable: true when the binary runs, false when it throws', as
 test('fetchHtmlTool: exposes plain-text toModelOutput (issue #188)', () => {
   assert.equal(typeof fetchHtmlTool().toModelOutput, 'function');
 });
+
+test('fetch_html: forwards the tool abort signal to curl as cancelSignal', async () => {
+  // Cancelling a generation must kill curl mid-transfer, not leave it running out --max-time on a
+  // connection nobody is waiting for.
+  const seen: Array<{ timeout?: number; cancelSignal?: AbortSignal }> = [];
+  const exec: ExecLike = async (_file, _args, options) => {
+    seen.push({ ...options });
+    return { stdout: '<html></html>', stderr: metaStderr(200, 'https://x.test/', 'text/html') };
+  };
+  const controller = new AbortController();
+  const t = fetchHtmlTool({ exec, lookup: publicLookup });
+  const execute = t.execute;
+  if (typeof execute !== 'function') throw new Error('tool has no execute');
+  await execute(
+    { url: 'https://x.test/' },
+    { toolCallId: 'test', messages: [], abortSignal: controller.signal },
+  );
+  assert.equal(seen[0]?.cancelSignal, controller.signal);
+  assert.ok((seen[0]?.timeout ?? 0) > 0, 'the deadline is still armed alongside the signal');
+});
+
+test('fetch_html: no tool signal → no cancelSignal key, deadline unchanged', async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const exec: ExecLike = async (_file, _args, options) => {
+    seen.push({ ...options });
+    return { stdout: '', stderr: metaStderr(200, 'https://x.test/', 'text/html') };
+  };
+  const t = fetchHtmlTool({ exec, lookup: publicLookup });
+  await run(t, { url: 'https://x.test/' });
+  assert.ok(!('cancelSignal' in (seen[0] ?? {})), 'no signal is passed as an explicit undefined');
+});
+
+test('isFetchHtmlAvailable: the probe carries its own deadline', async () => {
+  // It runs at wiring time, before any tool call exists to cancel it — a hanging --version would
+  // otherwise stall run startup.
+  const seen: Array<{ timeout?: number } | undefined> = [];
+  const exec: ExecLike = async (_file, _args, options) => {
+    seen.push(options);
+    return { stdout: 'curl 8.0.0', stderr: '' };
+  };
+  assert.equal(await isFetchHtmlAvailable({ exec }), true);
+  assert.ok((seen[0]?.timeout ?? 0) > 0);
+});

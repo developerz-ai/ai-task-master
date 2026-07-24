@@ -96,6 +96,11 @@ export function parseModelCatalog(json: unknown): OpenRouterModel[] {
   return models;
 }
 
+// Both catalog fetches run at startup (ModelLimitsRegistry.preload), and an endpoint that accepts
+// the connection and then stalls would hang the whole run before the first task — fillFromReference's
+// try/catch guards a rejection, never a hang. Twenty seconds is generous for one keyless GET.
+export const CATALOG_FETCH_TIMEOUT_MS = 20_000;
+
 export class OpenRouterClient {
   constructor(
     private readonly apiKey: string,
@@ -105,6 +110,7 @@ export class OpenRouterClient {
   async listModels(): Promise<OpenRouterModel[]> {
     const res = await fetch(`${this.baseUrl}/models`, {
       headers: { Authorization: `Bearer ${this.apiKey}` },
+      signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
       const excerpt = (await res.text()).slice(0, 500);

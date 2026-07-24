@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { assertGitAllowed, GitGuardError, runGit } from './git-exec.ts';
+import {
+  assertGitAllowed,
+  DEFAULT_GIT_TIMEOUT_MS,
+  execaOptions,
+  GitGuardError,
+  runGit,
+} from './git-exec.ts';
 
 test('assertGitAllowed: rejects plain force-push', () => {
   assert.throws(() => assertGitAllowed(['push', '--force']), GitGuardError);
@@ -164,4 +170,55 @@ test('commitsAheadOfBase: 0 on a fresh branch, counts new commits, null when unm
     await rm(repo, { recursive: true, force: true });
     await rm(remote, { recursive: true, force: true });
   }
+});
+
+// Nothing else bounds a git child: a stalled connection to a remote leaves `fetch`/`push`/`ls-remote`
+// waiting forever, and a SIGINT can only kill an in-flight child that was given the run's signal.
+test('execaOptions: no options → the default deadline, nothing else', () => {
+  assert.deepEqual(execaOptions(), { timeout: DEFAULT_GIT_TIMEOUT_MS });
+});
+
+test('execaOptions: cwd + explicit timeout + signal → execa cwd/timeout/cancelSignal', () => {
+  const controller = new AbortController();
+  assert.deepEqual(execaOptions({ cwd: '/tmp/repo', timeout: 25, signal: controller.signal }), {
+    cwd: '/tmp/repo',
+    timeout: 25,
+    cancelSignal: controller.signal,
+  });
+});
+
+test('execaOptions: the git policy is not passed to execa', () => {
+  // allowForcePush governs assertGitAllowed, not the subprocess — leaking it would be an unknown
+  // execa option.
+  assert.deepEqual(execaOptions({ cwd: '/tmp/repo', allowForcePush: false }), {
+    cwd: '/tmp/repo',
+    timeout: DEFAULT_GIT_TIMEOUT_MS,
+  });
+});
+
+test('runGit: an already-aborted signal kills the child rather than running it to completion', async () => {
+  // Proves the option actually reaches execa, not just the option builder.
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    () => runGit(['--version'], { signal: controller.signal }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /cancel|terminat/i);
+      return true;
+    },
+  );
+});
+
+test('runGit: a child that outruns its deadline is killed', async () => {
+  // `git --paginate log` on a repo it cannot read still exits fast, so drive the deadline with a
+  // subcommand that waits on stdin: `git hash-object --stdin` reads until EOF, which never comes.
+  await assert.rejects(
+    () => runGit(['hash-object', '--stdin'], { timeout: 200 }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /timed out/i);
+      return true;
+    },
+  );
 });

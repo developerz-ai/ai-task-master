@@ -58,7 +58,14 @@ export type GhClient = {
 
 // `git commit --amend` injection seam — defaults to execa so tests can record argv
 // without spawning git. Mirrors the GitHubClient.RunCmd shape on purpose.
-export type RunCmdOptions = { cwd?: string };
+export type RunCmdOptions = {
+  cwd?: string;
+  // Per-invocation deadline in ms. Defaults to DEFAULT_CMD_TIMEOUT_MS.
+  timeout?: number;
+  // Run abort handle. Aborting kills the in-flight child (execa `cancelSignal` → SIGTERM, then
+  // SIGKILL) instead of leaving it for the force-exit path to orphan.
+  signal?: AbortSignal;
+};
 export type RunCmdResult = { stdout: string; stderr: string; exitCode: number };
 export type RunCmd = (
   file: string,
@@ -66,9 +73,27 @@ export type RunCmd = (
   options?: RunCmdOptions,
 ) => Promise<RunCmdResult>;
 
+// Only local plumbing runs through here (`git commit --amend`, `git rev-parse`), so a minute is
+// already an eternity — but a wedged index lock would otherwise stall the group forever.
+export const DEFAULT_CMD_TIMEOUT_MS = 60_000;
+
+// Exported for the unit test: the option mapping is the whole point of the chokepoint, and
+// asserting it beats spawning git per case.
+export function execaOptions(options?: RunCmdOptions): {
+  cwd?: string;
+  timeout: number;
+  cancelSignal?: AbortSignal;
+} {
+  return {
+    ...(options?.cwd ? { cwd: options.cwd } : {}),
+    timeout: options?.timeout ?? DEFAULT_CMD_TIMEOUT_MS,
+    ...(options?.signal ? { cancelSignal: options.signal } : {}),
+  };
+}
+
 export const defaultRunCmd: RunCmd = async (file, args, options) => {
   try {
-    const r = await execa(file, [...args], options?.cwd ? { cwd: options.cwd } : {});
+    const r = await execa(file, [...args], execaOptions(options));
     return {
       stdout: typeof r.stdout === 'string' ? r.stdout : '',
       stderr: typeof r.stderr === 'string' ? r.stderr : '',
@@ -78,13 +103,21 @@ export const defaultRunCmd: RunCmd = async (file, args, options) => {
     if (err instanceof ExecaError) {
       return {
         stdout: typeof err.stdout === 'string' ? err.stdout : '',
-        stderr: typeof err.stderr === 'string' ? err.stderr : '',
+        stderr: failureStderr(err),
         exitCode: err.exitCode ?? 1,
       };
     }
     throw err;
   }
 };
+
+// A child killed by the deadline or by an abort usually wrote nothing to stderr, and finalizeCommit
+// reports failures as `git … failed: <stderr>` — so without this an operator reads an empty reason.
+function failureStderr(err: ExecaError): string {
+  const stderr = typeof err.stderr === 'string' ? err.stderr : '';
+  if (stderr.length > 0) return stderr;
+  return err.timedOut || err.isCanceled ? (err.shortMessage ?? err.message) : '';
+}
 
 // The orchestrator's role guidance. buildSystemPrompt weaves it with the style digest and rolling
 // context through render('orchestrator-system', …) — the one prompt-assembly seam, no call-site concat.
@@ -130,6 +163,11 @@ export type OrchestratorInit = {
   timeout?: TimeoutConfiguration;
   // Usage sink for the two direct generateText sites, recorded under the orchestrator role (#114).
   onUsage?: OnUsage;
+  // Run-scoped cancellation for the Orchestrator's OWN work — the two direct generateText calls and
+  // the `git commit --amend` plumbing. Orthogonal to `timeout`, which is a per-step deadline. The
+  // subagent tools are cancelled through OrchestratorBuildContext.signal instead, since a build is
+  // per-group. Unset → this work is not cancellable.
+  signal?: AbortSignal;
   // Harness-level notice sink for the direct generateText sites — currently only composePr's
   // deterministic fallback (`PR composition fell back …`). Injected so the Orchestrator stays free of
   // the observability rendering details; the adapter wires it to harnessProgress. Mirrors `onUsage`.
@@ -775,11 +813,16 @@ export class Orchestrator {
     const refined = await this.refineCommitMessage(group, delivery);
     const message = taskId === undefined ? refined : `${refined}\n\n${taskCommitTrailer(taskId)}`;
     const runCmd = this.init.runCmd ?? defaultRunCmd;
-    const amend = await runCmd('git', ['commit', '--amend', '-m', message], { cwd: checkoutPath });
+    // The run's abort handle, so a SIGINT during the amend kills git instead of orphaning it.
+    const cmdOptions: RunCmdOptions = {
+      cwd: checkoutPath,
+      ...(this.init.signal ? { signal: this.init.signal } : {}),
+    };
+    const amend = await runCmd('git', ['commit', '--amend', '-m', message], cmdOptions);
     if (amend.exitCode !== 0) {
       throw new Error(`git commit --amend failed: ${amend.stderr.trim() || amend.stdout.trim()}`);
     }
-    const sha = await runCmd('git', ['rev-parse', 'HEAD'], { cwd: checkoutPath });
+    const sha = await runCmd('git', ['rev-parse', 'HEAD'], cmdOptions);
     if (sha.exitCode !== 0) {
       throw new Error(`git rev-parse HEAD failed: ${sha.stderr.trim() || sha.stdout.trim()}`);
     }
@@ -802,6 +845,7 @@ export class Orchestrator {
           system: this.buildSystemPrompt(),
           prompt: this.buildCommitPrompt(group, delivery),
           ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
+          ...(this.init.signal ? { abortSignal: this.init.signal } : {}),
         }),
       this.init.timeout,
     );
@@ -869,6 +913,7 @@ export class Orchestrator {
             },
             toolChoice: 'auto',
             ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
+            ...(this.init.signal ? { abortSignal: this.init.signal } : {}),
           }),
         this.init.timeout,
       );

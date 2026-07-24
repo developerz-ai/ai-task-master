@@ -55,8 +55,12 @@ const META = '__AITM_FETCH_HTML_META__';
 export type ExecLike = (
   file: string,
   args: readonly string[],
-  options?: { timeout?: number; maxBuffer?: number },
+  options?: { timeout?: number; maxBuffer?: number; cancelSignal?: AbortSignal },
 ) => Promise<{ stdout: unknown; stderr: unknown }>;
+
+// The availability probe runs at wiring time, before any tool call exists to cancel it, so a
+// curl-impersonate build that hangs on --version would stall run startup. Its own short deadline.
+const AVAILABILITY_TIMEOUT_MS = 5_000;
 
 export type FetchHtmlInit = {
   // curl-impersonate binary name or path. Default `curl-impersonate-chrome`.
@@ -89,7 +93,7 @@ export async function isFetchHtmlAvailable(init: FetchHtmlInit = {}): Promise<bo
   const exec = resolveExec(init);
   const binary = init.binary ?? DEFAULT_BINARY;
   try {
-    await exec(binary, ['--version']);
+    await exec(binary, ['--version'], { timeout: AVAILABILITY_TIMEOUT_MS });
     return true;
   } catch {
     return false;
@@ -106,7 +110,10 @@ export function fetchHtmlTool(init: FetchHtmlInit = {}): Tool<FetchHtmlInput, We
     description:
       'Fetch a URL using a real browser TLS fingerprint (via curl-impersonate), for sites that block stock fetch with a JS challenge / 403 (Cloudflare, Akamai). Same output shape as web-fetch. Use this only when web-fetch returns a challenge or 403.',
     inputSchema: fetchHtmlInputSchema,
-    execute: async (input: FetchHtmlInput): Promise<WebFetchOutput> => {
+    execute: async (
+      input: FetchHtmlInput,
+      { abortSignal }: { abortSignal?: AbortSignal },
+    ): Promise<WebFetchOutput> => {
       const maxChars = Math.min(input.maxChars ?? DEFAULT_MAX_CHARS, MAX_OUTPUT_CHARS);
       const timeoutMs = Math.min(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
       const { url: safeUrl, addresses } = await resolveSafeUrl(input.url, lookup);
@@ -130,9 +137,12 @@ export function fetchHtmlTool(init: FetchHtmlInit = {}): Tool<FetchHtmlInput, We
         safeUrl.toString(),
       ];
       try {
+        // The subagent's abort handle: cancelling a generation kills curl mid-transfer rather than
+        // leaving it to run out --max-time on a connection nobody is waiting for any more.
         const r = await exec(binary, args, {
           timeout: timeoutMs + 5_000,
           maxBuffer: maxChars * 4 + 2_000_000,
+          ...(abortSignal ? { cancelSignal: abortSignal } : {}),
         });
         return buildOutput(input.url, asString(r.stdout), asString(r.stderr), maxChars);
       } catch (err) {

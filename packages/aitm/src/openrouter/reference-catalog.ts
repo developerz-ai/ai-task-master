@@ -16,7 +16,7 @@
 //
 // SRP: fetch + match only. ModelLimitsRegistry decides precedence and owns the merge.
 
-import { type OpenRouterModel, parseModelCatalog } from './client.ts';
+import { CATALOG_FETCH_TIMEOUT_MS, type OpenRouterModel, parseModelCatalog } from './client.ts';
 
 export const OPENROUTER_REFERENCE_URL = 'https://openrouter.ai/api/v1/models';
 
@@ -31,7 +31,10 @@ export class OpenRouterReferenceCatalog implements ReferenceCatalogClient {
   // No Authorization header by design: the public catalog needs none, and sending the active
   // profile's key to a third-party host would leak it to a provider the user never configured.
   async listModels(): Promise<OpenRouterModel[]> {
-    const res = await fetch(this.url, { headers: { accept: 'application/json' } });
+    const res = await fetch(this.url, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS),
+    });
     if (!res.ok) {
       const excerpt = (await res.text()).slice(0, 200);
       throw new Error(

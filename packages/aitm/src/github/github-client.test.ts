@@ -7,14 +7,19 @@ import {
   CHECKS_MAX_DELAY_MS,
   CHECKS_START_WAIT_MS,
   CHECKS_TIMEOUT_MS,
+  DEFAULT_CMD_TIMEOUT_MS,
   DEFAULT_PR_LABEL,
+  defaultRunCmd,
   defaultSleep,
+  execaOptions,
   GitHubClient,
   isInstantSleepEnabled,
   MAX_REVIEW_THREAD_PAGES,
   type RunCmd,
+  type RunCmdOptions,
   type RunCmdResult,
   type Sleep,
+  withSignal,
 } from './github-client.ts';
 
 type Call = { file: string; args: string[]; cwd?: string };
@@ -1275,5 +1280,93 @@ test('defaultSleep: already-aborted signal → resolves immediately, arms nothin
     assert.ok(Date.now() - start < 1000, 'an already-aborted signal skips the wait');
     await realDelay(50);
     assert.equal(removals(), 0, 'no timer and no listener were ever armed');
+  });
+});
+
+// Every gh/git child gets a deadline and, when the run supplies one, the run's abort handle:
+// CHECKS_TIMEOUT_MS bounds how many times waitForChecks polls, never how long one `gh` may hang.
+test('execaOptions: no options → the default deadline, nothing else', () => {
+  assert.deepEqual(execaOptions(), { timeout: DEFAULT_CMD_TIMEOUT_MS });
+});
+
+test('execaOptions: cwd + explicit timeout + signal → execa cwd/timeout/cancelSignal', () => {
+  const controller = new AbortController();
+  assert.deepEqual(execaOptions({ cwd: '/tmp/repo', timeout: 25, signal: controller.signal }), {
+    cwd: '/tmp/repo',
+    timeout: 25,
+    cancelSignal: controller.signal,
+  });
+});
+
+test('defaultRunCmd: a child that outruns its deadline → non-zero exit and a legible reason', async () => {
+  const r = await defaultRunCmd(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], {
+    timeout: 200,
+  });
+  assert.notEqual(r.exitCode, 0);
+  // Callers report failures as `<cmd> failed: <stderr>`; a signal-killed child writes nothing, so
+  // without the shortMessage fallback the operator would read an empty reason.
+  assert.match(r.stderr, /timed out/i);
+});
+
+test('defaultRunCmd: an aborted signal kills the in-flight child instead of orphaning it', async () => {
+  const controller = new AbortController();
+  const started = Date.now();
+  const pending = defaultRunCmd(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], {
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 50);
+  const r = await pending;
+  assert.notEqual(r.exitCode, 0);
+  assert.ok(Date.now() - started < 10_000, 'the child dies on abort, not on its own deadline');
+  assert.match(r.stderr, /cancel/i);
+});
+
+test('withSignal: binds the run signal into every call, keeping the caller options', async () => {
+  const seen: Array<RunCmdOptions | undefined> = [];
+  const run: RunCmd = async (_file, _args, options) => {
+    seen.push(options);
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  const controller = new AbortController();
+  const bound = withSignal(run, controller.signal);
+  await bound('gh', ['pr', 'view']);
+  await bound('gh', ['pr', 'view'], { cwd: '/tmp/repo', timeout: 5 });
+  assert.deepEqual(seen[0], { signal: controller.signal });
+  assert.deepEqual(seen[1], { cwd: '/tmp/repo', timeout: 5, signal: controller.signal });
+});
+
+test('GitHubClient: the constructor signal reaches every child spawn', async () => {
+  const seen: Array<AbortSignal | undefined> = [];
+  const run: RunCmd = async (_file, _args, options) => {
+    seen.push(options?.signal);
+    return { stdout: 'main\n', stderr: '', exitCode: 0 };
+  };
+  const controller = new AbortController();
+  await new GitHubClient('/tmp/repo', run, defaultSleep, controller.signal).currentBranch();
+  assert.deepEqual(seen, [controller.signal]);
+
+  // No run signal → the injected runner is used verbatim, so existing stubs see no extra option.
+  const bare: Array<RunCmdOptions | undefined> = [];
+  const plain: RunCmd = async (_file, _args, options) => {
+    bare.push(options);
+    return { stdout: 'main\n', stderr: '', exitCode: 0 };
+  };
+  await new GitHubClient('/tmp/repo', plain).currentBranch();
+  assert.deepEqual(bare, [{ cwd: '/tmp/repo' }]);
+});
+
+test('waitForChecks: aborted during the gh call → pending, not a parse failure', async () => {
+  // The child is killed mid-flight, so its stdout is truncated garbage. Reporting that as
+  // "gh pr checks failed" would turn a clean cancellation into a run-ending error.
+  const controller = new AbortController();
+  const run: RunCmd = async () => {
+    controller.abort();
+    return { stdout: '', stderr: 'Command was canceled', exitCode: 1 };
+  };
+  const g = new GitHubClient('/tmp/repo', run, async () => {}, controller.signal);
+  assert.deepEqual(await g.waitForChecks(7, controller.signal), {
+    state: 'pending',
+    failedChecks: [],
+    checks: [],
   });
 });

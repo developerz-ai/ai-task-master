@@ -30,7 +30,14 @@ export type MergeMethod = 'squash' | 'merge' | 'rebase';
 // Thin DI shim wrapping execa — lets unit tests assert command shape without spawning processes.
 // The actual integration test (PR 12) uses a replay shim. `runCmd` (not `runGh`) because we also
 // shell out to plain `git` for `currentBranch`.
-export type RunCmdOptions = { cwd?: string };
+export type RunCmdOptions = {
+  cwd?: string;
+  // Per-invocation deadline in ms. Defaults to DEFAULT_CMD_TIMEOUT_MS.
+  timeout?: number;
+  // Run abort handle. Aborting kills the in-flight child (execa `cancelSignal` → SIGTERM, then
+  // SIGKILL) instead of leaving it for the force-exit path to orphan.
+  signal?: AbortSignal;
+};
 export type RunCmdResult = { stdout: string; stderr: string; exitCode: number };
 export type RunCmd = (
   file: string,
@@ -38,9 +45,37 @@ export type RunCmd = (
   options?: RunCmdOptions,
 ) => Promise<RunCmdResult>;
 
+// Every child gets a deadline, because nothing else bounds one: CHECKS_TIMEOUT_MS bounds how many
+// times waitForChecks polls, never how long a single `gh` may hang. Five minutes is far above any
+// healthy call (the slowest is a CI log download) and far below "blocks the run forever".
+export const DEFAULT_CMD_TIMEOUT_MS = 5 * 60_000;
+
+// Exported for the unit test: the option mapping is the whole point of the chokepoint, and asserting
+// it beats spawning a process per case.
+export function execaOptions(options?: RunCmdOptions): {
+  cwd?: string;
+  timeout: number;
+  cancelSignal?: AbortSignal;
+} {
+  return {
+    ...(options?.cwd ? { cwd: options.cwd } : {}),
+    timeout: options?.timeout ?? DEFAULT_CMD_TIMEOUT_MS,
+    ...(options?.signal ? { cancelSignal: options.signal } : {}),
+  };
+}
+
+// A child killed by the deadline or by an abort usually wrote nothing to stderr, and every caller
+// reports failures as `<cmd> failed: <stderr>` — so without this an operator reads an empty reason.
+// execa's own summary ("Command timed out after 300000 milliseconds: gh …") is that reason.
+function failureStderr(err: ExecaError): string {
+  const stderr = typeof err.stderr === 'string' ? err.stderr : '';
+  if (stderr.length > 0) return stderr;
+  return err.timedOut || err.isCanceled ? (err.shortMessage ?? err.message) : '';
+}
+
 export const defaultRunCmd: RunCmd = async (file, args, options) => {
   try {
-    const r = await execa(file, [...args], options?.cwd ? { cwd: options.cwd } : {});
+    const r = await execa(file, [...args], execaOptions(options));
     return {
       stdout: typeof r.stdout === 'string' ? r.stdout : '',
       stderr: typeof r.stderr === 'string' ? r.stderr : '',
@@ -50,13 +85,22 @@ export const defaultRunCmd: RunCmd = async (file, args, options) => {
     if (err instanceof ExecaError) {
       return {
         stdout: typeof err.stdout === 'string' ? err.stdout : '',
-        stderr: typeof err.stderr === 'string' ? err.stderr : '',
+        stderr: failureStderr(err),
         exitCode: err.exitCode ?? 1,
       };
     }
     throw err;
   }
 };
+
+// Binds the run's abort handle into a RunCmd once, instead of threading it through the twenty-odd
+// call sites below — no call site can forget it. Wraps whatever RunCmd it is given, so an injected
+// test stub stays in charge. The run signal wins over a per-call one: the run ending is the stronger
+// claim, and nothing inside GitHubClient passes its own today.
+export const withSignal =
+  (run: RunCmd, signal: AbortSignal): RunCmd =>
+  (file, args, options) =>
+    run(file, args, { ...options, signal });
 
 // Sleep DI — tests inject a recording stub so backoff is asserted without real timers.
 // The optional signal makes a wait cancellable; stubs that ignore it stay assignable.
@@ -136,11 +180,19 @@ export class GitHubClient {
   // Capability matrix — docs/github-integration.md §"Capabilities".
   // Backoff — docs/github-integration.md §"Rate limits" (1s, doubling, 60s cap).
 
+  private readonly runCmd: RunCmd;
+
+  // `signal` is the run's abort handle: it is bound into every child spawn (see withSignal), so a
+  // SIGINT kills an in-flight `gh` rather than orphaning it. Poll cancellation is separate —
+  // waitForChecks takes its own signal, since a caller may cancel a wait without ending the run.
   constructor(
     private readonly cwd: string,
-    private readonly runCmd: RunCmd = defaultRunCmd,
+    runCmd: RunCmd = defaultRunCmd,
     private readonly sleep: Sleep = defaultSleep,
-  ) {}
+    signal?: AbortSignal,
+  ) {
+    this.runCmd = signal ? withSignal(runCmd, signal) : runCmd;
+  }
 
   // The login `gh` is authenticated as, resolved once via `gh api user` and reused, so the review
   // poll never re-spawns the lookup per iteration.
@@ -266,6 +318,9 @@ export class GitHubClient {
         ['pr', 'checks', String(pr), '--json', 'bucket,name,state,description'],
         { cwd: this.cwd },
       );
+      // An abort kills the child mid-flight, so its stdout is truncated or empty — parsing it would
+      // report "gh pr checks failed" for what is really a cancellation. Same non-verdict as above.
+      if (signal?.aborted) return { state: 'pending', failedChecks: [], checks: [] };
       // `gh pr checks` exits 8 when any check fails but still emits JSON on stdout. Treat any
       // exit code as "command ran" if stdout parses; otherwise propagate the failure.
       const rows = tryParseChecks(r.stdout);

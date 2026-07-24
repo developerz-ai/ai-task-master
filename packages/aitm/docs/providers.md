@@ -208,6 +208,7 @@ Rules that keep this honest:
 - **Model matching is exact or nothing.** `glm-5.2` → `z-ai/glm-5.2` (org-stripped), `k3` → `moonshotai/kimi-k3` (hyphen-boundary suffix). An ambiguous match yields nothing: mispricing a run is worse than not pricing it.
 - **Borrowed prices are LIST prices**, not what a subscription billed. Anything sourced this way is labelled, in the startup banner and in the end-of-run line (`$1.2345 est. at OpenRouter list rates`).
 - **The fetch is skipped** when the provider's catalog is already complete, and a failure to reach it degrades to "unknown" rather than failing the run.
+- **Both catalog fetches are time-boxed** (20s, `AbortSignal.timeout`). They run at startup, and the degrade-to-unknown path only catches a *rejection* — an endpoint that accepts the connection and then stalls would otherwise hang the run before its first task.
 
 ### Startup banner
 

@@ -836,9 +836,12 @@ export function planToPrGroups(
 // Branch names already published on `origin`, read in ONE `ls-remote` for the whole run rather than
 // a probe per group. Best-effort by design: no origin, no network, or not a git repo all yield an
 // empty set, so branch dedupe degrades to the plain names — a naming courtesy must never fail a run.
-export async function remoteBranchNames(cwd: string): Promise<Set<string>> {
+export async function remoteBranchNames(cwd: string, signal?: AbortSignal): Promise<Set<string>> {
   try {
-    const result = await runGit(['ls-remote', '--heads', 'origin'], { cwd });
+    const result = await runGit(['ls-remote', '--heads', 'origin'], {
+      cwd,
+      ...(signal ? { signal } : {}),
+    });
     return new Set(parseRemoteHeads(result.stdout));
   } catch {
     return new Set();
@@ -1018,7 +1021,11 @@ async function defaultPlanGroups(
     // One remote read per run, here at first branch assignment — the only moment a branch name is
     // chosen. A resume never reaches this path, so a persisted branch is never renamed underneath a
     // half-finished PR.
-    const groups = planToPrGroups(result.plan, input.branch, await remoteBranchNames(input.cwd));
+    const groups = planToPrGroups(
+      result.plan,
+      input.branch,
+      await remoteBranchNames(input.cwd, input.signal),
+    );
     harnessProgress(
       `plan ready: ${groups.length} PR group(s) — ${groups.map((g) => g.id).join(', ')}`,
       { phase: 'planning' },
@@ -1248,6 +1255,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       : {}),
     timeout: stepTimeout,
     ...(orchUsage ? { onUsage: orchUsage } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
     onProgress: (message) => harnessProgress(message),
   });
 
@@ -1549,7 +1557,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // first — `gh pr create` won't open a PR for a branch that isn't on the remote
       // ("No commits between … / Head ref must be a branch").
       harnessProgress(`group ${group.id}: pushing ${head} and opening PR`, prOpenTag);
-      await runGit(['push', '-u', 'origin', head], { cwd: input.cwd });
+      await runGit(['push', '-u', 'origin', head], {
+        cwd: input.cwd,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
       const pr = await orch.openPr(group, delivery, baseBranch);
       harnessProgress(`group ${group.id}: PR #${pr.number} opened — ${pr.url}`, prOpenTag);
       // Accumulate this group's deterministic digest into the live rolling context and persist it
@@ -1823,6 +1834,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           await runGit(['push', '--force-with-lease'], {
             cwd: checkout.path,
             allowForcePush: input.resolved.allowForcePush,
+            ...(input.signal ? { signal: input.signal } : {}),
           });
         } catch (err) {
           return {

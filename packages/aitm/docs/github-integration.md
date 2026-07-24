@@ -35,6 +35,12 @@ GraphQL queries are batched per PR (threads + comments fetched in one request). 
 
 `waitForChecks(pr, signal?)` takes the run's abort signal: it cancels the start grace and every backoff, and the loop checks `signal.aborted` at the top of each poll so a Ctrl-C stops within one in-flight `gh pr checks` instead of the 120-minute timeout. A cancelled wait returns `{ state: 'pending' }` — **not** a verdict. Callers (`handleWaitingCi`, the take-over loop, the prPerTask auto-merge flow) re-check the signal before branching, so a cancel never reads as a CI failure (an LLM fix pass) or as "nothing failing" (a merge).
 
+## Child-process deadlines
+
+Every `gh`/`git` child spawned by `GitHubClient` runs under a deadline (`DEFAULT_CMD_TIMEOUT_MS`, 5 min; override per call with `RunCmdOptions.timeout`) and, when the run supplies one, under the run's abort signal — bound once in the constructor, so a Ctrl-C kills an in-flight `gh` instead of leaving it for the force-exit path to orphan. Note what this is *not*: `CHECKS_TIMEOUT_MS` bounds how many times `waitForChecks` polls, never how long a single `gh` invocation may hang, so before these deadlines a network-wedged `gh api …/logs` blocked the run forever. A child killed by either route reports execa's own summary as `stderr` ("Command timed out after 300000 milliseconds: gh …"), since a signal-killed process writes no error of its own and callers render failures as `<cmd> failed: <stderr>`.
+
+The same treatment applies at the other subprocess chokepoints: `runGit` (`DEFAULT_GIT_TIMEOUT_MS`, 10 min — network subcommands are the ones that wedge), the Orchestrator's `git commit --amend` seam (1 min), and `fetch_html`'s `curl-impersonate` (the tool call's own `abortSignal`).
+
 ## No server
 
 No webhook listener. No long-running process. `merge-pr` is a polling command the user runs on-demand.

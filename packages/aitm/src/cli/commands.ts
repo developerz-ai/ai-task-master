@@ -22,7 +22,7 @@ import type { CliOverrides, ConfigFile, Profile, ResolvedConfig } from '../confi
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { createLlmFetch } from '../credentials/llm-fetch.ts';
-import { GitHubClient } from '../github/github-client.ts';
+import { defaultRunCmd, defaultSleep, GitHubClient } from '../github/github-client.ts';
 import { mergeFlowAdapter } from '../loop/merge-flow-adapter.ts';
 import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
@@ -406,7 +406,9 @@ export async function runStart(
   if (!auth.ok) {
     return { code: 1, message: 'gh CLI is not authenticated. Run `gh auth login`.' };
   }
-  const github = new GitHubClient(cwd);
+  // The run's abort handle is bound in here so a SIGINT kills an in-flight `gh` child, not just the
+  // poll loops around it (see GitHubClient's constructor).
+  const github = new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal);
 
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
@@ -711,7 +713,7 @@ export async function runMergePr(
   }
 
   try {
-    const github = ctx.github ?? new GitHubClient(cwd);
+    const github = ctx.github ?? new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal);
 
     // Take-over flow: `aitm merge-pr` (no args, no prior state) should work against any PR
     // the user built by hand — e.g. via Claude Code or `gh pr create`. We mirror the

@@ -80,7 +80,7 @@ Add an exception by appending a rule (`match: 'contains'` when a service words o
 - Integration tests run against a real temp git repo and real `gh` against a sandbox account. They are the source of truth for behavior.
 - Unit tests cover pure modules (`AgentConfigDetector`, `Credentials` resolution, plan parsing, PR-group sizing).
 - No mocking of `gh` or the AI SDK in integration tests. Mock only at module boundaries in unit tests.
-- Tests must pass under both `bun test` and `node --test` (or `vitest run` with a Node target) — runtime portability is enforced by CI.
+- Tests must pass under both `bun test` and `node --test` (or `vitest run` with a Node target) locally before every commit. CI's `bun` job only runs install/lint/typecheck/typecheck:tests — `bun test` is deliberately omitted there (Bun's `node:test` shim mishandles our suite across files, oven-sh/bun#5090); the `node` job (`npm run test:node --workspaces`) and `integration` job are what CI actually runs and are authoritative for portability enforcement.
 
 ## Out of scope for v1
 

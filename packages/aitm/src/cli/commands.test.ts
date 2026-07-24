@@ -11,12 +11,13 @@ import { Logger } from '../logger/logger.ts';
 import { acquireRunLock } from '../state/run-lock.ts';
 import { CURRENT_SCHEMA_VERSION, type RunState } from '../state/schema.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
-import type { CommandExit, RunPlannerInput, StartCtx } from './commands.ts';
+import type { CommandExit, McpLoginCtx, RunPlannerInput, StartCtx } from './commands.ts';
 import {
   drainStdin,
   isRunComplete,
   runClean,
   runConfig,
+  runMcpLogin,
   runMergePr,
   runProfile,
   runResume,
@@ -2620,4 +2621,83 @@ test('runResume: an unreadable state dir reports the real failure, not "nothing 
     await repo.cleanup();
     await home.cleanup();
   }
+});
+
+// ---- runMcpLogin ------------------------------------------------------------
+
+test('runMcpLogin: drives the injected performOAuth seam and prints the config snippet', async () => {
+  let receivedInput: unknown;
+  const ctx: McpLoginCtx = {
+    performOAuth: async (input) => {
+      receivedInput = input;
+      return {
+        name: 'my-server',
+        type: 'http',
+        url: 'https://mcp.example.com',
+        headers: { Authorization: 'Bearer tok-123' },
+      };
+    },
+  };
+  let out = '';
+  ctx.stdout = (chunk) => {
+    out += chunk;
+  };
+
+  const result = await runMcpLogin(
+    { kind: 'mcp-login', serverUrl: 'https://mcp.example.com' },
+    ctx,
+  );
+
+  assert.equal(result.code, 0);
+  assert.deepEqual(receivedInput, { serverUrl: 'https://mcp.example.com' });
+  assert.match(out, /OAuth authentication successful/);
+  assert.match(out, /"my-server"/);
+  assert.match(out, /"Authorization": "Bearer tok-123"/);
+});
+
+test('runMcpLogin: forwards callbackUrl and timeout overrides to the seam', async () => {
+  let receivedInput: unknown;
+  const ctx: McpLoginCtx = {
+    performOAuth: async (input) => {
+      receivedInput = input;
+      return {
+        name: 'my-server',
+        type: 'http',
+        url: 'https://mcp.example.com',
+        headers: { Authorization: 'Bearer tok' },
+      };
+    },
+  };
+
+  await runMcpLogin(
+    {
+      kind: 'mcp-login',
+      serverUrl: 'https://mcp.example.com',
+      callbackUrl: 'http://127.0.0.1:9999/callback',
+      timeout: 5000,
+    },
+    ctx,
+  );
+
+  assert.deepEqual(receivedInput, {
+    serverUrl: 'https://mcp.example.com',
+    callbackUrl: 'http://127.0.0.1:9999/callback',
+    timeout: 5000,
+  });
+});
+
+test('runMcpLogin: a rejecting performOAuth seam → exit 1 carrying the error message', async () => {
+  const ctx: McpLoginCtx = {
+    performOAuth: async () => {
+      throw new Error('state mismatch');
+    },
+  };
+
+  const result = await runMcpLogin(
+    { kind: 'mcp-login', serverUrl: 'https://mcp.example.com' },
+    ctx,
+  );
+
+  assert.equal(result.code, 1);
+  assert.match(result.message ?? '', /state mismatch/);
 });

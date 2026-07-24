@@ -37,7 +37,11 @@ test('public surface exports exact documented classes (presence and absence)', (
   assert.ok(api.DirtyWorkingTree, 'DirtyWorkingTree must be exported');
 
   // Verified constants and properties
-  assert.equal(api.DEFAULT_PR_LABEL, 'ai-task-master', 'DEFAULT_PR_LABEL must equal ai-task-master');
+  assert.equal(
+    api.DEFAULT_PR_LABEL,
+    'ai-task-master',
+    'DEFAULT_PR_LABEL must equal ai-task-master',
+  );
   assert.equal(api.ROLE_CAPABILITY.worker, 'coding', 'ROLE_CAPABILITY.worker must equal coding');
 
   // Absence: internal utilities that must not leak
@@ -46,6 +50,14 @@ test('public surface exports exact documented classes (presence and absence)', (
   assert.equal(api.runGit, undefined, 'runGit (internal) must not be exported');
   assert.equal(api.parseJson, undefined, 'parseJson (internal) must not be exported');
   assert.equal(api.formatJson, undefined, 'formatJson (internal) must not be exported');
-  assert.equal((api as any).readJsonFile, undefined, 'readJsonFile (internal) must not be exported');
-  assert.equal((api as any).writeJsonFile, undefined, 'writeJsonFile (internal) must not be exported');
+  assert.equal(
+    (api as Record<string, unknown>).readJsonFile,
+    undefined,
+    'readJsonFile (internal) must not be exported',
+  );
+  assert.equal(
+    (api as Record<string, unknown>).writeJsonFile,
+    undefined,
+    'writeJsonFile (internal) must not be exported',
+  );
 });

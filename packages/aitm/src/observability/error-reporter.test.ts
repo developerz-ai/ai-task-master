@@ -52,6 +52,128 @@ test('initErrorReporter: flush drains via a single bounded Sentry.close(2000)', 
   assert.ok(awaited, 'flush must await Sentry.close');
 });
 
+test('initErrorReporter: registers beforeSend, which scrubs the event through scrubEvent', async () => {
+  let capturedBeforeSend: ((event: SentryEvent, hint: unknown) => unknown) | undefined;
+  const sentry: SentrySdk = {
+    init: (options) => {
+      capturedBeforeSend = options.beforeSend as typeof capturedBeforeSend;
+    },
+    captureException: () => undefined,
+    close: async () => true,
+  };
+
+  await initErrorReporter({ AITM_SENTRY_DSN: 'https://k@glitchtip/1' }, async () => sentry);
+
+  assert.ok(capturedBeforeSend, 'Sentry.init must be called with a beforeSend hook');
+  const scrubbed = capturedBeforeSend?.(
+    { message: 'token sk-live-abcdefghijklmnop leaked' } as SentryEvent,
+    {},
+  ) as SentryEvent;
+  assert.doesNotMatch(String(scrubbed.message), /sk-live-abcdefghijklmnop/);
+});
+
+test('initErrorReporter: init options carry the dsn, sampling off, and env/release from env', async () => {
+  const inits: Array<Record<string, unknown>> = [];
+  const sentry: SentrySdk = {
+    init: (options) => {
+      inits.push(options as Record<string, unknown>);
+    },
+    captureException: () => undefined,
+    close: async () => true,
+  };
+
+  await initErrorReporter(
+    { AITM_SENTRY_DSN: 'https://k@glitchtip/1', AITM_ENV: 'staging', AITM_RELEASE: '1.2.3' },
+    async () => sentry,
+  );
+
+  assert.equal(inits.length, 1);
+  assert.equal(inits[0]?.dsn, 'https://k@glitchtip/1');
+  assert.equal(inits[0]?.environment, 'staging');
+  assert.equal(inits[0]?.release, '1.2.3');
+  assert.equal(inits[0]?.tracesSampleRate, 0);
+});
+
+test('initErrorReporter: defaults environment to production and omits release when unset', async () => {
+  const inits: Array<Record<string, unknown>> = [];
+  const sentry: SentrySdk = {
+    init: (options) => {
+      inits.push(options as Record<string, unknown>);
+    },
+    captureException: () => undefined,
+    close: async () => true,
+  };
+
+  await initErrorReporter({ AITM_SENTRY_DSN: 'https://k@glitchtip/1' }, async () => sentry);
+
+  assert.equal(inits[0]?.environment, 'production');
+  assert.ok(!('release' in (inits[0] ?? {})), 'no release key when AITM_RELEASE is unset');
+});
+
+test('initErrorReporter: captureException delegates to Sentry.captureException when a DSN is set', async () => {
+  const captured: unknown[] = [];
+  const sentry: SentrySdk = {
+    init: () => undefined,
+    captureException: (error) => {
+      captured.push(error);
+    },
+    close: async () => true,
+  };
+
+  const reporter = await initErrorReporter(
+    { AITM_SENTRY_DSN: 'https://k@glitchtip/1' },
+    async () => sentry,
+  );
+  const err = new Error('boom');
+  reporter.captureException(err);
+
+  assert.deepEqual(captured, [err]);
+});
+
+test('initErrorReporter: captureException swallows a throwing Sentry SDK (observability never breaks a run)', async () => {
+  const sentry: SentrySdk = {
+    init: () => undefined,
+    captureException: () => {
+      throw new Error('sdk exploded');
+    },
+    close: async () => true,
+  };
+
+  const reporter = await initErrorReporter(
+    { AITM_SENTRY_DSN: 'https://k@glitchtip/1' },
+    async () => sentry,
+  );
+
+  assert.doesNotThrow(() => reporter.captureException(new Error('boom')));
+});
+
+test('initErrorReporter: a throwing Sentry.init degrades to the safe no-op reporter', async () => {
+  const sentry: SentrySdk = {
+    init: () => {
+      throw new Error('init failed');
+    },
+    captureException: () => undefined,
+    close: async () => true,
+  };
+
+  const reporter = await initErrorReporter(
+    { AITM_SENTRY_DSN: 'https://k@glitchtip/1' },
+    async () => sentry,
+  );
+
+  assert.doesNotThrow(() => reporter.captureException(new Error('boom')));
+  await assert.doesNotReject(reporter.flush());
+});
+
+test('initErrorReporter: a rejecting loadSentry (SDK not installed) degrades to the safe no-op reporter', async () => {
+  const reporter = await initErrorReporter({ AITM_SENTRY_DSN: 'https://k@glitchtip/1' }, () =>
+    Promise.reject(new Error('module not found')),
+  );
+
+  assert.doesNotThrow(() => reporter.captureException(new Error('boom')));
+  await assert.doesNotReject(reporter.flush());
+});
+
 test('scrubEvent: redacts secret-shaped substrings in the top-level message', () => {
   const event = scrubEvent({ message: 'request failed: Bearer sk-abcdef1234567890' });
   assert.equal(event.message, 'request failed: Bearer [REDACTED]');

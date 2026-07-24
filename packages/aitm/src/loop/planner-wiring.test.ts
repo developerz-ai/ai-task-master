@@ -4,21 +4,25 @@
 // ships with its own paired test file.
 
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import { execa } from 'execa';
 import type { RunLoopInput } from '../composition/run-input.ts';
 import type { McpClientManager } from '../mcp/mcp-client.ts';
 import type { Plan } from '../plan/schema.ts';
 import { StateStore } from '../state/state-store.ts';
+import { SCOUT_LENSES, SCOUT_REPO_FILE_FLOOR } from '../subagents/planner-scouts.ts';
+import { makeTempRepo } from '../testing/temp-repo.ts';
 import {
   branchFor,
   defaultPlanGroups,
   parseRemoteHeads,
   planToPrGroups,
   remoteBranchNames,
+  surveyRepoForPlanner,
 } from './planner-wiring.ts';
 
 // ---- planToPrGroups (pure) -------------------------------------------------
@@ -428,6 +432,98 @@ test('defaultPlanGroups: a throw during the planner call still ends its transcri
       ['error'],
       'the planner transcript is closed exactly once, as an error',
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- surveyRepoForPlanner (real scout-runner wiring) -----------------------
+
+// A model that answers every scout's `submit` call with a valid ScoutFinding. defaultPlanGroups'
+// own tests use a tempdir with zero tracked files, so shouldSurveyInParallel's file-count gate
+// always skips the survey there — the real ScoutAgentInit this function builds (model, tools,
+// system prompt, timeout, usage sink, signal, all derived from a RunLoopInput via
+// applyHooks/resolvePlannerTools/reminderAgentSystemPrompt) is otherwise never constructed.
+function scoutSubmitModel(): { model: MockLanguageModelV3; callCount: () => number } {
+  let calls = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      calls += 1;
+      const n = calls;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${n}`,
+            toolName: 'submit',
+            input: JSON.stringify({
+              summary: `finding ${n}`,
+              facts: [`fact ${n}`],
+              relevantPaths: [`src/file-${n}.ts`],
+            }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+          outputTokens: { total: 1, text: 1, reasoning: undefined },
+          totalTokens: 2,
+        },
+        warnings: [],
+      };
+    },
+  });
+  return { model, callCount: () => calls };
+}
+
+test('surveyRepoForPlanner: above the file floor, drives real scout agents built from a RunLoopInput', async () => {
+  const repo = await makeTempRepo();
+  try {
+    for (let i = 0; i < SCOUT_REPO_FILE_FLOOR; i++) {
+      await writeFile(join(repo.path, `file-${i}.ts`), `export const x${i} = ${i};\n`);
+    }
+    await execa('git', ['add', '-A'], { cwd: repo.path });
+
+    const { model, callCount } = scoutSubmitModel();
+    const input = fakeInput(repo.path, model);
+
+    const brief = await surveyRepoForPlanner({
+      input,
+      style: '# style\n',
+      plannerModelId: 'openai/gpt-5',
+      mcp: fakeMcp(),
+      fetchHtmlAvailable: false,
+    });
+
+    assert.equal(
+      callCount(),
+      SCOUT_LENSES.length,
+      'every lens ran its own real scout agent, built via the real ScoutAgentInit wiring',
+    );
+    assert.ok(brief, 'the real scout survey synthesized a non-empty brief');
+    assert.match(brief ?? '', /gathered in parallel by \d+ scout/);
+    assert.match(brief ?? '', /finding 1/);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('surveyRepoForPlanner: below the file floor, the real scout wiring never runs', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-scout-below-floor-'));
+  try {
+    const { model, callCount } = scoutSubmitModel();
+    const input = fakeInput(dir, model);
+
+    const brief = await surveyRepoForPlanner({
+      input,
+      style: '# style\n',
+      plannerModelId: 'openai/gpt-5',
+      mcp: fakeMcp(),
+      fetchHtmlAvailable: false,
+    });
+
+    assert.equal(brief, undefined);
+    assert.equal(callCount(), 0, 'no scout agent is built below the file floor');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

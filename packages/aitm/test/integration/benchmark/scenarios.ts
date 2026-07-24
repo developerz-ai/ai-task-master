@@ -47,11 +47,15 @@ const singleFile: BenchScenario = {
   },
 };
 
-// Grade 2 — a small module plus its own passing test. Exercises "write behaviour + a test that proves
-// it", the core Worker contract.
+// Grade 2 — a small module plus its own test. Exercises "write behaviour + a test that proves it",
+// the core Worker contract. The verdict is STATIC: it confirms the module exports the function and the
+// test file references it AND carries a test construct + an assertion (so an empty or assertion-free
+// stub fails), but it does NOT execute the produced test — a well-formed test that is actually wrong
+// still passes. Running the produced test needs an exec-capable verify against the sandbox's own
+// runner, tracked as a follow-up (#308).
 const multiFileFeature: BenchScenario = {
   id: 'multi-file-feature',
-  title: 'Add a module and a passing test',
+  title: 'Add a module and a test',
   grade: 2,
   goal:
     'Add a TypeScript module src/slugify.ts that exports a function ' +
@@ -63,10 +67,16 @@ const multiFileFeature: BenchScenario = {
     const test = await readFile('src/slugify.test.ts');
     if (mod === null) return { ok: false, detail: 'src/slugify.ts missing' };
     if (test === null) return { ok: false, detail: 'src/slugify.test.ts missing' };
-    const ok = /slugify/.test(mod) && /slugify/.test(test);
+    const exported = /export\s+(?:function|const)\s+slugify\b/.test(mod);
+    const references = /slugify/.test(test);
+    const hasTest = /\b(?:test|it|describe)\s*\(/.test(test);
+    const hasAssert = /\bassert\b|\bexpect\s*\(/.test(test);
+    const ok = exported && references && hasTest && hasAssert;
     return {
       ok,
-      detail: ok ? 'module + test present' : 'files present but slugify symbol missing',
+      detail: ok
+        ? 'module exports slugify; test references it with a test construct + assertion'
+        : `exported=${exported} references=${references} hasTest=${hasTest} hasAssert=${hasAssert}`,
     };
   },
 };

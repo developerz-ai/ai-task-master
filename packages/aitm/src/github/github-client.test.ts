@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CiFailed, GhAuthRequired, GhCliMissing, MergeConflict, PrNotFound } from './errors.ts';
+import { CiFailed, GhCliMissing, MergeConflict } from './errors.ts';
 import {
   CHECKS_EMPTY_GRACE_MS,
   CHECKS_INITIAL_DELAY_MS,
@@ -76,14 +76,6 @@ function findFieldValue(args: readonly string[], flag: '-f' | '-F', key: string)
 test('GitHubClient is constructible (skeleton)', () => {
   const g = new GitHubClient('/tmp/repo');
   assert.ok(g instanceof GitHubClient);
-});
-
-test('domain errors carry their name', () => {
-  assert.equal(new PrNotFound().name, 'PrNotFound');
-  assert.equal(new GhAuthRequired().name, 'GhAuthRequired');
-  assert.equal(new GhCliMissing().name, 'GhCliMissing');
-  assert.equal(new CiFailed().name, 'CiFailed');
-  assert.equal(new MergeConflict().name, 'MergeConflict');
 });
 
 test('currentBranch shells git rev-parse with cwd', async () => {

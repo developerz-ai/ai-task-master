@@ -4,7 +4,7 @@
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
 import { isToleratedFailure } from './check-tolerance.ts';
-import { CiFailed, GhCliMissing, MergeConflict } from './errors.ts';
+import { CiFailed, GhCliMissing, GhCommandFailed, MergeConflict } from './errors.ts';
 import {
   type CheckStatus,
   type PullRequest,
@@ -221,7 +221,7 @@ export class GitHubClient {
   async currentBranch(): Promise<string> {
     const r = await this.runCmd('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: this.cwd });
     if (r.exitCode !== 0) {
-      throw new Error(`git rev-parse failed: ${r.stderr.trim() || r.stdout.trim()}`);
+      throw new GhCommandFailed('git rev-parse', r);
     }
     return r.stdout.trim();
   }
@@ -232,7 +232,7 @@ export class GitHubClient {
       cwd: this.cwd,
     });
     if (r.exitCode !== 0) {
-      throw new Error(`gh repo view failed: ${r.stderr.trim() || r.stdout.trim()}`);
+      throw new GhCommandFailed('gh repo view', r);
     }
     const parsed: unknown = parseGhJson('gh repo view', r.stdout);
     if (
@@ -258,7 +258,7 @@ export class GitHubClient {
     );
     if (r.exitCode !== 0) {
       if (isPrNotFoundStderr(r.stderr)) return null;
-      throw new Error(`gh pr view failed: ${r.stderr.trim() || r.stdout.trim()}`);
+      throw new GhCommandFailed('gh pr view', r);
     }
     return PullRequestSchema.parse(parseGhJson('gh pr view', r.stdout));
   }
@@ -296,7 +296,7 @@ export class GitHubClient {
 
     const r = await this.runCmd('gh', args, { cwd: this.cwd });
     if (r.exitCode !== 0) {
-      throw new Error(`gh pr create failed: ${r.stderr.trim() || r.stdout.trim()}`);
+      throw new GhCommandFailed('gh pr create', r);
     }
     // gh prints the PR URL to stdout; we re-fetch to get the full typed shape.
     const pr = await this.getPrForBranch(input.head);
@@ -335,7 +335,7 @@ export class GitHubClient {
       // exit code as "command ran" if stdout parses; otherwise propagate the failure.
       const rows = tryParseChecks(r.stdout);
       if (!rows) {
-        throw new Error(`gh pr checks failed: ${r.stderr.trim() || r.stdout.trim()}`);
+        throw new GhCommandFailed('gh pr checks', r);
       }
       const status = aggregateChecks(rows);
       if (status === 'failure' || status === 'cancelled') {
@@ -500,9 +500,7 @@ export class GitHubClient {
       if (cursor) args.push('-f', `threadsCursor=${cursor}`);
       const r = await this.runCmd('gh', args, { cwd: this.cwd });
       if (r.exitCode !== 0) {
-        throw new Error(
-          `gh api graphql (reviewThreads) failed: ${r.stderr.trim() || r.stdout.trim()}`,
-        );
+        throw new GhCommandFailed('gh api graphql (reviewThreads)', r);
       }
       const parsed = GqlReviewThreadsResponseSchema.parse(
         parseGhJson('gh api graphql (reviewThreads)', r.stdout),
@@ -548,9 +546,7 @@ export class GitHubClient {
         { cwd: this.cwd },
       );
       if (r.exitCode !== 0) {
-        throw new Error(
-          `gh api graphql (threadComments) failed: ${r.stderr.trim() || r.stdout.trim()}`,
-        );
+        throw new GhCommandFailed('gh api graphql (threadComments)', r);
       }
       const parsed = GqlThreadCommentsResponseSchema.parse(
         parseGhJson('gh api graphql (threadComments)', r.stdout),
@@ -586,9 +582,7 @@ export class GitHubClient {
       { cwd: this.cwd },
     );
     if (r.exitCode !== 0) {
-      throw new Error(
-        `gh api graphql (replyToThread) failed: ${r.stderr.trim() || r.stdout.trim()}`,
-      );
+      throw new GhCommandFailed('gh api graphql (replyToThread)', r);
     }
   }
 
@@ -599,9 +593,7 @@ export class GitHubClient {
       { cwd: this.cwd },
     );
     if (r.exitCode !== 0) {
-      throw new Error(
-        `gh api graphql (resolveThread) failed: ${r.stderr.trim() || r.stdout.trim()}`,
-      );
+      throw new GhCommandFailed('gh api graphql (resolveThread)', r);
     }
   }
 
@@ -614,7 +606,7 @@ export class GitHubClient {
     if (this.cachedLogin !== null) return this.cachedLogin;
     const r = await this.runCmd('gh', ['api', 'user', '--jq', '.login'], { cwd: this.cwd });
     if (r.exitCode !== 0) {
-      throw new Error(`gh api user failed: ${r.stderr.trim() || r.stdout.trim()}`);
+      throw new GhCommandFailed('gh api user', r);
     }
     const login = r.stdout.trim();
     if (login === '') {
@@ -630,7 +622,7 @@ export class GitHubClient {
       cwd: this.cwd,
     });
     if (r.exitCode !== 0) {
-      throw new Error(`gh repo view failed: ${r.stderr.trim() || r.stdout.trim()}`);
+      throw new GhCommandFailed('gh repo view', r);
     }
     const parsed = RepoOwnerNameSchema.parse(parseGhJson('gh repo view', r.stdout));
     this.cachedRepoMeta = { owner: parsed.owner.login, name: parsed.name };
@@ -657,7 +649,7 @@ export class GitHubClient {
     if (/merge conflict|not mergeable|conflict/i.test(combined)) {
       throw new MergeConflict(`Merge conflict on PR #${pr}: ${r.stderr.trim() || r.stdout.trim()}`);
     }
-    throw new Error(`gh pr merge failed: ${r.stderr.trim() || r.stdout.trim()}`);
+    throw new GhCommandFailed('gh pr merge', r);
   }
 
   // Whether the PR is already in the terminal MERGED state. Best-effort: a failed/unparseable state

@@ -1978,7 +1978,7 @@ test('runConfig list --effective → merged config with per-key source labels, e
     );
     assert.equal(result.code, 0);
     const out = writes.join('');
-    assert.match(out, /default < profile < global < project < CLI/);
+    assert.match(out, /default < profile < global < project < env < CLI/);
     assert.match(out, /\nmaxPrs\t7\tglobal\n/);
     assert.match(out, /\nmaxSessions\tnull\tdefault\n/, 'unset scalar shows default');
     assert.match(out, /\nbashRules\t\d+ rules \(first-match-wins\)\tmerged\n/);

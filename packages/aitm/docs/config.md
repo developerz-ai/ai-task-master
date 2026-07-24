@@ -30,11 +30,14 @@ The merged result is what every other module sees. A frozen snapshot is written 
 
 ## Environment variable overrides
 
-CI wrappers that don't want to write `.ai-task-master/config.json` can set these instead. Each
-mirrors its config-file key one-for-one, wins over both config files, and is itself overridden by
-the equivalent CLI flag when one exists. Unset or blank → falls through to project/global/default
-as usual; a set-but-invalid value (wrong type, out-of-range, unrecognized enum member) is a hard
-error, same as a malformed config file.
+CI wrappers that don't want to write `.ai-task-master/config.json` can set these instead. Each wins
+over both config files and is itself overridden by the equivalent CLI flag when one exists. Unset or
+blank → falls through to project/global/default as usual; a set-but-invalid value (wrong type,
+out-of-range, unrecognized enum member) is a hard error, same as a malformed config file.
+
+All but one mirror a config-file key one-for-one. The exception is `AITM_PR_PER_TASK`: `prPerTask`
+has no config-file key — it is env/CLI-only — so this variable overrides no file, and when unset it
+falls through straight to the default (`--pr-per-task` is its only higher-precedence source).
 
 | Env var | Key | Notes |
 | --- | --- | --- |
@@ -43,7 +46,7 @@ error, same as a malformed config file.
 | `AITM_MAX_CI_FIX_ATTEMPTS` | `maxCiFixAttempts` | Positive integer. |
 | `AITM_CONCURRENCY` | `concurrency` | Positive integer. |
 | `AITM_AUTO_MERGE` | `autoMerge` | `true`/`false` (or `1`/`0`). |
-| `AITM_PR_PER_TASK` | `prPerTask` | `true`/`false` (or `1`/`0`). |
+| `AITM_PR_PER_TASK` | `prPerTask` | `true`/`false` (or `1`/`0`). Env/CLI-only — no config-file key; overrides no file. |
 | `AITM_SELF_REVIEW` | `selfReview` | `true`/`false` (or `1`/`0`). |
 | `AITM_MERGE_METHOD` | `mergeMethod` | `squash` \| `merge` \| `rebase`. |
 | `AITM_LOG_LEVEL` | `logLevel` | `debug` \| `info` \| `warn` \| `error`. |

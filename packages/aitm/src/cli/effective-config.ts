@@ -10,7 +10,7 @@ import type { McpServer } from '../mcp/schema.ts';
 import { maskSecret } from './mask-secret.ts';
 
 const HEADER =
-  'Effective config — precedence low→high: default < profile < global < project < CLI\n' +
+  'Effective config — precedence low→high: default < profile < global < project < env < CLI\n' +
   'key\tvalue\tsource\n';
 
 export function formatEffectiveConfig(resolved: ResolvedConfig, sources: ConfigSourceMap): string {

@@ -46,7 +46,7 @@ function row(output: string, key: string): { value: string; source: string } | u
 
 test('effective-config: header names the precedence order and the columns', () => {
   const out = formatEffectiveConfig(makeResolved(), { maxPrs: 'default' });
-  assert.match(out, /default < profile < global < project < CLI/);
+  assert.match(out, /default < profile < global < project < env < CLI/);
   assert.match(out, /\nkey\tvalue\tsource\n/);
 });
 

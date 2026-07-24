@@ -6,9 +6,12 @@ export { main } from './cli/cli.ts';
 export { Compactor } from './compaction/compactor.ts';
 export { ConfigLoader } from './config/config-loader.ts';
 export { ConfigWriter } from './config/config-writer.ts';
-export type { Capability, ConfigFile, ResolvedConfig } from './config/schema.ts';
-export type { ModelHandles, Role } from './credentials/credentials.ts';
+export type { ConfigFile, ResolvedConfig } from './config/schema.ts';
+export type { ModelHandles } from './credentials/credentials.ts';
 export { Credentials, ROLE_CAPABILITY } from './credentials/credentials.ts';
+export type { Capability } from './domain/model.ts';
+export type { PrGroup } from './domain/pr-group.ts';
+export type { Role } from './domain/role.ts';
 export { DEFAULT_PR_LABEL, GitHubClient } from './github/github-client.ts';
 export { Logger } from './logger/logger.ts';
 export { WorkLoop } from './loop/work-loop.ts';
@@ -24,7 +27,7 @@ export {
 export { Orchestrator } from './orchestrator/orchestrator.ts';
 export { PlanGraph } from './plan/plan-graph.ts';
 export type { Plan, PlannedGroup, PlannedTask } from './plan/schema.ts';
-export type { PrGroup, RunState } from './state/schema.ts';
+export type { RunState } from './state/schema.ts';
 export { StateStore } from './state/state-store.ts';
 export { datetimeTool } from './tools/datetime.ts';
 export {

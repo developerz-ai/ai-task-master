@@ -4,11 +4,10 @@ import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
+import type { GithubToolInput, GithubToolOutput } from '../tools/github-thread-tool.ts';
 import { render } from './prompts/templates.ts';
 import {
   createReviewerAgent,
-  type GithubToolInput,
-  type GithubToolOutput,
   REVIEWER_SYSTEM_PREFIX,
   type ReviewerTools,
   runReviewer,

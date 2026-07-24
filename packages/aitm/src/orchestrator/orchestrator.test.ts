@@ -3,11 +3,12 @@ import { test } from 'node:test';
 import { StepTimeoutError } from '@developerz.ai/ai-claude-compat';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
-import type { Role } from '../credentials/credentials.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { Role } from '../domain/role.ts';
+import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
-import type { PrGroup } from '../state/schema.ts';
-import { MANIFEST_FIELD_MAX, type WorkerDelivery } from '../subagents/worker.ts';
+import { MANIFEST_FIELD_MAX } from '../subagents/worker.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
   assertPrBodySections,

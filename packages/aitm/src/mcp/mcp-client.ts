@@ -13,7 +13,7 @@
 import { experimental_createMCPClient, type MCPClient, type MCPClientConfig } from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { ToolSet } from 'ai';
-import type { Role } from '../credentials/credentials.ts';
+import type { Role } from '../domain/role.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { McpRoleAllowlist, McpRoleAllowlistValue, McpServer, McpServers } from './schema.ts';
 import { StdioProcessRegistry } from './stdio-process-registry.ts';

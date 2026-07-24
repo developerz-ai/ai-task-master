@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { PrGroup, Task } from '../state/schema.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
 import { makeStepCounter, phaseForStage } from './run-step.ts';
 
 function task(id: string, done = false): Task {

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { DEFAULT_MODELS } from '../credentials/defaults.ts';
+import { DEFAULT_MODELS } from '../domain/model.ts';
 import { clearRegisteredSecrets } from '../logger/secret-registry.ts';
 import { scrubSecrets } from '../logger/secret-scrubber.ts';
 import { ConfigLoader, DEFAULT_BASH_RULES } from './config-loader.ts';

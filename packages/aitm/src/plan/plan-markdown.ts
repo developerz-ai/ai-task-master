@@ -4,7 +4,7 @@
 // Format: `## Group: <title>` followed by `- [ ] [NORMAL] <task>` (complexity tag
 // optional → `normal`). These are the ONLY checkboxes aitm writes anywhere.
 
-import { type TaskComplexity, TaskComplexitySchema } from '../state/schema.ts';
+import { type TaskComplexity, TaskComplexitySchema } from '../domain/task.ts';
 
 export type PlanMarkdownTask = {
   text: string;

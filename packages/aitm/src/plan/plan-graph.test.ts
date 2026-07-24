@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { PrGroup, PrGroupStatus } from '../state/schema.ts';
+import type { PrGroup, PrGroupStatus } from '../domain/pr-group.ts';
 import { PlanGraph } from './plan-graph.ts';
 
 const group = (id: string, status: PrGroupStatus, dependsOn: string[] = []): PrGroup => ({

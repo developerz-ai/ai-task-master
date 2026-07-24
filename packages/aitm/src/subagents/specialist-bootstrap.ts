@@ -10,7 +10,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type AgentDefinition, loadAgents } from '@developerz.ai/ai-claude-compat';
 import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
-import type { PrGroup } from '../state/schema.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
 import { type OnUsage, reportUsage } from './factory.ts';
 import { STOPWORDS } from './specialist-registry.ts';
 

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { PrGroup } from '../domain/pr-group.ts';
 import { CiFailed } from '../github/errors.ts';
 import type { ReviewThread } from '../github/schema.ts';
-import type { PrGroup, RunState } from '../state/schema.ts';
+import type { RunState } from '../state/schema.ts';
 import { REVIEW_COMMENTS_GRACE } from './constants.ts';
 import {
   type AddressedThreadsStore,

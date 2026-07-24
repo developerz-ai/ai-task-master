@@ -1,3 +1,18 @@
+// Model capability tiers and their provider defaults. Shared leaf: config resolves models/effort by
+// tier, credentials maps role → tier → handle, and the loop gates OpenRouter-only directives on the
+// endpoint — so the tier enum and the provider defaults live here, below config AND credentials, to
+// keep those two dirs acyclic (config used to import the defaults while credentials imported config).
+//
+// Models are configured by *capability tier*, not by subagent role. The mapping role → tier lives in
+// src/credentials/credentials.ts (ROLE_CAPABILITY).
+//   generic — fallback for anything not otherwise specified
+//   smart   — best reasoning (Planner, Reviewer)
+//   coding  — code generation / edits (Worker)
+//   fast    — cheap routing / summarization (Orchestrator, toModelOutput compaction)
+//
+// docs/config.md §Schema, docs/auth.md §"LLM provider", docs/agent-config-detection.md, docs/runtime.md
+export type Capability = 'generic' | 'smart' | 'coding' | 'fast';
+
 // Canonical capability defaults — all OpenRouter routes (docs/auth.md §"LLM provider").
 // User-set models.{generic,smart,coding,fast} always wins; these only fill gaps.
 //
@@ -6,10 +21,6 @@
 // project's convention file does not constrain which model serves a request. The
 // flavor only affects which markdown is fed to subagent system prompts.
 //
-// docs/agent-config-detection.md, docs/config.md, docs/runtime.md
-
-import type { Capability } from '../config/schema.ts';
-
 // Tier mapping rationale (Claude family via OpenRouter — the most flexible coding stack today):
 //   haiku  → fast    : routing, orchestration, summarization (toModelOutput compaction)
 //   sonnet → generic : default fallback for any unspecified tier

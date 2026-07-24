@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PROVIDER_PRESETS } from '../config/provider-presets.ts';
-import { isOpenRouterEndpoint, OPENROUTER_API_BASE_URL } from './defaults.ts';
+import { DEFAULT_MODELS, isOpenRouterEndpoint, OPENROUTER_API_BASE_URL } from './model.ts';
+
+test('DEFAULT_MODELS defines one model per capability tier, all OpenRouter routes', () => {
+  assert.deepEqual(Object.keys(DEFAULT_MODELS).sort(), ['coding', 'fast', 'generic', 'smart']);
+  for (const model of Object.values(DEFAULT_MODELS)) {
+    assert.equal(model.startsWith('anthropic/'), true, `${model} routes via anthropic/*`);
+  }
+});
 
 test('isOpenRouterEndpoint: unset / blank baseURL → the default OpenRouter endpoint', () => {
   assert.equal(isOpenRouterEndpoint(undefined), true, 'unset → provider default (OpenRouter)');

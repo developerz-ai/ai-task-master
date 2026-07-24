@@ -31,13 +31,14 @@ import {
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
 import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
-import type { Role } from '../credentials/credentials.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { Role } from '../domain/role.ts';
+import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
-import type { PrGroup } from '../state/schema.ts';
 import { type OnUsage, reportUsage } from '../subagents/factory.ts';
 import { render } from '../subagents/prompts/templates.ts';
-import { MANIFEST_FIELD_MAX, type WorkerDelivery } from '../subagents/worker.ts';
+import { MANIFEST_FIELD_MAX } from '../subagents/worker.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 
 // Minimal model-resolver surface. The concrete `Credentials` class is structurally compatible;

@@ -3,7 +3,9 @@
 // per version, keyed by the version it reads, so a persisted-shape change adds a row here instead of
 // another read-time coercion pass in state-store.
 
-import { CURRENT_SCHEMA_VERSION, type GroupStage, type Task } from './schema.ts';
+import type { GroupStage } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
+import { CURRENT_SCHEMA_VERSION } from './schema.ts';
 
 type StateRecord = Record<string, unknown>;
 

@@ -46,7 +46,7 @@ export type LiveContextSize = {
 };
 
 export type CompactionInit = {
-  // The "fast" tier model used to write the summary. See src/credentials/defaults.ts.
+  // The "fast" tier model used to write the summary. See src/domain/model.ts.
   summarizer: LanguageModel;
   limits: ModelLimitsLookup;
   // Override the reply reserve (tokens held free for the model's own output). Unset → derived from

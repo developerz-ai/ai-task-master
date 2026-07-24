@@ -12,14 +12,17 @@
 // Deps are structural ports — concrete classes (Orchestrator, GitHubClient, StateStore,
 // InPlaceCheckout, PlanGraph) satisfy them at runtime; tests pass literal stubs.
 
+import type { GroupStage, PrGroup, PrGroupStatus } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
+import type { FileChange, WorkerDelivery } from '../domain/worker-delivery.ts';
 import { CiFailed } from '../github/errors.ts';
 import type { CiResult, MergeMethod, Sleep } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import { phaseForStage, type StepCounterFn } from '../observability/run-step.ts';
 import { formatDuration, type RunStep } from '../observability/step-progress.ts';
 import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
-import type { GroupStage, PrGroup, PrGroupStatus, RunState, Task } from '../state/schema.ts';
-import type { FileChange, WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
+import type { RunState } from '../state/schema.ts';
+import type { WorkerResult } from '../subagents/worker.ts';
 import { type BranchCleanup, branchCleanupMessage } from '../workspace/branch-cleanup.ts';
 import { perTaskBranch } from '../workspace/branch-name.ts';
 import { DirtyWorkingTree } from '../workspace/dirty-tree.ts';

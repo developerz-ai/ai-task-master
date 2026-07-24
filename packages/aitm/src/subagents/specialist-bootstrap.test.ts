@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
-import type { PrGroup } from '../state/schema.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
 import { bootstrapSpecialists, parseSpecialists, sanitizeName } from './specialist-bootstrap.ts';
 
 const OUTPUT = [

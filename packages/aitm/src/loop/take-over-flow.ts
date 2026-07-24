@@ -22,6 +22,7 @@
 
 import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, TimeoutConfiguration } from 'ai';
+import type { PrGroup } from '../domain/pr-group.ts';
 import { CiFailed } from '../github/errors.ts';
 import {
   type CiResult,
@@ -34,7 +35,6 @@ import {
 } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
-import type { PrGroup } from '../state/schema.ts';
 import type { SubagentInit, WorkerSubagentInit } from '../subagents/factory.ts';
 import {
   createReviewerAgent,

@@ -8,6 +8,7 @@
 
 import type { CommandRule } from '@developerz.ai/ai-claude-compat';
 import { z } from 'zod';
+import type { Capability } from '../domain/model.ts';
 import { McpRoleAllowlistSchema, McpServersSchema } from '../mcp/schema.ts';
 
 // A model-facing bash deny/allow rule (issue #113). Structurally the compat CommandRule; the schema
@@ -42,7 +43,6 @@ export const CapabilityModelsSchema = z
   .passthrough();
 
 export type CapabilityModels = z.infer<typeof CapabilityModelsSchema>;
-export type Capability = 'generic' | 'smart' | 'coding' | 'fast';
 
 // OpenRouter provider-routing controls (issue #124). camelCase config keys map onto the snake_case
 // `provider.*` chat-settings fields in Credentials. Handle-level: one value applies to all roles.

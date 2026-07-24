@@ -4,7 +4,8 @@
 // against the real plan (PrGroup[] + prPerTask). Kept separate so step-progress stays a pure
 // renderer and the counting is unit-tested against plan shapes.
 
-import type { GroupStage, PrGroup, Task } from '../state/schema.ts';
+import type { GroupStage, PrGroup } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
 
 // The unit-of-work counter for one progress line: `<unit> <index>/<total>`, e.g. `group 2/5` or
 // `task 3/38`. Composed into a RunStep and rendered by step-progress.formatStepTag.

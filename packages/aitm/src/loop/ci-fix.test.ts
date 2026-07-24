@@ -6,10 +6,10 @@ import { test } from 'node:test';
 import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { CompactorLike } from '../compaction/compaction-step.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
 import type { RunCmd, RunCmdResult } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
-import type { PrGroup } from '../state/schema.ts';
 import type { FileManifest, WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
 import {
   type FixSessionGithub,

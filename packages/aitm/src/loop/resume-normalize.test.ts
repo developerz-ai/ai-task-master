@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { PrGroup } from '../state/schema.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
 
 function group(overrides: Partial<PrGroup> = {}): PrGroup {

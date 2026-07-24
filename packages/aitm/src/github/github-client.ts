@@ -246,14 +246,21 @@ export class GitHubClient {
     return pr;
   }
 
-  async waitForChecks(pr: number): Promise<CiResult> {
+  // `signal` cancels the wait (SIGINT): both the start grace and the backoff resolve early on
+  // abort, and the poll then returns a NON-VERDICT `pending` result instead of a settled one.
+  // Callers must re-check the signal before acting on the result — see handleWaitingCi.
+  async waitForChecks(pr: number, signal?: AbortSignal): Promise<CiResult> {
     // Let CI register its checks before the first poll, so a just-pushed PR doesn't read as
     // "passed" off an empty check set — see CHECKS_START_WAIT_MS.
-    await this.sleep(CHECKS_START_WAIT_MS);
+    await this.sleep(CHECKS_START_WAIT_MS, signal);
     let delay = CHECKS_INITIAL_DELAY_MS;
     let waited = 0;
     let emptyWaited = 0;
     while (true) {
+      // A cancelled run stops here. The sleeps RESOLVE on abort rather than rejecting (see
+      // defaultSleep), so without this check a SIGINT would only make the loop spin faster —
+      // spawning a `gh pr checks` subprocess per tick until the 120-minute timeout.
+      if (signal?.aborted) return { state: 'pending', failedChecks: [], checks: [] };
       const r = await this.runCmd(
         'gh',
         ['pr', 'checks', String(pr), '--json', 'bucket,name,state,description'],
@@ -283,7 +290,7 @@ export class GitHubClient {
       if (waited >= CHECKS_TIMEOUT_MS) {
         throw new CiFailed(`PR #${pr} checks still pending after ${Math.round(waited / 1000)}s`);
       }
-      await this.sleep(delay);
+      await this.sleep(delay, signal);
       waited += delay;
       emptyWaited = rows.length === 0 ? emptyWaited + delay : 0;
       delay = Math.min(delay * 2, CHECKS_MAX_DELAY_MS);

@@ -43,12 +43,19 @@ function makeRun(replies: Reply[] | ((call: Call, idx: number) => Reply)): {
   return { run, calls };
 }
 
-function makeSleep(): { sleep: Sleep; delays: number[] } {
+function makeSleep(onSleep?: (ms: number) => void): {
+  sleep: Sleep;
+  delays: number[];
+  signals: Array<AbortSignal | undefined>;
+} {
   const delays: number[] = [];
-  const sleep: Sleep = async (ms) => {
+  const signals: Array<AbortSignal | undefined> = [];
+  const sleep: Sleep = async (ms, signal) => {
     delays.push(ms);
+    signals.push(signal);
+    onSleep?.(ms);
   };
-  return { sleep, delays };
+  return { sleep, delays, signals };
 }
 
 function findFieldValue(args: readonly string[], flag: '-f' | '-F', key: string): string | null {
@@ -595,6 +602,42 @@ test('waitForChecks throws CiFailed once the poll timeout budget is exhausted', 
   assert.ok(
     delays.reduce((sum, d) => sum + d, 0) >= CHECKS_TIMEOUT_MS,
     'gave up only after the timeout budget was spent',
+  );
+});
+
+test('waitForChecks: an already-aborted signal → pending, no gh call at all', async () => {
+  const { run, calls } = makeRun(() => ({ stdout: '[]' }));
+  const { sleep, signals } = makeSleep();
+  const controller = new AbortController();
+  controller.abort();
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  const result = await g.waitForChecks(1, controller.signal);
+  // Not a verdict — the poll never settled. Callers re-check the signal rather than reading this
+  // as "CI is still running".
+  assert.equal(result.state, 'pending');
+  assert.deepEqual(result.checks, []);
+  assert.equal(calls.length, 0, 'a cancelled wait spawns no `gh pr checks`');
+  assert.equal(signals[0], controller.signal, 'the start grace is cancellable');
+});
+
+test('waitForChecks: abort mid-poll → stops after the in-flight poll, never times out', async () => {
+  // Only-pending replies: without the abort this run would poll for the full 120-minute budget and
+  // end in CiFailed. The abort lands during the first backoff, so exactly one more poll happens.
+  const pending = JSON.stringify([{ bucket: 'pending', name: 'test', state: 'IN_PROGRESS' }]);
+  const { run, calls } = makeRun(() => ({ stdout: pending }));
+  const controller = new AbortController();
+  const { sleep, signals } = makeSleep((ms) => {
+    if (ms === CHECKS_INITIAL_DELAY_MS) controller.abort();
+  });
+  const g = new GitHubClient('/tmp/repo', run, sleep);
+  const result = await g.waitForChecks(1, controller.signal);
+  assert.equal(result.state, 'pending');
+  assert.deepEqual(result.failedChecks, []);
+  assert.equal(calls.length, 1, 'the poll loop stops at the top of the next iteration');
+  assert.deepEqual(
+    signals,
+    [controller.signal, controller.signal],
+    'both the start grace and the backoff take the signal',
   );
 });
 

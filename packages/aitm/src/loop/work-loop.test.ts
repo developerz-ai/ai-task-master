@@ -2117,6 +2117,93 @@ test('run(): signal aborts mid-batch → cancelled, not blocked, even though the
   assert.equal(result.kind, 'cancelled');
 });
 
+test("driveStages: the run's signal reaches the stage CI poll, and a cancelled poll never merges", async () => {
+  // A cancelled GitHubClient.waitForChecks returns the non-verdict 'pending'. The stage machine
+  // must stay in waiting-ci and the dispatcher must end the group there — not read 'pending' as a
+  // CI failure (an LLM fix pass) and not walk on to the merge.
+  const controller = new AbortController();
+  const { github, calls: ghCalls } = makeGithub();
+  const seen: Array<AbortSignal | undefined> = [];
+  const cancelling: WorkLoopGithub = {
+    ...github,
+    waitForChecks: async (_pr, signal) => {
+      seen.push(signal);
+      controller.abort();
+      return { state: 'pending', failedChecks: [] };
+    },
+  };
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
+  const ready = makeGraph([group('a')], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({
+      orchestrator,
+      github: cancelling,
+      graph: ready.graph,
+      signal: controller.signal,
+      autoMerge: true,
+    }),
+  );
+  const result = await loop.run();
+  assert.equal(result.kind, 'cancelled');
+  assert.equal(seen[0], controller.signal, 'StageDeps.signal reaches waitForChecks');
+  assert.deepEqual(ghCalls.mergePr, [], 'a cancelled run never merges');
+  assert.deepEqual(calls.runCiFix, [], "'pending' from a cancelled poll is not a CI failure");
+});
+
+test('driveStages: abort after CI settles → stops before ready-to-merge', async () => {
+  // The abort lands while the review threads are being read, i.e. the stage handler still returns
+  // 'ready-to-merge'. The dispatcher's pre-handler check is what keeps `gh pr merge` from running.
+  const controller = new AbortController();
+  const { github, calls: ghCalls } = makeGithub();
+  const cancelling: WorkLoopGithub = {
+    ...github,
+    listUnresolvedThreads: async () => {
+      controller.abort();
+      return [];
+    },
+  };
+  const { orchestrator } = makeOrchestrator({ prNumber: 7 });
+  const ready = makeGraph([group('a')], { completeAfter: 1 });
+  const loop = new WorkLoop(
+    makeDeps({
+      orchestrator,
+      github: cancelling,
+      graph: ready.graph,
+      signal: controller.signal,
+      autoMerge: true,
+    }),
+  );
+  const result = await loop.run();
+  assert.equal(result.kind, 'cancelled');
+  assert.deepEqual(ghCalls.mergePr, [], 'the merge stage is never dispatched on a cancelled run');
+});
+
+test('prPerTask autoMerge: abort during the CI wait → the task PR is not merged', async () => {
+  // The prPerTask flow has no stage machine to stop it: without its own post-wait check, a
+  // cancelled 'pending' wait reads as "not failing" and falls straight through to the merge.
+  const controller = new AbortController();
+  const { github, calls: ghCalls } = makeGithub();
+  const cancelling: WorkLoopGithub = {
+    ...github,
+    waitForChecks: async () => {
+      controller.abort();
+      return { state: 'pending', failedChecks: [] };
+    },
+  };
+  const { orchestrator } = makeOrchestrator({ prNumber: 7 });
+  const loop = new WorkLoop(
+    makeDeps({
+      orchestrator,
+      github: cancelling,
+      autoMerge: true,
+      prPerTask: true,
+      signal: controller.signal,
+    }),
+  );
+  await loop.runGroup(group('a'));
+  assert.deepEqual(ghCalls.mergePr, [], 'a cancelled run never merges');
+});
+
 test('autoMerge=false → result is awaiting-pr with PR numbers', async () => {
   const { orchestrator } = makeOrchestrator({ prNumber: 77 });
   const ready = makeGraph([group('p')], { completeAfter: 1 });

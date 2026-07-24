@@ -28,6 +28,7 @@ import {
   defaultSleep,
   type MergeMethod,
   type RunCmd,
+  type Sleep,
 } from '../github/github-client.ts';
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
@@ -54,7 +55,9 @@ import { DEFAULT_MAX_ITERATIONS, REVIEW_COMMENTS_GRACE } from './constants.ts';
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
 export type TakeOverGithub = {
-  waitForChecks(pr: number): Promise<CiResult>;
+  // The optional signal cancels the CI poll; an aborted wait returns without a verdict
+  // ('pending'), so the loop re-checks the signal before acting on the result.
+  waitForChecks(pr: number, signal?: AbortSignal): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
   mergePr(pr: number, method: MergeMethod, opts?: { admin?: boolean }): Promise<void>;
   replyToThread(threadId: string, body: string): Promise<void>;
@@ -132,12 +135,14 @@ export type TakeOverFlowInput = {
   // claude-task-master's merge-pr loop. Threaded from `--max-iterations`; tests inject a small cap.
   maxIterations?: number;
   // Abort handle. When aborted (e.g. SIGINT), the loop bails out to `{ kind: 'cancelled' }` →
-  // exit code 2, distinct from a `blocked` run (exit 1). Checked each iteration and before merge.
+  // exit code 2, distinct from a `blocked` run (exit 1). Threaded into every blocking wait (the CI
+  // poll, the review grace, the cooldown) and re-checked after each, so a cancel lands in seconds
+  // instead of at the next iteration top — and never falls through to the merge.
   signal?: AbortSignal;
   // Sleep between iterations so the next `waitForChecks` actually sees fresh CI state
   // after a push. Default 5s. Tests inject a 0-ms sleep.
   cooldownMs?: number;
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: Sleep;
   // git/gh shim — defaults to execa. Stubbed in unit tests to assert command shape without
   // spawning git. Every push after Reviewer/Worker commits goes through the shared
   // rebaseAndForcePush helper (ci-fix.ts): fetch origin <base> → rebase → push --force-with-lease.
@@ -166,18 +171,23 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   // Hoisted so the post-loop merge can report how many iterations actually ran: on an
   // early `break` it holds the break index, on natural exhaustion it equals maxIterations.
   let iteration = 0;
+  // Every cancellation exit reports the iteration it stopped at; `iteration` is read at call time.
+  const cancelled = (): TakeOverResult => {
+    log?.info('take-over: cancelled', { pr: input.pr, iteration });
+    return { kind: 'cancelled', iterations: iteration };
+  };
   // Fire the review-bot grace exactly once, the first time CI comes back green.
   let reviewGraceDone = false;
   for (; iteration < maxIterations; iteration++) {
-    if (input.signal?.aborted) {
-      log?.info('take-over: cancelled', { pr: input.pr, iteration });
-      return { kind: 'cancelled', iterations: iteration };
-    }
+    if (input.signal?.aborted) return cancelled();
     log?.info('take-over: iteration start', { pr: input.pr, iteration });
 
     // 1. Wait for CI to settle. observeCheckStatus maps a CI failure (or a poll timeout) to
     //    'failure' so the loop treats it as "Worker should try to fix" rather than a fatal error.
-    const ciStatus = await observeCheckStatus(input.github, input.pr);
+    const ciStatus = await observeCheckStatus(input.github, input.pr, input.signal);
+    // A cancelled poll returns 'pending', not a verdict — everything below (the fix Worker, the
+    // Reviewer, the force-push) would be work on a run the operator already stopped.
+    if (input.signal?.aborted) return cancelled();
     log?.info('take-over: ci status', { pr: input.pr, ciStatus });
 
     // 1a. Review bots (CodeRabbit) post their comments a little *after* CI completes rather than
@@ -189,7 +199,8 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
         pr: input.pr,
         graceMs: REVIEW_COMMENTS_GRACE,
       });
-      await sleep(REVIEW_COMMENTS_GRACE);
+      await sleep(REVIEW_COMMENTS_GRACE, input.signal);
+      if (input.signal?.aborted) return cancelled();
     }
 
     // 2. Pull review threads. Always runs — even on CI failure, threads may exist and
@@ -268,6 +279,7 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
         log,
         input.allowForcePush ?? true,
         input.subagents.resolveConflicts,
+        input.signal,
       );
       if (pushed.kind === 'blocked') {
         return { kind: 'blocked', reason: pushed.reason, iterations: iteration };
@@ -281,17 +293,17 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
 
     // Sleep so the next iteration's waitForChecks sees fresh CI state, not the stale
     // success/failure from before our push triggered a new run.
-    if (cooldownMs > 0) await sleep(cooldownMs);
+    if (cooldownMs > 0) await sleep(cooldownMs, input.signal);
   }
 
-  if (input.signal?.aborted) {
-    log?.info('take-over: cancelled', { pr: input.pr, iteration });
-    return { kind: 'cancelled', iterations: iteration };
-  }
+  if (input.signal?.aborted) return cancelled();
 
   // Final state check — make sure we didn't fall through the loop with a hung iteration.
-  const finalStatus = await observeCheckStatus(input.github, input.pr);
+  const finalStatus = await observeCheckStatus(input.github, input.pr, input.signal);
   const finalThreads = await input.github.listUnresolvedThreads(input.pr);
+  // A cancel during that final wait must not read as "CI never went green" — report the run
+  // cancelled (exit 2) rather than blocked (exit 1), and never reach the merge below.
+  if (input.signal?.aborted) return cancelled();
   if (finalStatus !== 'success') {
     return {
       kind: 'blocked',
@@ -315,9 +327,13 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
 // Flatten waitForChecks' structured result (and its timeout throw) into a single CheckStatus the
 // loop branches on: a returned 'failure' state or a CiFailed timeout both surface as 'failure'
 // (recoverable — the Worker tries to fix); 'success'/'pending' pass through unchanged.
-async function observeCheckStatus(github: TakeOverGithub, pr: number): Promise<CheckStatus> {
+async function observeCheckStatus(
+  github: TakeOverGithub,
+  pr: number,
+  signal: AbortSignal | undefined,
+): Promise<CheckStatus> {
   try {
-    const { state } = await github.waitForChecks(pr);
+    const { state } = await github.waitForChecks(pr, signal);
     return state;
   } catch (err) {
     if (err instanceof CiFailed) return 'failure';

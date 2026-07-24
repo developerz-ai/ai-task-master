@@ -31,6 +31,10 @@ Polling is silent per-iteration (exponential backoff, no line-per-poll spam). Wh
 
 GraphQL queries are batched per PR (threads + comments fetched in one request). CI status polling uses exponential backoff: 1s start, doubling, 60s cap.
 
+## Cancelling a CI wait
+
+`waitForChecks(pr, signal?)` takes the run's abort signal: it cancels the start grace and every backoff, and the loop checks `signal.aborted` at the top of each poll so a Ctrl-C stops within one in-flight `gh pr checks` instead of the 120-minute timeout. A cancelled wait returns `{ state: 'pending' }` — **not** a verdict. Callers (`handleWaitingCi`, the take-over loop, the prPerTask auto-merge flow) re-check the signal before branching, so a cancel never reads as a CI failure (an LLM fix pass) or as "nothing failing" (a merge).
+
 ## No server
 
 No webhook listener. No long-running process. `merge-pr` is a polling command the user runs on-demand.

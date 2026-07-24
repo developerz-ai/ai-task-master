@@ -212,6 +212,7 @@ export async function runFixSession(input: FixSessionInput): Promise<FixSessionR
     log,
     input.allowForcePush ?? true,
     input.subagents.resolveConflicts,
+    input.signal,
   );
   // Carry the Worker's manifest handle out so the next fix pass for this group can continue it (#107).
   return pushed.kind === 'fixed' ? { kind: 'fixed', handle: worker.handle } : pushed;
@@ -328,6 +329,7 @@ export async function rebaseAndForcePush(
   log: LoggerLike | undefined,
   allowForcePush = true,
   resolveConflicts?: ConflictResolver,
+  signal?: AbortSignal,
 ): Promise<PushResult> {
   // This is the only force-push path. When policy forbids it, don't rebase — block cleanly so a
   // human lands the fix, rather than leaving a rebased branch that can't be pushed.
@@ -354,6 +356,7 @@ export async function rebaseAndForcePush(
       log,
       rebase,
       resolveConflicts,
+      signal,
     );
     // Blocked → the rebase is already aborted; stop before pushing. Fixed → fall through to push.
     if (resolved.kind === 'blocked') return resolved;
@@ -379,6 +382,7 @@ async function resolveRebaseConflicts(
   log: LoggerLike | undefined,
   firstRebase: RunCmdResult,
   resolveConflicts: ConflictResolver | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<PushResult> {
   const cwd = { cwd: checkoutPath };
   const abortAndBlock = async (reason: string): Promise<PushResult> => {
@@ -390,6 +394,13 @@ async function resolveRebaseConflicts(
   if (!resolveConflicts) return abortAndBlock(manualReason);
 
   for (let attempt = 1; attempt <= MAX_CONFLICT_RESOLVE_ATTEMPTS; attempt++) {
+    // A cancelled run must not start another AI resolution pass. Abort the half-applied rebase on
+    // the way out: leaving the checkout mid-rebase would strand the operator's working tree.
+    if (signal?.aborted) {
+      return abortAndBlock(
+        `run cancelled while resolving the rebase onto origin/${baseBranch}; the rebase was aborted.`,
+      );
+    }
     const conflicted = await unmergedPaths(runCmd, cwd);
     if (conflicted.length === 0) {
       // Non-zero rebase with no unmerged paths is not an AI-resolvable content conflict (e.g. a

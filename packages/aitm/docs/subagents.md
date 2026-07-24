@@ -104,6 +104,8 @@ The editor fanout is the one set of generations an agent init cannot reach — t
 
 The optional half of a `SubagentInit` is forwarded through one helper (`forwardInit`), so every role passes the same dial set — before it, each factory hand-rolled the spread and quietly dropped fields the others forwarded.
 
+The same signal also runs the loops *between* subagent calls, where a run spends most of its wall clock: `StageDeps.signal` carries it into the stage machine, which hands it to `waitForChecks` and to the post-CI review grace; the take-over loop threads it through its CI poll, grace and cooldown; the shared rebase path stops before another AI conflict-resolution pass. Sleeps **resolve** on abort rather than rejecting (`defaultSleep`), so each loop re-checks `signal.aborted` at the top of its next iteration and decides what a cancelled run returns — a cancelled `waitForChecks` comes back `pending`, which is a *non-verdict*: every caller re-checks the signal before treating it as CI state, so no cancelled run routes into a fix pass or walks on to `gh pr merge`.
+
 ## Throughput guards
 
 Three mechanical limits, each traced to an observed waste:

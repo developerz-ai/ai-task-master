@@ -35,7 +35,9 @@ import { REVIEW_COMMENTS_GRACE } from './constants.ts';
 // per-stage decision, so it's bound at construction and handleReadyToMerge just calls mergePr(pr).
 export type StageGithub = {
   // Block until CI settles: returns the aggregate CiResult; throws CiFailed only on poll timeout.
-  waitForChecks(pr: number): Promise<CiResult>;
+  // The optional signal cancels the poll — an aborted wait returns a non-verdict 'pending' result
+  // (GitHubClient.waitForChecks), which is why every caller re-checks the signal before branching.
+  waitForChecks(pr: number, signal?: AbortSignal): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
   mergePr(pr: number): Promise<void>;
   // The login `gh` is authenticated as, so freshThreads can recognize the Reviewer's own replies and
@@ -102,6 +104,12 @@ export type StageDeps = {
   // Delay primitive for the post-CI review grace. Optional — defaults to a real timer; tests inject
   // a no-op so they don't block on the 2-minute wait.
   sleep?: Sleep;
+  // Run cancellation (SIGINT), threaded from WorkLoopDeps.signal. It cancels the CI poll and the
+  // review grace, and a handler that finds it aborted hands back its CURRENT stage rather than a
+  // transition: a cancelled run must not persist a stage it never really reached (a 'ci-failed' a
+  // resume would then "fix" on a PR whose CI never failed) nor advance toward the merge. The
+  // dispatcher owns ending the group. Unset → no cancellation, byte-identical to before.
+  signal?: AbortSignal;
   // When true, a CI-poll timeout force-advances to reviews (a policy override) instead of blocking.
   // Threaded from `--admin`. Default false: a timeout blocks rather than merging a PR whose CI never
   // finished. Only affects the timeout path — a real CI failure still routes to the fix loop.
@@ -141,8 +149,13 @@ export const handlePrOpen: StageHandler = async (deps, group) => {
 // CI never completed — unless --admin is set, which force-advances to reviews as a policy override.
 export const handleWaitingCi: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'waiting-ci');
+  if (deps.signal?.aborted) return 'waiting-ci';
   try {
-    const result = await deps.github.waitForChecks(pr);
+    const result = await deps.github.waitForChecks(pr, deps.signal);
+    // A cancelled poll returns early WITHOUT a verdict ('pending'), which the branch below would
+    // read as "CI is not green" and route to ci-failed — persisting a stage a resume would act on
+    // by running a fix session against a PR whose CI never actually failed.
+    if (deps.signal?.aborted) return 'waiting-ci';
     const { state } = result;
     // One line, once, when CI settles — the checks and their final buckets, so the operator sees
     // WHAT passed/failed without watching GitHub or reading a poll spam.
@@ -152,7 +165,10 @@ export const handleWaitingCi: StageHandler = async (deps, group) => {
     // Review bots (CodeRabbit) post their comments a little *after* CI completes rather than as a
     // blocking status check. Give them a grace window to land before waiting-reviews reads the
     // unresolved threads — otherwise we'd advance to merge ahead of the review.
-    await (deps.sleep ?? defaultSleep)(REVIEW_COMMENTS_GRACE);
+    await (deps.sleep ?? defaultSleep)(REVIEW_COMMENTS_GRACE, deps.signal);
+    // The grace resolves early on abort; advancing then would hand the cancelled run to
+    // waiting-reviews, one transition away from merging a PR the operator stopped.
+    if (deps.signal?.aborted) return 'waiting-ci';
     return 'waiting-reviews';
   } catch (err) {
     if (err instanceof CiFailed) return deps.adminMerge ? 'waiting-reviews' : 'blocked';

@@ -565,6 +565,57 @@ test('rebaseAndForcePush: resolver keeps leaving files unmerged → cap exhausts
   assert.ok(!commands.some((c) => c.includes('push')));
 });
 
+test('rebaseAndForcePush: cancelled run → no further AI resolution, rebase aborted', async () => {
+  // The first resolver pass cancels the run (a SIGINT lands mid-resolution). The next attempt must
+  // not start — and the half-applied rebase must not be left in the operator's checkout.
+  const { plan } = conflictThenResolvePlan({ unmerged: ['src/a.ts'], clearAfter: 100 });
+  const { runCmd, commands } = recordingRunCmd(plan);
+  const controller = new AbortController();
+  let calls = 0;
+  const result = await rebaseAndForcePush(
+    runCmd,
+    '/tmp/wt',
+    'main',
+    9,
+    undefined,
+    true,
+    async () => {
+      calls++;
+      controller.abort();
+      return { kind: 'resolved' };
+    },
+    controller.signal,
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /run cancelled/i);
+  assert.equal(calls, 1, 'the cap is not spent on a cancelled run');
+  assert.ok(commands.includes('git rebase --abort'), 'never leaves the checkout mid-rebase');
+  assert.ok(!commands.some((c) => c.includes('push')));
+});
+
+test('rebaseAndForcePush: an already-aborted signal → blocks without calling the resolver', async () => {
+  const { plan } = conflictThenResolvePlan({ unmerged: ['src/a.ts'], clearAfter: 1 });
+  const { runCmd } = recordingRunCmd(plan);
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  const result = await rebaseAndForcePush(
+    runCmd,
+    '/tmp/wt',
+    'main',
+    9,
+    undefined,
+    true,
+    async () => {
+      calls++;
+      return { kind: 'resolved' };
+    },
+    controller.signal,
+  );
+  assert.equal(result.kind, 'blocked');
+  assert.equal(calls, 0, 'no AI call once the run is cancelled');
+});
+
 test('rebaseAndForcePush: no resolver wired → today’s abort + block (unchanged)', async () => {
   const { runCmd, commands } = recordingRunCmd((args) =>
     args[0] === 'rebase' && args[1]?.startsWith('origin/')
@@ -594,6 +645,33 @@ test('runFixSession: conflict + resolver on subagents → resolves and force-pus
   assert.equal(result.kind, 'fixed');
   assert.ok(commands.includes('git -c core.editor=true rebase --continue'));
   assert.ok(commands.includes('git push --force-with-lease'));
+});
+
+test('runFixSession: threads the run signal into the shared push path', async () => {
+  // The session's signal must reach rebaseAndForcePush, or a cancelled run still spends AI
+  // conflict-resolution passes on its way to a force-push.
+  const { plan } = conflictThenResolvePlan({ unmerged: ['src/a.ts'], clearAfter: 1 });
+  const { runCmd, commands } = recordingRunCmd(plan);
+  const controller = new AbortController();
+  controller.abort();
+  let resolverCalls = 0;
+  const result = await runFixSession(
+    baseInput({
+      runCmd,
+      signal: controller.signal,
+      subagents: baseSubagents({
+        resolveConflicts: async () => {
+          resolverCalls++;
+          return { kind: 'resolved' };
+        },
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /run cancelled/i);
+  assert.equal(resolverCalls, 0);
+  assert.ok(commands.includes('git rebase --abort'), 'reached the push path and cleaned up');
+  assert.ok(!commands.includes('git push --force-with-lease'));
 });
 
 // rebaseAndForcePush is the shared push path (also used by the merge-pr take-over loop), so it has

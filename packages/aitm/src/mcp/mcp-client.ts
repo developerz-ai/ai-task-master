@@ -89,50 +89,78 @@ export class McpClientManager {
   async connectAll(): Promise<void> {
     const connectTimeoutMs = this.init.connectTimeoutMs ?? DEFAULT_MCP_CONNECT_TIMEOUT_MS;
     const closeTimeoutMs = this.init.closeTimeoutMs ?? DEFAULT_MCP_CLOSE_TIMEOUT_MS;
-    for (const [name, server] of Object.entries(this.init.servers)) {
-      // Track the client outside the try so a failure during tools() can still
-      // close the spawned process / socket instead of leaking it.
-      let client: MCPClient | undefined;
-      const config = buildClientConfig(name, server);
-      try {
-        const transport = transportKind(server);
-        // One deadline over createClient + tools() together: a server that spawns but never completes
-        // the MCP handshake must not hang the loop. `client` is assigned inside the raced work so the
-        // catch can still close a client that connected before its tools() call wedged; a createClient
-        // that never resolves leaves it undefined — the child pid registered in `finally` is the reap
-        // guarantee there.
-        const connected = await withDeadline(
-          (async (): Promise<{ client: MCPClient; tools: ToolSet }> => {
-            const c = await this.createClient(config);
-            client = c;
-            const tools = (await c.tools()) as ToolSet;
-            return { client: c, tools };
-          })(),
-          connectTimeoutMs,
-          'connect',
-        );
-        this.servers.push({ name, transport, client: connected.client, tools: connected.tools });
-      } catch (err) {
-        if (client) {
-          try {
-            // Time-box the cleanup close too, or a wedged server just moves the hang from the connect
-            // to here and still blocks the loop.
-            await withDeadline(client.close(), closeTimeoutMs, 'close');
-          } catch (closeErr) {
-            this.init.logger?.warn('mcp server cleanup failed', {
-              name,
-              error: errorMessage(closeErr),
-            });
-          }
+    // Connect every server concurrently, not one after another: each handshake is bounded by
+    // connectTimeoutMs and a cold `npx` server can take seconds to fetch its package, so N serial
+    // connects would add up to N × that latency. allSettled because connectOne owns its own failure —
+    // it logs, closes, and registers the child pid, then resolves to undefined — so one broken server
+    // can never reject the batch.
+    const outcomes = await Promise.allSettled(
+      Object.entries(this.init.servers).map(([name, server]) =>
+        this.connectOne(name, server, connectTimeoutMs, closeTimeoutMs),
+      ),
+    );
+    // Push fulfilled connections in input order (allSettled preserves the input order) so
+    // connected()/toolsForRole ordering stays deterministic instead of racing on handshake finish time.
+    for (const outcome of outcomes) {
+      if (outcome.status === 'fulfilled' && outcome.value) this.servers.push(outcome.value);
+    }
+  }
+
+  // Connect one server under a single deadline (createClient + its first tools() call, raced together)
+  // and return the ConnectedServer, or undefined when it failed. Never rejects: a broken server is
+  // logged and skipped so it cannot take down the whole batch.
+  private async connectOne(
+    name: string,
+    server: McpServer,
+    connectTimeoutMs: number,
+    closeTimeoutMs: number,
+  ): Promise<ConnectedServer | undefined> {
+    // client and config live across try/catch/finally: the catch closes a client that connected before
+    // its tools() call wedged, and the finally snapshots the spawned child's pid. buildClientConfig is
+    // inside the try so a throwing transport constructor is skipped like any other per-server failure
+    // rather than rejecting the whole batch.
+    let client: MCPClient | undefined;
+    let config: MCPClientConfig | undefined;
+    try {
+      const transport = transportKind(server);
+      config = buildClientConfig(name, server);
+      // Capture a non-optional handle for the closure: `config` is a `let` the finally reads, so TS
+      // cannot narrow it to non-undefined where the closure closes over it.
+      const cfg = config;
+      // `client` is assigned inside the raced work so the catch can still close a client that connected
+      // before its tools() call wedged; a createClient that never resolves leaves it undefined — the
+      // child pid registered in `finally` is the reap guarantee there.
+      const connected = await withDeadline(
+        (async (): Promise<{ client: MCPClient; tools: ToolSet }> => {
+          const c = await this.createClient(cfg);
+          client = c;
+          const tools = (await c.tools()) as ToolSet;
+          return { client: c, tools };
+        })(),
+        connectTimeoutMs,
+        'connect',
+      );
+      return { name, transport, client: connected.client, tools: connected.tools };
+    } catch (err) {
+      if (client) {
+        try {
+          // Time-box the cleanup close too, or a wedged server just moves the hang from the connect
+          // to here and still blocks the batch.
+          await withDeadline(client.close(), closeTimeoutMs, 'close');
+        } catch (closeErr) {
+          this.init.logger?.warn('mcp server cleanup failed', {
+            name,
+            error: errorMessage(closeErr),
+          });
         }
-        this.init.logger?.warn('mcp server connect failed', {
-          name,
-          error: errorMessage(err),
-        });
-      } finally {
-        // In `finally`, not the success path: a connect that dies mid-handshake has already spawned
-        // the child, and that is exactly the pid most likely to be left behind. Registering an
-        // already-dead pid is a no-op — the registry probes liveness before it signals.
+      }
+      this.init.logger?.warn('mcp server connect failed', { name, error: errorMessage(err) });
+      return undefined;
+    } finally {
+      // In `finally`, not the success path: a connect that dies mid-handshake has already spawned the
+      // child, and that is exactly the pid most likely to be left behind. Registering an already-dead
+      // pid is a no-op — the registry probes liveness before it signals.
+      if (config !== undefined) {
         const pid = stdioPid(config.transport);
         if (pid !== undefined) this.processes.register(name, pid);
       }

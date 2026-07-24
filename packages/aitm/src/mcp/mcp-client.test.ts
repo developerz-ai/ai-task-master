@@ -604,6 +604,102 @@ test('close: a client.close() that never returns does not block terminate() (tim
   assert.ok(warnings.some((w) => w.msg === 'mcp close batch timed out'));
 });
 
+// ---- parallel connect: servers handshake concurrently, one failure never blocks the rest (#79) ----
+
+test('connectAll connects servers concurrently, not one-at-a-time', async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const createClient: CreateMcpClient = async (config) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    // A real handshake yields; a truly-parallel connectAll holds both createClient calls in flight
+    // here at once, whereas a serial loop only ever has one before it awaits the next.
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    inFlight -= 1;
+    const name = (config.clientName ?? '').replace(/^aitm-/, '');
+    return fakeClient({ [`${name}_tool`]: fakeTool() });
+  };
+  const m = new McpClientManager({
+    servers: { a: { command: 'a' }, b: { command: 'b' } },
+    createClient,
+  });
+
+  await m.connectAll();
+
+  assert.equal(maxInFlight, 2, 'both servers must be mid-connect at once (parallel, not serial)');
+  // Pushed in input order regardless of which handshake finished first.
+  assert.deepEqual(
+    m.connected().map((c) => c.name),
+    ['a', 'b'],
+  );
+  await m.close();
+});
+
+test('connectAll: a partial failure closes the wedged client but keeps the good one connected', async () => {
+  const { logger, warnings } = recordingLogger();
+  const wedged = fakeClient({});
+  wedged.tools = () => pending(); // connects, then never finishes the handshake
+  const good = fakeClient({ ok_tool: fakeTool() });
+  const createClient: CreateMcpClient = async (config) =>
+    config.clientName === 'aitm-wedged' ? wedged : good;
+
+  const m = new McpClientManager({
+    servers: { good: { command: 'g' }, wedged: { command: 'w' } },
+    createClient,
+    connectTimeoutMs: 20,
+    logger,
+  });
+
+  await m.connectAll();
+
+  // The good server survived; the wedged one was skipped after the deadline.
+  assert.deepEqual(
+    m.connected().map((c) => c.name),
+    ['good'],
+  );
+  // The wedged client connected before tools() hung, so its cleanup close ran; the good one is untouched.
+  assert.equal(wedged.closeCalls, 1);
+  assert.equal(good.closeCalls, 0);
+  const failed = warnings.find((w) => w.msg === 'mcp server connect failed');
+  assert.equal(failed?.fields?.name, 'wedged');
+  await m.close();
+});
+
+test('connectAll: a stdio child spawned before a mid-handshake failure is still registered for reaping', async () => {
+  const registry = new StdioProcessRegistry({
+    // Report the pid as already gone so terminate() has nothing to wait on.
+    kill: () => {
+      throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+    },
+    exitHooks: { on: () => {}, off: () => {} },
+  });
+  const createClient: CreateMcpClient = async (config) => {
+    // The SDK sets transport.process when it spawns the child; mimic that, then fail the handshake so
+    // this is a mid-handshake failure — the pid must still reach the registry via the finally.
+    Object.assign(config.transport, { process: { pid: 4242 } });
+    const c = fakeClient({});
+    c.tools = async () => {
+      throw new Error('handshake-boom');
+    };
+    return c;
+  };
+
+  const m = new McpClientManager({
+    servers: { fs: { command: 'fs' } },
+    createClient,
+    processes: registry,
+  });
+
+  await m.connectAll();
+
+  assert.equal(m.connected().length, 0);
+  assert.deepEqual(
+    registry.list().map((t) => ({ name: t.name, pid: t.pid })),
+    [{ name: 'fs', pid: 4242 }],
+  );
+  await m.close();
+});
+
 test('connectAll: connectTimeoutMs <= 0 disables the deadline — a slow but successful connect completes', async () => {
   const createClient: CreateMcpClient = async () => {
     const c = fakeClient({});

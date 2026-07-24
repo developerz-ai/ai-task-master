@@ -342,11 +342,21 @@ export async function rebaseAndForcePush(
     };
   }
   const cwd = { cwd: checkoutPath };
-  const fetch = await runCmd('git', ['fetch', 'origin', baseBranch], cwd);
+  // The rebase's own commands carry the run signal so a Ctrl-C kills the in-flight child. Cleanup
+  // (`git rebase --abort`, in resolveRebaseConflicts) deliberately does not: an already-aborted
+  // signal would kill it on spawn and strand a half-applied rebase in the operator's checkout.
+  const cancellable = { cwd: checkoutPath, ...(signal ? { signal } : {}) };
+  const cancelled = (stage: string): PushResult => ({
+    kind: 'blocked',
+    reason: `run cancelled ${stage}; nothing was force-pushed.`,
+  });
+  if (signal?.aborted) return cancelled(`before the rebase onto origin/${baseBranch}`);
+  const fetch = await runCmd('git', ['fetch', 'origin', baseBranch], cancellable);
+  if (signal?.aborted) return cancelled(`while fetching origin/${baseBranch}`);
   if (fetch.exitCode !== 0) {
     return { kind: 'blocked', reason: `git fetch origin ${baseBranch} failed: ${gitErr(fetch)}` };
   }
-  const rebase = await runCmd('git', ['rebase', `origin/${baseBranch}`], cwd);
+  const rebase = await runCmd('git', ['rebase', `origin/${baseBranch}`], cancellable);
   if (rebase.exitCode !== 0) {
     const resolved = await resolveRebaseConflicts(
       runCmd,
@@ -361,7 +371,10 @@ export async function rebaseAndForcePush(
     // Blocked → the rebase is already aborted; stop before pushing. Fixed → fall through to push.
     if (resolved.kind === 'blocked') return resolved;
   }
-  const push = await runCmd('git', ['push', '--force-with-lease'], cwd);
+  // A cancel landing after the rebase settled must still not publish: the force-push is the one
+  // irreversible step here, and the branch is already rebased locally for whoever resumes.
+  if (signal?.aborted) return cancelled(`before the force-push for PR #${pr}`);
+  const push = await runCmd('git', ['push', '--force-with-lease'], cancellable);
   if (push.exitCode !== 0) {
     return { kind: 'blocked', reason: `git push --force-with-lease failed: ${gitErr(push)}` };
   }
@@ -390,17 +403,21 @@ async function resolveRebaseConflicts(
     return { kind: 'blocked', reason };
   };
 
+  // A cancelled run must not start (or continue) an AI resolution pass. Abort the half-applied
+  // rebase on the way out: leaving the checkout mid-rebase would strand the operator's working tree.
+  const cancelledMidRebase = (): Promise<PushResult> =>
+    abortAndBlock(
+      `run cancelled while resolving the rebase onto origin/${baseBranch}; the rebase was aborted.`,
+    );
+
+  // Checked before the no-resolver branch too, so a rebase the signal itself killed reports the
+  // cancel rather than "needs manual resolution".
+  if (signal?.aborted) return cancelledMidRebase();
   const manualReason = `git rebase onto origin/${baseBranch} hit conflicts that need manual resolution: ${gitErr(firstRebase)}`;
   if (!resolveConflicts) return abortAndBlock(manualReason);
 
   for (let attempt = 1; attempt <= MAX_CONFLICT_RESOLVE_ATTEMPTS; attempt++) {
-    // A cancelled run must not start another AI resolution pass. Abort the half-applied rebase on
-    // the way out: leaving the checkout mid-rebase would strand the operator's working tree.
-    if (signal?.aborted) {
-      return abortAndBlock(
-        `run cancelled while resolving the rebase onto origin/${baseBranch}; the rebase was aborted.`,
-      );
-    }
+    if (signal?.aborted) return cancelledMidRebase();
     const conflicted = await unmergedPaths(runCmd, cwd);
     if (conflicted.length === 0) {
       // Non-zero rebase with no unmerged paths is not an AI-resolvable content conflict (e.g. a
@@ -427,6 +444,9 @@ async function resolveRebaseConflicts(
     // The resolver edits + stages the files. If any stay unmerged it did not finish the job; spend
     // another attempt rather than continuing onto a half-resolved commit.
     if ((await unmergedPaths(runCmd, cwd)).length > 0) continue;
+    // The resolver call above can take minutes; a cancel landing inside it must not drive the
+    // rebase forward onto a commit nobody is waiting for.
+    if (signal?.aborted) return cancelledMidRebase();
     // Drive the rebase forward. `-c core.editor=true` accepts the reused commit message without
     // opening an editor, so an unattended `git rebase --continue` can never hang.
     const cont = await runCmd('git', ['-c', 'core.editor=true', 'rebase', '--continue'], cwd);

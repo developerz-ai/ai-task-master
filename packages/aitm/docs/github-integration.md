@@ -37,9 +37,9 @@ GraphQL queries are batched per PR (threads + comments fetched in one request). 
 
 ## Child-process deadlines
 
-Every `gh`/`git` child spawned by `GitHubClient` runs under a deadline (`DEFAULT_CMD_TIMEOUT_MS`, 5 min; override per call with `RunCmdOptions.timeout`) and, when the run supplies one, under the run's abort signal — bound once in the constructor, so a Ctrl-C kills an in-flight `gh` instead of leaving it for the force-exit path to orphan. Note what this is *not*: `CHECKS_TIMEOUT_MS` bounds how many times `waitForChecks` polls, never how long a single `gh` invocation may hang, so before these deadlines a network-wedged `gh api …/logs` blocked the run forever. A child killed by either route reports execa's own summary as `stderr` ("Command timed out after 300000 milliseconds: gh …"), since a signal-killed process writes no error of its own and callers render failures as `<cmd> failed: <stderr>`.
+Every child `GitHubClient` spawns — its `gh` calls, plus the one read-only `git rev-parse` behind `currentBranch()` — runs under a deadline (`DEFAULT_CMD_TIMEOUT_MS`, 5 min; override per call with `RunCmdOptions.timeout`) and, when the run supplies one, under the run's abort signal — bound once in the constructor, so a Ctrl-C kills an in-flight `gh` instead of leaving it for the force-exit path to orphan. Everything else git is somebody else's subprocess: `GitHubClient` never mutates a checkout, and the seams that do carry their own deadlines (below). Note what this is *not*: `CHECKS_TIMEOUT_MS` bounds how many times `waitForChecks` polls, never how long a single `gh` invocation may hang, so before these deadlines a network-wedged `gh api …/logs` blocked the run forever. A child killed by either route reports execa's own summary as `stderr` ("Command timed out after 300000 milliseconds: gh …"), since a signal-killed process writes no error of its own and callers render failures as `<cmd> failed: <stderr>`.
 
-The same treatment applies at the other subprocess chokepoints: `runGit` (`DEFAULT_GIT_TIMEOUT_MS`, 10 min — network subcommands are the ones that wedge), the Orchestrator's `git commit --amend` seam (1 min), and `fetch_html`'s `curl-impersonate` (the tool call's own `abortSignal`).
+The same treatment applies at the other subprocess chokepoints, each owned by its own module rather than by `GitHubClient`: `runGit` (`workspace/git-exec.ts` — `DEFAULT_GIT_TIMEOUT_MS`, 10 min, since network subcommands are the ones that wedge), the Orchestrator's `git commit --amend` seam (1 min), and `fetch_html`'s `curl-impersonate` (the tool call's own `abortSignal`).
 
 ## No server
 
@@ -47,7 +47,7 @@ No webhook listener. No long-running process. `merge-pr` is a polling command th
 
 ## Branch hygiene
 
-`GitHubClient` exposes `currentBranch()` and `defaultBranch()` so `Worker` can rebase safely. `GitHubClient` itself does not perform git operations — git runs via `Bun.$` directly inside the `Worker` bash tool. This keeps `GitHubClient` GitHub-only.
+`GitHubClient` exposes `currentBranch()` and `defaultBranch()` so `Worker` can rebase safely. Apart from that one read-only `git rev-parse`, `GitHubClient` performs no git operations: mutating git runs through `runGit` (`workspace/git-exec.ts`) and the `Worker` bash tool. This keeps `GitHubClient` GitHub-only.
 
 ## Cross-links
 

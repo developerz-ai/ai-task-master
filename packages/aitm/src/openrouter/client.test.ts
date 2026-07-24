@@ -221,3 +221,43 @@ test('listModels: the deadline expiring surfaces as a rejection, not a hang', as
   );
   assert.ok(CATALOG_FETCH_TIMEOUT_MS > 0 && CATALOG_FETCH_TIMEOUT_MS <= 60_000);
 });
+
+test('listModels: the run signal cancels the catalog fetch, not just the deadline', async () => {
+  // preload() runs before the first task, so without this a Ctrl-C waits out the full deadline on a
+  // stalled catalog GET before the process can exit.
+  const controller = new AbortController();
+  let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_input, init) => {
+    seen = init?.signal ?? undefined;
+    controller.abort();
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  await new OpenRouterClient('sk-or-test', undefined, controller.signal).listModels();
+  assert.equal(seen?.aborted, true);
+});
+
+test('listModels: an already-aborted run signal never reaches the network unaborted', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_input, init) => {
+    seen = init?.signal ?? undefined;
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  await new OpenRouterClient('sk-or-test', undefined, controller.signal).listModels();
+  assert.equal(seen?.aborted, true);
+});
+
+test('listModels: releases the run-signal listener once the request settles', async () => {
+  // The run signal outlives every catalog fetch; a retained listener leaks the finished controller
+  // and trips the runtime's max-listener warning on a long run.
+  const controller = new AbortController();
+  let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_input, init) => {
+    seen = init?.signal ?? undefined;
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  await new OpenRouterClient('sk-or-test', undefined, controller.signal).listModels();
+  controller.abort();
+  assert.equal(seen?.aborted, false);
+});

@@ -212,6 +212,9 @@ test('fetch_html: no tool signal → no cancelSignal key, deadline unchanged', a
   const t = fetchHtmlTool({ exec, lookup: publicLookup });
   await run(t, { url: 'https://x.test/' });
   assert.ok(!('cancelSignal' in (seen[0] ?? {})), 'no signal is passed as an explicit undefined');
+  // DEFAULT_TIMEOUT_MS (15s) + the 5s grace over curl's own --max-time. Asserted positively: a
+  // regression that dropped the deadline on this branch would leave curl unbounded here.
+  assert.equal(seen[0]?.timeout, 20_000, 'the deadline is unchanged without a tool signal');
 });
 
 test('isFetchHtmlAvailable: the probe carries its own deadline', async () => {

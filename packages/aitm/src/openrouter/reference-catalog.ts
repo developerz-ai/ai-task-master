@@ -16,7 +16,7 @@
 //
 // SRP: fetch + match only. ModelLimitsRegistry decides precedence and owns the merge.
 
-import { CATALOG_FETCH_TIMEOUT_MS, type OpenRouterModel, parseModelCatalog } from './client.ts';
+import { catalogFetchSignal, type OpenRouterModel, parseModelCatalog } from './client.ts';
 
 export const OPENROUTER_REFERENCE_URL = 'https://openrouter.ai/api/v1/models';
 
@@ -26,22 +26,30 @@ export type ReferenceCatalogClient = {
 };
 
 export class OpenRouterReferenceCatalog implements ReferenceCatalogClient {
-  constructor(private readonly url: string = OPENROUTER_REFERENCE_URL) {}
+  constructor(
+    private readonly url: string = OPENROUTER_REFERENCE_URL,
+    private readonly signal?: AbortSignal,
+  ) {}
 
   // No Authorization header by design: the public catalog needs none, and sending the active
   // profile's key to a third-party host would leak it to a provider the user never configured.
   async listModels(): Promise<OpenRouterModel[]> {
-    const res = await fetch(this.url, {
-      headers: { accept: 'application/json' },
-      signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      const excerpt = (await res.text()).slice(0, 200);
-      throw new Error(
-        `OpenRouter reference catalog failed: ${res.status} ${res.statusText} — ${excerpt}`,
-      );
+    const fetchSignal = catalogFetchSignal(this.signal);
+    try {
+      const res = await fetch(this.url, {
+        headers: { accept: 'application/json' },
+        signal: fetchSignal.signal,
+      });
+      if (!res.ok) {
+        const excerpt = (await res.text()).slice(0, 200);
+        throw new Error(
+          `OpenRouter reference catalog failed: ${res.status} ${res.statusText} — ${excerpt}`,
+        );
+      }
+      return parseModelCatalog(await res.json());
+    } finally {
+      fetchSignal.release();
     }
-    return parseModelCatalog(await res.json());
   }
 }
 

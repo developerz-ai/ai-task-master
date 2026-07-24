@@ -1221,7 +1221,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   const limits =
     input.modelLimits ??
     new ModelLimitsRegistry(
-      new OpenRouterClient(input.resolved.openrouterApiKey, input.resolved.baseURL),
+      new OpenRouterClient(input.resolved.openrouterApiKey, input.resolved.baseURL, input.signal),
     );
   const compactor = new Compactor({
     summarizer: input.credentials.modelForCapability('fast'),

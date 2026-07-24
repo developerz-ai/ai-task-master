@@ -35,7 +35,10 @@ import {
 } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { type ModelLimitsLookup, ModelLimitsRegistry } from '../openrouter/model-limits.ts';
-import { OpenRouterReferenceCatalog } from '../openrouter/reference-catalog.ts';
+import {
+  OPENROUTER_REFERENCE_URL,
+  OpenRouterReferenceCatalog,
+} from '../openrouter/reference-catalog.ts';
 import { UnsupportedSchemaVersion } from '../state/migrations.ts';
 import type { RunLockHandle } from '../state/run-lock.ts';
 import { CURRENT_SCHEMA_VERSION, type PrGroup, type RunState } from '../state/schema.ts';
@@ -528,8 +531,8 @@ export async function runStart(
     // tracker's pricing and the Compactor's context lookup (#102) so the catalog is fetched at most
     // once. The tracker's onUsage sinks are bound in the adapter; totals flush after the loop.
     const modelLimits = new ModelLimitsRegistry(
-      new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL),
-      new OpenRouterReferenceCatalog(),
+      new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL, ctx.signal),
+      new OpenRouterReferenceCatalog(OPENROUTER_REFERENCE_URL, ctx.signal),
     );
     const usage = new UsageTracker(modelLimits);
 

@@ -158,6 +158,9 @@ export function makeWorkerTool(deps: WorkerToolDeps): Tool<EmptyInput, WorkerRes
         rollingContext: deps.rollingContext,
         // formatCommand mirrors the direct path; verifyCommand stays off by design (see WorkerToolDeps).
         ...(deps.formatCommand ? { formatCommand: deps.formatCommand } : {}),
+        // Cancels the editor fanout too — the agent-level signal above only covers the Coordinator's
+        // own generation, so without this the per-file editors outlive a cancelled run.
+        ...(deps.signal ? { signal: deps.signal } : {}),
       });
     },
     toModelOutput: ({ output }) => ({ type: 'text', value: summarizeWorkerResult(output) }),

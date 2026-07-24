@@ -219,25 +219,39 @@ test('aitm start: SIGINT mid-run reaps the MCP child and surfaces cancelled (exi
 // A model whose doGenerate never settles on its own — it only rejects once the merged abortSignal
 // fires. Mirrors ai-claude-compat/src/subagent.test.ts's stallingModel(): the same real
 // createSubagent -> generate path a genuine Ctrl-C hits mid-Worker/Planner/Reviewer.
-function stallingModel(): MockLanguageModelV3 {
-  return new MockLanguageModelV3({
+//
+// `started` resolves the moment doGenerate is entered. Tests await it before aborting: an abort that
+// lands first leaves an already-aborted signal, which never replays the event to a listener attached
+// afterwards, so the generation would hang instead of rejecting. A timer can't rule that out.
+type StallingModel = { model: MockLanguageModelV3; started: Promise<void> };
+
+function stallingModel(): StallingModel {
+  let generateStarted: () => void = () => {};
+  const started = new Promise<void>((resolve) => {
+    generateStarted = resolve;
+  });
+  const model = new MockLanguageModelV3({
     doGenerate: (opts) =>
       new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () => {
+        const fail = (): void => {
           const reason = opts.abortSignal?.reason;
           reject(
             reason instanceof Error
               ? reason
               : new DOMException('This operation was aborted', 'AbortError'),
           );
-        });
+        };
+        // Belt and braces for a retry re-entered under an already-aborted signal.
+        if (opts.abortSignal?.aborted) {
+          generateStarted();
+          fail();
+          return;
+        }
+        opts.abortSignal?.addEventListener('abort', fail, { once: true });
+        generateStarted();
       }),
   });
-}
-
-// Abort on the next macrotask so the generate is genuinely in flight when the signal fires.
-function abortSoon(controller: AbortController): void {
-  setTimeout(() => controller.abort(), 5);
+  return { model, started };
 }
 
 // Generous vs. real provider latency variance, and miles under any real per-step timeout or CI
@@ -246,10 +260,11 @@ const CANCEL_BOUND_MS = 3000;
 
 test('runWorker: a real Coordinator generation (not a stub) rejects within seconds of Ctrl-C', async () => {
   const controller = new AbortController();
+  const stalling = stallingModel();
   // No tools are ever reached — the stalling model rejects on its very first generate, before the
   // Coordinator could make a tool call.
   const agent = createWorkerAgent({
-    model: stallingModel(),
+    model: stalling.model,
     tools: {},
     systemPrompt: WORKER_SYSTEM_PREFIX,
     signal: controller.signal,
@@ -264,15 +279,17 @@ test('runWorker: a real Coordinator generation (not a stub) rejects within secon
     status: 'pending',
     stage: 'pending',
   };
-  abortSoon(controller);
-  const start = Date.now();
-  const result = await runWorker(agent, {
+  const running = runWorker(agent, {
     group,
     checkoutPath: '/tmp/aitm-sigint-worker',
     baseBranch: 'main',
     styleContents: '# style\n',
     rollingContext: '',
   });
+  await stalling.started;
+  const start = Date.now();
+  controller.abort();
+  const result = await running;
   const elapsed = Date.now() - start;
   assert.ok(elapsed < CANCEL_BOUND_MS, `must reject within seconds, took ${elapsed}ms`);
   // runWorker never throws on abort — it catches and reports (see worker.ts's catch block).
@@ -282,19 +299,22 @@ test('runWorker: a real Coordinator generation (not a stub) rejects within secon
 
 test('runPlanner: a real generation (not a stub) rejects within seconds of Ctrl-C', async () => {
   const controller = new AbortController();
+  const stalling = stallingModel();
   const agent = createPlannerAgent({
-    model: stallingModel(),
+    model: stalling.model,
     tools: {},
     systemPrompt: PLANNER_SYSTEM_PREFIX,
     signal: controller.signal,
   });
-  abortSoon(controller);
-  const start = Date.now();
-  const result = await runPlanner(agent, {
+  const running = runPlanner(agent, {
     goal: 'add hello',
     styleContents: '# style\n',
     maxPrs: 5,
   });
+  await stalling.started;
+  const start = Date.now();
+  controller.abort();
+  const result = await running;
   const elapsed = Date.now() - start;
   assert.ok(elapsed < CANCEL_BOUND_MS, `must reject within seconds, took ${elapsed}ms`);
   assert.equal(result.kind, 'error');
@@ -303,8 +323,9 @@ test('runPlanner: a real generation (not a stub) rejects within seconds of Ctrl-
 
 test('runReviewer: a real generation (not a stub) rejects within seconds of Ctrl-C', async () => {
   const controller = new AbortController();
+  const stalling = stallingModel();
   const agent = createReviewerAgent({
-    model: stallingModel(),
+    model: stalling.model,
     tools: {},
     systemPrompt: REVIEWER_SYSTEM_PREFIX,
     signal: controller.signal,
@@ -315,14 +336,16 @@ test('runReviewer: a real generation (not a stub) rejects within seconds of Ctrl
     path: 'src/example.ts',
     comments: [{ id: 'thread-1-c1', body: 'please fix', author: 'reviewer' }],
   };
-  abortSoon(controller);
-  const start = Date.now();
-  const result = await runReviewer(agent, {
+  const running = runReviewer(agent, {
     pr: 1,
     threads: [thread],
     checkoutPath: '/tmp/aitm-sigint-reviewer',
     styleContents: '# style\n',
   });
+  await stalling.started;
+  const start = Date.now();
+  controller.abort();
+  const result = await running;
   const elapsed = Date.now() - start;
   assert.ok(elapsed < CANCEL_BOUND_MS, `must reject within seconds, took ${elapsed}ms`);
   // runReviewer never throws on abort either — same catch-and-report shape as runWorker.

@@ -894,3 +894,46 @@ test('planner tool: forwards deps.signal to the subagent → an abort cancels th
   assert.equal(out.kind, 'error');
   if (out.kind === 'error') assert.match(out.error, /abort/i);
 });
+
+test('worker tool: forwards deps.signal into WorkerInput → a cancel reaches the editor fanout', async () => {
+  // The agent-level signal only cancels the Coordinator's own generation; the per-file editors are
+  // cancelled ONLY by WorkerInput.signal, so without it a cancelled run keeps burning editor tokens.
+  const manifest: FileManifest = {
+    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
+    draftCommitMessage: 'feat: x',
+  };
+  const controller = new AbortController();
+  let editorSawTheCancel: boolean | undefined;
+  let i = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      if (i++ === 0) return submitContent(manifest);
+      // The run cancels mid-edit. Abort dispatch is synchronous, so the editor's own signal must
+      // already read aborted on the very next line when the fanout is wired to WorkerInput.signal.
+      controller.abort();
+      editorSawTheCancel = opts.abortSignal?.aborted ?? false;
+      return {
+        content: [{ type: 'text', text: 'created x' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const { tools } = makeWorkerTools();
+  const t = makeWorkerTool({
+    credentials: provider,
+    styleContents: '# style\n',
+    rollingContext: '',
+    workerTools: tools,
+    checkoutPath: '/tmp/wt',
+    baseBranch: 'main',
+    group: baseGroup(),
+    signal: controller.signal,
+  });
+  const exec = t.execute;
+  if (typeof exec !== 'function') throw new Error('no execute');
+  await exec({}, { toolCallId: 'tc', messages: [] });
+  assert.equal(editorSawTheCancel, true);
+});

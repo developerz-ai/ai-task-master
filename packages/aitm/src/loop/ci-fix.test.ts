@@ -616,6 +616,106 @@ test('rebaseAndForcePush: an already-aborted signal → blocks without calling t
   assert.equal(calls, 0, 'no AI call once the run is cancelled');
 });
 
+test('rebaseAndForcePush: an already-aborted signal runs no git command at all', async () => {
+  // A cancelled run must not even fetch or start the rebase — the previous test only proved the AI
+  // pass was skipped, by which point the checkout had already been rewritten.
+  const { plan } = conflictThenResolvePlan({ unmerged: ['src/a.ts'], clearAfter: 1 });
+  const { runCmd, commands } = recordingRunCmd(plan);
+  const controller = new AbortController();
+  controller.abort();
+  const result = await rebaseAndForcePush(
+    runCmd,
+    '/tmp/wt',
+    'main',
+    9,
+    undefined,
+    true,
+    async () => ({ kind: 'resolved' }),
+    controller.signal,
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /run cancelled/i);
+  assert.deepEqual(commands, [], 'no fetch, no rebase, no abort, no push');
+});
+
+test('rebaseAndForcePush: a cancel after the resolver clears conflicts stops before the push', async () => {
+  // The resolver succeeds, then the run is cancelled. `rebase --continue` must not drive the rebase
+  // forward and the force-push — the one irreversible step — must not happen.
+  const { plan } = conflictThenResolvePlan({ unmerged: ['src/a.ts'], clearAfter: 1 });
+  const { runCmd, commands } = recordingRunCmd(plan);
+  const controller = new AbortController();
+  const result = await rebaseAndForcePush(
+    runCmd,
+    '/tmp/wt',
+    'main',
+    9,
+    undefined,
+    true,
+    async () => {
+      controller.abort();
+      return { kind: 'resolved' };
+    },
+    controller.signal,
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /run cancelled/i);
+  assert.ok(!commands.includes('git -c core.editor=true rebase --continue'));
+  assert.ok(!commands.some((c) => c.includes('push')));
+  assert.ok(commands.includes('git rebase --abort'), 'never leaves the checkout mid-rebase');
+});
+
+test('rebaseAndForcePush: a cancel after a clean rebase blocks instead of force-pushing', async () => {
+  // No conflict at all: the rebase lands, then the signal fires. The branch is rebased locally for
+  // whoever resumes, but nothing is published.
+  const controller = new AbortController();
+  const { runCmd, commands } = recordingRunCmd((args) => {
+    if (args[0] === 'rebase') controller.abort();
+    return {};
+  });
+  const result = await rebaseAndForcePush(
+    runCmd,
+    '/tmp/wt',
+    'main',
+    9,
+    undefined,
+    true,
+    undefined,
+    controller.signal,
+  );
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /run cancelled/i);
+  assert.ok(!commands.some((c) => c.includes('push')));
+});
+
+test('rebaseAndForcePush: the run signal reaches the git children, but never the cleanup', async () => {
+  // Killing an in-flight `git fetch`/`rebase`/`push` is the point; killing `git rebase --abort` is
+  // not — an already-aborted signal would kill it on spawn and strand a half-applied rebase.
+  const controller = new AbortController();
+  const seen: Array<{ cmd: string; signal: boolean }> = [];
+  const { plan } = conflictThenResolvePlan({ unmerged: ['src/a.ts'], clearAfter: 100 });
+  const { runCmd } = recordingRunCmd(plan);
+  const spy: typeof runCmd = async (file, args, options) => {
+    seen.push({ cmd: `${file} ${args.join(' ')}`, signal: options?.signal !== undefined });
+    return runCmd(file, args, options);
+  };
+  await rebaseAndForcePush(
+    spy,
+    '/tmp/wt',
+    'main',
+    9,
+    undefined,
+    true,
+    async () => {
+      controller.abort();
+      return { kind: 'resolved' };
+    },
+    controller.signal,
+  );
+  assert.equal(seen.find((c) => c.cmd === 'git fetch origin main')?.signal, true);
+  assert.equal(seen.find((c) => c.cmd === 'git rebase origin/main')?.signal, true);
+  assert.equal(seen.find((c) => c.cmd === 'git rebase --abort')?.signal, false);
+});
+
 test('rebaseAndForcePush: no resolver wired → today’s abort + block (unchanged)', async () => {
   const { runCmd, commands } = recordingRunCmd((args) =>
     args[0] === 'rebase' && args[1]?.startsWith('origin/')
@@ -670,7 +770,9 @@ test('runFixSession: threads the run signal into the shared push path', async ()
   assert.equal(result.kind, 'blocked');
   if (result.kind === 'blocked') assert.match(result.reason, /run cancelled/i);
   assert.equal(resolverCalls, 0);
-  assert.ok(commands.includes('git rebase --abort'), 'reached the push path and cleaned up');
+  // Nothing to clean up: the push path now refuses before it fetches or rebases, so the checkout is
+  // never rewritten in the first place.
+  assert.ok(!commands.includes('git rebase origin/main'));
   assert.ok(!commands.includes('git push --force-with-lease'));
 });
 

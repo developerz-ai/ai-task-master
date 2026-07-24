@@ -15,6 +15,7 @@ import {
   memoryIndexBlock,
   type PromptBlock,
   renderPromptBlocks,
+  safetyPreambleBlock,
   selfIdBlock,
   toolResultTrustBlock,
 } from '@developerz.ai/ai-claude-compat';
@@ -96,16 +97,19 @@ function rolePrompt(slots: RolePromptSlots): string {
 }
 
 // Editor-leaf system prompt: role guidance + step-budget, style, and `<env>` — no self-id, no memory
-// index, and only ONE contract block. Mirrors the `explore` leaf's contract-free pattern (a leaf
-// can't spawn/delegate, so the harness/communication/autonomy governance text it exists to constrain
-// doesn't apply), but unlike `explore` the editor writes code, so it keeps the style digest and the
-// `<env>` block a code-writing leaf still needs. Fans out once per manifest file, so trimming the
-// per-call frame here compounds across the whole fanout.
+// index, and only the two contract blocks a code-writing leaf still needs. Mirrors the `explore`
+// leaf's contract-free pattern (a leaf can't spawn/delegate, so the harness/communication/autonomy
+// governance text it exists to constrain doesn't apply), but unlike `explore` the editor writes code,
+// so it keeps the style digest and the `<env>` block a code-writing leaf still needs. Fans out once
+// per manifest file, so trimming the per-call frame here compounds across the whole fanout.
 //
-// The one contract it DOES keep is tool-result trust: an editor holds readFile and webFetch, so it
-// ingests file contents and web pages — the exact channel that block exists to govern. Dropping it
-// here would leave the only role that reads untrusted content as the only role never told to treat
-// it as data.
+// The two contracts it DOES keep:
+// - The safety preamble (#186): the editor is the one leaf that mutates the working tree, so the
+//   default-to-caution framing that guards against destructive/irreversible edits applies squarely —
+//   an editor is where an unbounded change actually lands. Every production subagent carries it.
+// - Tool-result trust: an editor holds readFile and webFetch, so it ingests file contents and web
+//   pages — the exact channel that block exists to govern. Dropping it here would leave the only role
+//   that reads untrusted content as the only role never told to treat it as data.
 export type EditorPromptSlots = {
   // EDITOR_SYSTEM_PREFIX. Trusted, verbatim.
   readonly roleGuidance: string;
@@ -122,6 +126,7 @@ export type EditorPromptSlots = {
 function editorPrompt(slots: EditorPromptSlots): string {
   const guidance = slots.roleGuidance;
   return renderPromptBlocks([
+    safetyPreambleBlock(),
     toolResultTrustBlock(),
     {
       kind: 'sessionGuidance',

@@ -15,6 +15,8 @@ import {
   PROMPT_BLOCK_ORDER,
   type PromptBlock,
   renderPromptBlocks,
+  SAFETY_PREAMBLE_TEXT,
+  safetyPreambleBlock,
   selfIdBlock,
   stepBudgetLine,
   TOOL_RESULT_TRUST_TEXT,
@@ -176,11 +178,29 @@ test('autonomy default gives the reason for autonomy, an evidence gate, and a pr
   assert.match(AUTONOMY_CONTRACT_TEXT, /do that work now with tool calls/i);
 });
 
-test('identityBlock wraps the role text under the identity kind', () => {
-  assert.deepEqual(identityBlock('You are the Planner.'), {
-    kind: 'identity',
-    text: 'You are the Planner.',
-  });
+test('SAFETY_PREAMBLE_TEXT frames the agent as autonomous, scope-bound, and caution-first (issue #186)', () => {
+  assert.match(SAFETY_PREAMBLE_TEXT, /autonomous agent/i);
+  assert.match(SAFETY_PREAMBLE_TEXT, /real repository/i);
+  assert.match(SAFETY_PREAMBLE_TEXT, /scope/i);
+  assert.match(SAFETY_PREAMBLE_TEXT, /safe and reversible/i);
+  assert.match(SAFETY_PREAMBLE_TEXT, /destructive or irreversible/i);
+  assert.match(SAFETY_PREAMBLE_TEXT, /stop and report/i);
+});
+
+test('identityBlock folds the safety preamble in under the role text (issue #186)', () => {
+  const block = identityBlock('You are the Planner.');
+  assert.equal(block.kind, 'identity');
+  assert.match(block.text, /^You are the Planner\./);
+  assert.ok(block.text.includes(SAFETY_PREAMBLE_TEXT), 'carries the shared safety preamble');
+});
+
+test('identityBlock with empty role yields the safety preamble alone (issue #186)', () => {
+  assert.deepEqual(identityBlock(''), { kind: 'identity', text: SAFETY_PREAMBLE_TEXT });
+  assert.deepEqual(identityBlock('   '), { kind: 'identity', text: SAFETY_PREAMBLE_TEXT });
+});
+
+test('safetyPreambleBlock is the standalone identity-slot safety preamble (issue #186)', () => {
+  assert.deepEqual(safetyPreambleBlock(), { kind: 'identity', text: SAFETY_PREAMBLE_TEXT });
 });
 
 test('selfIdBlock states the model id, with the cutoff clause only when supplied', () => {
@@ -194,10 +214,12 @@ test('selfIdBlock states the model id, with the cutoff clause only when supplied
   assert.ok(!/knowledge cutoff/.test(withoutCutoff.text), 'cutoff clause omitted when absent');
 });
 
-test('defaultContractBlocks yields exactly the always-on contracts', () => {
+test('defaultContractBlocks yields exactly the always-on contracts, led by the safety preamble', () => {
+  const blocks = defaultContractBlocks();
   assert.deepEqual(
-    defaultContractBlocks().map((b) => b.kind),
+    blocks.map((b) => b.kind),
     [
+      'identity',
       'harnessContract',
       'communicationContract',
       'toolResultTrust',
@@ -205,6 +227,7 @@ test('defaultContractBlocks yields exactly the always-on contracts', () => {
       'autonomy',
     ],
   );
+  assert.equal(blocks[0]?.text, SAFETY_PREAMBLE_TEXT, 'the identity block is the safety preamble');
 });
 
 test('stepBudgetLine interpolates the effective cap and points at submit', () => {

@@ -189,8 +189,8 @@ export type McpLoginCtx = {
   stderr?: (chunk: string) => void;
   // OAuth flow injection seam for testing
   performOAuth?: (
-    input: import('../mcp/oauth.js').McpOAuthLoginInput,
-  ) => Promise<import('../mcp/oauth.js').OAuthConfig>;
+    input: import('../mcp/oauth.ts').McpOAuthLoginInput,
+  ) => Promise<import('../mcp/oauth.ts').OAuthConfig>;
 };
 
 // Exported for unit testing (drives the timeout/abort/size paths against an injected stream).

@@ -400,6 +400,72 @@ test('performOAuthFlow: binds the loopback server to the port named by callbackU
   }
 });
 
+test("performOAuthFlow: stop() closes a lingering keep-alive callback connection instead of waiting out Node's default 5s socket timeout", async () => {
+  const port = await getFreePort();
+  const callbackUrl = `http://${LOOPBACK_HOST}:${port}/callback`;
+  const tokenUrl = 'https://example.com/oauth/token';
+  const realFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) =>
+    String(input) === tokenUrl
+      ? new Response(JSON.stringify({ access_token: 'tok-keepalive' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      : realFetch(input, init);
+
+  const http = await import('node:http');
+  // A real browser holds the callback connection open on HTTP keep-alive after the response
+  // completes — plain `server.close()` awaits every open connection to drain on its own, which
+  // for an idle keep-alive socket means Node's default 5s server keepAliveTimeout. `stop()` must
+  // force it shut via `closeAllConnections()` instead of inheriting that wait.
+  const keepAliveAgent = new http.Agent({ keepAlive: true });
+
+  try {
+    const started = Date.now();
+    const config = await performOAuthFlow({
+      serverUrl: 'https://example.com/mcp',
+      authUrl: 'https://example.com/oauth/authorize',
+      tokenUrl,
+      clientId: 'test-client',
+      callbackUrl,
+      timeout: 2000,
+      openBrowser: async (rawUrl) => {
+        // Fire-and-forget, like the other tests here: performOAuthFlow only arms `callbackPath` on
+        // the server AFTER openBrowser resolves, so a request sent synchronously from inside
+        // openBrowser would 404 against a still-unset path. Send it shortly after returning instead.
+        const authUrl = new URL(rawUrl);
+        const cbState = authUrl.searchParams.get('state') ?? '';
+        setTimeout(() => {
+          const req = http.request(
+            {
+              host: LOOPBACK_HOST,
+              port,
+              path: `/callback?code=good&state=${cbState}`,
+              agent: keepAliveAgent,
+            },
+            (res) => res.resume(),
+          );
+          // stop()'s closeAllConnections() forcibly destroys this socket once performOAuthFlow
+          // resolves — expected, and harmless this late; only guards against an unhandled 'error'.
+          req.on('error', () => {});
+          req.end();
+        }, 10);
+      },
+    });
+    const elapsedMs = Date.now() - started;
+
+    assert.strictEqual(config.headers.Authorization, 'Bearer tok-keepalive');
+    assert.ok(
+      elapsedMs < 2000,
+      `stop() must force-close the idle keep-alive socket rather than wait out the server's default keep-alive timeout (took ${elapsedMs}ms)`,
+    );
+  } finally {
+    keepAliveAgent.destroy();
+    globalThis.fetch = realFetch;
+  }
+});
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,

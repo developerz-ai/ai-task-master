@@ -16,7 +16,7 @@ export async function makeTempRepo(opts?: { withClaudeMd?: boolean }): Promise<T
   const path = await mkdtemp(join(tmpdir(), 'aitm-test-'));
 
   try {
-    await execa('git', ['init'], { cwd: path });
+    await execa('git', ['init', '-b', 'main'], { cwd: path });
     await execa('git', ['config', 'user.email', 'test@aitm.local'], { cwd: path });
     await execa('git', ['config', 'user.name', 'aitm-test'], { cwd: path });
 

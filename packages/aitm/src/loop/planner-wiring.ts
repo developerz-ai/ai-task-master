@@ -154,7 +154,11 @@ export function parseRemoteHeads(stdout: string): string[] {
 // Run the parallel scout survey before planning, returning the synthesized brief — or undefined when
 // the repo is below the size floor (scouts would be pure added cost) or the sweep produced nothing.
 // Best-effort throughout: a git or scout failure degrades to no brief, never blocks the planner.
-async function surveyRepoForPlanner(params: {
+// Exported for unit testing — it is the only place that builds a real ScoutAgentInit (model, tools,
+// system prompt, timeout, usage sink, signal) from a RunLoopInput; createScoutRunner itself is
+// covered against a hand-built ScoutAgentInit in planner-scouts.test.ts, but that never exercises
+// this wiring.
+export async function surveyRepoForPlanner(params: {
   input: RunLoopInput;
   style: string;
   plannerModelId: string;

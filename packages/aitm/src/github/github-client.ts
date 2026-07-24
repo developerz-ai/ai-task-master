@@ -4,7 +4,7 @@
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
 import { isToleratedFailure } from './check-tolerance.ts';
-import { CiFailed, MergeConflict } from './errors.ts';
+import { CiFailed, GhCliMissing, MergeConflict } from './errors.ts';
 import {
   type CheckStatus,
   type PullRequest,
@@ -64,13 +64,15 @@ export function execaOptions(options?: RunCmdOptions): {
   };
 }
 
-// A child killed by the deadline or by an abort usually wrote nothing to stderr, and every caller
-// reports failures as `<cmd> failed: <stderr>` — so without this an operator reads an empty reason.
-// execa's own summary ("Command timed out after 300000 milliseconds: gh …") is that reason.
+// A child that never exited normally — killed by the deadline or an abort, terminated by a signal,
+// or a spawn failure other than ENOENT (which throws) — has an undefined exitCode and usually wrote
+// nothing to its own stderr. Every caller reports failures as `<cmd> failed: <stderr>`, so without a
+// fallback an operator reads an empty reason. execa's own summary ("Command timed out after 300000
+// milliseconds: gh …", "spawn gh EACCES") is that reason.
 function failureStderr(err: ExecaError): string {
   const stderr = typeof err.stderr === 'string' ? err.stderr : '';
   if (stderr.length > 0) return stderr;
-  return err.timedOut || err.isCanceled ? (err.shortMessage ?? err.message) : '';
+  return err.exitCode === undefined ? (err.shortMessage ?? err.message) : '';
 }
 
 export const defaultRunCmd: RunCmd = async (file, args, options) => {
@@ -83,6 +85,14 @@ export const defaultRunCmd: RunCmd = async (file, args, options) => {
     };
   } catch (err) {
     if (err instanceof ExecaError) {
+      // The binary isn't on PATH: execa raises a spawn error carrying code 'ENOENT' and no exitCode.
+      // Flattening that to {exitCode: 1, stderr: ''} made it indistinguishable from a real non-zero
+      // exit, so every caller printed `<cmd> failed:` with an empty reason. A missing gh (or git) is
+      // an environment fault the operator must fix, not a per-call failure — raise a typed domain
+      // error and carry execa's own summary ("spawn gh ENOENT") so the reason isn't dropped.
+      if (err.code === 'ENOENT') {
+        throw new GhCliMissing(`${file} is not installed or not on PATH: ${err.shortMessage}`);
+      }
       return {
         stdout: typeof err.stdout === 'string' ? err.stdout : '',
         stderr: failureStderr(err),

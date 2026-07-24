@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CiFailed, GhAuthRequired, MergeConflict, PrNotFound } from './errors.ts';
+import { CiFailed, GhAuthRequired, GhCliMissing, MergeConflict, PrNotFound } from './errors.ts';
 import {
   CHECKS_EMPTY_GRACE_MS,
   CHECKS_INITIAL_DELAY_MS,
@@ -81,6 +81,7 @@ test('GitHubClient is constructible (skeleton)', () => {
 test('domain errors carry their name', () => {
   assert.equal(new PrNotFound().name, 'PrNotFound');
   assert.equal(new GhAuthRequired().name, 'GhAuthRequired');
+  assert.equal(new GhCliMissing().name, 'GhCliMissing');
   assert.equal(new CiFailed().name, 'CiFailed');
   assert.equal(new MergeConflict().name, 'MergeConflict');
 });
@@ -1319,6 +1320,34 @@ test('defaultRunCmd: an aborted signal kills the in-flight child instead of orph
   assert.notEqual(r.exitCode, 0);
   assert.ok(Date.now() - started < 10_000, 'the child dies on abort, not on its own deadline');
   assert.match(r.stderr, /cancel/i);
+});
+
+test('defaultRunCmd: a missing binary → GhCliMissing, not a flattened exit 1', async () => {
+  // A spawn ENOENT used to return {exitCode: 1, stderr: ''} — indistinguishable from a real non-zero
+  // exit, and callers rendered `<cmd> failed:` with an empty reason. It is now a typed domain error
+  // that names the binary and carries execa's own summary (so the reason is surfaced, not dropped).
+  await assert.rejects(
+    defaultRunCmd('aitm-nonexistent-binary-xyz', ['repo', 'view']),
+    (err: unknown) => {
+      assert.ok(err instanceof GhCliMissing, 'a spawn ENOENT is a typed domain error, not exit 1');
+      assert.match(err.message, /aitm-nonexistent-binary-xyz/);
+      assert.match(err.message, /not installed or not on PATH/);
+      assert.match(err.message, /ENOENT/);
+      return true;
+    },
+  );
+});
+
+test('defaultRunCmd: a real non-zero exit keeps its own code instead of throwing', async () => {
+  // The spawn-failure fix must not swallow a genuine non-zero exit: it still returns, with its code.
+  const r = await defaultRunCmd(process.execPath, ['-e', 'process.exit(3)']);
+  assert.equal(r.exitCode, 3);
+});
+
+test('defaultRunCmd: a non-zero exit surfaces its own stderr', async () => {
+  const r = await defaultRunCmd(process.execPath, ['-e', 'console.error("boom"); process.exit(2)']);
+  assert.equal(r.exitCode, 2);
+  assert.match(r.stderr, /boom/);
 });
 
 test('withSignal: binds the run signal into every call, keeping the caller options', async () => {

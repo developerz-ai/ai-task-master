@@ -28,6 +28,9 @@ jobs:
       - name: lint
         run: bun run lint
 
+      - name: import cycles
+        run: bunx madge --circular packages/*/src
+
       - name: typecheck
         run: bun run typecheck
 

@@ -89,6 +89,10 @@ export type RunMergeFlowInput = {
   github: GitHubClient;
   // Cap on CI-wait/fix iterations before giving up. From `--max-iterations`; the flow defaults to 30.
   maxIterations?: number;
+  // Per-run token/cost accounting (issue #114/#190). The adapter binds role-scoped onUsage sinks off
+  // it and threads them through the take-over subagents; runMergePr flushes totals() to state + a
+  // summary line. Unset → no accounting (matching the merge flow's prior behavior).
+  usage?: UsageTracker;
   // Abort handle so a SIGINT (or a test) cancels the take-over loop → exit code 2.
   signal?: AbortSignal;
 };
@@ -172,6 +176,8 @@ export type MergePrCtx = {
   github?: GitHubClient;
   // See StartCtx.resolveStyle — same read-or-distill-or-fallback contract for the merge flow.
   resolveStyle?: (input: ResolveStyleInput) => Promise<string>;
+  // Sink for the end-of-run usage summary line (issue #114/#190). Defaults to process.stdout.
+  stdout?: (chunk: string) => void;
   // Abort handle, threaded into the take-over loop. When aborted, the flow returns `cancelled`
   // → exit code 2. The CLI can wire this to a SIGINT handler; tests drive it directly.
   signal?: AbortSignal;
@@ -839,6 +845,15 @@ export async function runMergePr(
       styleDigest = agentConfig.contents;
     }
 
+    // Per-run token/cost accounting (issue #114/#190) — the parity gap that left `aitm merge-pr`
+    // spend entirely unaccounted. One ModelLimitsRegistry for the tracker's pricing (a red-PR fix
+    // session runs the same coding-tier Worker as `aitm start`); totals flush after the flow.
+    const modelLimits = new ModelLimitsRegistry(
+      new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL, ctx.signal),
+      new OpenRouterReferenceCatalog(OPENROUTER_REFERENCE_URL, ctx.signal),
+    );
+    const usage = new UsageTracker(modelLimits);
+
     const runMergeFlow = ctx.runMergeFlow ?? defaultRunMergeFlow;
     let result: WorkLoopResult;
     try {
@@ -853,12 +868,25 @@ export async function runMergePr(
         state,
         runState,
         github,
+        usage,
         ...(args.maxIterations !== undefined ? { maxIterations: args.maxIterations } : {}),
         ...(ctx.signal ? { signal: ctx.signal } : {}),
       });
     } catch (err) {
       return { code: 1, message: errMsg(err) };
     }
+
+    // Flush per-run usage/cost accounting (issue #114/#190): persist totals + one summary line, the
+    // same end-of-run reporting `aitm start` does. Fire-and-forget — a tracker or state error must
+    // never change the run's outcome.
+    try {
+      const totals = await usage.totals();
+      await state.update((s) => ({ ...s, usage: totals }));
+      (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(usageSummaryLine(totals));
+    } catch {
+      // observability must never break the run
+    }
+
     return mapResultToExit(result);
   } finally {
     await disposeQuietly(disposer);

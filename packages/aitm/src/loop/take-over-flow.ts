@@ -116,6 +116,12 @@ export type TakeOverSubagents = {
   onReviewerStepFinish?: SubagentInit<ReviewerTools>['onStepFinish'];
   onWorkerStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
   onEditorStepFinish?: SubagentInit<WorkerTools>['onEditorStepFinish'];
+  // Per-call token-usage sinks (issue #114/#190) so `aitm merge-pr` accounts for its spend like
+  // `aitm start`. The Worker sink covers the shared CI-fix session (recorded under the coding-tier
+  // worker role); the Reviewer sink covers the review pass. A conflict resolver, when wired, carries
+  // its own via buildConflictResolver. Unset → no accounting, matching prior behavior.
+  onWorkerUsage?: SubagentInit<WorkerTools>['onUsage'];
+  onReviewerUsage?: SubagentInit<ReviewerTools>['onUsage'];
   // Injection seam — bypass the real subagent agents in tests.
   runReviewerOverride?: (input: {
     pr: number;
@@ -434,6 +440,7 @@ async function runReviewerThreads(
     ...(input.subagents.onReviewerStepFinish
       ? { onStepFinish: input.subagents.onReviewerStepFinish }
       : {}),
+    ...(input.subagents.onReviewerUsage ? { onUsage: input.subagents.onReviewerUsage } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
   });
   return runReviewer(agent, {
@@ -477,6 +484,7 @@ function runCiFixSession(
       ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
       ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),
       ...(subagents.timeout !== undefined ? { timeout: subagents.timeout } : {}),
+      ...(subagents.onWorkerUsage ? { onUsage: subagents.onWorkerUsage } : {}),
       ...(subagents.onWorkerStepFinish ? { onStepFinish: subagents.onWorkerStepFinish } : {}),
       ...(subagents.onEditorStepFinish ? { onEditorStepFinish: subagents.onEditorStepFinish } : {}),
       ...(subagents.runWorkerOverride ? { runWorkerOverride: subagents.runWorkerOverride } : {}),

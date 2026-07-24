@@ -49,7 +49,7 @@ import { z } from 'zod';
 import type { RunLoopInput } from '../cli/commands.ts';
 import { buildCompactionStep } from '../compaction/compaction-step.ts';
 import { Compactor } from '../compaction/compactor.ts';
-import type { WebSearchConfig } from '../config/schema.ts';
+import type { ResolvedConfig, WebSearchConfig } from '../config/schema.ts';
 import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager, type ToolSurface } from '../mcp/mcp-client.ts';
 import { guardDeferred, TOOL_SEARCH_TOOL_NAME, toolSearch } from '../mcp/tool-search.ts';
@@ -332,11 +332,16 @@ type StepEvent<TOOLS extends ToolSet> = Parameters<
 
 // Apply operator-configured PreToolUse/PostToolUse hooks over a resolved tool record (issue #121),
 // after the MCP/local partial-fill so both MCP-supplied and local tools are covered. No hooks
-// configured → the record is returned untouched. Exported for tests.
-export function applyHooks<T extends ToolSet>(tools: T, input: RunLoopInput, cwd: string): T {
+// configured → the record is returned untouched. Takes just the resolved config (not the whole
+// RunLoopInput) so the merge-pr adapter can reuse it over a RunMergeFlowInput too. Exported for tests.
+export function applyHooks<T extends ToolSet>(
+  tools: T,
+  source: { resolved: ResolvedConfig },
+  cwd: string,
+): T {
   // The zod-inferred config type spells optional fields as `T | undefined`; withHooks reads them
   // with `?? []`, so the shapes are runtime-identical — the cast only reconciles exactOptional.
-  const hooks = input.resolved.hooks as ToolHooks | undefined;
+  const hooks = source.resolved.hooks as ToolHooks | undefined;
   return hooks ? withHooks(tools, hooks, { cwd }) : tools;
 }
 

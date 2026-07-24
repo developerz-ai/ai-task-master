@@ -302,6 +302,27 @@ test('runFixSession: threads verifyCommand into the fix Worker input (issue #122
   assert.equal((captured as WorkerInput).formatCommand, 'bun run lint:fix');
 });
 
+test('runFixSession: threads the run signal into the fix Worker input (editor fanout cancel)', async () => {
+  // The agent already gets this signal via SubagentInit; the editor fanout is reachable only
+  // through WorkerInput.signal, so an abort must land on both or the leaves outlive the run.
+  const controller = new AbortController();
+  let captured: WorkerInput | null = null;
+  await runFixSession(
+    baseInput({
+      runCmd: recordingRunCmd().runCmd,
+      signal: controller.signal,
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  assert.ok(captured, 'fix Worker was invoked');
+  assert.equal((captured as WorkerInput).signal, controller.signal);
+});
+
 test('runFixSession: threads the live rolling context into the fix Worker input (issue #123)', async () => {
   let captured: WorkerInput | null = null;
   const rolling =

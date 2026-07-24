@@ -398,6 +398,8 @@ async function runWorkerCiFix(
     ...(input.subagents.formatCommand ? { formatCommand: input.subagents.formatCommand } : {}),
     ...(input.subagents.verifyCommand ? { verifyCommand: input.subagents.verifyCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),
+    // Same signal the take-over Worker's agent gets below, so an abort tears down the fanout too.
+    ...(input.signal ? { signal: input.signal } : {}),
   };
   if (input.subagents.runWorkerOverride) {
     return input.subagents.runWorkerOverride(workerInput);

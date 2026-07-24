@@ -99,7 +99,13 @@ type OrchestratorCalls = {
   selfReview: SelfReviewInvocation[];
 };
 
-type WorkerInvocationCall = { group: PrGroup; task?: Task; checkout: Checkout; baseBranch: string };
+type WorkerInvocationCall = {
+  group: PrGroup;
+  task?: Task;
+  checkout: Checkout;
+  baseBranch: string;
+  signal?: AbortSignal;
+};
 
 function makeOrchestrator(
   config: {
@@ -2050,6 +2056,33 @@ test('run(): an already-aborted signal → cancelled before any group runs', asy
   const result = await loop.run();
   assert.equal(result.kind, 'cancelled');
   assert.equal(calls.runWorker.length, 0, 'no worker invoked once the signal is already aborted');
+});
+
+test("run(): the run's signal reaches the Worker invocation", async () => {
+  // The mid-batch cancel above only holds because the signal actually reaches the in-flight LLM
+  // calls; the port field is what carries it (WorkerInvocation.signal → WorkerInput.signal). Left
+  // unpassed, an abort would be noticed only between groups, after a full pass burned its tokens.
+  const controller = new AbortController();
+  const ready = makeGraph([group('a')], { completeAfter: 1 });
+  const { orchestrator, calls } = makeOrchestrator();
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, graph: ready.graph, signal: controller.signal }),
+  );
+  await loop.run();
+  assert.equal(calls.runWorker.length, 1);
+  assert.equal(calls.runWorker[0]?.signal, controller.signal);
+});
+
+test('run(): no run signal → the Worker invocation omits it', async () => {
+  const ready = makeGraph([group('a')], { completeAfter: 1 });
+  const { orchestrator, calls } = makeOrchestrator();
+  const loop = new WorkLoop(makeDeps({ orchestrator, graph: ready.graph }));
+  await loop.run();
+  assert.equal(calls.runWorker.length, 1);
+  assert.ok(
+    calls.runWorker[0] && !('signal' in calls.runWorker[0]),
+    'exactOptionalPropertyTypes: an absent signal is omitted, never passed as undefined',
+  );
 });
 
 test('run(): signal aborts mid-batch → cancelled, not blocked, even though the abort failed the group', async () => {

@@ -141,6 +141,26 @@ test('runSelfReviewSession: no verify command → adversarial-review task, Worke
   assert.equal((captured as WorkerInput).verifyCommand, undefined);
 });
 
+test('runSelfReviewSession: threads the run signal into the review Worker input', async () => {
+  // Mirrors the CI-fix session: the agent's own signal never reaches the editor fanout, which is
+  // wired only from WorkerInput.signal.
+  const controller = new AbortController();
+  let captured: WorkerInput | null = null;
+  await runSelfReviewSession(
+    baseInput({
+      signal: controller.signal,
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  assert.ok(captured, 'review Worker was invoked');
+  assert.equal((captured as WorkerInput).signal, controller.signal);
+});
+
 test('runSelfReviewSession: nothing to fix (empty manifest, verify clean) → clean', async () => {
   const result = await runSelfReviewSession(
     baseInput({

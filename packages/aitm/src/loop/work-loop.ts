@@ -49,6 +49,10 @@ export type WorkerInvocation = {
   task?: Task;
   checkout: Checkout;
   baseBranch: string;
+  // The run's cancellation signal (WorkLoopDeps.signal), so an abort reaches this pass's in-flight
+  // LLM calls — the Coordinator's generation AND the editor fanout (WorkerInput.signal) — instead of
+  // only being noticed between groups. Optional: a run started without a signal omits it.
+  signal?: AbortSignal;
 };
 
 export type ReviewerInvocation = {
@@ -439,10 +443,11 @@ export class WorkLoop {
       for (const outcome of settled) {
         if (outcome.status === 'rejected') throw outcome.reason;
       }
-      // Re-check post-batch: an abort mid-batch aborts each group's in-flight LLM calls
-      // (worker.ts signal wiring), which runGroup's catch would otherwise report as `blocked`
-      // (exit 1). A cancelled run must report cancelled (exit 2) regardless of the abort-induced
-      // per-group outcome.
+      // Re-check post-batch: an abort mid-batch aborts each group's in-flight LLM calls — the
+      // signal reaches them via runOneTask → WorkerInvocation.signal → WorkerInput.signal (the
+      // editor fanout's shared controller) — which runGroup's catch would otherwise report as
+      // `blocked` (exit 1). A cancelled run must report cancelled (exit 2) regardless of the
+      // abort-induced per-group outcome.
       if (signal?.aborted) {
         return { kind: 'cancelled', outcomes: this.outcomes.slice() };
       }
@@ -851,7 +856,13 @@ export class WorkLoop {
     }
     const startedAt = this.now();
     const result = await this.checkoutMutex.runExclusive(async () => {
-      const worked = await this.deps.orchestrator.runWorker({ group, task, checkout, baseBranch });
+      const worked = await this.deps.orchestrator.runWorker({
+        group,
+        task,
+        checkout,
+        baseBranch,
+        ...(this.deps.signal ? { signal: this.deps.signal } : {}),
+      });
       if (worked.kind === 'ok') {
         await this.deps.orchestrator.finalizeCommit(group, worked.delivery, checkout.path, task.id);
       }

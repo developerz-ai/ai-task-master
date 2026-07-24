@@ -100,6 +100,8 @@ Agent-scoped rather than per-call, because the calls that matter are not all dri
 
 It also ends the retry kernel: an aborted run never sits out a backoff window nobody is waiting for.
 
+The editor fanout is the one set of generations an agent init cannot reach — the leaves are raw `generateText` calls sharing the fanout's own `AbortController`, not agent steps. That controller links to `WorkerInput.signal`, so the same run signal has to arrive twice: once on the agent (Coordinator) and once on the Worker input (leaves). Production passes it on both from one expression per call site — `WorkLoop` → `WorkerInvocation.signal` for the task path, and the run signal directly in the CI-fix, self-review and take-over sessions. Without the second, a Ctrl-C stops the Coordinator while every leaf keeps generating against a run that is already over.
+
 The optional half of a `SubagentInit` is forwarded through one helper (`forwardInit`), so every role passes the same dial set — before it, each factory hand-rolled the spread and quietly dropped fields the others forwarded.
 
 ## Throughput guards

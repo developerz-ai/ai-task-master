@@ -1356,7 +1356,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   };
 
   return {
-    runWorker: async ({ group, task, checkout, baseBranch }) => {
+    runWorker: async ({ group, task, checkout, baseBranch, signal }) => {
+      // The WorkLoop passes the run's signal per invocation; fall back to the adapter's own so a
+      // caller of this port that predates WorkerInvocation.signal still cancels. One expression for
+      // both consumers below — the Coordinator agent and the editor fanout must abort together.
+      const workerSignal = signal ?? input.signal;
       // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
       // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
       // memory (#118) is mounted on the manifest Worker so it can record durable repo facts.
@@ -1486,7 +1490,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
               ),
             }
           : {}),
-        ...(input.signal ? { signal: input.signal } : {}),
+        ...(workerSignal ? { signal: workerSignal } : {}),
       });
       const stopWorkerHeartbeat = startHeartbeat(workerAgentLabel, workerHeartbeatSink);
       let result: Awaited<ReturnType<typeof runWorkerSubagent>>;
@@ -1507,6 +1511,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           // 4), so passed unconditionally — with the default it equals EDITOR_CONCURRENCY_DEFAULT, so
           // behavior is unchanged until an operator sets `editorConcurrency`.
           editorConcurrency: input.resolved.editorConcurrency,
+          // Cancels the editor fanout: without it an abort stops the Coordinator's generation while
+          // every editor leaf runs to completion, burning a fanout's worth of tokens on a dead run.
+          ...(workerSignal ? { signal: workerSignal } : {}),
           // Resume (issue #108): continue the interrupted conversation from its retained messages
           // instead of cold-starting, reusing the #107 priorHandle continuation seam.
           ...(resumeMessages ? { priorHandle: { agent, messages: resumeMessages } } : {}),

@@ -263,6 +263,8 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
     ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),
+    // Same signal the fix Worker's agent gets below, so an abort tears down the editor fanout too.
+    ...(input.signal ? { signal: input.signal } : {}),
   };
   if (subagents.runWorkerOverride) {
     return subagents.runWorkerOverride({

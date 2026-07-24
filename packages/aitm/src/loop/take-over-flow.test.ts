@@ -239,6 +239,32 @@ test('runTakeOverFlow: threads verifyCommand into the CI-fix Worker input (issue
   assert.equal((captured as WorkerInput).formatCommand, 'bun run lint:fix');
 });
 
+test('runTakeOverFlow: threads the run signal into the CI-fix Worker input', async () => {
+  // The flow's own signal check only fires between iterations; WorkerInput.signal is what stops the
+  // editor fanout already in flight when the abort lands.
+  const controller = new AbortController();
+  const gh = fakeGithub({ checks: ['throw-cifailed'], threads: [[]] });
+  let captured: WorkerInput | null = null;
+  await runTakeOverFlow(
+    baseInput(gh.github, {
+      signal: controller.signal,
+      subagents: {
+        reviewerModel: dummyModel,
+        reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+        workerModel: dummyModel,
+        workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+        styleContents: '',
+        runWorkerOverride: async (win) => {
+          captured = win;
+          return { kind: 'blocked', reason: 'stop here' } satisfies WorkerResult;
+        },
+      },
+    }),
+  );
+  assert.ok(captured, 'CI-fix worker was invoked');
+  assert.equal((captured as WorkerInput).signal, controller.signal);
+});
+
 test('runTakeOverFlow: max iterations exhausted with threads remaining → blocked', async () => {
   const threads: ReviewThread[] = [
     {

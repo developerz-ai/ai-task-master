@@ -4,7 +4,12 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isToleratedFailure, TOLERATED_FAILURES_ENV, toleratedReason } from './check-tolerance.ts';
+import {
+  __resetEnvRulesCache,
+  isToleratedFailure,
+  TOLERATED_FAILURES_ENV,
+  toleratedReason,
+} from './check-tolerance.ts';
 import { GitHubClient, type RunCmd, type Sleep } from './github-client.ts';
 
 // Local stand-ins for the shim helpers in github-client.test.ts: one canned `gh` reply per call,
@@ -68,6 +73,7 @@ test('a real CodeRabbit verdict is still a failure', () => {
 // silently swallow a whole family of failures.
 test('environment rules stay exact', () => {
   const previous = process.env[TOLERATED_FAILURES_ENV];
+  __resetEnvRulesCache();
   process.env[TOLERATED_FAILURES_ENV] = 'bot=limit';
   try {
     assert.equal(isToleratedFailure({ name: 'bot', description: 'limit' }), true);
@@ -75,6 +81,7 @@ test('environment rules stay exact', () => {
   } finally {
     if (previous === undefined) delete process.env[TOLERATED_FAILURES_ENV];
     else process.env[TOLERATED_FAILURES_ENV] = previous;
+    __resetEnvRulesCache();
   }
 });
 
@@ -84,6 +91,7 @@ test('the same message from another check is a real failure', () => {
 
 test('extra rules can be declared via the environment', () => {
   const previous = process.env[TOLERATED_FAILURES_ENV];
+  __resetEnvRulesCache();
   process.env[TOLERATED_FAILURES_ENV] = 'some-bot=quota exceeded; other=busy';
   try {
     assert.equal(isToleratedFailure({ name: 'some-bot', description: 'Quota exceeded' }), true);
@@ -92,17 +100,20 @@ test('extra rules can be declared via the environment', () => {
   } finally {
     if (previous === undefined) delete process.env[TOLERATED_FAILURES_ENV];
     else process.env[TOLERATED_FAILURES_ENV] = previous;
+    __resetEnvRulesCache();
   }
 });
 
 test('malformed environment rules are skipped, not thrown', () => {
   const previous = process.env[TOLERATED_FAILURES_ENV];
+  __resetEnvRulesCache();
   process.env[TOLERATED_FAILURES_ENV] = 'garbage;;=x;y=';
   try {
     assert.equal(isToleratedFailure(RATE_LIMITED), true);
   } finally {
     if (previous === undefined) delete process.env[TOLERATED_FAILURES_ENV];
     else process.env[TOLERATED_FAILURES_ENV] = previous;
+    __resetEnvRulesCache();
   }
 });
 

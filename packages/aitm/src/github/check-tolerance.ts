@@ -50,6 +50,9 @@ export const TOLERATED_FAILURES: readonly ToleratedFailure[] = [
   },
 ];
 
+// Memoized env-parsed rules, lazily initialized on first access.
+let cachedEnvRules: ToleratedFailure[] | undefined;
+
 // Malformed entries (no `=`, empty side) are skipped rather than thrown: a typo in an env var must
 // not break CI evaluation.
 function envRules(): ToleratedFailure[] {
@@ -66,12 +69,25 @@ function envRules(): ToleratedFailure[] {
   return rules;
 }
 
+// Lazily initialize the memoized env rules on first call.
+function getEnvRules(): ToleratedFailure[] {
+  if (cachedEnvRules === undefined) {
+    cachedEnvRules = envRules();
+  }
+  return cachedEnvRules;
+}
+
+// For testing: reset the memoized env rules cache when the env var changes.
+export function __resetEnvRulesCache(): void {
+  cachedEnvRules = undefined;
+}
+
 // The rule's reason when a failing check may be ignored, else null.
 export function toleratedReason(check: ToleratedCheck): string | null {
   const name = check.name.trim().toLowerCase();
   const description = (check.description ?? '').trim().toLowerCase();
   if (!name || !description) return null;
-  for (const rule of [...TOLERATED_FAILURES, ...envRules()]) {
+  for (const rule of [...TOLERATED_FAILURES, ...getEnvRules()]) {
     if (rule.check.toLowerCase() !== name) continue;
     const wanted = rule.description.toLowerCase();
     const hit = rule.match === 'contains' ? description.includes(wanted) : description === wanted;

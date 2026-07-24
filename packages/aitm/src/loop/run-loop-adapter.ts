@@ -578,6 +578,10 @@ export type OrchestratorBridgeCtx = {
   // capture the worker input the bridge builds — chiefly that the resolved `editorConcurrency` cap
   // is threaded through. Omitted in production, where it defaults to the real runWorkerSubagent.
   workerRunner?: typeof runWorkerSubagent;
+  // Test seam: override specialist discovery so a test can force a discovery failure and assert the
+  // roster degrades to empty instead of poisoning the memoized promise for every later Worker.
+  // Omitted in production, where it defaults to the real discoverSpecialists.
+  discoverSpecialists?: typeof discoverSpecialists;
 };
 
 export type RunLoopAdapterSeams = {
@@ -1145,6 +1149,7 @@ export function selfReviewVerifyCommand(
 export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrchestrator {
   const { input, mcp, rollingContext, fetchHtmlAvailable, state, stepCounter, background } = ctx;
   const workerRunner = ctx.workerRunner ?? runWorkerSubagent;
+  const discoverRoster = ctx.discoverSpecialists ?? discoverSpecialists;
   // Rolling context accumulates across groups within a run (issue #123): seeded from what a resumed
   // run already persisted (ctx.rollingContext), grown by openPr after each PR, and read LIVE by the
   // worker + ci-fix bridges — so group N+1 plans against group N's digest. Appends are serialized so
@@ -1164,13 +1169,16 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   let specialistsPromise: ReturnType<typeof discoverSpecialists> | undefined;
   const specialistRoster = () =>
     (specialistsPromise ??= (async () => {
-      const shipped = await discoverSpecialists(input.cwd);
-      if (shipped.length > 0) return shipped;
-      if (input.resolved.generateSpecialists === false) return shipped;
-      // Bootstrap must never break (or even delay-fail) a run: a state port without read() (test
-      // stubs), a stub credentials object, or a provider failure all degrade to the empty roster —
-      // byte-identical to a repo with no agents before this feature.
+      // Never reject: any failure degrades to the empty roster, byte-identical to a repo with no
+      // agents. The result is memoized, so a rejection here would be re-thrown into every later
+      // Worker that awaits the roster and would surface as an unhandled rejection from the
+      // fire-and-forget announce below (fatal on Node ≥15). Discovery I/O, a state port without
+      // read() (test stubs), a stub credentials object, or a provider failure during bootstrap all
+      // land in the same catch.
       try {
+        const shipped = await discoverRoster(input.cwd);
+        if (shipped.length > 0) return shipped;
+        if (input.resolved.generateSpecialists === false) return shipped;
         const runState = await state.read();
         const bootstrapUsage = roleUsageSink(
           input.usage,
@@ -1192,20 +1200,23 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           },
         );
       } catch {
-        return shipped;
+        return [];
       }
     })());
   // Announce the discovered roster once, up front (mirrors claudetm's "Found N subagents"). For a
   // repo that ships agents this is a cheap dir read; for a generated team it also fronts the one
   // LLM call so the roster line still appears before the first group starts. Fire-and-forget —
-  // failures degrade to an empty roster inside the promise, never delaying the run.
-  void specialistRoster().then((roster) => {
-    if (roster.length > 0) {
-      harnessProgress(
-        `found ${roster.length} specialist(s): ${roster.map((a) => a.name).join(', ')}`,
-      );
-    }
-  });
+  // specialistRoster() never rejects (failures degrade to [] inside it); the .catch is a final guard
+  // so a throw from the announce callback itself can never become an unhandled rejection.
+  void specialistRoster()
+    .then((roster) => {
+      if (roster.length > 0) {
+        harnessProgress(
+          `found ${roster.length} specialist(s): ${roster.map((a) => a.name).join(', ')}`,
+        );
+      }
+    })
+    .catch(() => {});
 
   // Per-group CI-fix conversation handles, retained in memory for the life of the run so successive
   // fix passes for a group continue the same Worker conversation instead of re-planning cold — the

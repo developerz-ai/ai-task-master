@@ -2241,3 +2241,93 @@ test('runWorker: no signal anywhere → WorkerInput omits it', async () => {
   } as never);
   assert.equal(seen[0], undefined);
 });
+
+// ---- specialist-discovery failure degrades, never poisons later workers -----
+
+// A throwing discoverSpecialists must not reject the memoized roster promise. The rejection would be
+// memoized and re-awaited by every later runWorker (breaking each group before it reaches the Worker)
+// and would surface as an unhandled rejection from the fire-and-forget announce (fatal on Node ≥15).
+// Both must instead degrade to an empty roster. `seen` records the agent each Worker call receives, so
+// the tests can prove execution still reaches the Worker.
+function discoveryFailureHarness(): {
+  orch: ReturnType<typeof defaultMakeOrchestrator>;
+  seen: unknown[];
+} {
+  const model = emptyManifestModel();
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: () => 'openai/gpt-5',
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const seen: unknown[] = [];
+  const workerRunner = async (agent: unknown): Promise<WorkerResult> => {
+    seen.push(agent);
+    return { kind: 'blocked', reason: 'captured' };
+  };
+  const orch = defaultMakeOrchestrator({
+    input: {
+      cwd: '/tmp/adapter-discovery-fail',
+      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
+      credentials,
+      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+      github: {},
+      goal: 'g',
+      criteria: undefined,
+      branch: undefined,
+      state: {},
+    },
+    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
+    rollingContext: '',
+    state: {},
+    stepCounter: () => undefined,
+    workerRunner,
+    discoverSpecialists: async () => {
+      throw new Error('boom: cannot read .claude/agents');
+    },
+  } as never);
+  return { orch, seen };
+}
+
+test('runWorker: a discoverSpecialists failure degrades to an empty roster, not a poisoned promise', async () => {
+  const { orch, seen } = discoveryFailureHarness();
+  // Each call awaits the memoized roster before routing. A rejected roster would throw here — and for
+  // every later group — never reaching the Worker.
+  await orch.runWorker({
+    group: group('core'),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  await orch.runWorker({
+    group: group('api'),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  assert.equal(seen.length, 2, 'both groups reached the Worker despite the discovery failure');
+});
+
+test('defaultMakeOrchestrator: a discoverSpecialists failure never leaks an unhandled rejection', async () => {
+  const captured: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    captured.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    // Construction fires the fire-and-forget announce (`specialistRoster().then(...)`); the runWorker
+    // exercises the awaited consumer. Neither may surface the discovery failure as a rejection.
+    const { orch } = discoveryFailureHarness();
+    await orch
+      .runWorker({
+        group: group('core'),
+        checkout: { path: '/tmp/wt' },
+        baseBranch: 'main',
+      } as never)
+      .catch(() => {});
+    // Let any floating rejection settle before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled);
+  }
+  const leaked = captured.filter((r) => r instanceof Error && r.message.includes('boom'));
+  assert.deepEqual(leaked, [], 'discovery failure degraded silently, no unhandled rejection');
+});

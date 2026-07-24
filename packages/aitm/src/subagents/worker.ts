@@ -61,9 +61,11 @@ import {
   tool,
 } from 'ai';
 import { z } from 'zod';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
+import type { FileChange, WorkerDelivery } from '../domain/worker-delivery.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import { harnessProgress } from '../observability/step-progress.ts';
-import type { PrGroup, Task } from '../state/schema.ts';
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
 import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
@@ -196,23 +198,6 @@ export type WorkerInput = {
   // re-do finished work. Off everywhere else: the normal worker path must keep planning and editing
   // as distinct phases. See planAndEdit.
   inlineEditsExpected?: boolean;
-};
-
-// Per-file outcome from the parallel editor fanout. Useful to the Orchestrator
-// when composing the PR body and the (possibly squashed) commit message.
-export type FileChange = {
-  path: string;
-  kind: 'create' | 'modify' | 'delete';
-  summary: string;
-};
-
-export type WorkerDelivery = {
-  branch: string;
-  // Draft message Worker proposes; Orchestrator may rewrite before committing the final.
-  draftCommitMessage: string;
-  changes: FileChange[];
-  // Per-task progress entries appended to .ai-task-master/progress.md.
-  progressEntries: string[];
 };
 
 export type WorkerResult =

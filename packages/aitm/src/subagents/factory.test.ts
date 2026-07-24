@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { LanguageModelUsage } from 'ai';
+import { DEFAULT_LLM_STEP_TIMEOUT_MS } from '../config/defaults.ts';
 import {
   appendReminderBlock,
-  DEFAULT_LLM_STEP_TIMEOUT_MS,
   forwardInit,
   prependContextBlock,
   reportUsage,

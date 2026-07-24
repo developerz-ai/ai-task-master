@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { LanguageModel } from 'ai';
 import type { ResolvedConfig } from '../config/schema.ts';
+import { DEFAULT_MODELS, OPENROUTER_API_BASE_URL } from '../domain/model.ts';
 import { Credentials, chatSettings, providerSettings, ROLE_CAPABILITY } from './credentials.ts';
-import { DEFAULT_MODELS, OPENROUTER_API_BASE_URL } from './defaults.ts';
 
 const baseResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig => ({
   openrouterApiKey: 'sk-or-test',

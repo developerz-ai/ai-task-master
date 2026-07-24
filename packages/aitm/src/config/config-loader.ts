@@ -16,16 +16,17 @@
 import { join } from 'node:path';
 import type { CommandRule } from '@developerz.ai/ai-claude-compat';
 import { ZodError, z } from 'zod';
-import { DEFAULT_MODELS } from '../credentials/defaults.ts';
+import { type Capability, DEFAULT_MODELS } from '../domain/model.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { registerSecretValues } from '../logger/secret-registry.ts';
-import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../loop/constants.ts';
-import { DEFAULT_MCP_DEFER_TOOLS_OVER } from '../mcp/mcp-client.ts';
 import { type McpServers, McpServersSchema } from '../mcp/schema.ts';
-import { DEFAULT_LLM_STEP_TIMEOUT_MS } from '../subagents/factory.ts';
+import {
+  DEFAULT_LLM_STEP_TIMEOUT_MS,
+  DEFAULT_MAX_CI_FIX_ATTEMPTS,
+  DEFAULT_MCP_DEFER_TOOLS_OVER,
+} from './defaults.ts';
 import { formatZodError, readJsonFile } from './json-file.ts';
 import {
-  type Capability,
   type CliOverrides,
   CONFIG_KEYS,
   type ConfigFile,

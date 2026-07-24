@@ -12,8 +12,8 @@ import { access, mkdir, open, readdir, readFile, stat, unlink, writeFile } from 
 import { join } from 'node:path';
 import type { LanguageModelUsage, ModelMessage } from 'ai';
 import { modelMessageSchema } from 'ai';
+import type { GroupStage } from '../domain/pr-group.ts';
 import { Logger } from '../logger/logger.ts';
-import type { GroupStage } from './schema.ts';
 
 const TRANSCRIPTS_DIR = 'transcripts';
 const PLANNER_SUBDIR = 'planner';

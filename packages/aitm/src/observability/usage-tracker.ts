@@ -6,7 +6,7 @@
 // docs/auth.md §"LLM provider", src/observability/error-reporter.ts
 
 import type { LanguageModelUsage, ProviderMetadata } from 'ai';
-import type { Role } from '../credentials/credentials.ts';
+import type { Role } from '../domain/role.ts';
 import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
 
 export type RoleUsage = {

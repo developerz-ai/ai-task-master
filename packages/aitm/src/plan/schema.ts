@@ -3,7 +3,7 @@
 // Planner returns to the Orchestrator before that persistence step.
 
 import { z } from 'zod';
-import { TaskComplexitySchema } from '../state/schema.ts';
+import { TaskComplexitySchema } from '../domain/task.ts';
 
 // The `.describe()` text reaches the model as the tool-input JSON schema, at the moment it fills the
 // field — far closer to the decision than the system prompt, and the only layer the schema-retry

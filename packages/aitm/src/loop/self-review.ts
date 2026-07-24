@@ -23,11 +23,12 @@
 import type { MemoryIndexEntry } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, TimeoutConfiguration } from 'ai';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
-import type { Capability } from '../config/schema.ts';
+import type { Capability } from '../domain/model.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
 import { defaultRunCmd, type RunCmd, type RunCmdResult } from '../github/github-client.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import { withAcceptanceCheck } from '../plan/acceptance.ts';
-import type { PrGroup, Task } from '../state/schema.ts';
 import type { SubagentInit, WorkerSubagentInit } from '../subagents/factory.ts';
 import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {

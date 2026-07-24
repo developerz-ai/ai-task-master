@@ -20,6 +20,7 @@
 // to waiting-reviews. The addressed-threads dedup (prContext) is what lets the waiting-reviews ⇄
 // addressing-reviews loop terminate instead of re-processing a replied-but-unresolved thread.
 
+import type { GroupStage, PrGroup } from '../domain/pr-group.ts';
 import { CiFailed } from '../github/errors.ts';
 import {
   type CheckSummary,
@@ -28,7 +29,7 @@ import {
   type Sleep,
 } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
-import type { GroupStage, PrGroup, RunState } from '../state/schema.ts';
+import type { RunState } from '../state/schema.ts';
 import { type CiRoute, routeCiPoll } from './ci-outcome-policy.ts';
 import { REVIEW_COMMENTS_GRACE } from './constants.ts';
 

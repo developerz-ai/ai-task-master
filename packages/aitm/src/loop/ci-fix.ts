@@ -19,7 +19,9 @@
 import type { MemoryIndexEntry, SubagentHandle } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, ModelMessage, TimeoutConfiguration } from 'ai';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
-import type { Capability } from '../config/schema.ts';
+import type { Capability } from '../domain/model.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
 import {
   defaultRunCmd,
   type RunCmd,
@@ -28,7 +30,6 @@ import {
 } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
-import type { PrGroup, Task } from '../state/schema.ts';
 import type { SubagentInit, WorkerSubagentInit } from '../subagents/factory.ts';
 import { harnessContextBlock, reminderAgentSystemPrompt } from '../subagents/role-prompt.ts';
 import {

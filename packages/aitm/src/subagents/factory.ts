@@ -33,12 +33,6 @@ export type OnUsage = (
   providerMetadata?: ProviderMetadata,
 ) => void;
 
-// Default per-step LLM request deadline (issue #129). The bound covers one provider HTTP call plus
-// that step's tool executions, and a single legitimate Worker step may run a bash call at the tool's
-// own 600s ceiling (MAX_BASH_TIMEOUT_MS) plus a slow high-effort completion — so the default clears
-// 600s comfortably. Config `llmStepTimeoutMs` overrides it; the schema floor is 1000ms.
-export const DEFAULT_LLM_STEP_TIMEOUT_MS = 900_000;
-
 // Runaway backstop for a subagent's tool loop — NOT a work budget. Every subagent terminates when it
 // calls `submit` (`hasToolCall(SUBMIT_TOOL_NAME)` in createSubagent's stopWhen), so this cap only
 // fires for a pathological agent that never submits. The old per-role caps (12–30) were low enough to

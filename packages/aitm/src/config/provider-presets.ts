@@ -4,7 +4,7 @@
 // separately (--api-key or `aitm profile set`), never hardcoded here. Every preset is an
 // OpenAI-compatible endpoint — no Anthropic SDK path (see docs/auth.md §Anthropic).
 
-import { OPENROUTER_API_BASE_URL } from '../credentials/defaults.ts';
+import { OPENROUTER_API_BASE_URL } from '../domain/model.ts';
 import type { Profile } from './schema.ts';
 
 export type PresetName = 'openrouter' | 'zai' | 'moonshot';

@@ -9,8 +9,9 @@ import {
   type OpenRouterProvider,
 } from '@openrouter/ai-sdk-provider';
 import type { LanguageModel } from 'ai';
-import type { Capability, ResolvedConfig } from '../config/schema.ts';
-import { DEFAULT_MODELS, isOpenRouterEndpoint } from './defaults.ts';
+import type { ResolvedConfig } from '../config/schema.ts';
+import { type Capability, DEFAULT_MODELS, isOpenRouterEndpoint } from '../domain/model.ts';
+import type { Role } from '../domain/role.ts';
 import { samplingParamsFor } from './model-params.ts';
 
 // Amazon Bedrock rejects the AI SDK's structured-output request (`output_config.format`), failing
@@ -59,7 +60,7 @@ export function chatSettings(
   // not OpenRouter — it must not receive OpenRouter-only directives. Gate on the resolved HOST, not
   // baseURL presence: the `openrouter` preset sets baseURL to the OpenRouter endpoint explicitly, so a
   // presence check would wrongly strip cache_control/session_id/usage for every preset-openrouter
-  // profile (see credentials/defaults.ts isOpenRouterEndpoint).
+  // profile (see domain/model.ts isOpenRouterEndpoint).
   const onOpenRouter = isOpenRouterEndpoint(resolved.baseURL);
   // `cache_control` is an OpenRouter request-body directive enabling automatic prompt caching for
   // the cache-control families (anthropic/*, qwen/*, alibaba/*):
@@ -96,8 +97,6 @@ export function chatSettings(
     ...samplingParamsFor(modelId),
   };
 }
-
-export type Role = 'planner' | 'worker' | 'reviewer' | 'orchestrator';
 
 export const ROLE_CAPABILITY: Readonly<Record<Role, Capability>> = {
   planner: 'smart',

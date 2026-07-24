@@ -12,7 +12,17 @@
 
 import { type Tool, tool } from 'ai';
 import { z } from 'zod';
-import type { GithubToolInput, GithubToolOutput } from '../subagents/reviewer.ts';
+
+// The `github` tool's I/O contract. Flat (not a union) so the tool's parameter JSON-Schema isn't
+// `oneOf` — several OpenRouter-routed providers reject `oneOf` in tool params ("Invalid arguments
+// passed to the model"). `body` is used only by replyToThread. Lives with the tool; the Reviewer
+// (subagents/reviewer.ts §ReviewerTools.github) imports it from here.
+export type GithubToolInput = {
+  action: 'replyToThread' | 'resolveThread';
+  threadId: string;
+  body?: string | undefined;
+};
+export type GithubToolOutput = { ok: boolean; error?: string };
 
 // Minimal slice of GitHubClient surface this tool needs. Keeping it structural means tests
 // can drop in a literal `{ replyToThread, resolveThread }` stub without subclassing.

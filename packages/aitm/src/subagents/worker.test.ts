@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
-import type { PrGroup, Task } from '../state/schema.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
 import { render } from './prompts/templates.ts';
 import {
   type BashInput,

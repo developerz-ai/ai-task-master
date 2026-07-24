@@ -22,6 +22,8 @@ import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { RunLoopInput } from '../cli/commands.ts';
 import { Credentials } from '../credentials/credentials.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import { GitHubClient } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
@@ -29,10 +31,10 @@ import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import { UsageTracker } from '../observability/usage-tracker.ts';
 import { type ModelLimitsLookup, ModelNotFound } from '../openrouter/model-limits.ts';
 import type { Plan } from '../plan/schema.ts';
-import type { PrGroup, RunState } from '../state/schema.ts';
+import type { RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import { type TranscriptRecorder, TranscriptStore } from '../state/transcript-store.ts';
-import type { WorkerDelivery, WorkerResult } from '../subagents/worker.ts';
+import type { WorkerResult } from '../subagents/worker.ts';
 import {
   type AdapterStatePort,
   activeToolNames,

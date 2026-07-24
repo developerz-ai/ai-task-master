@@ -10,7 +10,8 @@
 
 import { join } from 'node:path';
 import { type AgentDefinition, loadAgents } from '@developerz.ai/ai-claude-compat';
-import type { PrGroup, Task } from '../state/schema.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
 import { render } from './prompts/templates.ts';
 
 // Discover the TARGET repo's domain specialists: `<repoRoot>/.claude/agents/*.md`. Only the project

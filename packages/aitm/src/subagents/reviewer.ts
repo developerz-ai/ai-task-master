@@ -24,6 +24,7 @@ import {
 import { type Tool, type ToolLoopAgent, tool } from 'ai';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
+import type { GithubToolInput, GithubToolOutput } from '../tools/github-thread-tool.ts';
 import {
   AGENT_STEP_BACKSTOP,
   appendReminderBlock,
@@ -34,18 +35,6 @@ import {
 import { render } from './prompts/templates.ts';
 import { discardStrayEdits } from './stray-edits.ts';
 import type { WorkerTools } from './worker.ts';
-
-// Subset of GitHubClient methods exposed to the agent. Kept as a single discriminated tool so
-// the SDK only registers one `github` slot — matches the task's tool surface contract.
-// Flat (not a union) so the tool's parameter JSON-Schema isn't `oneOf` — several
-// OpenRouter-routed providers reject `oneOf` in tool params ("Invalid arguments passed to the
-// model"). `body` is used only by replyToThread.
-export type GithubToolInput = {
-  action: 'replyToThread' | 'resolveThread';
-  threadId: string;
-  body?: string | undefined;
-};
-export type GithubToolOutput = { ok: boolean; error?: string };
 
 // The Reviewer gets the Worker's full edit/search surface (it pushes fixes) plus a `github`
 // tool for replying to and resolving review threads.

@@ -5,9 +5,9 @@
 // on the PR-open path. FIFO-capped so a long run's context never grows unbounded.
 // docs/state.md §context.md
 
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import type { PullRequest } from '../github/schema.ts';
-import type { WorkerDelivery } from '../subagents/worker.ts';
-import type { PrGroup } from './schema.ts';
 
 // Total context.md byte budget. Once an append would exceed it, the OLDEST whole-group blocks are
 // dropped first — a block is never split. A single block larger than the cap is kept alone (the cap

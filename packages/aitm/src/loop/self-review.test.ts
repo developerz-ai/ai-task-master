@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import type { PrGroup } from '../domain/pr-group.ts';
 import type { RunCmd, RunCmdResult } from '../github/github-client.ts';
-import type { PrGroup } from '../state/schema.ts';
 import type { FileManifest, WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
 import {
   runSelfReviewSession,

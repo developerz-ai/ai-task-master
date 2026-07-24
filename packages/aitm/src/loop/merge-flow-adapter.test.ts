@@ -12,7 +12,7 @@ import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
 import type { RunMergeFlowInput } from '../cli/commands.ts';
 import type { ResolvedConfig } from '../config/schema.ts';
 import { Credentials } from '../credentials/credentials.ts';
-import { DEFAULT_MODELS } from '../credentials/defaults.ts';
+import { DEFAULT_MODELS } from '../domain/model.ts';
 import {
   GitHubClient,
   type RunCmd,

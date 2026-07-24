@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { AgentDefinition } from '@developerz.ai/ai-claude-compat';
-import type { PrGroup, Task } from '../state/schema.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
 import {
   buildSpecialistSignal,
   composeSpecialistGuidance,

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { PrGroup } from '../domain/pr-group.ts';
+import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import type { PullRequest } from '../github/schema.ts';
-import type { WorkerDelivery } from '../subagents/worker.ts';
 import { appendGroupDigest, ROLLING_CONTEXT_MAX_BYTES } from './rolling-context.ts';
-import type { PrGroup } from './schema.ts';
 
 function group(id: string, title: string): PrGroup {
   return { id, title, tasks: [], dependsOn: [], branch: `aitm/${id}`, pr: null, status: 'pending' };

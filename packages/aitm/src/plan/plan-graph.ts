@@ -2,7 +2,7 @@
 // Why a graph and not a list — docs/task-groups.md (extended): large goals split into
 // independent PRs that can run in parallel. A linear list serializes work needlessly.
 
-import type { PrGroup } from '../state/schema.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
 
 export class PlanGraph {
   private readonly index: Map<string, PrGroup>;

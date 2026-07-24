@@ -48,7 +48,8 @@ import type { RunLoopInput } from '../cli/commands.ts';
 import { buildCompactionStep } from '../compaction/compaction-step.ts';
 import { Compactor } from '../compaction/compactor.ts';
 import type { ResolvedConfig, WebSearchConfig } from '../config/schema.ts';
-import { isOpenRouterEndpoint } from '../credentials/defaults.ts';
+import { isOpenRouterEndpoint } from '../domain/model.ts';
+import type { GroupStage, PrGroup } from '../domain/pr-group.ts';
 import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager, type ToolSurface } from '../mcp/mcp-client.ts';
 import { guardDeferred, TOOL_SEARCH_TOOL_NAME, toolSearch } from '../mcp/tool-search.ts';
@@ -83,7 +84,7 @@ import type { PlanMarkdownGroup } from '../plan/plan-markdown.ts';
 import type { Plan } from '../plan/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
 import { appendGroupDigest, type GroupDigestEntry } from '../state/rolling-context.ts';
-import type { GroupStage, PrGroup, RunState } from '../state/schema.ts';
+import type { RunState } from '../state/schema.ts';
 import type {
   RunEndOutcome,
   TranscriptRecorder,
@@ -110,8 +111,6 @@ import {
 } from '../subagents/planner-scouts.ts';
 import {
   createReviewerAgent,
-  type GithubToolInput,
-  type GithubToolOutput,
   REVIEWER_SYSTEM_PREFIX,
   type ReviewerTools,
   runReviewer as runReviewerSubagent,
@@ -132,6 +131,7 @@ import {
 } from '../subagents/worker.ts';
 import { datetimeTool } from '../tools/datetime.ts';
 import { type FetchHtmlInput, fetchHtmlTool, isFetchHtmlAvailable } from '../tools/fetch-html.ts';
+import type { GithubToolInput, GithubToolOutput } from '../tools/github-thread-tool.ts';
 import { type WebFetchOutput, webFetchTool } from '../tools/web-fetch.ts';
 import { webSearchTool } from '../tools/web-search.ts';
 import {

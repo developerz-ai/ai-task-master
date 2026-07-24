@@ -18,7 +18,7 @@
 // whole budget again every resume — the exact loop the durable count exists to stop. Such a group is
 // left blocked so PlanGraph.ready() skips it until a human intervenes.
 
-import type { PrGroup, PrGroupStatus } from '../state/schema.ts';
+import type { PrGroup, PrGroupStatus } from '../domain/pr-group.ts';
 
 // Coarse statuses a group holds only because a prior run was interrupted or blocked while driving it.
 // All are re-schedulable on an explicit resume; only 'merged' is truly terminal.

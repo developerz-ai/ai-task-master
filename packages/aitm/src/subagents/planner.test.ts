@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import type { PrGroup } from '../domain/pr-group.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { Plan } from '../plan/schema.ts';
-import type { PrGroup } from '../state/schema.ts';
 import { createPlannerAgent, PLANNER_SYSTEM_PREFIX, runPlanner } from './planner.ts';
 
 let submitCallId = 0;

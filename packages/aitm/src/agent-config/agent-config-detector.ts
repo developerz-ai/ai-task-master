@@ -25,6 +25,27 @@ export type AgentConfig = {
   sources: Array<{ path: string; scope: ConfigScope }>;
 };
 
+// A generic style baseline for a repo that ships no CLAUDE.md/AGENTS.md and passed no --style. aitm
+// should still run on a bare repo (not abort): the distiller layers the repo's own config files
+// (tsconfig, package.json scripts, CONTRIBUTING.md) on top, and this is composed in verbatim as the
+// authoritative style, so subagents get a usable — if generic — guide.
+export const DEFAULT_STYLE_CONTENTS = [
+  '# Coding Style (default — no CLAUDE.md/AGENTS.md in the repo)',
+  '',
+  'Follow the conventions already visible in the code you touch:',
+  '- Match existing indentation, quote style, and semicolon usage in nearby files.',
+  '- Match existing naming (files, types, functions) and import ordering.',
+  "- Put tests where the repo already keeps them; run the project's build/test/lint before committing.",
+  '- Make the smallest change that satisfies the task — do not reformat or refactor unrelated code.',
+].join('\n');
+
+// The AgentConfig used when detection finds no project style file. `flavor: 'custom'` maps to the
+// state file's `agentConfigFile: 'custom'`; `path` is empty (there is no file — it is only used for a
+// display label downstream, never re-read).
+export function defaultAgentConfig(): AgentConfig {
+  return { flavor: 'custom', path: '', contents: DEFAULT_STYLE_CONTENTS, sources: [] };
+}
+
 export type DetectOptions = {
   stylePath?: string | null;
   prefer?: 'claude' | 'agents';

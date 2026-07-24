@@ -7,9 +7,9 @@
 //     status   = waitForChecks(pr)
 //     threads  = listUnresolvedThreads(pr)
 //     if status == success and threads.empty: break
-//     if status == failure: runWorker (CI-fix path, optional)
-//     if threads.any: runReviewer per thread
-//     if anything changed: rebase onto origin/<base> + push --force-with-lease (shared ci-fix path)
+//     if status == failure: runFixSession  # shared ci-fix.ts pipeline (download → coding Worker →
+//                                           # rebase + force-push); loop back to re-poll CI
+//     elif threads.any:    runReviewer per thread, then rebase + push --force-with-lease
 //     sleep(cooldown)  # let CI restart
 //   mergePr(pr)
 //
@@ -20,6 +20,7 @@
 // docs/vendor/ai-sdk/chunk-09.md §"Subagents" — Reviewer/Worker are built ad-hoc per loop
 // iteration because their tool bindings (checkout, threads) change each iteration.
 
+import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, TimeoutConfiguration } from 'ai';
 import { CiFailed } from '../github/errors.ts';
 import {
@@ -42,15 +43,14 @@ import {
   runReviewer,
 } from '../subagents/reviewer.ts';
 import { buildRolePrompt } from '../subagents/role-prompt.ts';
+import type { WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
 import {
-  createWorkerAgent,
-  runWorker,
-  WORKER_SYSTEM_PREFIX,
-  type WorkerInput,
-  type WorkerResult,
-  type WorkerTools,
-} from '../subagents/worker.ts';
-import { type ConflictResolver, rebaseAndForcePush } from './ci-fix.ts';
+  type ConflictResolver,
+  type FixSessionModelSelector,
+  type FixSessionResult,
+  rebaseAndForcePush,
+  runFixSession,
+} from './ci-fix.ts';
 import { DEFAULT_MAX_ITERATIONS, REVIEW_COMMENTS_GRACE } from './constants.ts';
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
@@ -62,14 +62,14 @@ export type TakeOverGithub = {
   mergePr(pr: number, method: MergeMethod, opts?: { admin?: boolean }): Promise<void>;
   replyToThread(threadId: string, body: string): Promise<void>;
   resolveThread(threadId: string): Promise<void>;
-  // Optional — present on the real GitHubClient. When available, the flow downloads the full
-  // failed-CI logs so the CI-fix Worker can read them off disk instead of guessing (issue #48).
-  getFailedCiLogs?(pr: number): Promise<Array<{ check: string; logs: string }>>;
+  // Full failed-CI logs, downloaded by the shared CI-fix session (runFixSession) so the coding-tier
+  // Worker reads them off disk instead of guessing (issue #48). Present on the real GitHubClient.
+  getFailedCiLogs(pr: number): Promise<Array<{ check: string; logs: string }>>;
 };
 
 // Persists downloaded PR context (CI logs / comments) to disk under the state dir. PrContextStore
-// satisfies this; tests pass a stub. Optional on the flow input — when omitted, nothing is
-// downloaded and the CI-fix Worker falls back to its generic "read the CI logs via gh" task.
+// satisfies this; tests pass a stub. Structurally identical to ci-fix.ts's FixSessionPrContext —
+// the shared CI-fix session writes the take-over's context through it.
 export type PrContextPort = {
   clearCi(pr: number): Promise<void>;
   clearComments(pr: number): Promise<void>;
@@ -85,7 +85,10 @@ export type PrContextPort = {
 export type TakeOverSubagents = {
   reviewerModel: LanguageModel;
   reviewerTools: ReviewerTools;
-  workerModel: LanguageModel;
+  // Model selector for the shared CI-fix session. It always fixes on modelForCapability('coding') —
+  // the strongest code model — exactly like the WorkLoop ci-failed stage, so `merge-pr` and `start`
+  // fix a red PR through the same pipeline instead of a weaker hand-rolled one.
+  credentials: FixSessionModelSelector;
   workerTools: WorkerTools;
   // Style payload (CLAUDE.md / AGENTS.md). Prepended to subagent system prompts.
   styleContents: string;
@@ -125,9 +128,10 @@ export type TakeOverFlowInput = {
   baseBranch: string;
   github: TakeOverGithub;
   subagents: TakeOverSubagents;
-  // Optional store for downloaded CI logs / comments (issue #48). When present, the flow writes
-  // full failed-CI logs under .ai-task-master/debugging/pr/<pr>/ and points the Worker at them.
-  prContext?: PrContextPort;
+  // Store for downloaded CI logs / comments (issue #48). The shared CI-fix session writes the full
+  // failed-CI logs + review comments under .ai-task-master/debugging/pr/<pr>/ and points the
+  // coding-tier Worker at them.
+  prContext: PrContextPort;
   mergeMethod: MergeMethod;
   // When true, the final merge passes `gh pr merge --admin` to override base-branch policy
   // (e.g. "base branch policy prohibits the merge"). Default false. Threaded from `--admin`.
@@ -179,6 +183,10 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   };
   // Fire the review-bot grace exactly once, the first time CI comes back green.
   let reviewGraceDone = false;
+  // The CI-fix Worker's manifest conversation, retained across fix passes so the next one continues
+  // where the last left off instead of cold-starting (#107). Same role as run-loop-adapter's
+  // ciFixHandles map — a take-over drives a single PR, so one handle suffices.
+  let ciFixHandle: SubagentHandle<WorkerTools> | undefined;
   for (; iteration < maxIterations; iteration++) {
     if (input.signal?.aborted) return cancelled();
     log?.info('take-over: iteration start', { pr: input.pr, iteration });
@@ -204,8 +212,8 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
       if (input.signal?.aborted) return cancelled();
     }
 
-    // 2. Pull review threads. Always runs — even on CI failure, threads may exist and
-    //    fixing them might happen to fix CI too.
+    // 2. Pull review threads for the happy-path merge check below and the green-CI Reviewer pass.
+    //    (On the CI-red path the shared fix session re-reads and addresses the comments itself.)
     const threads = await input.github.listUnresolvedThreads(input.pr);
     log?.info('take-over: threads', { pr: input.pr, count: threads.length });
 
@@ -214,44 +222,31 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
       break;
     }
 
-    // 3. Download context to disk so subagents can READ it instead of guessing: full failed-CI
-    //    logs (one file per check) + the review comments, under .ai-task-master/debugging/pr/<pr>/.
-    //    Re-downloaded each iteration so the Worker never reads stale logs from a prior push.
-    let ciLogsDir: string | null = null;
-    if (input.prContext) {
-      // Scoped clears so the addressed-thread ledger survives the re-download each iteration.
-      await input.prContext.clearCi(input.pr);
-      await input.prContext.clearComments(input.pr);
-      if ((ciStatus === 'failure' || ciStatus === 'cancelled') && input.github.getFailedCiLogs) {
-        const failures = await input.github.getFailedCiLogs(input.pr);
-        ciLogsDir = await input.prContext.saveCiFailures(input.pr, failures);
-        log?.info('take-over: downloaded ci logs', {
-          pr: input.pr,
-          checks: failures.length,
-          dir: ciLogsDir,
-        });
+    // 3. CI red → the one shared CI-fix session (ci-fix.ts's runFixSession): clear stale context,
+    //    download the full failed-CI logs + review comments, run the coding-tier Worker against them
+    //    (compaction, memory-index, and the 'no-changes' guard all included), then rebase onto
+    //    origin/<base> and force-with-lease push so CI re-runs. The identical pipeline to the
+    //    WorkLoop ci-failed stage. It downloads and pushes internally, so loop straight back to
+    //    re-poll CI; the Reviewer addresses threads on a later green pass.
+    if (ciStatus === 'failure' || ciStatus === 'cancelled') {
+      const fixed = await runCiFixSession(input, runCmd, ciFixHandle);
+      // Anything but a delivered fix ends the run: runFixSession already blocks a 'no-changes' or
+      // errored Worker on its own reason (a contradiction while CI is red) and never force-pushes
+      // zero commits — so a red PR can't burn iterations re-polling the same failing checks.
+      if (fixed.kind !== 'fixed') {
+        return { kind: 'blocked', reason: fixed.reason, iterations: iteration };
       }
-      if (threads.length > 0) await input.prContext.saveComments(input.pr, threads);
+      // Retain this pass's manifest conversation so the next fix pass continues it (#107).
+      ciFixHandle = fixed.handle;
+      if (cooldownMs > 0) await sleep(cooldownMs, input.signal);
+      continue;
     }
 
+    // 4. CI green with unresolved threads → run the Reviewer, then push its commits.
     let pushedSomething = false;
     // A reviewer error is terminal for this run, but deferred until after the shared push below so a
     // pass that errored mid-way still lands the threads it finished (see the reviewer block).
     let reviewerBlock: string | null = null;
-
-    if (ciStatus === 'failure' || ciStatus === 'cancelled') {
-      const fixed = await runWorkerCiFix(input, ciLogsDir);
-      // Anything but a delivered fix ends the run. 'blocked'/'error' are explicit failures; a
-      // 'no-changes' verdict while CI is red is a contradiction — claiming nothing needs changing
-      // cannot fix a failing check. Block on the worker's own reason instead of force-pushing zero
-      // commits and re-polling the same red CI until maxIterations. Mirrors ci-fix.ts's
-      // `worker.kind !== 'ok'` guard.
-      if (fixed.kind !== 'ok') {
-        const reason = fixed.kind === 'error' ? `worker error: ${fixed.error}` : fixed.reason;
-        return { kind: 'blocked', reason, iterations: iteration };
-      }
-      pushedSomething = true;
-    }
 
     if (threads.length > 0) {
       const reviewed = await runReviewerThreads(input, threads);
@@ -381,67 +376,51 @@ async function runReviewerThreads(
   });
 }
 
-// Worker CI-fix path. Build a synthetic PR group whose only task is "fix CI on this PR",
-// then run the regular Worker. Worker emits a FileManifest and runs per-file editors —
-// suitable for "test failed, fix it" if Worker has enough context from the checkout.
-async function runWorkerCiFix(
+// CI-fix path, delegated to the one shared session (ci-fix.ts's runFixSession) so `aitm merge-pr`
+// and `aitm start` fix a red PR identically. Builds a minimal PR group whose only carried state is
+// branch/PR context — runFixSession's buildFixTask supplies the single scoped fix task — and maps
+// the take-over subagent seams onto FixSessionSubagents. `priorHandle` continues the previous fix
+// pass's manifest conversation (#107).
+function runCiFixSession(
   input: TakeOverFlowInput,
-  ciLogsDir: string | null,
-): Promise<WorkerResult> {
-  // When the logs were downloaded, point the Worker at the exact files (full logs, one per failed
-  // check) so a weak model has concrete errors to act on instead of being told to run `gh` itself.
-  const readTask = ciLogsDir
-    ? `Read the downloaded CI failure logs in ${ciLogsDir} (one file per failed check, full untruncated logs) with your shell/read tools, then fix every failure those logs report.`
-    : `Read the CI logs (via gh) and fix every failing check on PR #${input.pr}.`;
+  runCmd: RunCmd,
+  priorHandle: SubagentHandle<WorkerTools> | undefined,
+): Promise<FixSessionResult> {
+  const { subagents } = input;
   const group: PrGroup = {
     id: `takeover-ci-${input.pr}`,
     title: `Fix CI failures on PR #${input.pr}`,
-    tasks: [
-      { id: `takeover-ci-${input.pr}-1`, text: readTask, complexity: 'normal', done: false },
-      {
-        id: `takeover-ci-${input.pr}-2`,
-        text: 'Run the project test/lint commands locally to verify, then stage fixes.',
-        complexity: 'normal',
-        done: false,
-      },
-    ],
+    // buildFixTask supplies the scoped fix task; the group only carries branch/PR context.
+    tasks: [],
     dependsOn: [],
     branch: null,
     pr: input.pr,
     status: 'in-progress',
-    stage: 'waiting-ci',
+    stage: 'ci-failed',
   };
-  const workerInput: WorkerInput = {
+  return runFixSession({
+    github: input.github,
+    prContext: input.prContext,
+    subagents: {
+      credentials: subagents.credentials,
+      workerTools: subagents.workerTools,
+      styleContents: subagents.styleContents,
+      ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
+      ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),
+      ...(subagents.timeout !== undefined ? { timeout: subagents.timeout } : {}),
+      ...(subagents.onWorkerStepFinish ? { onStepFinish: subagents.onWorkerStepFinish } : {}),
+      ...(subagents.onEditorStepFinish ? { onEditorStepFinish: subagents.onEditorStepFinish } : {}),
+      ...(subagents.runWorkerOverride ? { runWorkerOverride: subagents.runWorkerOverride } : {}),
+      ...(subagents.resolveConflicts ? { resolveConflicts: subagents.resolveConflicts } : {}),
+    },
     group,
-    checkoutPath: input.checkoutPath,
+    pr: input.pr,
     baseBranch: input.baseBranch,
-    styleContents: input.subagents.styleContents,
-    rollingContext: '',
-    ...(input.subagents.formatCommand ? { formatCommand: input.subagents.formatCommand } : {}),
-    ...(input.subagents.verifyCommand ? { verifyCommand: input.subagents.verifyCommand } : {}),
+    checkoutPath: input.checkoutPath,
+    runCmd,
+    allowForcePush: input.allowForcePush ?? true,
     ...(input.logger ? { logger: input.logger } : {}),
-    // Same signal the take-over Worker's agent gets below, so an abort tears down the fanout too.
-    ...(input.signal ? { signal: input.signal } : {}),
-  };
-  if (input.subagents.runWorkerOverride) {
-    return input.subagents.runWorkerOverride(workerInput);
-  }
-  const agent = createWorkerAgent({
-    model: input.subagents.workerModel,
-    tools: input.subagents.workerTools,
-    systemPrompt: buildRolePrompt({
-      style: input.subagents.styleContents,
-      roleGuidance: WORKER_SYSTEM_PREFIX,
-      cwd: input.checkoutPath,
-    }),
-    ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
-    ...(input.subagents.onWorkerStepFinish
-      ? { onStepFinish: input.subagents.onWorkerStepFinish }
-      : {}),
-    ...(input.subagents.onEditorStepFinish
-      ? { onEditorStepFinish: input.subagents.onEditorStepFinish }
-      : {}),
+    ...(priorHandle ? { priorHandle } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
   });
-  return runWorker(agent, workerInput);
 }

@@ -1,7 +1,13 @@
-// Secret-shaped substring detection, shared by the logger (`msg`/field values) and the
-// GlitchTip error reporter (`beforeSend`). Complements key-name redaction: catches secrets
-// embedded in free text — log messages, error messages/stacks, URLs — where there is no key
+// Secret-shaped substring detection, shared by the logger (`msg`/field values), the progress
+// stream and the GlitchTip error reporter (`beforeSend`). Complements key-name redaction: catches
+// secrets embedded in free text — log messages, error messages/stacks, URLs — where there is no key
 // name to match against.
+//
+// Shape matching only covers credentials issued in a recognisable format, so it is layered over
+// literal-value redaction (`./secret-registry.ts`), which covers the keys this process was actually
+// configured with whatever they look like.
+
+import { redactRegisteredSecrets } from './secret-registry.ts';
 
 const REDACTED = '[REDACTED]';
 
@@ -23,9 +29,11 @@ const SECRET_PATTERNS: RegExp[] = [
 ];
 
 // Scrub secret-shaped substrings out of free-text content. Safe to call on any string —
-// text with no matches passes through unchanged.
+// text with no matches passes through unchanged. Registered literal keys go first: a configured key
+// is then redacted whole, rather than a pattern clipping part of it and leaving a remnant the
+// literal pass can no longer recognise.
 export function scrubSecrets(text: string): string {
-  let out = text;
+  let out = redactRegisteredSecrets(text);
   for (const pattern of SECRET_PATTERNS) {
     // Patterns with no capture group still pass a positional `offset` number as the second
     // callback arg — only a string second arg is an actual captured prefix to preserve.

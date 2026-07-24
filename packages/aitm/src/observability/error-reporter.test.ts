@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { clearRegisteredSecrets, registerSecretValues } from '../logger/secret-registry.ts';
 import { dsnFromEnv, initErrorReporter, scrubEvent } from './error-reporter.ts';
 
 test('dsnFromEnv: AITM_SENTRY_DSN takes precedence over SENTRY_DSN', () => {
@@ -180,6 +181,27 @@ test('scrubEvent: redacts request headers, cookies, query params and body', () =
   assert.deepEqual(event.request?.cookies, { csrf_token: '[REDACTED]', theme: 'dark' });
   assert.deepEqual(event.request?.query_string, { api_key: '[REDACTED]' });
   assert.deepEqual(event.request?.data, { note: 'Bearer [REDACTED]' });
+});
+
+test('scrubEvent: redacts a registered literal key under innocuous field names', () => {
+  // Neither guard would catch this on its own: `note`/`endpoint` are not secret-shaped key names,
+  // and a custom endpoint's key matches no vendor pattern. Only the startup-registered literal does.
+  const key = 'c58f21be97d40a3e6b12';
+  let event: ReturnType<typeof scrubEvent>;
+  try {
+    registerSecretValues([key]);
+    event = scrubEvent({
+      message: `401 from https://llm.internal/v1 using ${key}`,
+      extra: { note: `retried with ${key}`, endpoint: `https://llm.internal/v1#${key}` },
+      breadcrumbs: [{ message: `configured key ${key}` }],
+    });
+  } finally {
+    clearRegisteredSecrets();
+  }
+  assert.equal(event.message, '401 from https://llm.internal/v1 using [REDACTED]');
+  assert.equal(event.extra?.note, 'retried with [REDACTED]');
+  assert.equal(event.extra?.endpoint, 'https://llm.internal/v1#[REDACTED]');
+  assert.equal(event.breadcrumbs?.[0]?.message, 'configured key [REDACTED]');
 });
 
 test('scrubEvent: returns the same event object (Sentry beforeSend contract)', () => {

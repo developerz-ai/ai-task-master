@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { clearRegisteredSecrets, registerSecretValues } from '../logger/secret-registry.ts';
 import {
   agentLabel,
   agentStepProgress,
@@ -163,6 +164,31 @@ test('renderStepLines redacts credentials in agent text, reasoning and tool deta
   assert.ok(!joined.includes('ghp_1234567890'));
   assert.ok(!joined.includes('hunter2'));
   assert.equal(joined.match(/\[REDACTED\]/g)?.length, 3);
+});
+
+test('renderStepLines redacts a registered literal key no pattern would match', () => {
+  // The key of a custom OpenAI-compatible endpoint: registered at startup from config/env, and the
+  // only reason the progress stream can recognise it at all.
+  const key = 'd93b7a10f4c62e58b0a4';
+  const { sink } = stubSink();
+  let joined: string;
+  try {
+    registerSecretValues([key]);
+    joined = renderStepLines(
+      'worker g1',
+      {
+        text: `exporting LLM_API_KEY=${key}`,
+        toolCalls: [
+          { toolName: 'bash', input: { command: `curl -H "X-Api: ${key}" llm.internal` } },
+        ],
+      },
+      sink,
+    ).join('');
+  } finally {
+    clearRegisteredSecrets();
+  }
+  assert.ok(!joined.includes(key), 'the literal key never reaches the terminal');
+  assert.equal(joined.match(/\[REDACTED\]/g)?.length, 2);
 });
 
 test('renderStepLines sanitizes the tool name so it cannot forge a harness prefix', () => {

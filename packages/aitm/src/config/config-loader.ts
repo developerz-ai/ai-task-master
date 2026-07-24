@@ -16,6 +16,7 @@ import type { CommandRule } from '@developerz.ai/ai-claude-compat';
 import { ZodError, z } from 'zod';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
+import { registerSecretValues } from '../logger/secret-registry.ts';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../loop/constants.ts';
 import { DEFAULT_MCP_DEFER_TOOLS_OVER } from '../mcp/mcp-client.ts';
 import { type McpServers, McpServersSchema } from '../mcp/schema.ts';
@@ -132,6 +133,7 @@ export class ConfigLoader {
 
   async resolve(cliOverrides: CliOverrides): Promise<ResolvedConfig> {
     const global = await this.readGlobal();
+    this.registerProviderSecrets(global);
     const project = this.stripUntrustedProjectFields(await this.readProject());
     const claudeUser = await this.readClaudeUserMcp();
     const claudeProject = await this.readClaudeProjectMcp();
@@ -338,6 +340,23 @@ export class ConfigLoader {
 
   async readProject(): Promise<ConfigFile | null> {
     return this.readConfigFile(join(this.cwd, PROJECT_DIR, PROJECT_FILE));
+  }
+
+  // Hand every user-owned provider key to the literal-value redactor, so it can be scrubbed from
+  // logs, the progress stream and error reports whatever format it is in — a key for an arbitrary
+  // OpenAI-compatible endpoint matches none of the scrubber's vendor patterns. Every profile's key
+  // is registered, not just the active one: an inactive profile's key can still reach an output
+  // channel through an error message, an env dump or a mid-run profile switch.
+  //
+  // Project scope is deliberately excluded. Its openrouterApiKey is stripped upstream and never
+  // used, and registering an attacker-chosen literal would let a hostile repo blank arbitrary text
+  // out of the operator's own logs.
+  private registerProviderSecrets(global: ConfigFile | null): void {
+    registerSecretValues([
+      this.env.OPENROUTER_API_KEY,
+      global?.openrouterApiKey,
+      ...Object.values(global?.profiles ?? {}).map((profile) => profile.openrouterApiKey),
+    ]);
   }
 
   // The top-level project-scope trust boundary: drop every UNTRUSTED_PROJECT_FIELDS entry a project

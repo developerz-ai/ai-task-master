@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { clearRegisteredSecrets, registerSecretValues } from './secret-registry.ts';
 import { scrubSecrets } from './secret-scrubber.ts';
 
 test('scrubSecrets: redacts Bearer token, keeps the scheme prefix', () => {
@@ -86,6 +87,19 @@ test('scrubSecrets: redacts npm_ tokens', () => {
     scrubSecrets('token npm_abc123def456ghi789jkl012mnopqrstuv used'),
     'token npm_[REDACTED] used',
   );
+});
+
+test('scrubSecrets: redacts a registered literal key alongside pattern matches', () => {
+  clearRegisteredSecrets();
+  try {
+    registerSecretValues(['9c14b7ad2e5f4801']);
+    assert.equal(
+      scrubSecrets('POST https://llm.internal/v1 key=9c14b7ad2e5f4801 auth=Bearer sk-abcdef123456'),
+      'POST https://llm.internal/v1 key=[REDACTED] auth=Bearer [REDACTED]',
+    );
+  } finally {
+    clearRegisteredSecrets();
+  }
 });
 
 test('scrubSecrets: plain text with no secrets passes through unchanged', () => {

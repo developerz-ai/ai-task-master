@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { Logger, type LogRecord } from './logger.ts';
+import { clearRegisteredSecrets, registerSecretValues } from './secret-registry.ts';
 
 type WriteFn = typeof process.stdout.write;
 
@@ -70,6 +71,28 @@ test('Logger.status scrubs secrets before writing to stdout', () => {
   }
   assert.equal(out.lines.join(''), 'PR opened with token: Bearer [REDACTED]\n');
   assert.equal(err.lines.join(''), '');
+});
+
+test('Logger: a registered literal key is redacted from status, msg and field values', () => {
+  // Shapeless key from a custom OpenAI-compatible endpoint — no vendor pattern matches it.
+  const key = 'a41f9d02c7b6e58a3d17';
+  const out = captureStream(process.stdout);
+  const err = captureStream(process.stderr);
+  try {
+    registerSecretValues([key]);
+    const log = new Logger('info', 'run-1');
+    log.status(`calling endpoint with ${key}`);
+    log.info(`request rejected for ${key}`, { endpoint: `https://llm.internal/v1#${key}` });
+  } finally {
+    out.restore();
+    err.restore();
+    clearRegisteredSecrets();
+  }
+  assert.equal(out.lines.join(''), 'calling endpoint with [REDACTED]\n');
+  const [record] = parseLines(err.lines);
+  assert.equal(record?.msg, 'request rejected for [REDACTED]');
+  assert.equal(record?.endpoint, 'https://llm.internal/v1#[REDACTED]');
+  assert.ok(!err.lines.join('').includes(key), 'no channel leaks the raw key');
 });
 
 test('Logger.info writes JSON to stderr with level/msg/ts/runId', () => {

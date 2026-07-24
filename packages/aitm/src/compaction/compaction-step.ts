@@ -12,7 +12,12 @@
 import type { ModelMessage, ToolLoopAgentSettings, ToolSet } from 'ai';
 import type { LoggerLike } from '../logger/logger.ts';
 import { reportedInputTokens } from '../observability/usage-tracker.ts';
-import { type Compactor, effectiveInputTokens, type LiveContextSize } from './compactor.ts';
+import {
+  type Compactor,
+  effectiveInputTokens,
+  type LiveContextSize,
+  safeStringify,
+} from './compactor.ts';
 
 // The concrete (non-optional) prepareStep function type for a given tool set — extracted from the
 // SDK's own settings so it matches createSubagent's field exactly (see the note in subagent.ts on
@@ -251,14 +256,15 @@ function errText(err: unknown): string {
 
 // Rough token estimate of the message array — ~4 chars per token over the serialized content. It
 // over-counts JSON structure slightly, which only makes compaction trigger a touch early; for a
-// context-overflow guardrail, erring toward compacting sooner is the safe direction.
+// context-overflow guardrail, erring toward compacting sooner is the safe direction. Uses safeStringify
+// to guard against circular references and BigInt values that would otherwise throw.
 function estimateTokens(messages: readonly ModelMessage[]): number {
   let chars = 0;
   for (const message of messages) {
     chars +=
       typeof message.content === 'string'
         ? message.content.length
-        : JSON.stringify(message.content).length;
+        : safeStringify(message.content).length;
   }
   return Math.ceil(chars / 4);
 }

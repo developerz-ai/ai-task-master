@@ -97,6 +97,7 @@ type OrchestratorCalls = {
   runCiFix: { group: PrGroup; pr: number; baseBranch: string }[];
   addressReviews: { pr: number; threads: ReviewThread[] }[];
   selfReview: SelfReviewInvocation[];
+  releaseGroup: string[];
 };
 
 type WorkerInvocationCall = {
@@ -131,6 +132,7 @@ function makeOrchestrator(
     runCiFix: [],
     addressReviews: [],
     selfReview: [],
+    releaseGroup: [],
   };
   const queue = (
     config.workerResults ?? [{ kind: 'ok', delivery: delivery() } as WorkerResult]
@@ -159,6 +161,9 @@ function makeOrchestrator(
     addressReviews: async ({ pr, threads }) => {
       calls.addressReviews.push({ pr, threads });
       return config.addressReviewsResult ?? { kind: 'ok' };
+    },
+    releaseGroup: (groupId) => {
+      calls.releaseGroup.push(groupId);
     },
     ...(config.selfReview || config.selfReviewImpl || config.selfReviewResult
       ? {
@@ -517,6 +522,34 @@ test('runGroup sequences: acquire → worker → finalizeCommit → openPr → s
   // Test seeds no prGroups in baseState, so the map() is a no-op on group rows; the
   // assertion that matters here is that state.update was called twice (in-progress → awaiting-pr).
   assert.ok(updates.length >= 2, 'state.update called at least for in-progress + awaiting-pr');
+});
+
+test('runGroup: releases the group on every terminal path — merged, blocked, and rethrown', async () => {
+  // The orchestrator caches a full Worker conversation (and a CI-fix handle) per group; a group the
+  // loop is done with is never rescheduled, so releaseGroup is what stops those piling up for the
+  // whole run. It rides runGroup's finally, so every exit reports exactly once.
+  const merged = makeOrchestrator({ prNumber: 7 });
+  await new WorkLoop(makeDeps({ orchestrator: merged.orchestrator })).runGroup(group('alpha'));
+  assert.deepEqual(merged.calls.releaseGroup, ['alpha'], 'released after the group merges');
+
+  const blocked = makeOrchestrator({ workerResults: [{ kind: 'blocked', reason: 'no plan' }] });
+  await new WorkLoop(makeDeps({ orchestrator: blocked.orchestrator, autoMerge: false })).runGroup(
+    group('beta'),
+  );
+  assert.deepEqual(blocked.calls.releaseGroup, ['beta'], 'released after the group blocks');
+
+  // A run precondition (dirty tree) rethrows past runGroup's catch — the finally still runs.
+  const aborted = makeOrchestrator();
+  const home: CheckoutHome = {
+    acquire: () => Promise.reject(new DirtyWorkingTree('/repo', [' M src/a.ts'])),
+    release: async () => {},
+  };
+  await assert.rejects(
+    () =>
+      new WorkLoop(makeDeps({ orchestrator: aborted.orchestrator, home })).runGroup(group('gamma')),
+    DirtyWorkingTree,
+  );
+  assert.deepEqual(aborted.calls.releaseGroup, ['gamma'], 'released even when the run aborts');
 });
 
 test('self-review runs before openPr (group mode) with the delivery + checkout', async () => {

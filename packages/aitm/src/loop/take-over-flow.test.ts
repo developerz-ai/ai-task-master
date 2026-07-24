@@ -6,6 +6,7 @@ import type { CiResult, RunCmd, RunCmdResult } from '../github/github-client.ts'
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerInput, WorkerResult } from '../subagents/worker.ts';
+import { REVIEW_COMMENTS_GRACE } from './constants.ts';
 import { runTakeOverFlow, type TakeOverFlowInput, type TakeOverGithub } from './take-over-flow.ts';
 
 type GhCall =
@@ -239,6 +240,32 @@ test('runTakeOverFlow: threads verifyCommand into the CI-fix Worker input (issue
   assert.equal((captured as WorkerInput).formatCommand, 'bun run lint:fix');
 });
 
+test('runTakeOverFlow: threads the run signal into the CI-fix Worker input', async () => {
+  // The flow's own signal check only fires between iterations; WorkerInput.signal is what stops the
+  // editor fanout already in flight when the abort lands.
+  const controller = new AbortController();
+  const gh = fakeGithub({ checks: ['throw-cifailed'], threads: [[]] });
+  let captured: WorkerInput | null = null;
+  await runTakeOverFlow(
+    baseInput(gh.github, {
+      signal: controller.signal,
+      subagents: {
+        reviewerModel: dummyModel,
+        reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+        workerModel: dummyModel,
+        workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+        styleContents: '',
+        runWorkerOverride: async (win) => {
+          captured = win;
+          return { kind: 'blocked', reason: 'stop here' } satisfies WorkerResult;
+        },
+      },
+    }),
+  );
+  assert.ok(captured, 'CI-fix worker was invoked');
+  assert.equal((captured as WorkerInput).signal, controller.signal);
+});
+
 test('runTakeOverFlow: max iterations exhausted with threads remaining → blocked', async () => {
   const threads: ReviewThread[] = [
     {
@@ -297,15 +324,16 @@ test('runTakeOverFlow: signal aborted mid-flow → cancelled, no merge', async (
       comments: [{ id: 'C_M', body: 'fix', author: 'rabbit' }],
     },
   ];
-  // CI green but threads present → iteration 0 runs the Reviewer, pushes, then sleeps. The sleep
-  // aborts, so iteration 1's top-of-loop check bails to `cancelled` before any merge.
+  // CI green but threads present → iteration 0 runs the Reviewer, pushes, then sleeps the cooldown.
+  // That sleep aborts, so iteration 1's top-of-loop check bails to `cancelled` before any merge.
+  // Only the cooldown aborts (the review grace runs first and must not, or the Reviewer never runs).
   const gh = fakeGithub({ checks: ['success'], threads: [threads, []] });
   const controller = new AbortController();
   const input = baseInput(gh.github, {
     signal: controller.signal,
     cooldownMs: 1,
-    sleep: async () => {
-      controller.abort();
+    sleep: async (ms) => {
+      if (ms === 1) controller.abort();
     },
     subagents: {
       reviewerModel: dummyModel,
@@ -323,6 +351,72 @@ test('runTakeOverFlow: signal aborted mid-flow → cancelled, no merge', async (
   assert.equal(result.kind, 'cancelled');
   if (result.kind === 'cancelled') assert.equal(result.iterations, 1);
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0);
+});
+
+test('runTakeOverFlow: abort during the CI poll → cancelled before the Reviewer runs', async () => {
+  const threads: ReviewThread[] = [
+    {
+      id: 'TH_P',
+      isResolved: false,
+      path: 'src/a.ts',
+      comments: [{ id: 'C_P', body: 'fix', author: 'rabbit' }],
+    },
+  ];
+  const gh = fakeGithub({ checks: ['success'], threads: [threads, []] });
+  const controller = new AbortController();
+  const seen: Array<AbortSignal | undefined> = [];
+  let reviewerRuns = 0;
+  // A cancelled poll returns 'pending' — no verdict. Without the post-poll signal check the flow
+  // would read that as "CI not green", download logs and run the fix Worker on a stopped run.
+  const github: TakeOverGithub = {
+    ...gh.github,
+    waitForChecks: async (_pr, signal) => {
+      seen.push(signal);
+      controller.abort();
+      return { state: 'pending', failedChecks: [] };
+    },
+  };
+  const input = baseInput(github, {
+    signal: controller.signal,
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      workerModel: dummyModel,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runReviewerOverride: async () => {
+        reviewerRuns += 1;
+        return { kind: 'ok', resolutions: [] } satisfies ReviewerResult;
+      },
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'cancelled');
+  if (result.kind === 'cancelled') assert.equal(result.iterations, 0);
+  assert.equal(seen[0], controller.signal, 'the run signal reaches the CI poll');
+  assert.equal(reviewerRuns, 0, 'no Reviewer pass on a cancelled run');
+  assert.deepEqual(gh.calls, [], 'no thread read, no merge after the cancelled poll');
+});
+
+test('runTakeOverFlow: abort during the review grace → cancelled before reading threads', async () => {
+  const gh = fakeGithub({ checks: ['success'], threads: [[]] });
+  const controller = new AbortController();
+  const graceSignals: Array<AbortSignal | undefined> = [];
+  const input = baseInput(gh.github, {
+    signal: controller.signal,
+    sleep: async (ms, signal) => {
+      graceSignals.push(signal);
+      if (ms === REVIEW_COMMENTS_GRACE) controller.abort();
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'cancelled');
+  assert.equal(graceSignals[0], controller.signal, 'the grace sleep is cancellable');
+  assert.deepEqual(
+    gh.calls.map((c) => c.method),
+    ['waitForChecks'],
+    'the grace aborted → threads never read, PR never merged',
+  );
 });
 
 test('runTakeOverFlow: Reviewer error → blocked, no merge', async () => {

@@ -147,13 +147,39 @@ export function assertGitAllowed(args: readonly string[], policy?: GitPolicy): v
   }
 }
 
-export type RunGitOptions = { cwd?: string } & GitPolicy;
+export type RunGitOptions = {
+  cwd?: string;
+  // Per-invocation deadline in ms. Defaults to DEFAULT_GIT_TIMEOUT_MS.
+  timeout?: number;
+  // Run abort handle. Aborting kills the in-flight git child (execa `cancelSignal` → SIGTERM, then
+  // SIGKILL) instead of leaving it for the force-exit path to orphan.
+  signal?: AbortSignal;
+} & GitPolicy;
+
+// The network-facing subcommands (fetch, push, ls-remote) are the ones that wedge — a stalled TCP
+// connection to a remote leaves git waiting forever. Ten minutes clears a slow fetch on a large
+// repo while still bounding a hang. Callers with a tighter budget pass `timeout`.
+export const DEFAULT_GIT_TIMEOUT_MS = 10 * 60_000;
+
+// Exported for the unit test: the option mapping is the whole point of the chokepoint, and
+// asserting it beats spawning git per case.
+export function execaOptions(options?: RunGitOptions): {
+  cwd?: string;
+  timeout: number;
+  cancelSignal?: AbortSignal;
+} {
+  return {
+    ...(options?.cwd ? { cwd: options.cwd } : {}),
+    timeout: options?.timeout ?? DEFAULT_GIT_TIMEOUT_MS,
+    ...(options?.signal ? { cancelSignal: options.signal } : {}),
+  };
+}
 
 // Guarded git runner: validates against policy, then shells out via execa. Use this for every
 // git mutation instead of calling execa('git', …) directly.
 export async function runGit(args: readonly string[], options?: RunGitOptions) {
   assertGitAllowed(args, options);
-  return execa('git', [...args], options?.cwd ? { cwd: options.cwd } : {});
+  return execa('git', [...args], execaOptions(options));
 }
 
 // Count the commits `head` adds over `origin/<base>`. Returns null when the comparison cannot be

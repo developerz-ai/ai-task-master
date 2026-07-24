@@ -22,7 +22,7 @@ import type { CliOverrides, ConfigFile, Profile, ResolvedConfig } from '../confi
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { createLlmFetch } from '../credentials/llm-fetch.ts';
-import { GitHubClient } from '../github/github-client.ts';
+import { defaultRunCmd, defaultSleep, GitHubClient } from '../github/github-client.ts';
 import { mergeFlowAdapter } from '../loop/merge-flow-adapter.ts';
 import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
 import type { WorkLoopResult } from '../loop/work-loop.ts';
@@ -35,7 +35,10 @@ import {
 } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { type ModelLimitsLookup, ModelLimitsRegistry } from '../openrouter/model-limits.ts';
-import { OpenRouterReferenceCatalog } from '../openrouter/reference-catalog.ts';
+import {
+  OPENROUTER_REFERENCE_URL,
+  OpenRouterReferenceCatalog,
+} from '../openrouter/reference-catalog.ts';
 import { UnsupportedSchemaVersion } from '../state/migrations.ts';
 import type { RunLockHandle } from '../state/run-lock.ts';
 import { CURRENT_SCHEMA_VERSION, type PrGroup, type RunState } from '../state/schema.ts';
@@ -406,7 +409,9 @@ export async function runStart(
   if (!auth.ok) {
     return { code: 1, message: 'gh CLI is not authenticated. Run `gh auth login`.' };
   }
-  const github = new GitHubClient(cwd);
+  // The run's abort handle is bound in here so a SIGINT kills an in-flight `gh` child, not just the
+  // poll loops around it (see GitHubClient's constructor).
+  const github = new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal);
 
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
@@ -526,8 +531,8 @@ export async function runStart(
     // tracker's pricing and the Compactor's context lookup (#102) so the catalog is fetched at most
     // once. The tracker's onUsage sinks are bound in the adapter; totals flush after the loop.
     const modelLimits = new ModelLimitsRegistry(
-      new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL),
-      new OpenRouterReferenceCatalog(),
+      new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL, ctx.signal),
+      new OpenRouterReferenceCatalog(OPENROUTER_REFERENCE_URL, ctx.signal),
     );
     const usage = new UsageTracker(modelLimits);
 
@@ -711,7 +716,7 @@ export async function runMergePr(
   }
 
   try {
-    const github = ctx.github ?? new GitHubClient(cwd);
+    const github = ctx.github ?? new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal);
 
     // Take-over flow: `aitm merge-pr` (no args, no prior state) should work against any PR
     // the user built by hand — e.g. via Claude Code or `gh pr create`. We mirror the

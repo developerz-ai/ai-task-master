@@ -2021,3 +2021,84 @@ test('runWorker: carry-over never crosses group boundaries', async () => {
   } as never);
   assert.equal(seen[1], undefined, 'a different group starts cold');
 });
+
+// ---- run cancellation reaches the Worker ------------------------------------
+
+// Capture WorkerInput.signal at the same seam production uses. The Coordinator's generation is
+// cancelled by SubagentInit.signal; the editor fanout is cancelled ONLY by WorkerInput.signal, so
+// the adapter has to forward it or an abort leaves every editor leaf running to completion.
+function workerSignalHarness(runSignal?: AbortSignal): {
+  orch: ReturnType<typeof defaultMakeOrchestrator>;
+  seen: Array<AbortSignal | undefined>;
+} {
+  const model = emptyManifestModel();
+  const credentials = {
+    modelFor: () => model,
+    modelForCapability: () => model,
+    modelIdFor: () => 'openai/gpt-5',
+    modelIdForCapability: () => 'openai/gpt-5',
+  };
+  const seen: Array<AbortSignal | undefined> = [];
+  const workerRunner = async (
+    _agent: unknown,
+    workerInput: { signal?: AbortSignal },
+  ): Promise<WorkerResult> => {
+    seen.push(workerInput.signal);
+    return { kind: 'blocked', reason: 'captured' };
+  };
+  const orch = defaultMakeOrchestrator({
+    input: {
+      cwd: '/tmp/adapter-signal',
+      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
+      credentials,
+      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+      github: {},
+      goal: 'g',
+      criteria: undefined,
+      branch: undefined,
+      state: {},
+      ...(runSignal ? { signal: runSignal } : {}),
+    },
+    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
+    rollingContext: '',
+    state: {},
+    stepCounter: () => undefined,
+    workerRunner,
+  } as never);
+  return { orch, seen };
+}
+
+test("runWorker: the invocation's signal reaches WorkerInput (the editor fanout's abort)", async () => {
+  const controller = new AbortController();
+  const { orch, seen } = workerSignalHarness();
+  await orch.runWorker({
+    group: group('core'),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+    signal: controller.signal,
+  } as never);
+  assert.equal(seen[0], controller.signal);
+});
+
+test("runWorker: no invocation signal → falls back to the run's own signal", async () => {
+  // Callers of this port that predate WorkerInvocation.signal must still cancel: the adapter's own
+  // input.signal is the same run-scoped handle the WorkLoop would have passed.
+  const controller = new AbortController();
+  const { orch, seen } = workerSignalHarness(controller.signal);
+  await orch.runWorker({
+    group: group('core'),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  assert.equal(seen[0], controller.signal);
+});
+
+test('runWorker: no signal anywhere → WorkerInput omits it', async () => {
+  const { orch, seen } = workerSignalHarness();
+  await orch.runWorker({
+    group: group('core'),
+    checkout: { path: '/tmp/wt' },
+    baseBranch: 'main',
+  } as never);
+  assert.equal(seen[0], undefined);
+});

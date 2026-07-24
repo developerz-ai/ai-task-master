@@ -346,6 +346,73 @@ test('handleWaitingCi: non-CiFailed error propagates', async () => {
   );
 });
 
+test('handleWaitingCi: an already-aborted signal → stays in waiting-ci, no CI poll', async () => {
+  let polls = 0;
+  const controller = new AbortController();
+  controller.abort();
+  const deps = makeDeps({
+    signal: controller.signal,
+    github: makeGithub({
+      waitForChecks: async () => {
+        polls += 1;
+        return { state: 'success', failedChecks: [] };
+      },
+    }),
+  });
+  assert.equal(await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })), 'waiting-ci');
+  assert.equal(polls, 0, 'a cancelled run does not start a 120-minute CI poll');
+});
+
+test('handleWaitingCi: signal reaches waitForChecks and the review grace', async () => {
+  const controller = new AbortController();
+  const seen: Array<AbortSignal | undefined> = [];
+  const deps = makeDeps({
+    signal: controller.signal,
+    github: makeGithub({
+      waitForChecks: async (_pr, signal) => {
+        seen.push(signal);
+        return { state: 'success', failedChecks: [] };
+      },
+    }),
+    sleep: async (_ms, signal) => {
+      seen.push(signal);
+    },
+  });
+  assert.equal(
+    await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })),
+    'waiting-reviews',
+  );
+  assert.deepEqual(seen, [controller.signal, controller.signal]);
+});
+
+test('handleWaitingCi: abort during the CI poll → waiting-ci, never ci-failed', async () => {
+  // A cancelled poll returns the non-verdict 'pending'. Reading that as "CI is not green" would
+  // persist a ci-failed stage and spend a CI-fix attempt (an LLM call) on a stopped run.
+  const controller = new AbortController();
+  const deps = makeDeps({
+    signal: controller.signal,
+    github: makeGithub({
+      waitForChecks: async () => {
+        controller.abort();
+        return { state: 'pending', failedChecks: [] };
+      },
+    }),
+  });
+  assert.equal(await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })), 'waiting-ci');
+});
+
+test('handleWaitingCi: abort during the review grace → waiting-ci, not waiting-reviews', async () => {
+  const controller = new AbortController();
+  const deps = makeDeps({
+    signal: controller.signal,
+    sleep: async () => {
+      controller.abort();
+    },
+  });
+  // waiting-reviews is one transition from the merge — a cancelled grace must not advance there.
+  assert.equal(await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5 })), 'waiting-ci');
+});
+
 test('handleWaitingCi: missing PR throws', async () => {
   await assert.rejects(
     () => handleWaitingCi(makeDeps(), group({ stage: 'waiting-ci', pr: null })),

@@ -136,6 +136,9 @@ export type FixSessionInput = {
   // Handle from this group's previous CI-fix pass (#107). When set, the fix Worker continues that
   // manifest-planning conversation — it remembers what earlier passes already tried.
   priorHandle?: SubagentHandle<WorkerTools>;
+  // Run-scoped cancellation, forwarded to the fix Worker agent (see SubagentInit.signal) so an abort
+  // tears its in-flight generation down. Mirrors TakeOverFlowInput.signal. Unset → no signal.
+  signal?: AbortSignal;
 };
 
 export type FixSessionResult =
@@ -209,6 +212,7 @@ export async function runFixSession(input: FixSessionInput): Promise<FixSessionR
     log,
     input.allowForcePush ?? true,
     input.subagents.resolveConflicts,
+    input.signal,
   );
   // Carry the Worker's manifest handle out so the next fix pass for this group can continue it (#107).
   return pushed.kind === 'fixed' ? { kind: 'fixed', handle: worker.handle } : pushed;
@@ -260,6 +264,8 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
     ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),
+    // Same signal the fix Worker's agent gets below, so an abort tears down the editor fanout too.
+    ...(input.signal ? { signal: input.signal } : {}),
   };
   if (subagents.runWorkerOverride) {
     return subagents.runWorkerOverride({
@@ -296,6 +302,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     ...(subagents.onRetry ? { onRetry: subagents.onRetry } : {}),
     ...(subagents.onStream ? { onStream: subagents.onStream } : {}),
     ...(subagents.streamWatchdog ? { streamWatchdog: subagents.streamWatchdog } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   // priorHandle precedence (issue #108): an in-memory handle from an earlier pass this run wins;
   // otherwise, resume from an interrupted transcript's messages (built against this fresh agent).
@@ -322,6 +329,7 @@ export async function rebaseAndForcePush(
   log: LoggerLike | undefined,
   allowForcePush = true,
   resolveConflicts?: ConflictResolver,
+  signal?: AbortSignal,
 ): Promise<PushResult> {
   // This is the only force-push path. When policy forbids it, don't rebase — block cleanly so a
   // human lands the fix, rather than leaving a rebased branch that can't be pushed.
@@ -334,11 +342,21 @@ export async function rebaseAndForcePush(
     };
   }
   const cwd = { cwd: checkoutPath };
-  const fetch = await runCmd('git', ['fetch', 'origin', baseBranch], cwd);
+  // The rebase's own commands carry the run signal so a Ctrl-C kills the in-flight child. Cleanup
+  // (`git rebase --abort`, in resolveRebaseConflicts) deliberately does not: an already-aborted
+  // signal would kill it on spawn and strand a half-applied rebase in the operator's checkout.
+  const cancellable = { cwd: checkoutPath, ...(signal ? { signal } : {}) };
+  const cancelled = (stage: string): PushResult => ({
+    kind: 'blocked',
+    reason: `run cancelled ${stage}; nothing was force-pushed.`,
+  });
+  if (signal?.aborted) return cancelled(`before the rebase onto origin/${baseBranch}`);
+  const fetch = await runCmd('git', ['fetch', 'origin', baseBranch], cancellable);
+  if (signal?.aborted) return cancelled(`while fetching origin/${baseBranch}`);
   if (fetch.exitCode !== 0) {
     return { kind: 'blocked', reason: `git fetch origin ${baseBranch} failed: ${gitErr(fetch)}` };
   }
-  const rebase = await runCmd('git', ['rebase', `origin/${baseBranch}`], cwd);
+  const rebase = await runCmd('git', ['rebase', `origin/${baseBranch}`], cancellable);
   if (rebase.exitCode !== 0) {
     const resolved = await resolveRebaseConflicts(
       runCmd,
@@ -348,11 +366,15 @@ export async function rebaseAndForcePush(
       log,
       rebase,
       resolveConflicts,
+      signal,
     );
     // Blocked → the rebase is already aborted; stop before pushing. Fixed → fall through to push.
     if (resolved.kind === 'blocked') return resolved;
   }
-  const push = await runCmd('git', ['push', '--force-with-lease'], cwd);
+  // A cancel landing after the rebase settled must still not publish: the force-push is the one
+  // irreversible step here, and the branch is already rebased locally for whoever resumes.
+  if (signal?.aborted) return cancelled(`before the force-push for PR #${pr}`);
+  const push = await runCmd('git', ['push', '--force-with-lease'], cancellable);
   if (push.exitCode !== 0) {
     return { kind: 'blocked', reason: `git push --force-with-lease failed: ${gitErr(push)}` };
   }
@@ -373,6 +395,7 @@ async function resolveRebaseConflicts(
   log: LoggerLike | undefined,
   firstRebase: RunCmdResult,
   resolveConflicts: ConflictResolver | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<PushResult> {
   const cwd = { cwd: checkoutPath };
   const abortAndBlock = async (reason: string): Promise<PushResult> => {
@@ -380,10 +403,21 @@ async function resolveRebaseConflicts(
     return { kind: 'blocked', reason };
   };
 
+  // A cancelled run must not start (or continue) an AI resolution pass. Abort the half-applied
+  // rebase on the way out: leaving the checkout mid-rebase would strand the operator's working tree.
+  const cancelledMidRebase = (): Promise<PushResult> =>
+    abortAndBlock(
+      `run cancelled while resolving the rebase onto origin/${baseBranch}; the rebase was aborted.`,
+    );
+
+  // Checked before the no-resolver branch too, so a rebase the signal itself killed reports the
+  // cancel rather than "needs manual resolution".
+  if (signal?.aborted) return cancelledMidRebase();
   const manualReason = `git rebase onto origin/${baseBranch} hit conflicts that need manual resolution: ${gitErr(firstRebase)}`;
   if (!resolveConflicts) return abortAndBlock(manualReason);
 
   for (let attempt = 1; attempt <= MAX_CONFLICT_RESOLVE_ATTEMPTS; attempt++) {
+    if (signal?.aborted) return cancelledMidRebase();
     const conflicted = await unmergedPaths(runCmd, cwd);
     if (conflicted.length === 0) {
       // Non-zero rebase with no unmerged paths is not an AI-resolvable content conflict (e.g. a
@@ -410,6 +444,9 @@ async function resolveRebaseConflicts(
     // The resolver edits + stages the files. If any stay unmerged it did not finish the job; spend
     // another attempt rather than continuing onto a half-resolved commit.
     if ((await unmergedPaths(runCmd, cwd)).length > 0) continue;
+    // The resolver call above can take minutes; a cancel landing inside it must not drive the
+    // rebase forward onto a commit nobody is waiting for.
+    if (signal?.aborted) return cancelledMidRebase();
     // Drive the rebase forward. `-c core.editor=true` accepts the reused commit message without
     // opening an editor, so an unattended `git rebase --continue` can never hang.
     const cont = await runCmd('git', ['-c', 'core.editor=true', 'rebase', '--continue'], cwd);

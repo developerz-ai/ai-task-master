@@ -49,6 +49,10 @@ export type WorkerInvocation = {
   task?: Task;
   checkout: Checkout;
   baseBranch: string;
+  // The run's cancellation signal (WorkLoopDeps.signal), so an abort reaches this pass's in-flight
+  // LLM calls — the Coordinator's generation AND the editor fanout (WorkerInput.signal) — instead of
+  // only being noticed between groups. Optional: a run started without a signal omits it.
+  signal?: AbortSignal;
 };
 
 export type ReviewerInvocation = {
@@ -105,7 +109,9 @@ export type WorkLoopOrchestrator = {
 
 export type WorkLoopGithub = {
   defaultBranch(): Promise<string>;
-  waitForChecks(pr: number): Promise<CiResult>;
+  // The optional signal cancels the CI poll; an aborted wait comes back without a verdict
+  // ('pending'), so every call site re-checks the signal before acting on the result.
+  waitForChecks(pr: number, signal?: AbortSignal): Promise<CiResult>;
   listUnresolvedThreads(pr: number): Promise<ReviewThread[]>;
   mergePr(pr: number, method: MergeMethod, opts?: { admin?: boolean }): Promise<void>;
   // Login `gh` is authenticated as, forwarded to the addressing-reviews dedup so it can skip a thread
@@ -355,6 +361,20 @@ export function reviewFailedError(review: Extract<StageWorkResult, { kind: 'bloc
   return new Error(`reviewer failed: ${review.reason}`, { cause: review });
 }
 
+// The reason carried by a group the run's signal cancelled. run() re-checks the signal at the batch
+// boundary and reports the whole run `cancelled` (exit 2), so this only ever surfaces per group.
+const RUN_CANCELLED_REASON = 'run cancelled';
+
+// Thrown by the prPerTask auto-merge flow when the run is cancelled mid-CI-wait. A throw, not an
+// early return: the caller's next step is `gh pr merge`, and a silent return would record the group
+// merged. runGroup's catch turns it into a blocked group, which run() then reports as cancelled.
+class RunCancelled extends Error {
+  override readonly name = 'RunCancelled';
+  constructor() {
+    super(RUN_CANCELLED_REASON);
+  }
+}
+
 // Thrown when a state-write fails *after* an external side effect (openPr/mergePr) already
 // succeeded. Carries the real outcome so runGroup doesn't roll the group back to 'blocked'
 // and cause a retry to reopen/re-merge work that already landed.
@@ -439,10 +459,11 @@ export class WorkLoop {
       for (const outcome of settled) {
         if (outcome.status === 'rejected') throw outcome.reason;
       }
-      // Re-check post-batch: an abort mid-batch aborts each group's in-flight LLM calls
-      // (worker.ts signal wiring), which runGroup's catch would otherwise report as `blocked`
-      // (exit 1). A cancelled run must report cancelled (exit 2) regardless of the abort-induced
-      // per-group outcome.
+      // Re-check post-batch: an abort mid-batch aborts each group's in-flight LLM calls — the
+      // signal reaches them via runOneTask → WorkerInvocation.signal → WorkerInput.signal (the
+      // editor fanout's shared controller) — which runGroup's catch would otherwise report as
+      // `blocked` (exit 1). A cancelled run must report cancelled (exit 2) regardless of the
+      // abort-induced per-group outcome.
       if (signal?.aborted) {
         return { kind: 'cancelled', outcomes: this.outcomes.slice() };
       }
@@ -624,6 +645,18 @@ export class WorkLoop {
       // autoMerge off: stop once the PR is open; runMergePr (or a follow-up run) finishes it.
       if (!this.deps.autoMerge && stage === 'waiting-ci') return this.awaitingPrOutcome(ctx);
 
+      // Cancelled run (SIGINT): stop BEFORE dispatching another handler — the next transitions
+      // spend LLM calls (ci-failed, addressing-reviews) or merge the PR (ready-to-merge). The
+      // group's persisted stage stays where it is, so a resume re-enters exactly here; run()
+      // turns this outcome into `cancelled` (exit 2) at the batch boundary.
+      if (this.deps.signal?.aborted) {
+        return {
+          groupId: ctx.group.id,
+          status: 'blocked',
+          reason: ctx.blockedReason ?? RUN_CANCELLED_REASON,
+        };
+      }
+
       // Cap the CI-fix recovery loop: count each ci-failed dispatch against a budget that now
       // survives resumes (see StageCtx.fixAttempts), and once the cap is exceeded block WITHOUT
       // running the fix session (no LLM call, no push) so an unfixable red PR ends for a human
@@ -750,7 +783,7 @@ export class WorkLoop {
     };
     const authenticatedLogin = this.deps.github.authenticatedLogin?.bind(this.deps.github);
     const github: StageGithub = {
-      waitForChecks: (pr) => this.deps.github.waitForChecks(pr),
+      waitForChecks: (pr, signal) => this.deps.github.waitForChecks(pr, signal),
       listUnresolvedThreads: (pr) => this.deps.github.listUnresolvedThreads(pr),
       mergePr: (pr) =>
         this.deps.github.mergePr(pr, this.deps.mergeMethod ?? DEFAULT_MERGE_METHOD, {
@@ -765,6 +798,7 @@ export class WorkLoop {
       adminMerge: this.deps.adminMerge ?? false,
       ...(this.deps.prContext ? { prContext: this.deps.prContext } : {}),
       ...(this.deps.sleep ? { sleep: this.deps.sleep } : {}),
+      ...(this.deps.signal ? { signal: this.deps.signal } : {}),
       ...(this.deps.progress
         ? { progress: (message: string) => this.deps.progress?.(message) }
         : {}),
@@ -851,7 +885,13 @@ export class WorkLoop {
     }
     const startedAt = this.now();
     const result = await this.checkoutMutex.runExclusive(async () => {
-      const worked = await this.deps.orchestrator.runWorker({ group, task, checkout, baseBranch });
+      const worked = await this.deps.orchestrator.runWorker({
+        group,
+        task,
+        checkout,
+        baseBranch,
+        ...(this.deps.signal ? { signal: this.deps.signal } : {}),
+      });
       if (worked.kind === 'ok') {
         await this.deps.orchestrator.finalizeCommit(group, worked.delivery, checkout.path, task.id);
       }
@@ -1098,13 +1138,18 @@ export class WorkLoop {
     // unfixed remote. runCiFix pushes; the old runWorker + finalizeCommit `--amend` only rewrote
     // history locally, diverging from the pushed branch. A poll timeout (CiFailed) propagates; a
     // fix that can't land, or still-red CI after it, is fatal for this flow.
-    const ci = await github.waitForChecks(pr.number);
+    const signal = this.deps.signal;
+    const ci = await github.waitForChecks(pr.number, signal);
+    // A cancelled wait comes back 'pending', which reads as "not failing" and would fall straight
+    // through to the merge below. Stop the group instead.
+    this.throwIfCancelled();
     if (ci.state === 'failure') {
       const fix = await orchestrator.runCiFix({ group, pr: pr.number, checkout, baseBranch });
       if (fix.kind !== 'ok') {
         throw ciFixFailedError(fix);
       }
-      const recheck = await github.waitForChecks(pr.number);
+      const recheck = await github.waitForChecks(pr.number, signal);
+      this.throwIfCancelled();
       if (recheck.state === 'failure') {
         throw new CiFailed(`PR #${pr.number} still failing after worker CI fix`);
       }
@@ -1124,6 +1169,10 @@ export class WorkLoop {
     await github.mergePr(pr.number, this.deps.mergeMethod ?? DEFAULT_MERGE_METHOD, {
       admin: this.deps.adminMerge ?? false,
     });
+  }
+
+  private throwIfCancelled(): void {
+    if (this.deps.signal?.aborted) throw new RunCancelled();
   }
 
   private sessionCapReached(maxSessions: number | null): boolean {

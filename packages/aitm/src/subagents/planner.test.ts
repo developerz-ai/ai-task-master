@@ -479,3 +479,32 @@ test('runPlanner rejects NaN maxPrs', async () => {
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: Number.NaN });
   assert.equal(result.kind, 'error');
 });
+
+test('createPlannerAgent forwards the run signal → an abort cancels the in-flight plan generation', async () => {
+  // The Planner runs through the schema-retry kernel, which owns its generations — only the agent's
+  // own signal can reach them, so a Ctrl-C aborts the leg instead of waiting the provider out.
+  const stalling = new MockLanguageModelV3({
+    doGenerate: (opts) =>
+      new Promise((_resolve, reject) => {
+        opts.abortSignal?.addEventListener('abort', () =>
+          reject(new DOMException('This operation was aborted', 'AbortError')),
+        );
+      }),
+  });
+  const controller = new AbortController();
+  const agent = createPlannerAgent({
+    model: stalling,
+    tools: {},
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+    signal: controller.signal,
+    // Safety net: an unwired signal must fail the test rather than hang it forever.
+    timeout: { stepMs: 2_000 },
+  });
+  setTimeout(() => controller.abort(), 5);
+  const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') {
+    assert.match(result.error, /abort/i);
+    assert.doesNotMatch(result.error, /deadline/, 'a cancel is never a deadline breach');
+  }
+});

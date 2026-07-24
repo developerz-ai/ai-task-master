@@ -26,8 +26,10 @@ import {
   buildFallbackComposition,
   COMPOSE_PR_MAX_RETRIES,
   compositionOutcome,
+  DEFAULT_CMD_TIMEOUT_MS,
   DEFAULT_MAX_STEPS,
   describeSubmitPayload,
+  execaOptions,
   type GhClient,
   normalizePrBodyHeadings,
   ORCHESTRATOR_ROLE_PREFIX,
@@ -1650,4 +1652,64 @@ test('repairPrBody: a body with content mashed onto every heading line is not do
     "the model's summary survives",
   );
   assert.match(repaired, /add User and Session types/, "the model's changes survive under Changes");
+});
+
+// The `git commit --amend` seam is a chokepoint like GitHubClient's: without a deadline a wedged
+// index lock stalls the group forever, and without the run signal a SIGINT orphans the child.
+test('execaOptions: no options → the default deadline, nothing else', () => {
+  assert.deepEqual(execaOptions(), { timeout: DEFAULT_CMD_TIMEOUT_MS });
+});
+
+test('execaOptions: cwd + explicit timeout + signal → execa cwd/timeout/cancelSignal', () => {
+  const controller = new AbortController();
+  assert.deepEqual(execaOptions({ cwd: '/tmp/wt', timeout: 25, signal: controller.signal }), {
+    cwd: '/tmp/wt',
+    timeout: 25,
+    cancelSignal: controller.signal,
+  });
+});
+
+test('finalizeCommit: the run signal reaches every git child', async () => {
+  const { provider } = recordingProvider(modelEmitting('feat(core): add a'));
+  const seen: Array<AbortSignal | undefined> = [];
+  const runCmd: RunCmd = async (_file, args, options) => {
+    seen.push(options?.signal);
+    if (args[0] === 'rev-parse') return { stdout: 'shaXYZ\n', stderr: '', exitCode: 0 };
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  const controller = new AbortController();
+
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: {} as never,
+    runCmd,
+    signal: controller.signal,
+  });
+
+  assert.equal(await o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt'), 'shaXYZ');
+  assert.deepEqual(seen, [controller.signal, controller.signal]);
+});
+
+test('finalizeCommit: the run signal also cancels the refine generateText call', async () => {
+  const { provider } = recordingProvider(stallingModel());
+  const controller = new AbortController();
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: {} as never,
+    runCmd: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    signal: controller.signal,
+  });
+
+  const pending = o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt');
+  // Abort once the request is in flight: stallingModel settles off the abort EVENT, so a signal that
+  // fired before generateText armed its listener would leave the call hanging forever.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  controller.abort();
+  await assert.rejects(pending);
 });

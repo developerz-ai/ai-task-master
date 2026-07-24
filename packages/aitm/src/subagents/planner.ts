@@ -23,6 +23,7 @@ import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
 import {
   AGENT_STEP_BACKSTOP,
   appendReminderBlock,
+  forwardInit,
   prependContextBlock,
   type SubagentInit,
 } from './factory.ts';
@@ -88,12 +89,7 @@ export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAge
         inputSchema: PlanSchema,
         execute: async (plan) => plan,
       }),
-      ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
-      ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
-      ...(init.onStepFinish ? { onStepFinish: init.onStepFinish } : {}),
-      ...(init.onRetry ? { onRetry: init.onRetry } : {}),
-      ...(init.onStream ? { onStream: init.onStream } : {}),
-      ...(init.streamWatchdog ? { streamWatchdog: init.streamWatchdog } : {}),
+      ...forwardInit(init),
     },
     PLANNER_MAX_STEPS,
   );

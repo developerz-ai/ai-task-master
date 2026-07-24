@@ -96,21 +96,62 @@ export function parseModelCatalog(json: unknown): OpenRouterModel[] {
   return models;
 }
 
+// Both catalog fetches run at startup (ModelLimitsRegistry.preload), and an endpoint that accepts
+// the connection and then stalls would hang the whole run before the first task — fillFromReference's
+// try/catch guards a rejection, never a hang. Twenty seconds is generous for one keyless GET.
+export const CATALOG_FETCH_TIMEOUT_MS = 20_000;
+
+// The deadline alone doesn't answer a Ctrl-C: preload runs before the first task, so a stalled
+// catalog GET keeps the process alive for the full 20s after the run is already cancelled. Compose
+// the two by hand rather than with `AbortSignal.any`, which Node 20.0–20.2 lacks (same reason as
+// ai-claude-compat's linkController). `release` unhooks the run listener once the request settles —
+// the run signal outlives every fetch, and a retained listener leaks the finished controller.
+export function catalogFetchSignal(signal?: AbortSignal): {
+  signal: AbortSignal;
+  release: () => void;
+} {
+  const deadline = AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS);
+  if (!signal) return { signal: deadline, release: () => {} };
+  const controller = new AbortController();
+  if (signal.aborted) {
+    controller.abort(signal.reason);
+    return { signal: controller.signal, release: () => {} };
+  }
+  const unlink = [deadline, signal].map((outer) => {
+    const onAbort = () => controller.abort(outer.reason);
+    outer.addEventListener('abort', onAbort, { once: true });
+    return () => outer.removeEventListener('abort', onAbort);
+  });
+  return {
+    signal: controller.signal,
+    release: () => {
+      for (const unhook of unlink) unhook();
+    },
+  };
+}
+
 export class OpenRouterClient {
   constructor(
     private readonly apiKey: string,
     private readonly baseUrl: string = 'https://openrouter.ai/api/v1',
+    private readonly signal?: AbortSignal,
   ) {}
 
   async listModels(): Promise<OpenRouterModel[]> {
-    const res = await fetch(`${this.baseUrl}/models`, {
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-    });
-    if (!res.ok) {
-      const excerpt = (await res.text()).slice(0, 500);
-      throw new Error(`OpenRouter /models failed: ${res.status} ${res.statusText} — ${excerpt}`);
+    const fetchSignal = catalogFetchSignal(this.signal);
+    try {
+      const res = await fetch(`${this.baseUrl}/models`, {
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        signal: fetchSignal.signal,
+      });
+      if (!res.ok) {
+        const excerpt = (await res.text()).slice(0, 500);
+        throw new Error(`OpenRouter /models failed: ${res.status} ${res.statusText} — ${excerpt}`);
+      }
+      const json: unknown = await res.json();
+      return parseModelCatalog(json);
+    } finally {
+      fetchSignal.release();
     }
-    const json: unknown = await res.json();
-    return parseModelCatalog(json);
   }
 }

@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { OpenRouterModel } from './client.ts';
-import { matchReferenceModel } from './reference-catalog.ts';
+import {
+  matchReferenceModel,
+  OPENROUTER_REFERENCE_URL,
+  OpenRouterReferenceCatalog,
+} from './reference-catalog.ts';
 
 // Shaped like the real catalog: org-qualified ids, one `~` alias, one near-miss family member.
 const CATALOG: OpenRouterModel[] = [
@@ -52,4 +56,39 @@ test('matchReferenceModel: an ambiguous tier gives up rather than guessing', () 
   // Two orgs publishing the same local name: mispricing a run is worse than not pricing it.
   const ambiguous: OpenRouterModel[] = [{ id: 'a/shared-model' }, { id: 'b/shared-model' }];
   assert.equal(matchReferenceModel('shared-model', ambiguous), undefined);
+});
+
+test('reference catalog: the keyless fetch is time-boxed too', async () => {
+  // Same startup path as OpenRouterClient.listModels — a stalled public catalog must not hang the run.
+  const realFetch = globalThis.fetch;
+  let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_input, init) => {
+    seen = init?.signal ?? undefined;
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  try {
+    await new OpenRouterReferenceCatalog().listModels();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.ok(seen instanceof AbortSignal);
+  assert.equal(seen.aborted, false);
+});
+
+test('reference catalog: the run signal cancels the keyless fetch too', async () => {
+  const realFetch = globalThis.fetch;
+  const controller = new AbortController();
+  let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_input, init) => {
+    seen = init?.signal ?? undefined;
+    controller.abort();
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  try {
+    await new OpenRouterReferenceCatalog(OPENROUTER_REFERENCE_URL, controller.signal).listModels();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.ok(seen instanceof AbortSignal);
+  assert.equal(seen.aborted, true, 'the run signal reaches fetch, not just the deadline');
 });

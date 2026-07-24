@@ -836,9 +836,12 @@ export function planToPrGroups(
 // Branch names already published on `origin`, read in ONE `ls-remote` for the whole run rather than
 // a probe per group. Best-effort by design: no origin, no network, or not a git repo all yield an
 // empty set, so branch dedupe degrades to the plain names — a naming courtesy must never fail a run.
-export async function remoteBranchNames(cwd: string): Promise<Set<string>> {
+export async function remoteBranchNames(cwd: string, signal?: AbortSignal): Promise<Set<string>> {
   try {
-    const result = await runGit(['ls-remote', '--heads', 'origin'], { cwd });
+    const result = await runGit(['ls-remote', '--heads', 'origin'], {
+      cwd,
+      ...(signal ? { signal } : {}),
+    });
     return new Set(parseRemoteHeads(result.stdout));
   } catch {
     return new Set();
@@ -908,6 +911,7 @@ async function surveyRepoForPlanner(params: {
     }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   const ctx = {
     goal: input.goal,
@@ -979,6 +983,7 @@ async function defaultPlanGroups(
     ...(streaming
       ? { onStream: createLiveStreamRenderer(plannerLabel, plannerTag, plannerHeartbeatSink) }
       : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   // Parallel pre-planning survey (planner-scouts.ts): on a big enough repo, a pool of read-only
   // scouts sweeps distinct lenses concurrently and hands the Planner a map, so its own steps go to
@@ -1016,7 +1021,11 @@ async function defaultPlanGroups(
     // One remote read per run, here at first branch assignment — the only moment a branch name is
     // chosen. A resume never reaches this path, so a persisted branch is never renamed underneath a
     // half-finished PR.
-    const groups = planToPrGroups(result.plan, input.branch, await remoteBranchNames(input.cwd));
+    const groups = planToPrGroups(
+      result.plan,
+      input.branch,
+      await remoteBranchNames(input.cwd, input.signal),
+    );
     harnessProgress(
       `plan ready: ${groups.length} PR group(s) — ${groups.map((g) => g.id).join(', ')}`,
       { phase: 'planning' },
@@ -1212,7 +1221,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   const limits =
     input.modelLimits ??
     new ModelLimitsRegistry(
-      new OpenRouterClient(input.resolved.openrouterApiKey, input.resolved.baseURL),
+      new OpenRouterClient(input.resolved.openrouterApiKey, input.resolved.baseURL, input.signal),
     );
   const compactor = new Compactor({
     summarizer: input.credentials.modelForCapability('fast'),
@@ -1246,6 +1255,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       : {}),
     timeout: stepTimeout,
     ...(orchUsage ? { onUsage: orchUsage } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
     onProgress: (message) => harnessProgress(message),
   });
 
@@ -1330,6 +1340,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       ...(reviewerStreaming
         ? { onStream: createLiveStreamRenderer(reviewerLabel, reviewerTag, reviewerHeartbeatSink) }
         : {}),
+      ...(input.signal ? { signal: input.signal } : {}),
     });
     const stopReviewerHeartbeat = startHeartbeat(reviewerLabel, reviewerHeartbeatSink);
     let result: Awaited<ReturnType<typeof runReviewerSubagent>>;
@@ -1353,7 +1364,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   };
 
   return {
-    runWorker: async ({ group, task, checkout, baseBranch }) => {
+    runWorker: async ({ group, task, checkout, baseBranch, signal }) => {
+      // The WorkLoop passes the run's signal per invocation; fall back to the adapter's own so a
+      // caller of this port that predates WorkerInvocation.signal still cancels. One expression for
+      // both consumers below — the Coordinator agent and the editor fanout must abort together.
+      const workerSignal = signal ?? input.signal;
       // Prefer MCP-supplied tools; partial-fill any the server omits from the local set so a
       // bare `aitm start` (no mcpServers configured) can still edit, commit and open a PR.
       // memory (#118) is mounted on the manifest Worker so it can record durable repo facts.
@@ -1483,6 +1498,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
               ),
             }
           : {}),
+        ...(workerSignal ? { signal: workerSignal } : {}),
       });
       const stopWorkerHeartbeat = startHeartbeat(workerAgentLabel, workerHeartbeatSink);
       let result: Awaited<ReturnType<typeof runWorkerSubagent>>;
@@ -1503,6 +1519,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           // 4), so passed unconditionally — with the default it equals EDITOR_CONCURRENCY_DEFAULT, so
           // behavior is unchanged until an operator sets `editorConcurrency`.
           editorConcurrency: input.resolved.editorConcurrency,
+          // Cancels the editor fanout: without it an abort stops the Coordinator's generation while
+          // every editor leaf runs to completion, burning a fanout's worth of tokens on a dead run.
+          ...(workerSignal ? { signal: workerSignal } : {}),
           // Resume (issue #108): continue the interrupted conversation from its retained messages
           // instead of cold-starting, reusing the #107 priorHandle continuation seam.
           ...(resumeMessages ? { priorHandle: { agent, messages: resumeMessages } } : {}),
@@ -1538,7 +1557,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // first — `gh pr create` won't open a PR for a branch that isn't on the remote
       // ("No commits between … / Head ref must be a branch").
       harnessProgress(`group ${group.id}: pushing ${head} and opening PR`, prOpenTag);
-      await runGit(['push', '-u', 'origin', head], { cwd: input.cwd });
+      await runGit(['push', '-u', 'origin', head], {
+        cwd: input.cwd,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
       const pr = await orch.openPr(group, delivery, baseBranch);
       harnessProgress(`group ${group.id}: PR #${pr.number} opened — ${pr.url}`, prOpenTag);
       // Accumulate this group's deterministic digest into the live rolling context and persist it
@@ -1645,6 +1667,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           baseBranch,
           checkoutPath: checkout.path,
           ...(verifyCommand ? { verifyCommand } : {}),
+          ...(input.signal ? { signal: input.signal } : {}),
         });
       } finally {
         stopSelfReviewHeartbeat();
@@ -1768,6 +1791,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           checkoutPath: checkout.path,
           allowForcePush: input.resolved.allowForcePush,
           ...(priorHandle ? { priorHandle } : {}),
+          ...(input.signal ? { signal: input.signal } : {}),
         });
       } finally {
         stopCiFixHeartbeat();
@@ -1810,6 +1834,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           await runGit(['push', '--force-with-lease'], {
             cwd: checkout.path,
             allowForcePush: input.resolved.allowForcePush,
+            ...(input.signal ? { signal: input.signal } : {}),
           });
         } catch (err) {
           return {

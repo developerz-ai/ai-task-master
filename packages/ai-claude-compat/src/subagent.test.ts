@@ -493,6 +493,106 @@ test('continueSubagent: forwards the caller signal — aborting mid-continuation
   );
 });
 
+// --- agent-scoped run cancellation (SubagentConfig.signal) ---
+
+function stallingAgent(config: { signal?: AbortSignal; timeout?: { stepMs: number } } = {}) {
+  return createSubagent(
+    {
+      model: stallingModel(),
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      ...(config.signal ? { signal: config.signal } : {}),
+      ...(config.timeout ? { timeout: config.timeout } : {}),
+    },
+    12,
+  );
+}
+
+test('createSubagent: the run signal cancels a generation the caller does not drive (schema retry)', async () => {
+  // runWithSchemaRetry owns its generations, so a per-call signal can never reach them — the agent's
+  // own signal is the only way a Ctrl-C aborts a planner/reviewer/scout leg.
+  const ac = new AbortController();
+  const agent = stallingAgent({ signal: ac.signal });
+  abortSoon(ac);
+  await assert.rejects(
+    runWithSchemaRetry(agent, OutSchema, 'go'),
+    (err: unknown) => err instanceof Error && err.name === 'AbortError',
+  );
+});
+
+test('createSubagent: a run signal does NOT disarm the configured per-step deadline', async () => {
+  // The signal never fires; the 40ms deadline must still abort the stalled provider.
+  const ac = new AbortController();
+  const agent = stallingAgent({ signal: ac.signal, timeout: { stepMs: 40 } });
+  await assert.rejects(agent.generate({ prompt: 'go' }), (err: unknown) => {
+    assert.ok(
+      err instanceof StepTimeoutError,
+      'the deadline still fires with a run signal present',
+    );
+    return true;
+  });
+});
+
+test('createSubagent: a run-signal abort is not relabelled as a deadline breach', async () => {
+  const ac = new AbortController();
+  const agent = stallingAgent({ signal: ac.signal, timeout: { stepMs: 100_000 } });
+  abortSoon(ac);
+  await assert.rejects(agent.generate({ prompt: 'go' }), (err: unknown) => {
+    assert.ok(!(err instanceof StepTimeoutError), 'the run cancel is not a deadline breach');
+    assert.ok(err instanceof Error && err.name === 'AbortError');
+    return true;
+  });
+});
+
+test('createSubagent: the run signal composes with a per-call abortSignal — either one cancels', async () => {
+  const run = new AbortController();
+  const perCall = new AbortController();
+  abortSoon(run);
+  await assert.rejects(
+    stallingAgent({ signal: run.signal }).generate({ prompt: 'go', abortSignal: perCall.signal }),
+    (err: unknown) => err instanceof Error && err.name === 'AbortError',
+    'the run signal still reaches a call that brought its own signal',
+  );
+
+  const otherRun = new AbortController();
+  const otherCall = new AbortController();
+  abortSoon(otherCall);
+  await assert.rejects(
+    stallingAgent({ signal: otherRun.signal }).generate({
+      prompt: 'go',
+      abortSignal: otherCall.signal,
+    }),
+    (err: unknown) => err instanceof Error && err.name === 'AbortError',
+    'the per-call signal is not swallowed by the run signal',
+  );
+});
+
+test('createSubagent: the composed-signal bridge is released once the generate settles (no leak)', async () => {
+  // A run signal outlives many generations; one retained bridge listener per call leaks the finished
+  // controller and trips the runtime max-listener warning on a long run.
+  const run = new AbortController();
+  const perCall = new AbortController();
+  const agent = createSubagent(
+    {
+      model: scriptedModel(() => ({ submit: JSON.stringify({ n: 5 }) })).model,
+      tools: {},
+      systemPrompt: 'sys',
+      submit: submitTool(OutSchema),
+      signal: run.signal,
+    },
+    12,
+  );
+  const result = await agent.generate({ prompt: 'go', abortSignal: perCall.signal });
+  assert.deepEqual(submittedOutput(result, OutSchema), { ok: true, value: { n: 5 } });
+  assert.equal(getEventListeners(run.signal, 'abort').length, 0, 'run signal listener removed');
+  assert.equal(
+    getEventListeners(perCall.signal, 'abort').length,
+    0,
+    'call signal listener removed',
+  );
+});
+
 test('callWithRetry: an aborted signal ends the retry loop instead of sleeping out the backoff', async () => {
   const ac = new AbortController();
   let calls = 0;

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import {
+  CATALOG_FETCH_TIMEOUT_MS,
   contextLengthOf,
   maxOutputTokensOf,
   OpenRouterClient,
@@ -193,4 +194,70 @@ test('parseModelCatalog: a genuinely invalid entry is still dropped, and drops o
     models.map((m) => m.id),
     ['good/model', 'other/model'],
   );
+});
+
+test('listModels: the catalog fetch is time-boxed', async () => {
+  // preload() runs at startup, and fillFromReference's try/catch guards a rejection, never a hang:
+  // an endpoint that accepts the connection and then stalls would block the run before task one.
+  let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_input, init) => {
+    seen = init?.signal ?? undefined;
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  await new OpenRouterClient('sk-or-test').listModels();
+  assert.ok(seen instanceof AbortSignal);
+  assert.equal(seen.aborted, false);
+});
+
+test('listModels: the deadline expiring surfaces as a rejection, not a hang', async () => {
+  // What the caller sees once AbortSignal.timeout fires: fetch rejects and listModels propagates it,
+  // so ModelLimitsRegistry's try/catch can degrade instead of waiting forever.
+  globalThis.fetch = async () => {
+    throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+  };
+  await assert.rejects(
+    () => new OpenRouterClient('sk-or-test', 'https://stalled.test/v1').listModels(),
+    /TimeoutError|aborted/,
+  );
+  assert.ok(CATALOG_FETCH_TIMEOUT_MS > 0 && CATALOG_FETCH_TIMEOUT_MS <= 60_000);
+});
+
+test('listModels: the run signal cancels the catalog fetch, not just the deadline', async () => {
+  // preload() runs before the first task, so without this a Ctrl-C waits out the full deadline on a
+  // stalled catalog GET before the process can exit.
+  const controller = new AbortController();
+  let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_input, init) => {
+    seen = init?.signal ?? undefined;
+    controller.abort();
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  await new OpenRouterClient('sk-or-test', undefined, controller.signal).listModels();
+  assert.equal(seen?.aborted, true);
+});
+
+test('listModels: an already-aborted run signal never reaches the network unaborted', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_input, init) => {
+    seen = init?.signal ?? undefined;
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  await new OpenRouterClient('sk-or-test', undefined, controller.signal).listModels();
+  assert.equal(seen?.aborted, true);
+});
+
+test('listModels: releases the run-signal listener once the request settles', async () => {
+  // The run signal outlives every catalog fetch; a retained listener leaks the finished controller
+  // and trips the runtime's max-listener warning on a long run.
+  const controller = new AbortController();
+  let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_input, init) => {
+    seen = init?.signal ?? undefined;
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+  await new OpenRouterClient('sk-or-test', undefined, controller.signal).listModels();
+  controller.abort();
+  assert.equal(seen?.aborted, false);
 });

@@ -10,6 +10,7 @@
 import type {
   RetryOptions,
   StreamWatchdogConfig,
+  SubagentConfig,
   SubagentStreamSink,
 } from '@developerz.ai/ai-claude-compat';
 import type {
@@ -90,7 +91,33 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
   // Overrides for the streaming stall watchdog, forwarded to createSubagent. Unset → production
   // defaults (120s inactivity / 30s grace). Only consulted when onStream is set.
   streamWatchdog?: StreamWatchdogConfig;
+  // Run-scoped cancellation handle (the CLI's SIGINT/SIGTERM controller, threaded from
+  // RunLoopInput.signal). Forwarded to createSubagent, which applies it to every generate the agent
+  // makes — including the ones the schema-retry kernel drives itself — so an abort tears the
+  // in-flight LLM request down instead of the run waiting the generation out. Unset → no signal.
+  signal?: AbortSignal;
 };
+
+// The optional half of a SubagentInit, shaped for createSubagent. One helper so planner/worker/
+// reviewer forward the SAME set: each used to hand-roll this spread and quietly dropped fields the
+// others forwarded (planner: prepareStep + providerOptions; reviewer: providerOptions), so a caller
+// setting one got silence rather than an error. Conditional spreads preserve key-absence under
+// exactOptionalPropertyTypes — an unset field must never override a createSubagent default.
+export function forwardInit<TTools extends ToolSet>(
+  init: SubagentInit<TTools>,
+): Omit<SubagentConfig<TTools>, 'model' | 'tools' | 'systemPrompt' | 'submit'> {
+  return {
+    ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
+    ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
+    ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
+    ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
+    ...(init.onStepFinish ? { onStepFinish: init.onStepFinish } : {}),
+    ...(init.onRetry ? { onRetry: init.onRetry } : {}),
+    ...(init.onStream ? { onStream: init.onStream } : {}),
+    ...(init.streamWatchdog ? { streamWatchdog: init.streamWatchdog } : {}),
+    ...(init.signal ? { signal: init.signal } : {}),
+  };
+}
 
 // Concrete factory implementations live next to each subagent: planner.ts, worker.ts, reviewer.ts.
 export type SubagentFactory<TInit, TAgent> = (init: TInit) => TAgent;

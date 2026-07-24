@@ -4,6 +4,7 @@ import type { LanguageModelUsage } from 'ai';
 import {
   appendReminderBlock,
   DEFAULT_LLM_STEP_TIMEOUT_MS,
+  forwardInit,
   prependContextBlock,
   reportUsage,
   type SubagentFactory,
@@ -80,4 +81,58 @@ test('appendReminderBlock: appends the trailing block with a blank-line separato
   );
   assert.equal(appendReminderBlock('Goal: x', undefined), 'Goal: x');
   assert.equal(appendReminderBlock('Goal: x', ''), 'Goal: x', 'empty block is a no-op');
+});
+
+test('forwardInit: omits every unset optional field so createSubagent defaults stand', () => {
+  const minimal: SubagentInit = { model: 'test/model', tools: {}, systemPrompt: 'sys' };
+  assert.deepEqual(Object.keys(forwardInit(minimal)), []);
+});
+
+test('forwardInit: forwards every createSubagent-shaped field, including the run signal', () => {
+  const controller = new AbortController();
+  const prepareStep = async () => ({});
+  const onStepFinish = () => {};
+  const onRetry = () => {};
+  const onStream = () => {};
+  const forwarded = forwardInit({
+    model: 'test/model',
+    tools: {},
+    systemPrompt: 'sys',
+    maxSteps: 7,
+    prepareStep,
+    timeout: { stepMs: 40 },
+    providerOptions: { openrouter: { tools: [] } },
+    onStepFinish,
+    onRetry,
+    onStream,
+    streamWatchdog: { inactivityMs: 5 },
+    signal: controller.signal,
+  });
+  assert.deepEqual(Object.keys(forwarded).sort(), [
+    'maxSteps',
+    'onRetry',
+    'onStepFinish',
+    'onStream',
+    'prepareStep',
+    'providerOptions',
+    'signal',
+    'streamWatchdog',
+    'timeout',
+  ]);
+  assert.equal(forwarded.signal, controller.signal);
+  assert.equal(forwarded.maxSteps, 7);
+  assert.equal(forwarded.prepareStep, prepareStep);
+  assert.deepEqual(forwarded.timeout, { stepMs: 40 });
+});
+
+test('forwardInit: drops the aitm-only sinks createSubagent does not accept', () => {
+  // onUsage / onEditorStepFinish are read by the runners off the init registry, not by the agent.
+  const forwarded = forwardInit({
+    model: 'test/model',
+    tools: {},
+    systemPrompt: 'sys',
+    onUsage: () => {},
+    onEditorStepFinish: () => () => {},
+  });
+  assert.deepEqual(Object.keys(forwarded), []);
 });

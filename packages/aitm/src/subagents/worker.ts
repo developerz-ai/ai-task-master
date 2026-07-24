@@ -69,6 +69,7 @@ import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
 import {
   AGENT_STEP_BACKSTOP,
   appendReminderBlock,
+  forwardInit,
   type OnUsage,
   prependContextBlock,
   reportUsage,
@@ -286,16 +287,11 @@ export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent 
         inputSchema: FileManifestSchema,
         execute: async (manifest) => manifest,
       }),
-      ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),
+      ...forwardInit(init),
       // The survey budget composes ONTO the caller's prepareStep (compaction, deferred-tool
-      // activation) rather than replacing it — one prepareStep slot, several policies.
+      // activation) rather than replacing it — one prepareStep slot, several policies. Set after the
+      // forwarded init so it wins over the plain passthrough.
       prepareStep: withSurveyBudget(init.prepareStep),
-      ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
-      ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
-      ...(init.onStepFinish ? { onStepFinish: init.onStepFinish } : {}),
-      ...(init.onRetry ? { onRetry: init.onRetry } : {}),
-      ...(init.onStream ? { onStream: init.onStream } : {}),
-      ...(init.streamWatchdog ? { streamWatchdog: init.streamWatchdog } : {}),
     },
     WORKER_MAX_STEPS,
   );

@@ -121,6 +121,9 @@ export type SelfReviewInput = {
   // spawning a process.
   runCmd?: RunCmd;
   logger?: LoggerLike;
+  // Run-scoped cancellation, forwarded to the review Worker agent (see SubagentInit.signal) so an
+  // abort tears its in-flight generation down. Mirrors FixSessionInput.signal. Unset → no signal.
+  signal?: AbortSignal;
 };
 
 export type SelfReviewResult =
@@ -196,6 +199,8 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     ...(subagents.progressBlock ? { progressBlock: subagents.progressBlock } : {}),
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),
+    // Same signal the review Worker's agent gets below, so an abort tears down the editor fanout too.
+    ...(input.signal ? { signal: input.signal } : {}),
     // A reviewer fixes what it finds as it finds it — it reads the diff, spots the bug, and edits.
     // Its manifest therefore describes work already on disk, and fanning editors out over it makes
     // them re-derive finished changes (observed: two editors, ~70s, zero net edits, one of them
@@ -232,6 +237,7 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     ...(subagents.onRetry ? { onRetry: subagents.onRetry } : {}),
     ...(subagents.onStream ? { onStream: subagents.onStream } : {}),
     ...(subagents.streamWatchdog ? { streamWatchdog: subagents.streamWatchdog } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   return runWorker(agent, baseInput);
 }

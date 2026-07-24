@@ -89,6 +89,23 @@ Every subagent terminates when it calls `submit` (`createSubagent` pairs `stepCo
 
 Editor leaves are the one exception to "terminate on submit": a leaf has no `submit` tool, so it ends on a plain text response or the backstop. A leaf that keeps calling tools without finishing is exactly the runaway the backstop catches.
 
+## Cancellation
+
+One `AbortSignal` — the CLI's SIGINT/SIGTERM handle, carried as `RunLoopInput.signal` — reaches every subagent through its init (`SubagentInit.signal`, `ScoutAgentInit.signal`) and is forwarded to `createSubagent`, which applies it to **every** generate that agent makes.
+
+Agent-scoped rather than per-call, because the calls that matter are not all driven by the caller: `runWithSchemaRetry` owns its own re-invocations (Planner, Reviewer, scouts), so a signal handed in at the call site could never reach them. It **composes** instead of replacing:
+
+- with the configured per-step deadline (`llmStepTimeoutMs`) — whichever fires first aborts the step, and a cancel is never relabelled as a deadline breach;
+- with a per-call `abortSignal` — both are honored, so a call that brings its own signal is still cancellable by one Ctrl-C.
+
+It also ends the retry kernel: an aborted run never sits out a backoff window nobody is waiting for.
+
+The editor fanout is the one set of generations an agent init cannot reach — the leaves are raw `generateText` calls sharing the fanout's own `AbortController`, not agent steps. That controller links to `WorkerInput.signal`, so the same run signal has to arrive twice: once on the agent (Coordinator) and once on the Worker input (leaves). Production passes it on both from one expression per call site — `WorkLoop` → `WorkerInvocation.signal` for the task path, and the run signal directly in the CI-fix, self-review and take-over sessions. Without the second, a Ctrl-C stops the Coordinator while every leaf keeps generating against a run that is already over.
+
+The optional half of a `SubagentInit` is forwarded through one helper (`forwardInit`), so every role passes the same dial set — before it, each factory hand-rolled the spread and quietly dropped fields the others forwarded.
+
+The same signal also runs the loops *between* subagent calls, where a run spends most of its wall clock: `StageDeps.signal` carries it into the stage machine, which hands it to `waitForChecks` and to the post-CI review grace; the take-over loop threads it through its CI poll, grace and cooldown; the shared rebase path stops before another AI conflict-resolution pass. Sleeps **resolve** on abort rather than rejecting (`defaultSleep`), so each loop re-checks `signal.aborted` at the top of its next iteration and decides what a cancelled run returns — a cancelled `waitForChecks` comes back `pending`, which is a *non-verdict*: every caller re-checks the signal before treating it as CI state, so no cancelled run routes into a fix pass or walks on to `gh pr merge`.
+
 ## Throughput guards
 
 Three mechanical limits, each traced to an observed waste:

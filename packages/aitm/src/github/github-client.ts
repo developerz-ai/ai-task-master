@@ -238,6 +238,11 @@ export class GitHubClient {
   // spawns a `gh repo view` subprocess per group instead of once.
   private cachedDefaultBranch: string | null = null;
 
+  // Labels created once per run via `gh label create --force` and reused — createPr is called
+  // once per PR group, and the label set never changes mid-run, so without this a multi-group run
+  // spawns a `gh label create` subprocess per label per group instead of once.
+  private cachedLabels: Set<string> | null = null;
+
   async currentBranch(): Promise<string> {
     const r = await this.runCmd('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: this.cwd });
     if (r.exitCode !== 0) {
@@ -254,20 +259,16 @@ export class GitHubClient {
     if (r.exitCode !== 0) {
       throw new GhCommandFailed('gh repo view', r);
     }
-    const parsed: unknown = parseGhJson('gh repo view', r.stdout);
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      'defaultBranchRef' in parsed &&
-      typeof parsed.defaultBranchRef === 'object' &&
-      parsed.defaultBranchRef !== null &&
-      'name' in parsed.defaultBranchRef &&
-      typeof parsed.defaultBranchRef.name === 'string'
-    ) {
-      this.cachedDefaultBranch = parsed.defaultBranchRef.name;
-      return this.cachedDefaultBranch;
+    const parsed = DefaultBranchRefSchema.safeParse(parseGhJson('gh repo view', r.stdout));
+    if (!parsed.success) {
+      throw new GhCommandFailed('gh repo view', r);
     }
-    throw new Error(`gh repo view: unexpected JSON shape: ${r.stdout}`);
+    const branchName = parsed.data.defaultBranchRef?.name;
+    if (typeof branchName !== 'string') {
+      throw new GhCommandFailed('gh repo view', r);
+    }
+    this.cachedDefaultBranch = branchName;
+    return this.cachedDefaultBranch;
   }
 
   async getPrForBranch(branch: string): Promise<PullRequest | null> {
@@ -310,8 +311,15 @@ export class GitHubClient {
     // `gh pr create --label X` fails if X doesn't exist yet — which it won't on a fresh repo the
     // first time aitm opens a PR. Ensure each label exists first (idempotent via --force; the
     // result is intentionally not checked so a labels-permission gap doesn't block PR creation).
+    // Cache created labels once per run to avoid repeated subprocess calls.
+    if (this.cachedLabels === null) {
+      this.cachedLabels = new Set();
+    }
     for (const label of labels) {
-      await this.runCmd('gh', ['label', 'create', label, '--force'], { cwd: this.cwd });
+      if (!this.cachedLabels.has(label)) {
+        await this.runCmd('gh', ['label', 'create', label, '--force'], { cwd: this.cwd });
+        this.cachedLabels.add(label);
+      }
     }
 
     const r = await this.runCmd('gh', args, { cwd: this.cwd });
@@ -704,7 +712,7 @@ export class GitHubClient {
     // the conflict branch so an already-merged PR is never misreported as a conflict.
     if (await this.isMerged(pr)) return;
     const combined = `${r.stderr}\n${r.stdout}`;
-    if (/merge conflict|not mergeable|conflict/i.test(combined)) {
+    if (/merge conflict|not mergeable/i.test(combined)) {
       throw new MergeConflict(`Merge conflict on PR #${pr}: ${r.stderr.trim() || r.stdout.trim()}`);
     }
     throw new GhCommandFailed('gh pr merge', r);
@@ -918,6 +926,15 @@ function collectFailedChecks(rows: CheckRow[]): FailedCheck[] {
 const RepoOwnerNameSchema = z.object({
   owner: z.object({ login: z.string() }),
   name: z.string(),
+});
+
+// `gh repo view --json defaultBranchRef` returns `{ defaultBranchRef: { name } }`.
+const DefaultBranchRefSchema = z.object({
+  defaultBranchRef: z
+    .object({
+      name: z.string(),
+    })
+    .nullable(),
 });
 
 const REVIEW_THREADS_QUERY = `query($owner: String!, $repo: String!, $pr: Int!, $threadsCursor: String) {

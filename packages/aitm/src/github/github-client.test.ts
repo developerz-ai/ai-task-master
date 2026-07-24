@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CiFailed, GhCliMissing, MergeConflict } from './errors.ts';
+import { CiFailed, GhCliMissing, GhCommandFailed, MergeConflict } from './errors.ts';
 import {
   CHECKS_EMPTY_GRACE_MS,
   CHECKS_INITIAL_DELAY_MS,
@@ -145,7 +145,7 @@ test('defaultBranch caches the branch (one subprocess across calls)', async () =
 test('defaultBranch throws on unexpected JSON shape', async () => {
   const { run } = makeRun([{ stdout: JSON.stringify({ wrong: 'shape' }) }]);
   const g = new GitHubClient('/tmp/repo', run);
-  await assert.rejects(() => g.defaultBranch(), /unexpected JSON shape/);
+  await assert.rejects(() => g.defaultBranch(), GhCommandFailed);
 });
 
 test('defaultBranch: exit-0 non-JSON stdout throws naming the command, cause preserved', async () => {

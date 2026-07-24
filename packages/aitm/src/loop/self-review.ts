@@ -28,7 +28,7 @@ import { defaultRunCmd, type RunCmd, type RunCmdResult } from '../github/github-
 import type { LoggerLike } from '../logger/logger.ts';
 import { withAcceptanceCheck } from '../plan/acceptance.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
-import type { SubagentInit } from '../subagents/factory.ts';
+import type { SubagentInit, WorkerSubagentInit } from '../subagents/factory.ts';
 import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
@@ -97,7 +97,7 @@ export type SelfReviewSubagents = {
   // Per-step transcript recorder callback forwarded to the review Worker agent. Unset → nothing.
   onStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
   // Progress-only per-step callback for the review Worker's parallel editor fanout. Unset → silent.
-  onEditorStepFinish?: SubagentInit<WorkerTools>['onEditorStepFinish'];
+  onEditorStepFinish?: WorkerSubagentInit<WorkerTools>['onEditorStepFinish'];
   // Retry-visibility sink forwarded to the review Worker agent (slice 01b). Unset → no sink.
   onRetry?: SubagentInit<WorkerTools>['onRetry'];
   // Live-streaming sink + watchdog overrides forwarded to the review Worker agent (slice 07). Set

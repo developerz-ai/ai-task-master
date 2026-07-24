@@ -29,7 +29,7 @@ import {
 import type { ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
-import type { SubagentInit } from '../subagents/factory.ts';
+import type { SubagentInit, WorkerSubagentInit } from '../subagents/factory.ts';
 import { buildRolePrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
@@ -98,8 +98,8 @@ export type FixSessionSubagents = {
   // nothing recorded.
   onStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
   // Progress-only per-step callback for the fix Worker's parallel editor fanout (silent-run fix).
-  // See SubagentInit.onEditorStepFinish. Unset → editors stay silent.
-  onEditorStepFinish?: SubagentInit<WorkerTools>['onEditorStepFinish'];
+  // See WorkerSubagentInit.onEditorStepFinish. Unset → editors stay silent.
+  onEditorStepFinish?: WorkerSubagentInit<WorkerTools>['onEditorStepFinish'];
   // Retry-visibility sink forwarded to the fix Worker agent (slice 01b). Unset → no sink.
   onRetry?: SubagentInit<WorkerTools>['onRetry'];
   // Live-streaming sink + watchdog overrides forwarded to the fix Worker agent (slice 07). Set only

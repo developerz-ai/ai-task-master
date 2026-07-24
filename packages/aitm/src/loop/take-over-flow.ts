@@ -35,7 +35,7 @@ import {
 import type { ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup } from '../state/schema.ts';
-import type { SubagentInit } from '../subagents/factory.ts';
+import type { SubagentInit, WorkerSubagentInit } from '../subagents/factory.ts';
 import {
   createReviewerAgent,
   REVIEWER_SYSTEM_PREFIX,
@@ -116,7 +116,7 @@ export type TakeOverSubagents = {
   // silent, matching prior behavior.
   onReviewerStepFinish?: SubagentInit<ReviewerTools>['onStepFinish'];
   onWorkerStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
-  onEditorStepFinish?: SubagentInit<WorkerTools>['onEditorStepFinish'];
+  onEditorStepFinish?: WorkerSubagentInit<WorkerTools>['onEditorStepFinish'];
   // Per-call token-usage sinks (issue #114/#190) so `aitm merge-pr` accounts for its spend like
   // `aitm start`. The Worker sink covers the shared CI-fix session (recorded under the coding-tier
   // worker role); the Reviewer sink covers the review pass. A conflict resolver, when wired, carries

@@ -73,7 +73,7 @@ import {
   type OnUsage,
   prependContextBlock,
   reportUsage,
-  type SubagentInit,
+  type WorkerSubagentInit,
 } from './factory.ts';
 import { EDITOR_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 import { buildEditorRolePrompt } from './role-prompt.ts';
@@ -274,9 +274,9 @@ const MANIFEST_WRITE_TOOLS: ReadonlySet<string> = new Set(['writeFile', 'editFil
 
 // Module-private link from a Worker agent back to its init, so runWorker can spawn editor
 // sub-agents with the same model + tool handles without exposing them on the public surface.
-const workerInitRegistry = new WeakMap<WorkerAgent, SubagentInit<WorkerTools>>();
+const workerInitRegistry = new WeakMap<WorkerAgent, WorkerSubagentInit<WorkerTools>>();
 
-export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent {
+export function createWorkerAgent(init: WorkerSubagentInit<WorkerTools>): WorkerAgent {
   const agent = createSubagent<WorkerTools>(
     {
       model: init.model,
@@ -473,7 +473,7 @@ type PlanEditResult =
 // runs through here (which never verifies), it can never trigger a second fix pass.
 async function planAndEdit(
   agent: WorkerAgent,
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   input: WorkerInput,
   branch: string,
 ): Promise<PlanEditResult> {
@@ -603,7 +603,7 @@ function appliedPhantomReason(paths: string[]): string {
 // returning any files the fix pass touched so runWorker can fold them into the delivery.
 async function commitWithVerify(
   agent: WorkerAgent,
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   input: WorkerInput,
   branch: string,
   message: string,
@@ -1000,7 +1000,7 @@ export function buildTeamBrief(input: WorkerInput, files: readonly FileManifestE
 // one concurrent LLM request per file (slice 05). Each leaf yields one outcome per file it owns; the
 // per-group results are flattened back to one outcome per manifest entry for planAndEdit.
 async function runEditorFanout(
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   manifest: FileManifest,
   input: WorkerInput,
 ): Promise<EditorOutcome[]> {
@@ -1062,7 +1062,7 @@ async function runEditorFanout(
 // Exactly one: a second narration after being told "you wrote nothing" is a real capability failure,
 // and retrying it again would just burn a leaf's worth of tokens before blocking anyway.
 async function runEditor(
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   leaf: EditorLeaf,
   input: WorkerInput,
   signal: AbortSignal,
@@ -1100,7 +1100,7 @@ async function runEditor(
 
 // One generateText call for a leaf, returning its one-line summary ('' when it said nothing).
 async function runEditorPass(
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   leaf: EditorLeaf,
   input: WorkerInput,
   signal: AbortSignal,
@@ -1133,7 +1133,7 @@ async function runEditorPass(
         ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
         ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
         // Editor-fanout progress (silent-run fix): per-step-field-only handlers, safe under the
-        // parallel fanout — see SubagentInit.onEditorStepFinish.
+        // parallel fanout — see WorkerSubagentInit.onEditorStepFinish.
         ...(editorStepFinish ? { onStepFinish: editorStepFinish } : {}),
       }),
     init.timeout,
@@ -1148,7 +1148,7 @@ async function runEditorPass(
 // writeFile/editFile, and every unwritten path must surface as a phantom rather than a FileChange the
 // committed diff can't back (audit 05).
 async function verifyEditorOutcomes(
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   input: WorkerInput,
   group: readonly FileManifestEntry[],
   summary: string,

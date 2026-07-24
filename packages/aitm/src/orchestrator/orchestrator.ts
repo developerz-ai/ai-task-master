@@ -671,6 +671,15 @@ export function repairPrBody(
     .join('\n\n');
 }
 
+// The deterministic conventional-commit subject for a group when no model-authored message is usable:
+// `feat: <group.title>` (or the group id when the title is blank), collapsed to one line and capped
+// ≤72 chars on a word boundary. Shared by buildFallbackComposition (the PR title) and
+// resolveCommitMessage's total fallback so the two never drift. Exported for unit testing.
+export function fallbackCommitSubject(group: PrGroup): string {
+  const subject = group.title.trim() || group.id;
+  return truncateAtWord(`feat: ${oneLine(subject)}`, 72);
+}
+
 // Deterministic PR composition used when the model's composePr attempts are exhausted (invalid
 // schema, a missing section, or no submission at all). Built purely from in-memory group + delivery
 // data, so it is total (never throws) and does no I/O. The body emits every configured section
@@ -681,12 +690,34 @@ export function buildFallbackComposition(
   delivery: WorkerDelivery,
   sections: readonly string[],
 ): PrComposition {
-  const subject = group.title.trim() || group.id;
-  const title = truncateAtWord(`feat: ${oneLine(subject)}`, 72);
+  const title = fallbackCommitSubject(group);
   const body = sections
     .map((heading) => `${heading}\n${fallbackSectionContent(heading, group, delivery)}`)
     .join('\n\n');
   return { title, body };
+}
+
+// The final commit message from the orchestrator's refine output, made total so an empty or
+// code-fenced model response never produces `git commit --amend -m ''` and blocks the whole group at
+// finalizeCommit. Mirrors composePr's fallback ladder: strip a wrapping code fence (weak models emit
+// the message inside ```), and when nothing usable survives, fall back to the Worker's own draft, then
+// to a deterministic feat: subject built from the group. Exported for unit testing.
+export function resolveCommitMessage(
+  text: string,
+  group: PrGroup,
+  delivery: WorkerDelivery,
+): string {
+  const refined = cleanCommitText(text);
+  if (refined !== '') return refined;
+  const draft = cleanCommitText(delivery.draftCommitMessage);
+  if (draft !== '') return draft;
+  return fallbackCommitSubject(group);
+}
+
+// Strip one wrapping code fence and trim — the normalization applied to both the model output and the
+// Worker draft before either is accepted as a commit message.
+function cleanCommitText(text: string): string {
+  return stripCodeFence(text.trim()).trim();
 }
 
 // Standard PR body every aitm-opened PR follows, so reviewers get a consistent shape. The
@@ -850,7 +881,7 @@ export class Orchestrator {
       this.init.timeout,
     );
     reportUsage(this.init.onUsage, result);
-    return result.text.trim();
+    return resolveCommitMessage(result.text, group, delivery);
   }
 
   // Task-specific ask only — the shared system prompt (style/role/rolling-context) is sent once via

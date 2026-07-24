@@ -30,6 +30,7 @@ import {
   DEFAULT_MAX_STEPS,
   describeSubmitPayload,
   execaOptions,
+  fallbackCommitSubject,
   type GhClient,
   normalizePrBodyHeadings,
   ORCHESTRATOR_ROLE_PREFIX,
@@ -41,6 +42,7 @@ import {
   type RunCmd,
   recoverComposition,
   repairPrBody,
+  resolveCommitMessage,
   resolveMaxSteps,
   resolvePrBodySections,
   SUBMIT_PAYLOAD_PREVIEW_CHARS,
@@ -472,6 +474,47 @@ test('finalizeCommit rewrites commit message and amends via runCmd, returning th
     args: ['rev-parse', 'HEAD'],
     cwd: '/tmp/wt',
   });
+});
+
+test('finalizeCommit: an empty refine response amends with the Worker draft, not an empty message', async () => {
+  // Without the total fallback this would run `git commit --amend -m ''` and fail the whole group.
+  const { provider } = recordingProvider(modelEmitting(''));
+  const calls: Array<readonly string[]> = [];
+  const runCmd: RunCmd = async (_file, args) => {
+    calls.push(args);
+    if (args[0] === 'rev-parse') return { stdout: 'shaXYZ\n', stderr: '', exitCode: 0 };
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: {} as never,
+    runCmd,
+  });
+  await o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt');
+  assert.deepEqual(calls[0], ['commit', '--amend', '-m', 'feat: add a']);
+});
+
+test('finalizeCommit: a code-fenced refine response amends with the fence stripped', async () => {
+  const { provider } = recordingProvider(modelEmitting('```\nfeat(core): add module a\n```'));
+  const calls: Array<readonly string[]> = [];
+  const runCmd: RunCmd = async (_file, args) => {
+    calls.push(args);
+    if (args[0] === 'rev-parse') return { stdout: 'shaXYZ\n', stderr: '', exitCode: 0 };
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: {} as never,
+    runCmd,
+  });
+  await o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt');
+  assert.deepEqual(calls[0], ['commit', '--amend', '-m', 'feat(core): add module a']);
 });
 
 test('finalizeCommit stamps a task-id trailer onto the amended message when taskId is given', async () => {
@@ -1357,6 +1400,50 @@ test('buildFallbackComposition: empty group.title falls back to the group id', (
     PR_BODY_SECTIONS,
   );
   assert.equal(title, 'feat: core');
+});
+
+test('fallbackCommitSubject: feat:<group.title>, id when blank, capped ≤72 on a word boundary', () => {
+  assert.equal(fallbackCommitSubject(baseGroup()), 'feat: Core');
+  assert.equal(fallbackCommitSubject({ ...baseGroup(), title: '   ' }), 'feat: core');
+  const long = fallbackCommitSubject({ ...baseGroup(), title: 'add '.repeat(40).trim() });
+  assert.ok(long.length <= 72, 'a long title is capped to 72');
+  assert.ok(long.startsWith('feat: add'), 'the feat: prefix and subject survive the cap');
+});
+
+test('resolveCommitMessage: a non-empty refined message is used verbatim', () => {
+  const msg = 'feat(core): add module a\n\nAdds a and fixes b.';
+  assert.equal(resolveCommitMessage(msg, baseGroup(), baseDelivery()), msg);
+});
+
+test('resolveCommitMessage: a wrapping code fence is stripped from the refined message', () => {
+  const fenced = '```\nfeat(core): add module a\n```';
+  assert.equal(
+    resolveCommitMessage(fenced, baseGroup(), baseDelivery()),
+    'feat(core): add module a',
+  );
+  const tagged = '```text\nfeat(core): add module a\n```';
+  assert.equal(
+    resolveCommitMessage(tagged, baseGroup(), baseDelivery()),
+    'feat(core): add module a',
+  );
+});
+
+test('resolveCommitMessage: an empty or whitespace-only refined message falls back to the draft', () => {
+  const delivery = { ...baseDelivery(), draftCommitMessage: 'feat: add a' };
+  assert.equal(resolveCommitMessage('', baseGroup(), delivery), 'feat: add a');
+  assert.equal(resolveCommitMessage('   \n\t', baseGroup(), delivery), 'feat: add a');
+});
+
+test('resolveCommitMessage: a fence with an empty body falls back to the draft', () => {
+  const delivery = { ...baseDelivery(), draftCommitMessage: 'feat: add a' };
+  assert.equal(resolveCommitMessage('```\n\n```', baseGroup(), delivery), 'feat: add a');
+});
+
+test('resolveCommitMessage: empty refined AND empty draft falls back to the deterministic subject', () => {
+  const delivery = { ...baseDelivery(), draftCommitMessage: '   ' };
+  assert.equal(resolveCommitMessage('', baseGroup(), delivery), 'feat: Core');
+  // Never empty — the whole point of the total fallback (no `git commit --amend -m ''`).
+  assert.notEqual(resolveCommitMessage('', baseGroup(), delivery).trim(), '');
 });
 
 test('buildFallbackComposition: body passes assertPrBodySections for the default section set', () => {

@@ -18,7 +18,6 @@ import {
   type FileManifest,
   type FileManifestEntry,
   groupManifestByDir,
-  hasStrayEdit,
   labelEditorGroups,
   MANIFEST_SURVEY_BUDGET,
   MAX_FILES_PER_EDITOR,
@@ -894,20 +893,6 @@ test('runWorker: a blocked pass with stray edits restores a clean tree (no parti
     cmds.some((c) => /clean -fd/.test(c)),
     'untracked stray files are cleaned',
   );
-});
-
-test('hasStrayEdit: state-dir entries never count as a dirty tree', () => {
-  // In a repo that does not gitignore `.ai-task-master`, aitm's own untracked state files show up in
-  // `git status --porcelain`. Counting them would hard-reset the checkout on every non-committing
-  // pass — and `git clean` would delete the run's own plan and scratch.
-  assert.equal(hasStrayEdit(''), false);
-  assert.equal(hasStrayEdit('?? .ai-task-master/\n'), false);
-  assert.equal(
-    hasStrayEdit('?? .ai-task-master/state.json\n?? .ai-task-master/scratch/fuzz.ts\n'),
-    false,
-  );
-  assert.equal(hasStrayEdit(' M README.md\n'), true);
-  assert.equal(hasStrayEdit('?? .ai-task-master/state.json\n M README.md\n'), true);
 });
 
 test('runWorker: the stray-edit cleanup never deletes aitm own state dir', async () => {

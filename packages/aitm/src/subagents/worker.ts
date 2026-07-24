@@ -77,6 +77,7 @@ import {
 } from './factory.ts';
 import { EDITOR_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 import { buildEditorRolePrompt } from './role-prompt.ts';
+import { discardStrayEdits } from './stray-edits.ts';
 
 // The Claude-Code-style tool surface (from @developerz.ai/ai-claude-compat) the Worker drives:
 // read/write whole files, edit by exact string replace (single + atomic batch), and search the
@@ -1309,8 +1310,9 @@ async function checkoutBranch(
   await runBash(exec, `git -C ${shQuote(input.checkoutPath)} checkout -B ${shQuote(branch)}`);
 }
 
-// aitm's own state dir, relative to the checkout root. Every git command in this module that could
-// otherwise sweep it into a commit — or delete it — names it, so the three call sites agree.
+// aitm's own state dir, relative to the checkout root. stageAndCommit names it so `git add -A` never
+// sweeps the run's own bookkeeping into a target-repo commit. (The clean-tree restore that also spares
+// it lives in stray-edits.ts, which sources the same path from workspace/dirty-tree.ts.)
 const STATE_DIR = '.ai-task-master';
 
 // Stage (excluding aitm's own state dir) + commit — the post-verify steps shared by both paths.
@@ -1330,59 +1332,6 @@ async function stageAndCommit(
   await runBash(exec, `git -C ${wt} add -A`);
   await runBash(exec, `git -C ${wt} reset -q -- ${STATE_DIR}`);
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
-}
-
-// Restore the checkout to a clean tree after a worker pass that committed nothing. The planning
-// agent and any fix-pass fanout can leave edits behind (an empty manifest declared clean — the
-// self-review "clean" case — a blocked fix, a phantom edit, a verify failure, or a mid-commit
-// throw), and the shared in-place checkout never auto-resets uncommitted changes: a later
-// `checkout -B` carries them onto whatever branch comes next, so a stray edit surfaced post-merge
-// as an uncommitted file (the README.md leftover). When the tree is dirty, reset tracked files to
-// HEAD and drop untracked ones. aitm's own state dir must survive that: `git clean` without `-x`
-// spares it only when the TARGET repo happens to gitignore it, so `-e .ai-task-master` protects it
-// when the repo does not — otherwise this cleanup deletes the run's own plan, style cache, generated
-// specialists, and scratch mid-run (same guard as InPlaceCheckout.ensureCleanTree). For the same
-// reason the dirty check ignores state-dir entries: in a repo that doesn't ignore it, the untracked
-// state dir alone would read as "dirty" and hard-reset the tree on every non-committing pass.
-// A clean tree is a no-op (one cheap status check). Best-effort: a cleanup fault never masks the
-// worker's real result. Safe because a successful stageAndCommit already captured any real work;
-// whatever remains is, by definition, not meant to ship.
-async function discardStrayEdits(
-  bash: Tool<BashInput, BashOutput>,
-  checkoutPath: string,
-): Promise<void> {
-  const exec = bash?.execute;
-  if (typeof exec !== 'function') return; // best-effort: no cleanup without a runnable bash tool
-  const wt = shQuote(checkoutPath);
-  const out = await exec(
-    {
-      command: `git -C ${wt} status --porcelain`,
-      description: 'check for stray edits left by a non-committing worker pass',
-    },
-    { toolCallId: `worker-tree-status-${Date.now()}`, messages: [] },
-  );
-  if (isAsyncIterable(out)) return;
-  if (out.exitCode !== 0) return;
-  if (!hasStrayEdit(out.stdout)) return;
-  for (const command of [
-    `git -C ${wt} reset --hard HEAD`,
-    `git -C ${wt} clean -fd -e ${STATE_DIR}`,
-  ]) {
-    try {
-      await runBash(exec, command);
-    } catch {
-      // best-effort: never mask the worker's real result with a cleanup failure
-    }
-  }
-}
-
-// Does this `git status --porcelain` output show anything worth cleaning? State-dir entries do not
-// count: in a repo that does not gitignore `.ai-task-master`, its own untracked files would
-// otherwise make every tree look dirty. Exported for the unit test of that exact case.
-export function hasStrayEdit(porcelain: string): boolean {
-  return porcelain
-    .split('\n')
-    .some((line) => line.trim() !== '' && !line.slice(3).startsWith(STATE_DIR));
 }
 
 function requireExec(

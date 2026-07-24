@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { LanguageModelUsage } from 'ai';
 import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
-import type { RunMergeFlowInput } from '../cli/commands.ts';
+import type { RunMergeFlowInput } from '../composition/run-input.ts';
 import type { ResolvedConfig } from '../config/schema.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../domain/model.ts';

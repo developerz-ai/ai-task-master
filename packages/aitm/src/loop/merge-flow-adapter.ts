@@ -9,7 +9,7 @@
 import { resolve as resolvePath } from 'node:path';
 import { backgroundProcessTools } from '@developerz.ai/ai-claude-compat';
 // Type-only import — no runtime cycle with commands.ts, which imports this module's value.
-import type { RunMergeFlowInput } from '../cli/commands.ts';
+import type { RunMergeFlowInput } from '../composition/run-input.ts';
 import { agentStepProgress, shortModelName } from '../observability/step-progress.ts';
 import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';

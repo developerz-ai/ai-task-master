@@ -43,10 +43,10 @@ import {
 } from '@developerz.ai/ai-claude-compat';
 import { type ModelMessage, type Tool, type ToolLoopAgentSettings, type ToolSet, tool } from 'ai';
 import { z } from 'zod';
-// Type-only import — no runtime cycle with commands.ts, which imports this module's value.
-import type { RunLoopInput } from '../cli/commands.ts';
 import { buildCompactionStep } from '../compaction/compaction-step.ts';
 import { Compactor } from '../compaction/compactor.ts';
+// Type-only import — no runtime cycle with commands.ts, which imports this module's value.
+import type { RunLoopInput } from '../composition/run-input.ts';
 import type { ResolvedConfig, WebSearchConfig } from '../config/schema.ts';
 import { isOpenRouterEndpoint } from '../domain/model.ts';
 import type { GroupStage, PrGroup } from '../domain/pr-group.ts';

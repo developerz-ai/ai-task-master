@@ -17,6 +17,7 @@ import {
   defaultAgentConfig,
 } from '../agent-config/agent-config-detector.ts';
 import { composeStyleGuide, StyleDistiller } from '../agent-config/coding-style.ts';
+import type { RunLoopInput, RunMergeFlowInput } from '../composition/run-input.ts';
 import { ConfigLoader } from '../config/config-loader.ts';
 import { ConfigWriter } from '../config/config-writer.ts';
 import { type AddProfileInput, ProfileManager } from '../config/profiles.ts';
@@ -26,7 +27,7 @@ import { createLlmFetch, type LlmFetch } from '../credentials/llm-fetch.ts';
 import { DEFAULT_MODELS } from '../domain/model.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
 import { defaultRunCmd, defaultSleep, GitHubClient } from '../github/github-client.ts';
-import { Logger, type LoggerLike } from '../logger/logger.ts';
+import { Logger } from '../logger/logger.ts';
 import { Disposer, disposeQuietly } from '../loop/disposer.ts';
 import { mergeFlowAdapter } from '../loop/merge-flow-adapter.ts';
 import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
@@ -56,59 +57,6 @@ import { type BannerEntry, modelBanner } from './model-banner.ts';
 export type CommandExit = { code: 0 | 1 | 2; message?: string };
 
 export type AuthStatusFn = (cwd: string) => Promise<{ ok: boolean; scopes: string[] }>;
-
-export type RunLoopInput = {
-  cwd: string;
-  resolved: ResolvedConfig;
-  credentials: Credentials;
-  agentConfig: AgentConfig;
-  // Distilled coding-style digest; when absent, subagents fall back to agentConfig.contents.
-  styleDigest?: string;
-  state: StateStore;
-  github: GitHubClient;
-  goal: string;
-  criteria: string | undefined;
-  // Caller-specified PR branch (from `--branch`). Used verbatim for a single-group plan,
-  // prefixed per group otherwise. Undefined falls back to `aitm/<group-id>`.
-  branch: string | undefined;
-  // Per-run token/cost accounting (issue #114). The adapter binds role-scoped onUsage sinks off it;
-  // runStart flushes totals() to state + a summary line. Unset → no accounting.
-  usage?: UsageTracker;
-  // The single ModelLimitsRegistry for the run, shared by the tracker's pricing and the Compactor's
-  // context lookup (#102) so the catalog is fetched at most once. Unset → the adapter builds its own.
-  modelLimits?: ModelLimitsLookup;
-  // Abort handle threaded from the CLI's SIGINT/SIGTERM handler (cli.ts). On abort the adapter closes
-  // MCP so a force-exit can't orphan its stdio children; unset → no cancellation wiring.
-  signal?: AbortSignal;
-  // The run's structured logger, threaded into every loop consumer that accepts `logger?: LoggerLike`
-  // (worker verify, MCP lifecycle, conflict resolution, compaction). Constructed in runStart; unset
-  // in unit tests that stub the loop, where each `logger?.warn(...)` stays a no-op.
-  logger?: LoggerLike;
-};
-
-export type RunMergeFlowInput = {
-  cwd: string;
-  pr: number;
-  resume: boolean;
-  resolved: ResolvedConfig;
-  credentials: Credentials;
-  agentConfig: AgentConfig;
-  styleDigest?: string;
-  state: StateStore;
-  runState: RunState;
-  github: GitHubClient;
-  // Cap on CI-wait/fix iterations before giving up. From `--max-iterations`; the flow defaults to 30.
-  maxIterations?: number;
-  // Per-run token/cost accounting (issue #114/#190). The adapter binds role-scoped onUsage sinks off
-  // it and threads them through the take-over subagents; runMergePr flushes totals() to state + a
-  // summary line. Unset → no accounting (matching the merge flow's prior behavior).
-  usage?: UsageTracker;
-  // Abort handle so a SIGINT (or a test) cancels the take-over loop → exit code 2.
-  signal?: AbortSignal;
-  // The run's structured logger — same role as RunLoopInput.logger, threaded through the take-over
-  // flow (its shared CI-fix session + conflict resolver). Constructed in runMergePr.
-  logger?: LoggerLike;
-};
 
 // Inputs for resolving the coding-style digest fed to subagent prompts. The digest is distilled
 // once from AgentConfig + repo signals (StyleDistiller) and cached in the state dir; resume reuses

@@ -20,7 +20,7 @@ import type { LanguageModelUsage, ModelMessage, ToolSet } from 'ai';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
-import type { RunLoopInput } from '../cli/commands.ts';
+import type { RunLoopInput } from '../composition/run-input.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { WorkerDelivery } from '../domain/worker-delivery.ts';

@@ -4,19 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
+import type { RunLoopInput, RunMergeFlowInput } from '../composition/run-input.ts';
 import type { LlmFetch } from '../credentials/llm-fetch.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
 import { Logger } from '../logger/logger.ts';
 import { acquireRunLock } from '../state/run-lock.ts';
 import { CURRENT_SCHEMA_VERSION, type RunState } from '../state/schema.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
-import type {
-  CommandExit,
-  RunLoopInput,
-  RunMergeFlowInput,
-  RunPlannerInput,
-  StartCtx,
-} from './commands.ts';
+import type { CommandExit, RunPlannerInput, StartCtx } from './commands.ts';
 import {
   autoMergeNotice,
   drainStdin,

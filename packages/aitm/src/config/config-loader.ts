@@ -4,7 +4,8 @@
 // Provider credentials (openrouterApiKey, baseURL) are USER-OWNED ONLY: they resolve
 // global > profile > env — user config wins, env is the fallback — and are stripped from project
 // scope, so an untrusted repo can neither redirect inference nor swap the key (see
-// stripUntrustedProjectFields). MCP servers are the deliberate exception: a project-scoped stdio
+// stripUntrustedProjectFields). Bash governance (bashRules) is tighten-only from project scope: a
+// repo may add denies but never an `allow`. MCP servers are the deliberate exception: a project-scoped stdio
 // entry (./.mcp.json or ./.ai-task-master/config.json) IS honored and spawned, because plugging aitm
 // into the same servers the repo's Claude Code session already uses is the point of discovering
 // those files at all. Frozen snapshot written by writeSnapshot().
@@ -51,6 +52,9 @@ const CLAUDE_USER_FILE = '.claude.json';
 //   - verifyCommand     runs via `sh -c` in the verify gate and self-review (issue #214)
 //   - stylePath         reads an arbitrary absolute path into subagent prompts (issue #214);
 //                       in-repo style is served by CLAUDE.md/AGENTS.md auto-detection instead
+// `bashRules` is the one partially-trusted field: project scope may only TIGHTEN it, so its `allow`
+// entries are dropped and its denies merged rather than the whole field being stripped —
+// see stripProjectBashAllowRules.
 const UNTRUSTED_PROJECT_FIELDS = [
   {
     key: 'baseURL',
@@ -63,8 +67,9 @@ const UNTRUSTED_PROJECT_FIELDS = [
   { key: 'stylePath', reason: 'a project-set style path can read files outside the repo' },
 ] as const satisfies ReadonlyArray<{ key: keyof ConfigFile; reason: string }>;
 
-// Built-in destructive-command deny rules, appended AFTER any configured rules so a repo can
-// allow-override a single default (first-match-wins) without losing the rest (issue #113).
+// Built-in destructive-command deny rules, appended AFTER any configured rules so the OPERATOR can
+// allow-override a single default from ~/.aitm.json (first-match-wins) without losing the rest
+// (issue #113). A project config cannot: its `allow` entries are dropped upstream.
 // `git push --force*` deliberately also catches `--force-with-lease` on the model-facing side — the
 // sanctioned lease push is the harness's own CI-fix flow, not the model's shell.
 export const DEFAULT_BASH_RULES: readonly CommandRule[] = [
@@ -161,10 +166,13 @@ export class ConfigLoader {
     // Optional per-repo PR body sections (project > global). Undefined when neither sets it.
     const prBodySections = project?.prBodySections ?? global?.prBodySections;
 
-    // Configured bash rules (project over global, wholesale) then the built-in defaults, so every
-    // consumer sees one final first-match-wins list (issue #113).
+    // Bash governance is tighten-only from project scope: the project's denies (its `allow` entries
+    // were dropped upstream by stripProjectBashAllowRules) come first, then the user-owned global
+    // rules — merged, NOT replaced, since wholesale replacement would let a repo drop the operator's
+    // denies — then the built-in defaults. One final first-match-wins list per consumer (issue #113).
     const bashRules: readonly CommandRule[] = [
-      ...(project?.bashRules ?? global?.bashRules ?? []),
+      ...(project?.bashRules ?? []),
+      ...(global?.bashRules ?? []),
       ...DEFAULT_BASH_RULES,
     ];
 
@@ -346,15 +354,43 @@ export class ConfigLoader {
       this.warnUntrustedProjectField(key, reason);
       delete sanitized[key];
     }
+    this.stripProjectBashAllowRules(sanitized);
     return sanitized;
   }
 
+  // `bashRules` governs the model-facing shell, so project scope may only TIGHTEN it: an `allow`
+  // entry from a checked-in config would sit ahead of the DEFAULT_BASH_RULES denies under
+  // first-match-wins and clear `git push --force` / `gh pr merge` / `git reset --hard` for an
+  // untrusted repo. Denies survive — a repo adding one can only narrow what the model may run.
+  // Mutates the sanitized copy stripUntrustedProjectFields owns; never the caller's object.
+  private stripProjectBashAllowRules(sanitized: ConfigFile): void {
+    const rules = sanitized.bashRules;
+    if (!rules) return;
+    const denies = rules.filter((rule) => rule.action === 'deny');
+    const dropped = rules.length - denies.length;
+    if (dropped > 0) {
+      this.warnOnce(
+        'bashRules',
+        `${dropped} bashRules "allow" ${dropped === 1 ? 'rule' : 'rules'} in ./${PROJECT_DIR}/${PROJECT_FILE} ${dropped === 1 ? 'is' : 'are'} ignored — ` +
+          'a project config may only add denies, never clear one; ' +
+          `"allow" is honored only from the user-owned ~/${GLOBAL_FILE}`,
+      );
+    }
+    if (denies.length > 0) sanitized.bashRules = denies;
+    else delete sanitized.bashRules;
+  }
+
   private warnUntrustedProjectField(key: string, reason: string): void {
-    if (this.warnedUntrustedProjectFields.has(key)) return;
-    this.warnedUntrustedProjectFields.add(key);
-    this.warn(
+    this.warnOnce(
+      key,
       `${key} in ./${PROJECT_DIR}/${PROJECT_FILE} is ignored — ${reason}; honored only from the user-owned ~/${GLOBAL_FILE}`,
     );
+  }
+
+  private warnOnce(key: string, message: string): void {
+    if (this.warnedUntrustedProjectFields.has(key)) return;
+    this.warnedUntrustedProjectFields.add(key);
+    this.warn(message);
   }
 
   // Read Claude Code's project-scoped MCP file (./.mcp.json). Schema is permissive:

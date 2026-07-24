@@ -620,7 +620,7 @@ test('resolve: llmStepTimeoutMs follows project > global > default (config-only,
   }
 });
 
-test('resolve: bashRules = configured (project over global, wholesale) then the built-in defaults (issue #113)', async () => {
+test('resolve: bashRules = project denies, then global rules, then the built-in defaults (issue #113)', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
   try {
@@ -636,17 +636,91 @@ test('resolve: bashRules = configured (project over global, wholesale) then the 
       ...DEFAULT_BASH_RULES,
     ]);
 
-    // Project rules REPLACE global wholesale, then the defaults follow.
+    // Project denies are MERGED ahead of the global rules, never replacing them.
     await writeProjectConfig(cwd.path, {
+      bashRules: [{ pattern: 'npm publish', action: 'deny' }],
+    });
+    assert.deepEqual((await loader.resolve({})).bashRules, [
+      { pattern: 'npm publish', action: 'deny' },
+      { pattern: 'rm -rf *', action: 'deny' },
+      ...DEFAULT_BASH_RULES,
+    ]);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: project bashRules "allow" is dropped + warned; a global "allow" still overrides a default deny', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  const { calls, warn } = makeWarnCollector();
+  try {
+    await writeGlobalConfig(home.path, { openrouterApiKey: 'sk-global' });
+    await writeProjectConfig(cwd.path, {
+      bashRules: [
+        { pattern: 'git push --force*', action: 'allow' },
+        { pattern: 'gh pr merge', action: 'allow' },
+        { pattern: 'terraform apply', action: 'deny' },
+      ],
+    });
+    const loader = new ConfigLoader(cwd.path, home.path, {}, { warn });
+
+    // Only the project deny survives; both allows are gone, so the defaults still deny.
+    assert.deepEqual((await loader.resolve({})).bashRules, [
+      { pattern: 'terraform apply', action: 'deny' },
+      ...DEFAULT_BASH_RULES,
+    ]);
+    const warned = calls.filter((m) => m.includes('bashRules'));
+    assert.equal(
+      warned.length,
+      1,
+      `expected exactly one bashRules warning, got: ${JSON.stringify(calls)}`,
+    );
+    assert.match(warned[0] ?? '', /2 bashRules "allow" rules .* are ignored/);
+
+    // Repeat resolve() does not re-warn (once per loader instance).
+    await loader.resolve({});
+    assert.equal(calls.filter((m) => m.includes('bashRules')).length, 1);
+
+    // The same allow from the user-owned global config IS honored — it precedes the default deny.
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-global',
       bashRules: [{ pattern: 'git push --force*', action: 'allow' }],
     });
-    const resolved = await loader.resolve({});
+    const resolved = await new ConfigLoader(cwd.path, home.path, {}, { warn }).resolve({});
     assert.deepEqual(resolved.bashRules, [
+      { pattern: 'terraform apply', action: 'deny' },
       { pattern: 'git push --force*', action: 'allow' },
       ...DEFAULT_BASH_RULES,
     ]);
-    // The project allow sits before the default deny → first-match-wins lets the repo opt in.
-    assert.equal(resolved.bashRules[0]?.action, 'allow');
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
+test('resolve: an all-allow project bashRules leaves the global rules + defaults untouched', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  const { calls, warn } = makeWarnCollector();
+  try {
+    await writeGlobalConfig(home.path, {
+      openrouterApiKey: 'sk-global',
+      bashRules: [{ pattern: 'rm -rf *', action: 'deny' }],
+    });
+    await writeProjectConfig(cwd.path, {
+      bashRules: [{ pattern: 'rm -rf *', action: 'allow' }],
+    });
+    const loader = new ConfigLoader(cwd.path, home.path, {}, { warn });
+    assert.deepEqual((await loader.resolve({})).bashRules, [
+      { pattern: 'rm -rf *', action: 'deny' },
+      ...DEFAULT_BASH_RULES,
+    ]);
+    assert.match(
+      calls.find((m) => m.includes('bashRules')) ?? '',
+      /1 bashRules "allow" rule .* is ignored/,
+    );
   } finally {
     await home.cleanup();
     await cwd.cleanup();

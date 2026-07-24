@@ -213,8 +213,10 @@ export const ConfigFileSchema = z
     // Per-repo PR body section headings (each a `## ` heading, in order). Unset → the default
     // Summary/Changes/Testing. See src/orchestrator/orchestrator.ts §resolvePrBodySections.
     prBodySections: z.array(z.string()).optional(),
-    // Deny/allow rules for the model-facing bash tool (issue #113). Resolved wholesale (project over
-    // global) and appended before the built-in destructive-command defaults; first-match-wins.
+    // Deny/allow rules for the model-facing bash tool (issue #113). Project denies < global rules <
+    // the built-in destructive-command defaults, merged into one first-match-wins list. Project
+    // scope may only tighten: an `allow` in a project config is ignored + warned (ConfigLoader
+    // .stripProjectBashAllowRules), so a checked-in file can never clear a deny.
     bashRules: z.array(CommandRuleSchema).optional(),
     // External MCP servers to mount into subagent tool surfaces (client only — aitm is never
     // exposed as an MCP server). See docs/mcp.md and src/mcp/schema.ts.
@@ -333,6 +335,8 @@ export type ResolvedConfig = {
   prBodySections?: readonly string[] | undefined;
   // Effective bash deny/allow rules: configured rules (project over global) followed by the built-in
   // destructive-command defaults, so every consumer sees one final first-match-wins list (issue #113).
+  // Final first-match-wins rule list: project denies, then global rules, then the built-in
+  // destructive-command defaults. A project `allow` never reaches here (trust boundary).
   bashRules: readonly CommandRule[];
   // Merged MCP server map across all discovered sources (see ConfigLoader.resolve for
   // precedence). Empty object when nothing was found — never undefined, so callers can

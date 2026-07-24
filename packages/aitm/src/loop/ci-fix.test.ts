@@ -135,6 +135,28 @@ function submitManifestModel(manifest: FileManifest): MockLanguageModelV3 {
   });
 }
 
+test('runFixSession: the fix Worker carries the #106 context block, mirroring the main-loop Worker (issue #141)', async () => {
+  let captured: WorkerInput | null = null;
+  const result = await runFixSession(
+    baseInput({
+      subagents: baseSubagents({
+        runWorkerOverride: async (input) => {
+          captured = input;
+          return okWorker();
+        },
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'fixed');
+  assert.ok(captured, 'fix worker was invoked');
+  // The advisory date context block (issue #106) is threaded into the fix Worker input. Asserted
+  // structurally — its own reminder frame + ISO-date shape — so the check can't flake at UTC midnight.
+  const ctx = (captured as WorkerInput).contextBlock ?? '';
+  assert.match(ctx, /system-reminder/i, 'fix Worker gets the #106 advisory context block');
+  assert.match(ctx, /currentDate/, 'the context block carries the date label');
+  assert.match(ctx, /\d{4}-\d{2}-\d{2}/, 'the context block carries an ISO date');
+});
+
 test('runFixSession: CI failure → saves logs+comments to disk, fix prompt references those dirs, rebases + force-with-lease', async () => {
   const stateDir = await mkdtemp(join(tmpdir(), 'aitm-cifix-'));
   try {

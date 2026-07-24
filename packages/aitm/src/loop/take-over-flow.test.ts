@@ -195,6 +195,11 @@ test('runTakeOverFlow: unresolved threads → invokes Reviewer, pushes, then mer
         reviewerInvocations++;
         assert.equal(rin.pr, 42);
         assert.equal(rin.threads.length, 1);
+        // The take-over Reviewer runs on the reminder-decorated worker tool set, so it gets the same
+        // #106 advisory date context block the main-loop Reviewer does (issue #141). Asserted
+        // structurally (reminder frame + ISO-date shape) so the check can't flake at UTC midnight.
+        assert.match(rin.contextBlock, /system-reminder/i, 'reviewer gets the #106 context block');
+        assert.match(rin.contextBlock, /currentDate/, 'the context block carries the date label');
         return {
           kind: 'ok',
           resolutions: [{ threadId: 'TH_1', kind: 'fixed', commitSha: 'abc123' }],

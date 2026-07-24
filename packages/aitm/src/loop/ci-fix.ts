@@ -30,7 +30,7 @@ import type { ReviewThread } from '../github/schema.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { PrGroup, Task } from '../state/schema.ts';
 import type { SubagentInit, WorkerSubagentInit } from '../subagents/factory.ts';
-import { buildRolePrompt } from '../subagents/role-prompt.ts';
+import { harnessContextBlock, reminderAgentSystemPrompt } from '../subagents/role-prompt.ts';
 import {
   createWorkerAgent,
   runWorker,
@@ -264,6 +264,9 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     baseBranch,
     styleContents: subagents.styleContents,
     rollingContext: subagents.rollingContext ?? '',
+    // The advisory date context block the main-loop Worker gets (issue #106) — mirrors the #141
+    // system-prompt change so the fix Worker's first message opens with the same cacheable prefix.
+    contextBlock: harnessContextBlock(),
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
     ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),
     ...(input.logger ? { logger: input.logger } : {}),
@@ -287,7 +290,11 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
   const agent = createWorkerAgent({
     model: subagents.credentials.modelForCapability('coding'),
     tools: subagents.workerTools,
-    systemPrompt: buildRolePrompt({
+    // reminderAgentSystemPrompt (not bare buildRolePrompt): the fix Worker's tools are the same
+    // reminder-decorated set the main loop uses, so its prompt must carry the #106 provenance
+    // contract too — otherwise a stale-read <system-reminder> fires on a role never told the
+    // reminders are advisory harness context (issue #141).
+    systemPrompt: reminderAgentSystemPrompt({
       style: subagents.styleContents,
       roleGuidance: WORKER_SYSTEM_PREFIX,
       cwd: checkoutPath,

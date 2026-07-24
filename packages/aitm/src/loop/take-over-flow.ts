@@ -43,7 +43,7 @@ import {
   type ReviewerTools,
   runReviewer,
 } from '../subagents/reviewer.ts';
-import { buildRolePrompt } from '../subagents/role-prompt.ts';
+import { harnessContextBlock, reminderAgentSystemPrompt } from '../subagents/role-prompt.ts';
 import type { WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
 import {
   type ConflictResolver,
@@ -129,6 +129,9 @@ export type TakeOverSubagents = {
     threads: ReviewThread[];
     checkoutPath: string;
     styleContents: string;
+    // The #106 advisory context block the real runReviewer call receives (issue #141), so the
+    // override is a faithful stand-in for the reviewer input.
+    contextBlock: string;
   }) => Promise<ReviewerResult>;
   // Receives the full WorkerInput the real path would build (incl. formatCommand/verifyCommand/
   // logger), mirroring ci-fix.ts's FixSessionSubagents.runWorkerOverride.
@@ -441,18 +444,26 @@ async function runReviewerThreads(
   input: TakeOverFlowInput,
   threads: ReviewThread[],
 ): Promise<ReviewerResult> {
+  // The advisory date context block the main-loop Reviewer gets (issue #106/#141), threaded into the
+  // reviewer's first user message. Built once so the override stand-in and the real runReviewer call
+  // receive the identical block.
+  const contextBlock = harnessContextBlock();
   if (input.subagents.runReviewerOverride) {
     return input.subagents.runReviewerOverride({
       pr: input.pr,
       threads,
       checkoutPath: input.checkoutPath,
       styleContents: input.subagents.styleContents,
+      contextBlock,
     });
   }
   const agent = createReviewerAgent({
     model: input.subagents.reviewerModel,
     tools: input.subagents.reviewerTools,
-    systemPrompt: buildRolePrompt({
+    // reminderAgentSystemPrompt (not bare buildRolePrompt): the take-over Reviewer runs on the same
+    // reminder-decorated worker tool set (merge-flow-adapter → resolveWorkerTools), so its prompt
+    // must carry the #106 provenance contract too (issue #141).
+    systemPrompt: reminderAgentSystemPrompt({
       style: input.subagents.styleContents,
       roleGuidance: REVIEWER_SYSTEM_PREFIX,
       cwd: input.checkoutPath,
@@ -469,6 +480,7 @@ async function runReviewerThreads(
     threads,
     checkoutPath: input.checkoutPath,
     styleContents: input.subagents.styleContents,
+    contextBlock,
   });
 }
 

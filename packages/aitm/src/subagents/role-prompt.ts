@@ -11,7 +11,13 @@
 // (role-prompt → prompts/templates → prompts/slots + compat) so the main loop and the flows it pulls in
 // (ci-fix, take-over) share it without an import cycle.
 
-import { detectGitRepo, envBlock, type MemoryIndexEntry } from '@developerz.ai/ai-claude-compat';
+import {
+  contextReminder,
+  detectGitRepo,
+  envBlock,
+  type MemoryIndexEntry,
+  SYSTEM_REMINDER_CONTRACT,
+} from '@developerz.ai/ai-claude-compat';
 import { render } from './prompts/templates.ts';
 
 export type RolePromptInput = {
@@ -43,6 +49,26 @@ export function buildRolePrompt(input: RolePromptInput): string {
     ...(input.knowledgeCutoff !== undefined ? { knowledgeCutoff: input.knowledgeCutoff } : {}),
     ...(input.memoryIndex !== undefined ? { memoryIndex: input.memoryIndex } : {}),
   });
+}
+
+// System prompt for a main-loop agent whose tool set is decorated with reminders (issue #106): the
+// role's block-pipeline prompt (issue #105) plus the provenance contract, so the model treats
+// <system-reminder> content as advisory harness context, not user intent. Lives here (not in
+// run-loop-adapter) so the flows that reuse the decorated tool sets — the CI-fix worker and the
+// take-over reviewer (issue #141) — share it without importing back into the adapter (import cycle).
+export function reminderAgentSystemPrompt(input: RolePromptInput): string {
+  return `${buildRolePrompt(input)}\n\n${SYSTEM_REMINDER_CONTRACT}`;
+}
+
+// The BYTE-STABLE leading context block prepended to every reminder-decorated subagent's first user
+// message: today's date, framed as advisory <system-reminder> context (issue #106). It carries no
+// per-step content, so the leading prompt prefix is identical across every call in a conversation
+// (and across a run's calls within a day) — the provider's prompt cache holds instead of being
+// invalidated by a moving prefix. The date stays day-granular for the same reason. The run's Step
+// N/M position and the repo style digest stay OUT (the former rides a trailing reminder so it never
+// busts the cached prefix; the latter is already single-sourced in the system prompt).
+export function harnessContextBlock(): string {
+  return contextReminder([{ label: 'currentDate', body: new Date().toISOString().slice(0, 10) }]);
 }
 
 export type EditorRolePromptInput = {

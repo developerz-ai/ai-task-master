@@ -3,14 +3,21 @@ import { test } from 'node:test';
 import {
   AUTONOMY_CONTRACT_TEXT,
   COMMUNICATION_CONTRACT_TEXT,
+  contextReminder,
   HARNESS_CONTRACT_TEXT,
+  SYSTEM_REMINDER_CONTRACT,
 } from '@developerz.ai/ai-claude-compat';
 import {
   EDITOR_SYSTEM_PREFIX,
   PLANNER_SYSTEM_PREFIX,
   WORKER_SYSTEM_PREFIX,
 } from './prompts/role-guidance.ts';
-import { buildEditorRolePrompt, buildRolePrompt } from './role-prompt.ts';
+import {
+  buildEditorRolePrompt,
+  buildRolePrompt,
+  harnessContextBlock,
+  reminderAgentSystemPrompt,
+} from './role-prompt.ts';
 
 test('buildRolePrompt weaves the always-on contracts, role guidance, style and env', () => {
   const prompt = buildRolePrompt({
@@ -141,6 +148,32 @@ test('buildEditorRolePrompt omits an empty style block (no blank-line artifact)'
   });
   assert.ok(!prompt.includes('\n\n\n'), 'no triple newline from the omitted style block');
   assert.match(prompt, /You are a leaf editor\./, 'role guidance still present');
+});
+
+test('reminderAgentSystemPrompt: the role prompt plus the #106 provenance contract, appended last', () => {
+  const input = {
+    style: '# style',
+    roleGuidance: 'You are the Worker.',
+    cwd: '/tmp/does-not-exist-checkout',
+  };
+  const prompt = reminderAgentSystemPrompt(input);
+  // It is exactly the role prompt with the provenance contract on the end — nothing else changes.
+  assert.equal(prompt, `${buildRolePrompt(input)}\n\n${SYSTEM_REMINDER_CONTRACT}`);
+  assert.ok(prompt.includes(HARNESS_CONTRACT_TEXT), 'still carries the role contract frame');
+  assert.ok(prompt.endsWith(SYSTEM_REMINDER_CONTRACT), 'provenance contract is the final block');
+});
+
+test('harnessContextBlock: a <system-reminder> carrying only the day-granular currentDate (issue #106)', () => {
+  const block = harnessContextBlock();
+  assert.match(block, /system-reminder/i, 'framed as advisory system-reminder context');
+  assert.match(block, /currentDate/, 'carries the date label');
+  const date = block.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? '';
+  assert.match(date, /^\d{4}-\d{2}-\d{2}$/, 'carries an ISO date');
+  // Byte-stable and cacheable: the block is EXACTLY a single-field currentDate reminder — no style
+  // digest and no per-step run position — so the leading prompt prefix never moves within a day.
+  // Rebuilt from the block's own date (not a second clock read) so this can't flake at UTC midnight.
+  assert.equal(block, contextReminder([{ label: 'currentDate', body: date }]));
+  assert.ok(!/Step \d+ of/.test(block), 'no run position — that rides a trailing reminder');
 });
 
 test('buildEditorRolePrompt: injects a team brief when given one, omits it otherwise', () => {

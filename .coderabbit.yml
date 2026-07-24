@@ -83,9 +83,12 @@ reviews:
       enabled: true
 
   pre_merge_checks:
+    # Off to match finishing_touches.docstrings above: the house style is "no comments unless the WHY
+    # is non-obvious" (CLAUDE.md), so the codebase documents with `//` WHY-comments, not JSDoc `/** */`
+    # docstrings. A coverage threshold here contradicts that intent and warns on every function-adding
+    # PR. See #297.
     docstrings:
-      mode: warning
-      threshold: 30
+      mode: 'off'
     title:
       mode: warning
     description:

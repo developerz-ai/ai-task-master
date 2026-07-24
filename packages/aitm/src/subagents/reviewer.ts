@@ -45,7 +45,7 @@ export type GithubToolInput = {
   threadId: string;
   body?: string | undefined;
 };
-export type GithubToolOutput = { ok: boolean };
+export type GithubToolOutput = { ok: boolean; error?: string };
 
 // The Reviewer gets the Worker's full edit/search surface (it pushes fixes) plus a `github`
 // tool for replying to and resolving review threads.

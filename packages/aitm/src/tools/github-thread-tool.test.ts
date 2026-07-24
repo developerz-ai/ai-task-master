@@ -53,7 +53,7 @@ test('githubThreadTool: replyToThread rejects empty body', async () => {
     threadId: 'TH_1',
     body: '',
   });
-  assert.deepEqual(out, { ok: false });
+  assert.deepEqual(out, { ok: false, error: 'body is required for replyToThread' });
   assert.deepEqual(rec.calls, []);
 });
 
@@ -65,7 +65,7 @@ test('githubThreadTool: replyToThread rejects whitespace-only body', async () =>
     threadId: 'TH_1',
     body: '   \n  \t  ',
   });
-  assert.deepEqual(out, { ok: false });
+  assert.deepEqual(out, { ok: false, error: 'body is required for replyToThread' });
   assert.deepEqual(rec.calls, []);
 });
 
@@ -76,7 +76,7 @@ test('githubThreadTool: replyToThread rejects omitted body', async () => {
     action: 'replyToThread',
     threadId: 'TH_1',
   });
-  assert.deepEqual(out, { ok: false });
+  assert.deepEqual(out, { ok: false, error: 'body is required for replyToThread' });
   assert.deepEqual(rec.calls, []);
 });
 

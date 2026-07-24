@@ -102,11 +102,9 @@ export class AgentConfigDetector {
       const path = isAbsolute(options.stylePath)
         ? options.stylePath
         : resolve(this.repoRoot, options.stylePath);
-      if (!isAbsolute(options.stylePath)) {
-        const rel = relative(this.repoRoot, path);
-        if (rel.startsWith('..') || isAbsolute(rel)) {
-          throw new Error(`stylePath must remain within repoRoot: ${options.stylePath}`);
-        }
+      const rel = relative(this.repoRoot, path);
+      if (rel.startsWith('..') || isAbsolute(rel)) {
+        throw new Error(`stylePath must remain within repoRoot: ${options.stylePath}`);
       }
       const raw = await readFile(path, 'utf8');
       const contents = await expandImports(raw, dirname(path), {
@@ -136,8 +134,18 @@ export class AgentConfigDetector {
   private async discoverNested(options: DetectOptions, projectPath: string): Promise<Layer[]> {
     const picks: Array<FilePick & { depth: number }> = [];
     const walk = async (dir: string, depth: number): Promise<void> => {
-      const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
-      if (entries === null) return;
+      let entries: Array<{ name: string; isDirectory(): boolean }>;
+      try {
+        const result = await readdir(dir, { withFileTypes: true });
+        entries = result as Array<{ name: string; isDirectory(): boolean }>;
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        if ('code' in error && error.code === 'ENOENT') {
+          return;
+        }
+        options.onWarn?.(`Failed to read directory ${dir}: ${error.message}`);
+        return;
+      }
       if (depth > 0) {
         const pick = await pickInDir(dir, options.prefer);
         if (pick !== null && pick.path !== projectPath) picks.push({ ...pick, depth });

@@ -44,7 +44,7 @@ export function githubThreadTool(
     execute: async (input): Promise<GithubToolOutput> => {
       if (input.action === 'replyToThread') {
         if (!input.body?.trim()) {
-          return { ok: false };
+          return { ok: false, error: 'body is required for replyToThread' };
         }
         await init.github.replyToThread(input.threadId, input.body);
         return { ok: true };

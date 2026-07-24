@@ -251,6 +251,16 @@ export type ConfigFile = z.infer<typeof ConfigFileSchema>;
 // it. Add a key to ConfigFileSchema and both tables pick it up automatically.
 export const CONFIG_KEYS: ReadonlySet<string> = new Set(Object.keys(ConfigFileSchema.shape));
 
+// Object keys reserved by the JS runtime: a dotted config/profile path or a profile name containing
+// one of these would resolve to Object.prototype, and a write through it would pollute every object
+// in the process. Rejected before any lookup or setDotted call — see config/dotted-path.ts
+// (splitDottedKey) and config/profiles.ts (assertProfileName).
+export const FORBIDDEN_KEY_SEGMENTS: ReadonlySet<string> = new Set([
+  '__proto__',
+  'prototype',
+  'constructor',
+]);
+
 export type CliOverrides = {
   maxPrs?: number;
   maxSessions?: number | null;

@@ -10,7 +10,6 @@
 // into the same servers the repo's Claude Code session already uses is the point of discovering
 // those files at all. Frozen snapshot written by writeSnapshot().
 
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { CommandRule } from '@developerz.ai/ai-claude-compat';
 import { ZodError, z } from 'zod';
@@ -21,6 +20,7 @@ import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../loop/constants.ts';
 import { DEFAULT_MCP_DEFER_TOOLS_OVER } from '../mcp/mcp-client.ts';
 import { type McpServers, McpServersSchema } from '../mcp/schema.ts';
 import { DEFAULT_LLM_STEP_TIMEOUT_MS } from '../subagents/factory.ts';
+import { formatZodError, readJsonFile } from './json-file.ts';
 import {
   type CliOverrides,
   CONFIG_KEYS,
@@ -453,20 +453,8 @@ export class ConfigLoader {
   // .mcp.json or the much larger ~/.claude.json). Missing file → null. Malformed JSON
   // is a hard error — we don't want to silently ignore a corrupted user file.
   private async readMcpEnvelope(path: string): Promise<McpServers | null> {
-    let raw: string;
-    try {
-      raw = await readFile(path, 'utf8');
-    } catch (err) {
-      if (isNotFound(err)) return null;
-      throw err;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`${path}: invalid JSON — ${msg}`);
-    }
+    const parsed = await readJsonFile(path);
+    if (parsed === undefined) return null;
     const envelope = McpEnvelopeSchema.safeParse(parsed);
     if (!envelope.success) {
       throw new Error(`${path}: ${formatZodError(envelope.error)}`);
@@ -513,20 +501,8 @@ export class ConfigLoader {
   }
 
   private async readConfigFile(path: string): Promise<ConfigFile | null> {
-    let raw: string;
-    try {
-      raw = await readFile(path, 'utf8');
-    } catch (err) {
-      if (isNotFound(err)) return null;
-      throw err;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`${path}: invalid JSON — ${msg}`);
-    }
+    const parsed = await readJsonFile(path);
+    if (parsed === undefined) return null;
     let validated: ConfigFile;
     try {
       validated = ConfigFileSchema.parse(parsed);
@@ -732,19 +708,6 @@ function pickNullable<T>(
   if (project !== undefined) return project;
   if (global !== undefined) return global;
   return fallback;
-}
-
-function isNotFound(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code: unknown }).code === 'ENOENT'
-  );
-}
-
-function formatZodError(err: ZodError): string {
-  return err.issues.map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ');
 }
 
 // Permissive envelope for Claude Code config files: we only extract `mcpServers` and

@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CapabilityModelsSchema, CONFIG_KEYS, ConfigFileSchema, ProfileSchema } from './schema.ts';
+import {
+  CapabilityModelsSchema,
+  CONFIG_KEYS,
+  ConfigFileSchema,
+  FORBIDDEN_KEY_SEGMENTS,
+  ProfileSchema,
+} from './schema.ts';
 
 test('ConfigFileSchema accepts empty object (all fields optional)', () => {
   const parsed = ConfigFileSchema.parse({});
@@ -205,4 +211,11 @@ test('CONFIG_KEYS: is the schema shape verbatim → writer + loader share one ta
   ]) {
     assert.ok(CONFIG_KEYS.has(key), `CONFIG_KEYS must include "${key}"`);
   }
+});
+
+test('FORBIDDEN_KEY_SEGMENTS covers the prototype-pollution vectors', () => {
+  for (const seg of ['__proto__', 'prototype', 'constructor']) {
+    assert.ok(FORBIDDEN_KEY_SEGMENTS.has(seg), `FORBIDDEN_KEY_SEGMENTS must include "${seg}"`);
+  }
+  assert.equal(FORBIDDEN_KEY_SEGMENTS.has('models'), false);
 });

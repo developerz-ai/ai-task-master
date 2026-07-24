@@ -4,14 +4,17 @@
 // separately (--api-key or `aitm profile set`), never hardcoded here. Every preset is an
 // OpenAI-compatible endpoint — no Anthropic SDK path (see docs/auth.md §Anthropic).
 
+import { OPENROUTER_API_BASE_URL } from '../credentials/defaults.ts';
 import type { Profile } from './schema.ts';
 
 export type PresetName = 'openrouter' | 'zai' | 'moonshot';
 
 export const PROVIDER_PRESETS: Readonly<Record<PresetName, Profile>> = {
-  // The provider default. Models left unset so the built-in capability defaults apply.
+  // The provider default. Models left unset so the built-in capability defaults apply. baseURL is set
+  // to the OpenRouter endpoint explicitly — Credentials still recognizes it as OpenRouter via host
+  // comparison (isOpenRouterEndpoint), so preset-openrouter profiles keep every OpenRouter directive.
   openrouter: {
-    baseURL: 'https://openrouter.ai/api/v1',
+    baseURL: OPENROUTER_API_BASE_URL,
   },
   // z.ai GLM coding plan (OpenAI-compatible). GLM-5.2 for reasoning/coding, GLM-5-Turbo for
   // cheap routing/summarization. These are a current-as-of-release starting point — z.ai has

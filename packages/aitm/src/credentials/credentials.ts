@@ -10,7 +10,7 @@ import {
 } from '@openrouter/ai-sdk-provider';
 import type { LanguageModel } from 'ai';
 import type { Capability, ResolvedConfig } from '../config/schema.ts';
-import { DEFAULT_MODELS } from './defaults.ts';
+import { DEFAULT_MODELS, isOpenRouterEndpoint } from './defaults.ts';
 import { samplingParamsFor } from './model-params.ts';
 
 // Amazon Bedrock rejects the AI SDK's structured-output request (`output_config.format`), failing
@@ -56,8 +56,11 @@ export function chatSettings(
   const fallback = resolved.fallbackModels?.[capability];
   const effort = resolved.reasoningEffort?.[capability];
   // A custom `baseURL` (z.ai, moonshot, self-hosted, proxy) is a direct OpenAI-compatible endpoint,
-  // not OpenRouter — it must not receive OpenRouter-only directives.
-  const onOpenRouter = !resolved.baseURL;
+  // not OpenRouter — it must not receive OpenRouter-only directives. Gate on the resolved HOST, not
+  // baseURL presence: the `openrouter` preset sets baseURL to the OpenRouter endpoint explicitly, so a
+  // presence check would wrongly strip cache_control/session_id/usage for every preset-openrouter
+  // profile (see credentials/defaults.ts isOpenRouterEndpoint).
+  const onOpenRouter = isOpenRouterEndpoint(resolved.baseURL);
   // `cache_control` is an OpenRouter request-body directive enabling automatic prompt caching for
   // the cache-control families (anthropic/*, qwen/*, alibaba/*):
   //   - gated on the RESOLVED id, so a cache-control override on any tier is cached and a

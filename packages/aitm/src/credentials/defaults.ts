@@ -28,6 +28,31 @@ export const DEFAULT_MODELS: Record<Capability, string> = {
   coding: 'anthropic/claude-opus-4.8',
 };
 
+// The provider's default OpenAI-compatible inference endpoint. `baseURL` unset resolves to this
+// upstream; the `openrouter` preset (config/provider-presets.ts) sets it explicitly. Single source of
+// truth so the preset and the endpoint detector below can never disagree.
+export const OPENROUTER_API_BASE_URL = 'https://openrouter.ai/api/v1';
+
+const OPENROUTER_HOSTNAME = new URL(OPENROUTER_API_BASE_URL).hostname;
+
+// True when the resolved `baseURL` targets OpenRouter — unset/blank means the provider default, which
+// IS OpenRouter. Gate OpenRouter-only request directives (cache_control, session_id stickiness, usage
+// accounting) on this. A presence check (`!baseURL`) is WRONG: the `openrouter` preset sets baseURL to
+// the OpenRouter endpoint explicitly, so a presence check misclassifies every preset-openrouter
+// profile as a custom endpoint and silently strips those directives. Compare the HOST instead: the
+// exact host or a real subdomain (`gateway.openrouter.ai`), never a lookalike (`notopenrouter.ai`,
+// which a bare `endsWith` would accept). A malformed URL fails closed (non-OpenRouter → no
+// OpenRouter-only directives). See credentials.ts and loop/run-loop-adapter.ts webSearchProviderOptions.
+export function isOpenRouterEndpoint(baseURL: string | undefined): boolean {
+  if (baseURL === undefined || baseURL.trim() === '') return true;
+  try {
+    const host = new URL(baseURL).hostname.toLowerCase();
+    return host === OPENROUTER_HOSTNAME || host.endsWith(`.${OPENROUTER_HOSTNAME}`);
+  } catch {
+    return false;
+  }
+}
+
 // Recommended reasoning-effort tiers (issue #125) — DOCUMENTED, not defaulted. Shipping a default
 // effort would change request bytes for every existing user and push a `reasoning` param to
 // endpoints that may reject it (custom baseURL, non-reasoning models). Opt in via

@@ -48,6 +48,7 @@ import type { RunLoopInput } from '../cli/commands.ts';
 import { buildCompactionStep } from '../compaction/compaction-step.ts';
 import { Compactor } from '../compaction/compactor.ts';
 import type { ResolvedConfig, WebSearchConfig } from '../config/schema.ts';
+import { isOpenRouterEndpoint } from '../credentials/defaults.ts';
 import type { GitHubClient } from '../github/github-client.ts';
 import { McpClientManager, type ToolSurface } from '../mcp/mcp-client.ts';
 import { guardDeferred, TOOL_SEARCH_TOOL_NAME, toolSearch } from '../mcp/tool-search.ts';
@@ -1093,33 +1094,19 @@ export function makeBudgetCheck(
 
 // ---- Orchestrator bridge ---------------------------------------------------
 
-// True when `baseURL` targets the OpenRouter API (the default when unset). The `web_search` server
-// tool is an OpenRouter-API feature carried in the `openrouter` provider namespace; a non-OpenRouter
-// OpenAI-compatible endpoint (z.ai, kimi, a vLLM gateway) receives a tool schema it does not
-// understand and hard-rejects the whole request (observed: `tools[0].type:type is illegal` on z.ai,
-// which blocked a CI-fix session). Exported for tests.
-export function isOpenRouterEndpoint(baseURL: string | undefined): boolean {
-  if (baseURL === undefined || baseURL.trim() === '') return true;
-  try {
-    const host = new URL(baseURL).hostname.toLowerCase();
-    // Exact host or a real subdomain — NOT a bare endsWith, which would accept `notopenrouter.ai`.
-    return host === 'openrouter.ai' || host.endsWith('.openrouter.ai');
-  } catch {
-    return false;
-  }
-}
-
 // web_search server-tool gating (issue #112) + optional domain filters (issue #195). The tri-state
 // gate lives on a bare boolean or, for the object form, on its `enabled` field: undefined → CI-fix
 // sessions only (highest lookup value, bounded cost); true → all Worker calls; false → never. When
 // enabled, the object form's allowed/excluded domains ride the server-tool payload. Returns the
 // providerOptions fragment (openrouter namespace) or undefined when web_search should not attach.
 //
-// Attaches ONLY on an OpenRouter endpoint: the server tool lives in the `openrouter` provider
-// namespace, so on any other OpenAI-compatible endpoint it is a tool schema the provider rejects
-// outright — attaching it there crashes the request rather than degrading. The provider-agnostic
-// DuckDuckGo `webSearch` function tool stays in the tool set on every endpoint, so web search still
-// works elsewhere; only this OpenRouter-native server tool is gated off. Exported for tests.
+// Attaches ONLY on an OpenRouter endpoint (isOpenRouterEndpoint): the server tool lives in the
+// `openrouter` provider namespace, so on any other OpenAI-compatible endpoint (z.ai, kimi, a vLLM
+// gateway) it is a tool schema the provider rejects outright (observed: `tools[0].type:type is
+// illegal` on z.ai, which blocked a CI-fix session) — attaching it there crashes the request rather
+// than degrading. The provider-agnostic DuckDuckGo `webSearch` function tool stays in the tool set on
+// every endpoint, so web search still works elsewhere; only this OpenRouter-native server tool is
+// gated off. Exported for tests.
 export function webSearchProviderOptions(
   webSearch: WebSearchConfig | undefined,
   ciFix: boolean,

@@ -609,6 +609,7 @@ export async function runLoopAdapter(
         ...(input.resolved.mcpRoleAllowlist !== undefined
           ? { roleAllowlist: input.resolved.mcpRoleAllowlist }
           : {}),
+        ...(input.logger ? { logger: input.logger } : {}),
       });
 
   // One ProcessManager per run, bound to the repo root the single in-place checkout also uses, so a
@@ -1562,6 +1563,8 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           progressBlock: runProgressReminder(workerStepTag),
           ...(input.resolved.formatCommand ? { formatCommand: input.resolved.formatCommand } : {}),
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
+          // One structured event per verify invocation reaches the run's logger (worker.ts).
+          ...(input.logger ? { logger: input.logger } : {}),
           // Bound the editor fanout at the resolved cap (issue #189). Always a number (config default
           // 4), so passed unconditionally — with the default it equals EDITOR_CONCURRENCY_DEFAULT, so
           // behavior is unchanged until an operator sets `editorConcurrency`.
@@ -1714,6 +1717,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           baseBranch,
           checkoutPath: checkout.path,
           ...(verifyCommand ? { verifyCommand } : {}),
+          ...(input.logger ? { logger: input.logger } : {}),
           ...(input.signal ? { signal: input.signal } : {}),
         });
       } finally {
@@ -1787,6 +1791,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
               agentLabel({ model: ciFixModel, role: 'conflict-resolve', ctx: group.id }),
               ciFixTag,
             ),
+            ...(input.logger ? { logger: input.logger } : {}),
           })
         : undefined;
       const stopCiFixHeartbeat = startHeartbeat(ciFixLabel, ciFixHeartbeatSink);
@@ -1838,6 +1843,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           checkoutPath: checkout.path,
           allowForcePush: input.resolved.allowForcePush,
           ...(priorHandle ? { priorHandle } : {}),
+          ...(input.logger ? { logger: input.logger } : {}),
           ...(input.signal ? { signal: input.signal } : {}),
         });
       } finally {

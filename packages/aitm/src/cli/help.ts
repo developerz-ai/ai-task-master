@@ -81,6 +81,7 @@ export const CLI_COMMANDS: readonly CommandSpec[] = [
     ],
   },
   { invocation: 'aitm clean', flags: [{ tokens: ['--force', '-f'] }] },
+  { invocation: 'aitm update', flags: [{ tokens: ['--check'] }] },
   { invocation: 'aitm help | --help | -h' },
   { invocation: 'aitm version | --version | -v' },
 ];

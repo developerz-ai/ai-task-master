@@ -68,6 +68,10 @@ export type ProfileArgs =
 // confirmation prompt (claudetm's --force/-f).
 export type CleanArgs = { kind: 'clean'; force: boolean };
 
+// Mirrors claudetm's `update`: manual self-update from the npm registry. `check` only reports
+// whether a newer version exists — nothing installs unless `aitm update` is run without it.
+export type UpdateArgs = { kind: 'update'; check: boolean };
+
 // OAuth login for MCP servers: perform authorization code flow and output config snippet.
 export type McpLoginArgs = {
   kind: 'mcp-login';
@@ -85,6 +89,7 @@ export type ParsedArgs =
   | ConfigArgs
   | ProfileArgs
   | CleanArgs
+  | UpdateArgs
   | McpLoginArgs
   | { kind: 'help' }
   | { kind: 'version' }
@@ -117,6 +122,8 @@ export function parseArgs(argv: ReadonlyArray<string>): ParsedArgs {
       return parseProfile(rest);
     case 'clean':
       return parseClean(rest);
+    case 'update':
+      return parseUpdate(rest);
     case 'mcp-login':
       return parseMcpLogin(rest);
     default:
@@ -134,6 +141,18 @@ function parseClean(args: ReadonlyArray<string>): ParsedArgs {
     }
   }
   return { kind: 'clean', force };
+}
+
+function parseUpdate(args: ReadonlyArray<string>): ParsedArgs {
+  let check = false;
+  for (const arg of args) {
+    if (arg === '--check') {
+      check = true;
+    } else {
+      return USAGE_ERROR;
+    }
+  }
+  return { kind: 'update', check };
 }
 
 function parseMcpLogin(args: ReadonlyArray<string>): ParsedArgs {

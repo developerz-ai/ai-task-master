@@ -13,7 +13,7 @@ import type { Capability } from '../config/schema.ts';
 // Tier mapping rationale (Claude family via OpenRouter — the most flexible coding stack today):
 //   haiku  → fast    : routing, orchestration, summarization (toModelOutput compaction)
 //   sonnet → generic : default fallback for any unspecified tier
-//   opus   → smart   : Planner, Reviewer (architectural reasoning, critique)
+//   opus (Opus 5) → smart : Planner, Reviewer (architectural reasoning, critique)
 //   opus   → coding  : Worker (best-in-class code generation)
 // Prompt caching (issue #109): all four defaults route to anthropic/* , so every default handle is
 // built with `cache_control: { type: 'ephemeral' }` — the stable prefix (system prompt + tool defs,
@@ -24,8 +24,8 @@ import type { Capability } from '../config/schema.ts';
 export const DEFAULT_MODELS: Record<Capability, string> = {
   fast: 'anthropic/claude-haiku-4.5',
   generic: 'anthropic/claude-sonnet-5',
-  smart: 'anthropic/claude-opus-4.8',
-  coding: 'anthropic/claude-opus-4.8',
+  smart: 'anthropic/claude-opus-5',
+  coding: 'anthropic/claude-opus-5',
 };
 
 // The provider's default OpenAI-compatible inference endpoint. `baseURL` unset resolves to this

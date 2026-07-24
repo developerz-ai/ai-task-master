@@ -18,6 +18,7 @@ import {
   runStart,
 } from './commands.ts';
 import { HELP_TEXT } from './help.ts';
+import { runUpdate } from './update.ts';
 
 export type MainCtx = {
   cwd?: string;
@@ -61,6 +62,12 @@ export async function main(argv: ReadonlyArray<string>, ctx: MainCtx = {}): Prom
       return emit(await runProfile(parsed, buildProfileCtx(ctx, stdout)), stdout, stderr);
     case 'clean':
       return emit(await runClean(parsed, buildCleanCtx(ctx, stdout)), stdout, stderr);
+    case 'update':
+      return emit(
+        await runUpdate(parsed, { stdout, currentVersion: await readVersion() }),
+        stdout,
+        stderr,
+      );
     case 'mcp-login':
       return emit(await runMcpLogin(parsed, buildMcpLoginCtx(ctx, stdout, stderr)), stdout, stderr);
     case 'help':

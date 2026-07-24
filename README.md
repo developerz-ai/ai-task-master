@@ -87,7 +87,7 @@ Interrupted? `aitm resume` picks the run back up — it reads the goal from `.ai
 
 - **Provider**: any OpenAI-compatible endpoint through one credential — OpenRouter by default, or point `baseURL` at z.ai GLM, a self-hosted gateway, or another provider. No Anthropic SDK. See [🔀 Providers & profiles](#-providers--profiles).
 - **Coding style**: `aitm` reads your repo's `CLAUDE.md` or `AGENTS.md` and feeds it to subagents as a style signal.
-- **State**: every run persists to `.ai-task-master/` so resume-after-crash is one command — including a human-readable `plan.md` (per-task checkboxes) and `progress.md` (timestamped lifecycle log). `aitm clean` wipes it for a fresh start.
+- **State**: every run persists to `.ai-task-master/` so resume-after-crash is one command — including a human-readable `plan.md` (per-task checkboxes) and `progress.md` (timestamped lifecycle log). `aitm clean` wipes it for a fresh start. `aitm update` self-updates to the latest npm release (`--check` to only check; never automatic).
 - **One checkout**: groups run sequentially in your working tree on `aitm/<group>` branches — no worktrees, no hidden copies. Within a group, the Worker is the single owner: it edits small/cohesive tasks itself, and only fans out parallel leaf editors for genuinely large work (many files, multi-area debugging).
 
 ### 📺 Reading the console stream

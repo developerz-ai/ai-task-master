@@ -5,6 +5,8 @@
 // Hand-rolled rather than `AsyncDisposableStack`/`await using`: Node 20 and Deno 1.40 are supported
 // targets and neither ships the disposal built-ins reliably.
 
+import process from 'node:process';
+
 export type DisposeFn = () => void | Promise<void>;
 
 export class Disposer {

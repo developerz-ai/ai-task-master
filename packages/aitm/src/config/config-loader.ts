@@ -14,6 +14,7 @@
 // those files at all. Frozen snapshot written by writeSnapshot().
 
 import { join } from 'node:path';
+import process from 'node:process';
 import type { CommandRule } from '@developerz.ai/ai-claude-compat';
 import { ZodError, z } from 'zod';
 import { type Capability, DEFAULT_MODELS } from '../domain/model.ts';

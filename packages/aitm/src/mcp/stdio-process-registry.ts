@@ -11,6 +11,7 @@
 // The package's one sleep primitive lives beside the CI poller that needed it abortable; the grace
 // poll below borrows it so there is a single timer implementation to keep leak-free — and, as a
 // side effect, the grace poll costs no wall-clock under the test-runner fast path.
+import process from 'node:process';
 import { defaultSleep } from '../github/github-client.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 

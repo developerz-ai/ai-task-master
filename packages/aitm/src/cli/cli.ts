@@ -4,6 +4,7 @@
 
 import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { type ErrorReporter, initErrorReporter } from '../observability/error-reporter.ts';
 import { parseArgs } from './args.ts';

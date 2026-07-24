@@ -3,6 +3,7 @@
 // (no-DSN) path, and runtimes where it isn't installed (e.g. Deno), never load it and pay nothing.
 // Every failure degrades to a no-op: observability must never break a run.
 
+import process from 'node:process';
 import type { EventHint, ErrorEvent as SentryEvent } from '@sentry/node';
 import { redactInPlace } from '../logger/redact.ts';
 

@@ -8,6 +8,7 @@
 
 import { homedir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
+import process from 'node:process';
 import { createInterface } from 'node:readline/promises';
 import type { Readable } from 'node:stream';
 import {

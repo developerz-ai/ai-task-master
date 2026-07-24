@@ -10,6 +10,7 @@
 
 import { access, mkdir, open, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import process from 'node:process';
 import type { LanguageModelUsage, ModelMessage } from 'ai';
 import { modelMessageSchema } from 'ai';
 import type { GroupStage } from '../domain/pr-group.ts';

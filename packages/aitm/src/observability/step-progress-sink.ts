@@ -2,6 +2,7 @@
 // own cyan status line. Formatting itself lives in step-progress-format.ts; this module is the
 // stateful/output side — where lines go, and the onStepFinish-shaped handlers that drive it.
 
+import process from 'node:process';
 import {
   CYAN_BOLD,
   clip,

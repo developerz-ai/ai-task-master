@@ -4,6 +4,7 @@
 // somewhere) lives in step-progress-sink.ts; the live-stream path lives in step-progress-renderer.ts.
 
 import { basename, isAbsolute, relative } from 'node:path';
+import process from 'node:process';
 import { scrubSecrets } from '../logger/secret-scrubber.ts';
 import type { ProgressSink } from './step-progress-sink.ts';
 

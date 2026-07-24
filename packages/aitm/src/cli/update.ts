@@ -3,6 +3,7 @@
 // run; nothing ever updates automatically. `--check` reports whether a newer version exists and
 // exits without installing.
 
+import process from 'node:process';
 import { defaultRunCmd, type RunCmd } from '../github/github-client.ts';
 import type { UpdateArgs } from './args.ts';
 import type { CommandExit } from './commands.ts';

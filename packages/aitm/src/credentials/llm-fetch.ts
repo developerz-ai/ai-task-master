@@ -8,6 +8,8 @@
 // provider keeps its own default fetch (byte-identical request path). Never touches `Bun.*` — the
 // runtime is feature-detected; portability is a hard rule.
 
+import process from 'node:process';
+
 export type Runtime = 'node' | 'bun' | 'deno' | 'other';
 
 // The dispatcher type Node's global fetch accepts on `RequestInit` (sourced from undici-types via

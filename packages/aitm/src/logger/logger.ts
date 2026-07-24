@@ -4,6 +4,7 @@
 
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import process from 'node:process';
 import { safeStringify } from '../serialization/safe-stringify.ts';
 import { redactCopy } from './redact.ts';
 import { scrubSecrets } from './secret-scrubber.ts';

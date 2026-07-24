@@ -29,7 +29,10 @@ const datetimeInputSchema = z.object({
 export type DatetimeInput = z.infer<typeof datetimeInputSchema>;
 
 export type DatetimeOutput = {
+  // Wall-clock time rendered in `timezone`. `iso` carries the same instant as an unambiguous UTC
+  // stamp — returning both keeps the localized value honest instead of labeling UTC as the zone.
   datetime: string;
+  iso: string;
   timezone: string;
 };
 
@@ -39,14 +42,15 @@ export function datetimeTool(): Tool<DatetimeInput, DatetimeOutput> {
     inputSchema: datetimeInputSchema,
     execute: async (input: DatetimeInput): Promise<DatetimeOutput> => {
       const date = new Date();
-      const dateTime = date.toISOString();
       const formatter = new Intl.DateTimeFormat('en-US', {
         timeZone: input.timezone,
+        dateStyle: 'full',
+        timeStyle: 'long',
       });
-      const resolvedTimeZone = formatter.resolvedOptions().timeZone;
       return {
-        datetime: dateTime,
-        timezone: resolvedTimeZone,
+        datetime: formatter.format(date),
+        iso: date.toISOString(),
+        timezone: formatter.resolvedOptions().timeZone,
       };
     },
   });

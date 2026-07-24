@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import type { LlmFetch } from '../credentials/llm-fetch.ts';
 import { Logger } from '../logger/logger.ts';
@@ -17,6 +18,7 @@ import type {
 } from './commands.ts';
 import {
   autoMergeNotice,
+  drainStdin,
   isRunComplete,
   prLinksBlock,
   runClean,
@@ -2091,6 +2093,43 @@ test('runProfile: add --api-key-stdin with empty stdin exits 1', async () => {
   } finally {
     await home.cleanup();
   }
+});
+
+test('drainStdin: timeout interrupts an open-but-idle stream (never a chunk)', async () => {
+  const stream = new PassThrough(); // stays open, emits no data, never ends
+  await assert.rejects(drainStdin({ stream, timeoutMs: 50 }), /timed out after 50ms/);
+});
+
+test('drainStdin: abort interrupts an open-but-idle stream mid-read', async () => {
+  const stream = new PassThrough();
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(new Error('aborted-mid-read')), 10);
+  await assert.rejects(
+    drainStdin({ stream, timeoutMs: 60_000, signal: ac.signal }),
+    /aborted-mid-read/,
+  );
+});
+
+test('drainStdin: already-aborted signal rejects before reading', async () => {
+  const stream = new PassThrough();
+  await assert.rejects(
+    drainStdin({ stream, signal: AbortSignal.abort(new Error('pre-aborted')) }),
+    /pre-aborted/,
+  );
+});
+
+test('drainStdin: reads piped chunks then resolves on end', async () => {
+  const stream = new PassThrough();
+  stream.write('sk-or-');
+  stream.write('piped-123\n');
+  stream.end();
+  assert.equal(await drainStdin({ stream, timeoutMs: 5_000 }), 'sk-or-piped-123\n');
+});
+
+test('drainStdin: rejects when data exceeds maxBytes', async () => {
+  const stream = new PassThrough();
+  stream.write('x'.repeat(50));
+  await assert.rejects(drainStdin({ stream, maxBytes: 10, timeoutMs: 5_000 }), /maximum size/);
 });
 
 test('runProfile: use on an unknown profile exits 1 with a helpful message', async () => {

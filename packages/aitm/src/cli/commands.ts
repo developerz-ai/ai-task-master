@@ -9,6 +9,7 @@
 import { homedir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import type { Readable } from 'node:stream';
 import {
   type AgentConfig,
   AgentConfigDetector,
@@ -232,43 +233,79 @@ export type McpLoginCtx = {
   ) => Promise<import('../mcp/oauth.js').OAuthConfig>;
 };
 
-async function drainStdin(options?: {
+// Exported for unit testing (drives the timeout/abort/size paths against an injected stream).
+export async function drainStdin(options?: {
   timeoutMs?: number;
   maxBytes?: number;
   signal?: AbortSignal;
+  stream?: Readable;
 }): Promise<string> {
   const timeoutMs = options?.timeoutMs ?? 30_000; // 30 second default
   const maxBytes = options?.maxBytes ?? 1_000_000; // 1MB default
   const signal = options?.signal;
 
-  let data = '';
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-  }, timeoutMs);
+  if (signal?.aborted) throw signal.reason ?? new Error('Aborted');
 
-  try {
-    process.stdin.setEncoding('utf8');
-    for await (const chunk of process.stdin) {
-      if (timedOut) {
-        throw new Error(
-          `Reading from stdin timed out after ${timeoutMs}ms. Pass the API key via --api-key or OPENROUTER_API_KEY env var instead.`,
-        );
-      }
-      if (signal?.aborted) {
-        throw signal.reason ?? new Error('Aborted');
-      }
+  const stdin = options?.stream ?? process.stdin;
+  stdin.setEncoding('utf8');
+
+  // Event-driven, not `for await`: an open-but-idle stdin (no chunk ever arrives) blocks the async
+  // iterator forever, so the timer and abort signal must *actively* settle the read rather than only
+  // being checked when the next chunk lands. `finish` runs exactly once and always tears down the
+  // timer, listeners, and the stream flow so no path leaks or holds the event loop open.
+  return await new Promise<string>((resolve, reject) => {
+    let data = '';
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      stdin.off('data', onData);
+      stdin.off('end', onEnd);
+      stdin.off('error', onError);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      stdin.pause();
+    };
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      finish(() =>
+        reject(
+          new Error(
+            `Reading from stdin timed out after ${timeoutMs}ms. Pass the API key via --api-key or OPENROUTER_API_KEY env var instead.`,
+          ),
+        ),
+      );
+    }, timeoutMs);
+
+    const onData = (chunk: string) => {
       data += chunk;
       if (data.length > maxBytes) {
-        throw new Error(
-          `stdin data exceeded maximum size of ${maxBytes} bytes. API keys should be much smaller.`,
+        finish(() =>
+          reject(
+            new Error(
+              `stdin data exceeded maximum size of ${maxBytes} bytes. API keys should be much smaller.`,
+            ),
+          ),
         );
       }
-    }
-    return data;
-  } finally {
-    clearTimeout(timer);
-  }
+    };
+    const onEnd = () => finish(() => resolve(data));
+    const onError = (err: Error) => finish(() => reject(err));
+    const onAbort = signal
+      ? () => finish(() => reject(signal.reason ?? new Error('Aborted')))
+      : undefined;
+
+    stdin.on('data', onData);
+    stdin.on('end', onEnd);
+    stdin.on('error', onError);
+    if (onAbort) signal?.addEventListener('abort', onAbort, { once: true });
+    stdin.resume();
+  });
 }
 
 // Pre-run banner shown when auto-merge is active. aitm merges its own PRs via a `gh` subprocess,
@@ -819,7 +856,7 @@ export async function runMergePr(
     // Detect agentConfig early so it can be passed to synthesizeTakeoverState, ensuring
     // the take-over state carries the actual detected config file rather than a hardcoded default.
     const detector = new AgentConfigDetector(cwd);
-    const detectOpts = buildDetectOpts(undefined, null, homeDir, warn);
+    const detectOpts = buildDetectOpts(undefined, resolved.stylePath, homeDir, warn);
 
     let agentConfig: AgentConfig | null;
     try {

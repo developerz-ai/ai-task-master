@@ -20,7 +20,7 @@ import type { LanguageModelUsage, ModelMessage, ToolSet } from 'ai';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
-import type { RunLoopInput } from '../cli/commands.ts';
+import type { RunLoopInput } from '../composition/run-input.ts';
 import { Credentials } from '../credentials/credentials.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { WorkerDelivery } from '../domain/worker-delivery.ts';
@@ -44,7 +44,6 @@ import {
   defaultMakeOrchestrator,
   describeError,
   exploreReadTools,
-  githubThreadTool,
   harnessContextBlock,
   localEditTools,
   localReadTools,
@@ -960,30 +959,6 @@ test('reminderAgentSystemPrompt: block pipeline + provenance contract (issues #1
     'no step-budget reminder — agents run until they submit',
   );
   assert.match(prompt, /anthropic\/claude-sonnet-4/, 'self-identifies the routed model');
-});
-
-// ---- githubThreadTool ------------------------------------------------------
-
-test('githubThreadTool dispatches reply and resolve to the GitHub client', async () => {
-  const calls: string[] = [];
-  const gh = {
-    replyToThread: async (threadId: string, body: string) => {
-      calls.push(`reply:${threadId}:${body}`);
-    },
-    resolveThread: async (threadId: string) => {
-      calls.push(`resolve:${threadId}`);
-    },
-  };
-  const t = githubThreadTool(gh);
-  const exec = t.execute;
-  assert.equal(typeof exec, 'function');
-  if (typeof exec !== 'function') return;
-  const ctx = { toolCallId: 'x', messages: [] };
-  const r1 = await exec({ action: 'replyToThread', threadId: 't1', body: 'hi' }, ctx);
-  const r2 = await exec({ action: 'resolveThread', threadId: 't2' }, ctx);
-  assert.deepEqual(r1, { ok: true });
-  assert.deepEqual(r2, { ok: true });
-  assert.deepEqual(calls, ['reply:t1:hi', 'resolve:t2']);
 });
 
 // ---- compaction wiring (issue #102) ----------------------------------------

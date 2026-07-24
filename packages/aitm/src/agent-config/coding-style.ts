@@ -11,7 +11,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
-import { type OnUsage, reportUsage } from '../subagents/factory.ts';
+import { type OnUsage, reportUsage } from '../observability/usage-sink.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
 
 export type StyleDistillerInit = {

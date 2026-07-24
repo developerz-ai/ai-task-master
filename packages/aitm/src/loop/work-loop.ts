@@ -26,6 +26,7 @@ import type { WorkerResult } from '../subagents/worker.ts';
 import { type BranchCleanup, branchCleanupMessage } from '../workspace/branch-cleanup.ts';
 import { DirtyWorkingTree } from '../workspace/dirty-tree.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
+import { describeError } from './adapter-support.ts';
 import { chargeCiFixAttempt } from './ci-outcome-policy.ts';
 import { Mutex } from './mutex.ts';
 import { type PrPerTaskDeps, runPrPerTaskGroup } from './pr-per-task-mode.ts';
@@ -356,15 +357,6 @@ type StageCtx = {
   // cycling forever on an unfixable red PR (issue #128).
   fixAttempts: number;
 };
-
-// Reduce a caught value to display text the way every catch site in this file already did
-// (`err instanceof Error ? err.message : String(err)`), but without silently dropping the
-// original value: wrapping a non-Error in a real Error keeps it reachable as `.cause` instead of
-// discarding it once `String(err)` runs. A caught Error is returned as-is — same object, same
-// `.message`, whatever `.cause` it already carried. Exported for the cause-preservation unit test.
-export function describeError(err: unknown): Error {
-  return err instanceof Error ? err : new Error(String(err), { cause: err });
-}
 
 // The reason carried by a group the run's signal cancelled. run() re-checks the signal at the batch
 // boundary and reports the whole run `cancelled` (exit 2), so this only ever surfaces per group.

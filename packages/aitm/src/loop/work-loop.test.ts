@@ -9,7 +9,6 @@ import { DirtyWorkingTree } from '../workspace/dirty-tree.ts';
 import {
   alreadyCommittedDelivery,
   type BudgetStatus,
-  describeError,
   mergeDeliveries,
   noChangesDelivery,
   recoveredDelivery,
@@ -1776,22 +1775,6 @@ test('state write failure after mergePr → outcome stays merged', async () => {
     'merge outcome preserved despite state write failure',
   );
   assert.notEqual(result.kind, 'blocked');
-});
-
-// ---- cause preservation (issue #101 slice 04, task 18) --------------------
-
-test('describeError: an Error is returned as-is — same object, same message, cause untouched', () => {
-  const original = new Error('boom', { cause: 'root cause' });
-  const described = describeError(original);
-  assert.equal(described, original);
-  assert.equal(described.message, 'boom');
-  assert.equal(described.cause, 'root cause');
-});
-
-test('describeError: a non-Error throw is wrapped, same message text, original value as cause', () => {
-  const described = describeError('disk full');
-  assert.equal(described.message, 'disk full');
-  assert.equal(described.cause, 'disk full');
 });
 
 // ---- no-changes tasks & nothing-to-ship groups ---------------------------

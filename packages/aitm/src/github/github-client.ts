@@ -177,6 +177,11 @@ export const CHECKS_EMPTY_GRACE_MS = 60_000;
 // A checkless PR is NOT a failed read — see readCheckRows — so it never counts toward this.
 export const CHECKS_MAX_CONSECUTIVE_FAILURES = 5;
 
+// gh caps `run list` at this many rows. getFailedCiLogs also passes `--commit <headSha>` so gh
+// filters to the PR's exact head commit server-side — without it, a busy branch's newer/older
+// pushes could fill this window and truncate the head's own runs off the list entirely.
+export const FAILED_RUN_LIST_LIMIT = 30;
+
 // waitForChecks collapses the per-check buckets into one of three states; callers branch on it
 // instead of catching a throw. failedChecks is populated only when state is 'failure' (one entry
 // per failed/cancelled check) for diagnostics — the fix loop re-downloads full logs via
@@ -422,30 +427,33 @@ export class GitHubClient {
     return out;
   }
 
-  // Run ids of failed/timed-out runs for the branch. When a head sha is known, prefer runs for
-  // that exact commit (the PR's current head) so we don't surface logs from a stale push.
+  // Run ids of failed/timed-out runs to pull logs from. When the PR's head sha is known, gh filters
+  // to that exact commit server-side (`--commit`), so `--limit` truncation on a busy branch can't
+  // push the head's own runs off the list — and we never widen to other commits, which would hand
+  // the fix Worker logs from a stale push. Without a sha (headRefOid missing) we can only scope by
+  // branch.
   private async failedRunIds(branch: string, sha: string | undefined): Promise<number[]> {
-    const r = await this.runCmd(
-      'gh',
-      [
-        'run',
-        'list',
-        '--branch',
-        branch,
-        '--json',
-        'databaseId,headSha,conclusion',
-        '--limit',
-        '30',
-      ],
-      { cwd: this.cwd },
-    );
+    const args = [
+      'run',
+      'list',
+      '--branch',
+      branch,
+      '--json',
+      'databaseId,headSha,conclusion',
+      '--limit',
+      String(FAILED_RUN_LIST_LIMIT),
+    ];
+    if (sha) args.push('--commit', sha);
+    const r = await this.runCmd('gh', args, { cwd: this.cwd });
     if (r.exitCode !== 0) return [];
-    const parsed = safeJson(r.stdout);
-    const rows = WorkflowRunsSchema.safeParse(parsed);
+    const rows = WorkflowRunsSchema.safeParse(safeJson(r.stdout));
     if (!rows.success) return [];
     const failed = rows.data.filter((run) => FAILED_CONCLUSIONS.has(run.conclusion ?? ''));
-    const forSha = sha ? failed.filter((run) => run.headSha === sha) : [];
-    return (forSha.length > 0 ? forSha : failed).map((run) => run.databaseId);
+    // `--commit` already scoped server-side; re-check headSha as belt-and-braces so a row for any
+    // other commit is dropped rather than surfaced as this PR's failure. No fallback: an empty
+    // result means the head has no failed run, and stale-push logs are worse than none.
+    const scoped = sha ? failed.filter((run) => run.headSha === sha) : failed;
+    return scoped.map((run) => run.databaseId);
   }
 
   private async failedJobs(

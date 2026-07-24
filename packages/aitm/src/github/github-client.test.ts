@@ -13,6 +13,7 @@ import {
   defaultRunCmd,
   defaultSleep,
   execaOptions,
+  FAILED_RUN_LIST_LIMIT,
   GitHubClient,
   isInstantSleepEnabled,
   MAX_REVIEW_THREAD_PAGES,
@@ -1093,12 +1094,14 @@ test('resolveThread throws on non-zero exit', async () => {
 
 test('getFailedCiLogs downloads full logs for failed jobs of the PR head run', async () => {
   // Sequence: pr view → run list → repo view (repoMeta) → api jobs → api job logs.
+  let runListArgs: string[] = [];
   const run: RunCmd = async (file, args) => {
     const a = args.join(' ');
     if (file === 'gh' && a.startsWith('pr view')) {
       return { stdout: '{"headRefName":"feat/x","headRefOid":"abc123"}', stderr: '', exitCode: 0 };
     }
     if (file === 'gh' && a.startsWith('run list')) {
+      runListArgs = [...args];
       return {
         stdout: JSON.stringify([
           { databaseId: 111, headSha: 'abc123', conclusion: 'failure' },
@@ -1139,6 +1142,76 @@ test('getFailedCiLogs downloads full logs for failed jobs of the PR head run', a
   assert.equal(out.length, 1);
   assert.equal(out[0]?.check, 'bun (test + lint)');
   assert.match(out[0]?.logs ?? '', /biome format error/);
+  // The head sha is filtered server-side and the row cap is a named constant, not a magic 30.
+  assert.deepEqual(runListArgs.slice(runListArgs.indexOf('--commit')), ['--commit', 'abc123']);
+  assert.deepEqual(
+    runListArgs.slice(runListArgs.indexOf('--limit'), runListArgs.indexOf('--limit') + 2),
+    ['--limit', String(FAILED_RUN_LIST_LIMIT)],
+  );
+});
+
+test('getFailedCiLogs never falls back to a stale push run when the head sha has no failed run', async () => {
+  // A busy branch: gh returns a failed run for an OLDER push (headSha 'old'), none for the PR's
+  // current head 'abc123'. The old code fell back to every failed run and handed the fix Worker
+  // these stale logs; the fix must return [] and never fetch that run's jobs.
+  const run: RunCmd = async (file, args) => {
+    const a = args.join(' ');
+    if (file === 'gh' && a.startsWith('pr view')) {
+      return { stdout: '{"headRefName":"feat/x","headRefOid":"abc123"}', stderr: '', exitCode: 0 };
+    }
+    if (file === 'gh' && a.startsWith('run list')) {
+      return {
+        stdout: JSON.stringify([{ databaseId: 222, headSha: 'old', conclusion: 'failure' }]),
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    if (file === 'gh' && a.includes('actions/runs/222/jobs')) {
+      throw new Error('must not fetch jobs for a stale push run');
+    }
+    return { stdout: '{"owner":{"login":"o"},"name":"r"}', stderr: '', exitCode: 0 };
+  };
+  const g = new GitHubClient('/tmp/repo', run);
+  assert.deepEqual(await g.getFailedCiLogs(42), []);
+});
+
+test('getFailedCiLogs scopes run list by branch only when the head sha is unknown', async () => {
+  // No headRefOid → no sha to filter on, so run list must NOT carry --commit and the branch's
+  // failed run is used best-effort.
+  let runListArgs: string[] = [];
+  const run: RunCmd = async (file, args) => {
+    const a = args.join(' ');
+    if (file === 'gh' && a.startsWith('pr view')) {
+      return { stdout: '{"headRefName":"feat/x"}', stderr: '', exitCode: 0 };
+    }
+    if (file === 'gh' && a.startsWith('run list')) {
+      runListArgs = [...args];
+      return {
+        stdout: JSON.stringify([{ databaseId: 111, headSha: 'whatever', conclusion: 'failure' }]),
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    if (file === 'gh' && a.startsWith('repo view')) {
+      return { stdout: '{"owner":{"login":"o"},"name":"r"}', stderr: '', exitCode: 0 };
+    }
+    if (file === 'gh' && a.includes('actions/runs/111/jobs')) {
+      return {
+        stdout: JSON.stringify({ jobs: [{ id: 9001, name: 'ci', conclusion: 'failure' }] }),
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    if (file === 'gh' && a.includes('actions/jobs/9001/logs')) {
+      return { stdout: 'boom', stderr: '', exitCode: 0 };
+    }
+    throw new Error(`unexpected call: ${file} ${a}`);
+  };
+  const g = new GitHubClient('/tmp/repo', run);
+  const out = await g.getFailedCiLogs(42);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]?.check, 'ci');
+  assert.ok(!runListArgs.includes('--commit'));
 });
 
 test('getFailedCiLogs returns [] when the PR has no failed runs', async () => {

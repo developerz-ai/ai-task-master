@@ -1208,6 +1208,43 @@ test('runMergePr: happy path with --pr override', async () => {
   }
 });
 
+test('runMergePr: builds a usage tracker, threads it to the flow, and flushes totals (#190)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    let out = '';
+    let captured: RunMergeFlowInput | null = null;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 99 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        stdout: (chunk) => {
+          out += chunk;
+        },
+        runMergeFlow: async (input) => {
+          captured = input;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.ok(captured?.usage, 'usage tracker threaded to the merge flow');
+    assert.match(out, /^Usage: /m, 'end-of-run usage summary printed');
+    const persisted = JSON.parse(
+      await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
+    ) as { usage?: unknown };
+    assert.ok(persisted.usage, 'usage totals persisted to state');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('runMergePr: releases the keep-alive transport when the flow ends', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();

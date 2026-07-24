@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { LanguageModelUsage } from 'ai';
 import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
 import type { RunMergeFlowInput } from '../cli/commands.ts';
 import type { ResolvedConfig } from '../config/schema.ts';
@@ -18,9 +19,12 @@ import {
   type RunCmdResult,
   type Sleep,
 } from '../github/github-client.ts';
+import { UsageTracker } from '../observability/usage-tracker.ts';
+import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import type { RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
-import { mergeFlowAdapter } from './merge-flow-adapter.ts';
+import { type MergeFlowSeams, mergeFlowAdapter } from './merge-flow-adapter.ts';
+import type { TakeOverFlowInput, TakeOverResult } from './take-over-flow.ts';
 
 type Reply = Partial<RunCmdResult>;
 
@@ -192,4 +196,147 @@ test('mergeFlowAdapter: aborted signal → cancelled, mapped with empty outcomes
   controller.abort();
   const result = await mergeFlowAdapter(baseInput({ github, signal: controller.signal }));
   assert.deepEqual(result, { kind: 'cancelled', outcomes: [] });
+});
+
+// --- parity plumbing: bashRules / ProcessManager / applyHooks / usage (issues #113/#121/#190) ---
+
+// Capture the TakeOverFlowInput the adapter builds — via the runTakeOver seam — so the four parity
+// seams can be asserted on the wired subagents without driving the real take-over loop.
+function captureFlow(returns: TakeOverResult): {
+  seams: MergeFlowSeams;
+  captured: () => TakeOverFlowInput;
+} {
+  let seen: TakeOverFlowInput | undefined;
+  return {
+    seams: {
+      runTakeOver: async (input) => {
+        seen = input;
+        return returns;
+      },
+    },
+    captured: () => {
+      assert.ok(seen, 'runTakeOver seam was invoked');
+      return seen;
+    },
+  };
+}
+
+// Drive a tool's execute the way the SDK does — enough of the options object for the tool to run.
+async function execTool<O>(t: { execute?: unknown }, input: unknown): Promise<O> {
+  const exec = t.execute as (
+    i: unknown,
+    o: { toolCallId: string; messages: never[] },
+  ) => Promise<O>;
+  return exec(input, { toolCallId: 'test', messages: [] });
+}
+
+// A lookup with no pricing → tokens still record, cost stays null (never touches the network).
+const noLimits: ModelLimitsLookup = {
+  preload: async () => {},
+  forModel: async (modelId): Promise<ModelLimits> => ({ modelId }),
+};
+
+function usageOf(input: number, output: number): LanguageModelUsage {
+  return { inputTokens: input, outputTokens: output, totalTokens: input + output };
+}
+
+test('mergeFlowAdapter: worker tools carry bashRules, the ProcessManager, and operator hooks', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const resolved = baseResolved({
+    bashRules: [{ pattern: 'git push --force*', action: 'deny' }],
+    hooks: { preToolUse: [{ matcher: 'datetime', command: 'exit 2' }] },
+  });
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  // cwd = a real dir so the PreToolUse hook subprocess has somewhere to spawn.
+  await mergeFlowAdapter(baseInput({ github, resolved, cwd: process.cwd() }), flow.seams);
+  const { subagents } = flow.captured();
+
+  // bashRules (#113): a denied command short-circuits at exit 126 without spawning.
+  const denied = await execTool<{ exitCode: number; denied?: boolean }>(
+    subagents.workerTools.bash,
+    {
+      command: 'git push --force',
+    },
+  );
+  assert.equal(denied.exitCode, 126);
+  assert.equal(denied.denied, true);
+
+  // ProcessManager (#103): the background poll/stop tools are mounted only when a manager is wired.
+  assert.ok(Object.hasOwn(subagents.workerTools, 'bashOutput'), 'bashOutput mounted');
+  assert.ok(Object.hasOwn(subagents.workerTools, 'killBash'), 'killBash mounted');
+
+  // applyHooks (#121): the PreToolUse hook blocks the matched tool before it runs.
+  const blocked = await execTool<{ blockedByHook?: boolean }>(subagents.workerTools.datetime, {});
+  assert.equal(blocked.blockedByHook, true);
+});
+
+test('mergeFlowAdapter: a usage tracker → role-scoped worker + reviewer sinks that record spend', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const tracker = new UsageTracker(noLimits);
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  await mergeFlowAdapter(baseInput({ github, usage: tracker }), flow.seams);
+  const { subagents } = flow.captured();
+
+  assert.equal(typeof subagents.onWorkerUsage, 'function');
+  assert.equal(typeof subagents.onReviewerUsage, 'function');
+  subagents.onWorkerUsage?.(usageOf(100, 20), 'coding-model');
+  subagents.onReviewerUsage?.(usageOf(10, 5), 'reviewer-model');
+
+  const totals = await tracker.totals();
+  assert.equal(totals.perRole.worker?.inputTokens, 100);
+  assert.equal(totals.perRole.worker?.outputTokens, 20);
+  assert.equal(totals.perRole.reviewer?.inputTokens, 10);
+  assert.equal(totals.overall.calls, 2);
+});
+
+test('mergeFlowAdapter: no usage tracker → onUsage seams omitted (no accounting)', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  await mergeFlowAdapter(baseInput({ github }), flow.seams);
+  const { subagents } = flow.captured();
+  assert.equal(subagents.onWorkerUsage, undefined);
+  assert.equal(subagents.onReviewerUsage, undefined);
+});
+
+// --- run-level cost/token ceiling (issue #190) ---
+
+test('mergeFlowAdapter: a tracker + a configured ceiling → wires a budget check that reports usage', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const tracker = new UsageTracker(noLimits);
+  const resolved = baseResolved({ maxTotalTokens: 100 });
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  await mergeFlowAdapter(baseInput({ github, resolved, usage: tracker }), flow.seams);
+  const { budget } = flow.captured();
+
+  assert.equal(typeof budget, 'function');
+  assert.equal((await budget?.())?.exceeded, false);
+
+  // Same ledger the role-usage sinks feed — recording spend through them trips the ceiling.
+  const { subagents } = flow.captured();
+  subagents.onWorkerUsage?.(usageOf(80, 30), 'coding-model');
+  const status = await budget?.();
+  assert.equal(status?.exceeded, true);
+  if (status?.exceeded) assert.match(status.reason, /token ceiling reached/);
+});
+
+test('mergeFlowAdapter: no ceiling configured → budget seam omitted', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const tracker = new UsageTracker(noLimits);
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  await mergeFlowAdapter(baseInput({ github, usage: tracker }), flow.seams);
+  assert.equal(flow.captured().budget, undefined);
+});
+
+test('mergeFlowAdapter: a ceiling but no tracker → budget seam omitted (nothing to measure against)', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const resolved = baseResolved({ maxCostUsd: 5 });
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  await mergeFlowAdapter(baseInput({ github, resolved }), flow.seams);
+  assert.equal(flow.captured().budget, undefined);
 });

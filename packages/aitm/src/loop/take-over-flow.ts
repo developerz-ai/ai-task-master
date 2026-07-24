@@ -53,6 +53,7 @@ import {
   runFixSession,
 } from './ci-fix.ts';
 import { DEFAULT_MAX_ITERATIONS, REVIEW_COMMENTS_GRACE } from './constants.ts';
+import type { BudgetStatus } from './work-loop.ts';
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
 export type TakeOverGithub = {
@@ -116,6 +117,12 @@ export type TakeOverSubagents = {
   onReviewerStepFinish?: SubagentInit<ReviewerTools>['onStepFinish'];
   onWorkerStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
   onEditorStepFinish?: SubagentInit<WorkerTools>['onEditorStepFinish'];
+  // Per-call token-usage sinks (issue #114/#190) so `aitm merge-pr` accounts for its spend like
+  // `aitm start`. The Worker sink covers the shared CI-fix session (recorded under the coding-tier
+  // worker role); the Reviewer sink covers the review pass. A conflict resolver, when wired, carries
+  // its own via buildConflictResolver. Unset → no accounting, matching prior behavior.
+  onWorkerUsage?: SubagentInit<WorkerTools>['onUsage'];
+  onReviewerUsage?: SubagentInit<ReviewerTools>['onUsage'];
   // Injection seam — bypass the real subagent agents in tests.
   runReviewerOverride?: (input: {
     pr: number;
@@ -158,6 +165,12 @@ export type TakeOverFlowInput = {
   // after a push. Default 5s. Tests inject a 0-ms sleep.
   cooldownMs?: number;
   sleep?: Sleep;
+  // Run-level cost/token ceiling (issue #190), consulted at each iteration boundary BEFORE any new
+  // CI-fix or Reviewer work is dispatched — mirrors WorkLoop's group-batch-boundary budget check
+  // (work-loop.ts's `run()`), so `merge-pr` stops opening new spend the same way `start` does.
+  // Built by merge-flow-adapter's makeBudgetCheck from the usage ledger + resolved ceilings. Unset →
+  // no ceiling, byte-identical to before.
+  budget?: () => Promise<BudgetStatus>;
   // git/gh shim — defaults to execa. Stubbed in unit tests to assert command shape without
   // spawning git. Every push after Reviewer/Worker commits goes through the shared
   // rebaseAndForcePush helper (ci-fix.ts): fetch origin <base> → rebase → push --force-with-lease.
@@ -199,6 +212,20 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   let ciFixHandle: SubagentHandle<WorkerTools> | undefined;
   for (; iteration < maxIterations; iteration++) {
     if (input.signal?.aborted) return cancelled();
+
+    // Run-level cost/token ceiling (issue #190): consult the live usage ledger BEFORE this
+    // iteration's CI-fix/Reviewer work can spend anything further. A crossed ceiling blocks the run
+    // here rather than mid-fix-session.
+    if (input.budget) {
+      const status = await input.budget();
+      // A SIGINT during the async ledger lookup must still report cancelled (exit 2), not a budget
+      // block — mirror WorkLoop's post-check re-check of signal.
+      if (input.signal?.aborted) return cancelled();
+      if (status.exceeded) {
+        return { kind: 'blocked', reason: status.reason, iterations: iteration };
+      }
+    }
+
     log?.info('take-over: iteration start', { pr: input.pr, iteration });
 
     // 1. Wait for CI to settle. observeCheckStatus maps a CI failure (or a poll timeout) to
@@ -434,6 +461,7 @@ async function runReviewerThreads(
     ...(input.subagents.onReviewerStepFinish
       ? { onStepFinish: input.subagents.onReviewerStepFinish }
       : {}),
+    ...(input.subagents.onReviewerUsage ? { onUsage: input.subagents.onReviewerUsage } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
   });
   return runReviewer(agent, {
@@ -477,6 +505,7 @@ function runCiFixSession(
       ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
       ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),
       ...(subagents.timeout !== undefined ? { timeout: subagents.timeout } : {}),
+      ...(subagents.onWorkerUsage ? { onUsage: subagents.onWorkerUsage } : {}),
       ...(subagents.onWorkerStepFinish ? { onStepFinish: subagents.onWorkerStepFinish } : {}),
       ...(subagents.onEditorStepFinish ? { onEditorStepFinish: subagents.onEditorStepFinish } : {}),
       ...(subagents.runWorkerOverride ? { runWorkerOverride: subagents.runWorkerOverride } : {}),

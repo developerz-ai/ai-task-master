@@ -623,10 +623,11 @@ export async function runLoopAdapter(
   // disposer, so every run-scoped acquisition has exactly one registered release and neither exit
   // path can forget one. LIFO, so the order below is the reverse of the teardown order.
   const disposer = new Disposer();
-  // Registered BEFORE connectAll: a transport constructor that throws mid-list rejects connectAll
-  // with servers 1..N-1 already connected, and the `mcpConnected` flag this replaces was never set
-  // on that path — their stdio children survived to process exit. close() is idempotent, so
-  // registering it for a run that never connects costs nothing.
+  // Registered BEFORE connectAll: connectAll connects every server in parallel and each one spawns its
+  // stdio child as it goes, so a run aborted mid-connect (reapOnAbort drains this disposer) can already
+  // have live children — even though connectAll no longer rejects on a per-server failure. close()
+  // reaps whatever connected and is idempotent, so registering it for a run that never connects costs
+  // nothing.
   disposer.add(() => mcp.close());
   disposer.add(() => background.manager.killAll());
 

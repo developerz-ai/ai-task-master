@@ -4,6 +4,7 @@ import type { MCPClient, MCPClientConfig } from '@ai-sdk/mcp';
 import type { ToolSet } from 'ai';
 import type { LoggerLike } from '../logger/logger.ts';
 import { type CreateMcpClient, McpClientManager } from './mcp-client.ts';
+import { StdioProcessRegistry } from './stdio-process-registry.ts';
 
 type FakeClient = MCPClient & {
   closeCalls: number;
@@ -26,6 +27,29 @@ function fakeClient(tools: ToolSet): FakeClient {
 
 function fakeTool(): ToolSet[string] {
   return { description: 't', inputSchema: { type: 'object' } } as ToolSet[string];
+}
+
+// A promise that never settles — stands in for an SDK call wedged mid-handshake or a no-op close.
+function pending<T = never>(): Promise<T> {
+  return new Promise<T>(() => {});
+}
+
+function recordingLogger(): {
+  logger: LoggerLike;
+  warnings: Array<{ msg: string; fields: Record<string, unknown> | undefined }>;
+} {
+  const warnings: Array<{ msg: string; fields: Record<string, unknown> | undefined }> = [];
+  const logger: LoggerLike = {
+    debug: () => {},
+    info: () => {},
+    warn: (msg: string, fields?: Record<string, unknown>) => {
+      warnings.push({ msg, fields });
+    },
+    error: () => {},
+    status: () => {},
+    flush: async () => {},
+  };
+  return { logger, warnings };
 }
 
 function recordingFactory(map: Record<string, ToolSet>): {
@@ -483,5 +507,277 @@ test('toolSurfaceForRole: the split honors the per-role allowlist (issue #119)',
   // Only server `a` is mounted for the worker, so only its tool appears — then defers at threshold 0.
   assert.deepEqual(Object.keys(surface.deferred), ['mcp__a__x']);
   assert.deepEqual(surface.direct, {});
+  await m.close();
+});
+
+// ---- connect/close deadlines: no MCP path may hang forever (slice 04) ----
+
+test('connectAll: a server that spawns but never finishes tools() is skipped after connectTimeoutMs', async () => {
+  const { logger, warnings } = recordingLogger();
+  const createClient: CreateMcpClient = async () => {
+    const c = fakeClient({});
+    c.tools = () => pending();
+    return c;
+  };
+  const m = new McpClientManager({
+    servers: { wedged: { command: 'x' } },
+    createClient,
+    connectTimeoutMs: 20,
+    logger,
+  });
+
+  await m.connectAll();
+
+  assert.equal(m.connected().length, 0);
+  const failed = warnings.find((w) => w.msg === 'mcp server connect failed');
+  assert.ok(failed, 'expected a connect-failed warning');
+  assert.equal(failed?.fields?.name, 'wedged');
+  assert.match(String(failed?.fields?.error), /timed out/);
+  await m.close();
+});
+
+test('connectAll: a client that connects then wedges on tools() is still closed after the deadline', async () => {
+  const c = fakeClient({});
+  c.tools = () => pending();
+  const createClient: CreateMcpClient = async () => c;
+  const m = new McpClientManager({
+    servers: { wedged: { command: 'x' } },
+    createClient,
+    connectTimeoutMs: 20,
+  });
+
+  await m.connectAll();
+
+  assert.equal(m.connected().length, 0);
+  // createClient resolved before tools() wedged, so cleanup must close the connected client.
+  assert.equal(c.closeCalls, 1);
+});
+
+test('connectAll: a createClient that never resolves is skipped after the deadline without throwing', async () => {
+  const { logger, warnings } = recordingLogger();
+  const createClient: CreateMcpClient = () => pending();
+  const m = new McpClientManager({
+    servers: { wedged: { command: 'x' } },
+    createClient,
+    connectTimeoutMs: 20,
+    logger,
+  });
+
+  await assert.doesNotReject(() => m.connectAll());
+
+  assert.equal(m.connected().length, 0);
+  assert.ok(warnings.some((w) => w.msg === 'mcp server connect failed'));
+  await m.close();
+});
+
+test('close: a client.close() that never returns does not block terminate() (time-boxed batch)', async () => {
+  const { logger, warnings } = recordingLogger();
+  const c = fakeClient({ t: fakeTool() });
+  c.close = () => pending();
+  const createClient: CreateMcpClient = async () => c;
+
+  const registry = new StdioProcessRegistry({
+    kill: () => {},
+    exitHooks: { on: () => {}, off: () => {} },
+  });
+  let terminateCalls = 0;
+  const realTerminate = registry.terminate.bind(registry);
+  registry.terminate = async () => {
+    terminateCalls += 1;
+    await realTerminate();
+  };
+
+  const m = new McpClientManager({
+    servers: { wedged: { command: 'x' } },
+    createClient,
+    processes: registry,
+    closeTimeoutMs: 20,
+    logger,
+  });
+  await m.connectAll();
+  assert.equal(m.connected().length, 1);
+
+  await m.close();
+
+  assert.equal(terminateCalls, 1, 'terminate() must run even when a client.close() hangs');
+  assert.deepEqual(m.connected(), []);
+  assert.ok(warnings.some((w) => w.msg === 'mcp close batch timed out'));
+});
+
+// ---- parallel connect: servers handshake concurrently, one failure never blocks the rest (#79) ----
+
+test('connectAll connects servers concurrently, not one-at-a-time', async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const createClient: CreateMcpClient = async (config) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    // A real handshake yields; a truly-parallel connectAll holds both createClient calls in flight
+    // here at once, whereas a serial loop only ever has one before it awaits the next.
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    inFlight -= 1;
+    const name = (config.clientName ?? '').replace(/^aitm-/, '');
+    return fakeClient({ [`${name}_tool`]: fakeTool() });
+  };
+  const m = new McpClientManager({
+    servers: { a: { command: 'a' }, b: { command: 'b' } },
+    createClient,
+  });
+
+  await m.connectAll();
+
+  assert.equal(maxInFlight, 2, 'both servers must be mid-connect at once (parallel, not serial)');
+  // Pushed in input order regardless of which handshake finished first.
+  assert.deepEqual(
+    m.connected().map((c) => c.name),
+    ['a', 'b'],
+  );
+  await m.close();
+});
+
+test('connectAll: a partial failure closes the wedged client but keeps the good one connected', async () => {
+  const { logger, warnings } = recordingLogger();
+  const wedged = fakeClient({});
+  wedged.tools = () => pending(); // connects, then never finishes the handshake
+  const good = fakeClient({ ok_tool: fakeTool() });
+  const createClient: CreateMcpClient = async (config) =>
+    config.clientName === 'aitm-wedged' ? wedged : good;
+
+  const m = new McpClientManager({
+    servers: { good: { command: 'g' }, wedged: { command: 'w' } },
+    createClient,
+    connectTimeoutMs: 20,
+    logger,
+  });
+
+  await m.connectAll();
+
+  // The good server survived; the wedged one was skipped after the deadline.
+  assert.deepEqual(
+    m.connected().map((c) => c.name),
+    ['good'],
+  );
+  // The wedged client connected before tools() hung, so its cleanup close ran; the good one is untouched.
+  assert.equal(wedged.closeCalls, 1);
+  assert.equal(good.closeCalls, 0);
+  const failed = warnings.find((w) => w.msg === 'mcp server connect failed');
+  assert.equal(failed?.fields?.name, 'wedged');
+  await m.close();
+});
+
+test('connectAll: a stdio child spawned before a mid-handshake failure is still registered for reaping', async () => {
+  const registry = new StdioProcessRegistry({
+    // Report the pid as already gone so terminate() has nothing to wait on.
+    kill: () => {
+      throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+    },
+    exitHooks: { on: () => {}, off: () => {} },
+  });
+  const createClient: CreateMcpClient = async (config) => {
+    // The SDK sets transport.process when it spawns the child; mimic that, then fail the handshake so
+    // this is a mid-handshake failure — the pid must still reach the registry via the finally.
+    Object.assign(config.transport, { process: { pid: 4242 } });
+    const c = fakeClient({});
+    c.tools = async () => {
+      throw new Error('handshake-boom');
+    };
+    return c;
+  };
+
+  const m = new McpClientManager({
+    servers: { fs: { command: 'fs' } },
+    createClient,
+    processes: registry,
+  });
+
+  await m.connectAll();
+
+  assert.equal(m.connected().length, 0);
+  assert.deepEqual(
+    registry.list().map((t) => ({ name: t.name, pid: t.pid })),
+    [{ name: 'fs', pid: 4242 }],
+  );
+  await m.close();
+});
+
+test('connectAll: connectTimeoutMs <= 0 disables the deadline — a slow but successful connect completes', async () => {
+  const createClient: CreateMcpClient = async () => {
+    const c = fakeClient({});
+    c.tools = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return { slow: fakeTool() } as never;
+    };
+    return c;
+  };
+  const m = new McpClientManager({
+    servers: { slow: { command: 'x' } },
+    createClient,
+    connectTimeoutMs: 0,
+  });
+
+  await m.connectAll();
+
+  assert.deepEqual(Object.keys(m.toolsForRole('worker')), ['mcp__slow__slow']);
+  await m.close();
+});
+
+test('connectAll warns on post-sanitization server name collisions (issue #80)', async () => {
+  const { logger, warnings } = recordingLogger();
+  const { createClient } = recordingFactory({
+    'my.server': { ping: fakeTool() },
+    'my server': { pong: fakeTool() },
+    'my/server': { status: fakeTool() },
+  });
+  const m = new McpClientManager({
+    servers: {
+      'my.server': { command: 'a' },
+      'my server': { command: 'b' },
+      'my/server': { command: 'c' },
+    },
+    createClient,
+    logger,
+  });
+
+  await m.connectAll();
+
+  // All three servers should be connected (no deduping of the servers themselves).
+  assert.equal(m.connected().length, 3);
+
+  // But a warning should be issued about the post-sanitization collision.
+  const collisionWarning = warnings.find(
+    (w) => w.msg === 'mcp server name collision after sanitization',
+  );
+  assert.ok(collisionWarning, 'expected a collision warning');
+  // All three original names should be listed.
+  assert.deepEqual(collisionWarning?.fields?.colliding, ['my.server', 'my server', 'my/server']);
+  // They should all sanitize to `my-server`.
+  assert.equal(collisionWarning?.fields?.sanitized, 'my-server');
+
+  await m.close();
+});
+
+test('connectAll: no collision warning when server names sanitize uniquely (issue #80)', async () => {
+  const { logger, warnings } = recordingLogger();
+  const { createClient } = recordingFactory({
+    'my-server': { ping: fakeTool() },
+    'other.srv': { pong: fakeTool() },
+  });
+  const m = new McpClientManager({
+    servers: {
+      'my-server': { command: 'a' },
+      'other.srv': { command: 'b' },
+    },
+    createClient,
+    logger,
+  });
+
+  await m.connectAll();
+
+  // No collision warning should be issued when sanitized names are unique.
+  const collisionWarning = warnings.find(
+    (w) => w.msg === 'mcp server name collision after sanitization',
+  );
+  assert.equal(collisionWarning, undefined);
+
   await m.close();
 });

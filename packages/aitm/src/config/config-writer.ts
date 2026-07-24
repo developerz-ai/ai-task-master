@@ -51,7 +51,11 @@ export class ConfigWriter {
 
   async unset(scope: ConfigScope, key: string): Promise<ConfigFile> {
     const parts = splitKey(key);
-    assertNotProfileManaged(parts[0]);
+    const top = parts[0];
+    assertNotProfileManaged(top);
+    if (!CONFIG_KEYS.has(top)) {
+      throw new Error(unknownKeyMessage(top));
+    }
     const file = await this.readRaw(scope);
     unsetDottedKey(file, parts);
     return this.validateAndPersist(scope, file);

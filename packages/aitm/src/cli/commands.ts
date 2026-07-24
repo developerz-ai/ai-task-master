@@ -226,11 +226,43 @@ export type McpLoginCtx = {
   ) => Promise<import('../mcp/oauth.js').OAuthConfig>;
 };
 
-async function drainStdin(): Promise<string> {
+async function drainStdin(options?: {
+  timeoutMs?: number;
+  maxBytes?: number;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const timeoutMs = options?.timeoutMs ?? 30_000; // 30 second default
+  const maxBytes = options?.maxBytes ?? 1_000_000; // 1MB default
+  const signal = options?.signal;
+
   let data = '';
-  process.stdin.setEncoding('utf8');
-  for await (const chunk of process.stdin) data += chunk;
-  return data;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+  }, timeoutMs);
+
+  try {
+    process.stdin.setEncoding('utf8');
+    for await (const chunk of process.stdin) {
+      if (timedOut) {
+        throw new Error(
+          `Reading from stdin timed out after ${timeoutMs}ms. Pass the API key via --api-key or OPENROUTER_API_KEY env var instead.`,
+        );
+      }
+      if (signal?.aborted) {
+        throw signal.reason ?? new Error('Aborted');
+      }
+      data += chunk;
+      if (data.length > maxBytes) {
+        throw new Error(
+          `stdin data exceeded maximum size of ${maxBytes} bytes. API keys should be much smaller.`,
+        );
+      }
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Pre-run banner shown when auto-merge is active. aitm merges its own PRs via a `gh` subprocess,
@@ -779,6 +811,21 @@ export async function runMergePr(
       ctx.github ??
       new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal, undefined, warnToStderr);
 
+    // Detect agentConfig early so it can be passed to synthesizeTakeoverState, ensuring
+    // the take-over state carries the actual detected config file rather than a hardcoded default.
+    const detector = new AgentConfigDetector(cwd);
+    const detectOpts = buildDetectOpts(undefined, null, homeDir);
+
+    let agentConfig: AgentConfig | null;
+    try {
+      agentConfig = await detector.detect(detectOpts);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+    if (!agentConfig) {
+      agentConfig = defaultAgentConfig();
+    }
+
     // Take-over flow: `aitm merge-pr` (no args, no prior state) should work against any PR
     // the user built by hand — e.g. via Claude Code or `gh pr create`. We mirror the
     // claude-task-master `merge_pr` pattern: try to read existing state, and if absent,
@@ -790,7 +837,7 @@ export async function runMergePr(
     // number is junk, so the take-over PR is written in place: a mid-plan run keeps its plan,
     // group stages, options and runId rather than being replaced by a bare take-over state.
     if (args.resume === false) {
-      const synth = await synthesizeTakeoverState({ args, github, resolved });
+      const synth = await synthesizeTakeoverState({ args, github, resolved, agentConfig });
       if (synth.kind === 'error') return synth.exit;
       const takeover = synth.state;
       try {
@@ -809,7 +856,7 @@ export async function runMergePr(
         runState = await state.read();
       } catch (err) {
         if (!isFileNotFound(err)) return unreadableStateExit(stateDir, err);
-        const synth = await synthesizeTakeoverState({ args, github, resolved });
+        const synth = await synthesizeTakeoverState({ args, github, resolved, agentConfig });
         if (synth.kind === 'error') return synth.exit;
         runState = synth.state;
         try {
@@ -843,22 +890,6 @@ export async function runMergePr(
         message:
           'No PR to merge. Pass --pr <N>, switch to the PR branch, or run `aitm start` to populate state.',
       };
-    }
-
-    const detector = new AgentConfigDetector(cwd);
-    const detectOpts = buildDetectOpts(undefined, runState.options.stylePath, homeDir);
-
-    let agentConfig: AgentConfig | null;
-    try {
-      agentConfig = await detector.detect(detectOpts);
-    } catch (err) {
-      return { code: 1, message: errMsg(err) };
-    }
-    if (!agentConfig) {
-      process.stderr.write(
-        'No CLAUDE.md or AGENTS.md in the repo and no stylePath in state — using a generic default style.\n',
-      );
-      agentConfig = defaultAgentConfig();
     }
 
     const authStatus = ctx.authStatus ?? defaultAuthStatus;
@@ -1011,14 +1042,24 @@ export async function runClean(args: CleanArgs, ctx: CleanCtx = {}): Promise<Com
 }
 
 // Interactive yes/no over stdin. Non-TTY stdin (CI, pipes) denies without prompting: an unattended
-// `aitm clean` must opt into deletion with --force, never hang waiting for input.
-async function ttyConfirm(question: string): Promise<boolean> {
+// `aitm clean` must opt into deletion with --force, never hang waiting for input. AbortSignal support
+// allows testing/cancellation without patching globals.
+async function ttyConfirm(question: string, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error('Aborted');
+  }
   if (process.stdin.isTTY !== true) return false;
   const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const listener = () => rl.close();
+  signal?.addEventListener('abort', listener);
   try {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Aborted');
+    }
     const answer = await rl.question(question);
     return /^y(es)?$/i.test(answer.trim());
   } finally {
+    signal?.removeEventListener('abort', listener);
     rl.close();
   }
 }
@@ -1371,8 +1412,9 @@ async function synthesizeTakeoverState(input: {
   args: Extract<ParsedArgs, { kind: 'merge-pr' }>;
   github: GitHubClient;
   resolved: ResolvedConfig;
+  agentConfig: AgentConfig;
 }): Promise<SynthesizeTakeoverResult> {
-  const { args, github, resolved } = input;
+  const { args, github, resolved, agentConfig } = input;
   let pr = args.pr ?? null;
   if (pr === null) {
     let branch: string;
@@ -1406,6 +1448,12 @@ async function synthesizeTakeoverState(input: {
   }
 
   const now = new Date().toISOString();
+  const agentConfigFile: RunState['agentConfigFile'] =
+    agentConfig.flavor === 'claude'
+      ? 'CLAUDE.md'
+      : agentConfig.flavor === 'agents'
+        ? 'AGENTS.md'
+        : 'custom';
   const state: RunState = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     status: 'awaiting-pr',
@@ -1417,7 +1465,7 @@ async function synthesizeTakeoverState(input: {
     runId: `takeover-${Date.now().toString(36)}`,
     provider: 'openrouter',
     model: resolved.models.generic ?? DEFAULT_MODELS.generic,
-    agentConfigFile: 'CLAUDE.md',
+    agentConfigFile,
     createdAt: now,
     updatedAt: now,
     options: {

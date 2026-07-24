@@ -69,12 +69,14 @@ export function makeStepCounter(groups: readonly PrGroup[], prPerTask: boolean):
       return { unit: 'group', index: gi + 1, total: totalGroups };
     }
     const before = tasksBefore.get(groupId) ?? 0;
-    const within = task
-      ? Math.max(
-          0,
-          group.tasks.findIndex((t) => t.id === task.id),
-        )
-      : group.tasks.filter((t) => t.done).length;
+    let within: number;
+    if (task) {
+      const idx = group.tasks.findIndex((t) => t.id === task.id);
+      if (idx === -1) return undefined;
+      within = idx;
+    } else {
+      within = group.tasks.filter((t) => t.done).length;
+    }
     return { unit: 'task', index: Math.min(before + within + 1, totalTasks), total: totalTasks };
   };
 }

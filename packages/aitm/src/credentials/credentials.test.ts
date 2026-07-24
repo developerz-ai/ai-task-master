@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { LanguageModel } from 'ai';
 import type { ResolvedConfig } from '../config/schema.ts';
 import { Credentials, chatSettings, providerSettings, ROLE_CAPABILITY } from './credentials.ts';
-import { DEFAULT_MODELS } from './defaults.ts';
+import { DEFAULT_MODELS, OPENROUTER_API_BASE_URL } from './defaults.ts';
 
 const baseResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig => ({
   openrouterApiKey: 'sk-or-test',
@@ -268,6 +268,38 @@ test('chatSettings: anthropic on OpenRouter keeps ephemeral breakpoints AND gain
   const s = chatSettings('anthropic/claude-opus-4.7', 'coding', baseResolved(), 'run-abc');
   assert.deepEqual(s.cache_control, { type: 'ephemeral' }, 'breakpoints preserved');
   assert.deepEqual(s.extraBody, { session_id: 'run-abc', prompt_cache_key: 'run-abc' });
+});
+
+test('chatSettings: an explicit OpenRouter baseURL (the `openrouter` preset) keeps every OpenRouter directive', () => {
+  // Regression: `aitm profile add … --preset openrouter` sets baseURL to the OpenRouter endpoint
+  // explicitly. A presence check (`!baseURL`) misread that as a custom endpoint and stripped
+  // cache_control, session_id stickiness, AND usage accounting. Host comparison keeps all three.
+  const cfg = baseResolved({ baseURL: OPENROUTER_API_BASE_URL });
+  const s = chatSettings('anthropic/claude-opus-4.8', 'coding', cfg, 'run-abc');
+  assert.deepEqual(s.cache_control, { type: 'ephemeral' }, 'cache_control preserved');
+  assert.deepEqual(
+    s.extraBody,
+    { session_id: 'run-abc', prompt_cache_key: 'run-abc' },
+    'session stickiness preserved',
+  );
+  assert.deepEqual(s.usage, { include: true }, 'usage accounting preserved');
+  // The whole point of the fix: an explicit OpenRouter baseURL is byte-identical to leaving it unset.
+  assert.deepEqual(
+    s,
+    chatSettings('anthropic/claude-opus-4.8', 'coding', baseResolved(), 'run-abc'),
+  );
+});
+
+test('chatSettings: an OpenRouter subdomain baseURL is still treated as OpenRouter', () => {
+  const s = chatSettings(
+    'anthropic/claude-opus-4.8',
+    'coding',
+    baseResolved({ baseURL: 'https://gateway.openrouter.ai/v1' }),
+    'run-xyz',
+  );
+  assert.deepEqual(s.cache_control, { type: 'ephemeral' });
+  assert.deepEqual(s.extraBody, { session_id: 'run-xyz', prompt_cache_key: 'run-xyz' });
+  assert.deepEqual(s.usage, { include: true });
 });
 
 test('chatSettings: qwen/* and alibaba/* join the cache_control family on OpenRouter', () => {

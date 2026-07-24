@@ -217,7 +217,7 @@ test('capGroups: a dangling dep on the last-kept group itself is dropped, not ma
   assert.doesNotThrow(() => PlanGraph.validate(toPrGroups(capped)));
 });
 
-test('runPlanner returns blocked when the model emits an empty plan', async () => {
+test('runPlanner returns error when the model emits an empty plan (schema validation fails)', async () => {
   const empty: Plan = { goal: 'x', groups: [] };
   const agent = createPlannerAgent({
     model: planJsonModel(empty),
@@ -225,7 +225,8 @@ test('runPlanner returns blocked when the model emits an empty plan', async () =
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
-  assert.equal(result.kind, 'blocked');
+  assert.equal(result.kind, 'error');
+  assert.match(result.kind === 'error' ? result.error : '', /schema validation|min/i);
 });
 
 test('runPlanner: prepends the contextBlock to the first user message, ahead of the task text (issue #106)', async () => {

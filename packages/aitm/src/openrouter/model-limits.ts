@@ -152,6 +152,7 @@ export class ModelLimitsRegistry implements ModelLimitsLookup {
 function hasGap(limits: ModelLimits): boolean {
   return (
     limits.contextLength === undefined ||
+    limits.maxOutputTokens === undefined ||
     limits.promptUsdPerToken === undefined ||
     limits.completionUsdPerToken === undefined
   );

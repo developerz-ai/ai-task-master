@@ -147,10 +147,12 @@ async function expandSegment(
   for (const match of text.matchAll(re)) {
     const full = match[0];
     const lead = match[1] ?? '';
-    const rawPath = match[2] ?? '';
+    let rawPath = match[2] ?? '';
     const index = match.index ?? 0;
     result += text.slice(last, index);
-    last = index + full.length;
+    // Trim trailing punctuation from the path (e.g., `@guide.` → `@guide`).
+    rawPath = rawPath.replace(/[.,;:!?]+$/, '');
+    last = index + lead.length + 1 + rawPath.length;
     if (rawPath === '' || rawPath.startsWith('@')) {
       result += full;
       continue;

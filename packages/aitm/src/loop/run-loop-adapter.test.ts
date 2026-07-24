@@ -44,7 +44,6 @@ import {
   exploreReadTools,
   githubThreadTool,
   harnessContextBlock,
-  isOpenRouterEndpoint,
   localEditTools,
   localReadTools,
   makeBudgetCheck,
@@ -1408,25 +1407,6 @@ test('webSearchProviderOptions: unset → CI-fix only; true → all Worker calls
   // false: off for both, including CI-fix.
   assert.equal(webSearchProviderOptions(false, true, OR), undefined, 'false → CI-fix off');
   assert.equal(webSearchProviderOptions(false, false, OR), undefined, 'false → regular off');
-});
-
-test('isOpenRouterEndpoint: default and openrouter.ai are OpenRouter; other hosts are not', () => {
-  assert.equal(isOpenRouterEndpoint(undefined), true, 'unset baseURL → the default OpenRouter API');
-  assert.equal(isOpenRouterEndpoint(''), true);
-  assert.equal(isOpenRouterEndpoint('https://openrouter.ai/api/v1'), true);
-  assert.equal(isOpenRouterEndpoint('https://api.z.ai/api/coding/paas/v4'), false);
-  assert.equal(isOpenRouterEndpoint('https://api.kimi.com/coding/v1'), false);
-  assert.equal(
-    isOpenRouterEndpoint('https://notopenrouter.ai/api/v1'),
-    false,
-    'lookalike host rejected',
-  );
-  assert.equal(
-    isOpenRouterEndpoint('https://gateway.openrouter.ai/v1'),
-    true,
-    'real subdomain accepted',
-  );
-  assert.equal(isOpenRouterEndpoint('not a url'), false);
 });
 
 test('webSearchProviderOptions: the OpenRouter web_search server tool is NEVER attached off OpenRouter', () => {

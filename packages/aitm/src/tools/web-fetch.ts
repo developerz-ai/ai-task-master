@@ -269,7 +269,7 @@ export async function readBodyCapped(
       }
       body += decoder.decode(value, { stream: true });
       if (body.length >= maxChars) {
-        truncated = body.length > maxChars;
+        truncated = true;
         body = body.slice(0, maxChars);
         await reader.cancel();
         return { body, truncated };

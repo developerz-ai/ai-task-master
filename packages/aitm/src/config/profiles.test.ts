@@ -189,6 +189,63 @@ test('set rejects keys outside the documented surface', async () => {
   });
 });
 
+const RESERVED_NAMES = ['__proto__', 'prototype', 'constructor'];
+
+test('every command rejects a reserved profile name and leaves Object.prototype intact', async () => {
+  await withManager(async ({ manager, home }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    for (const name of RESERVED_NAMES) {
+      await assert.rejects(() => manager.add(name), /Invalid profile name/);
+      await assert.rejects(() => manager.use(name), /Invalid profile name/);
+      await assert.rejects(
+        () => manager.set(name, 'baseURL', 'https://evil.example/v1'),
+        /Invalid profile name/,
+      );
+      await assert.rejects(() => manager.get(name, 'baseURL'), /Invalid profile name/);
+      await assert.rejects(() => manager.remove(name), /Invalid profile name/);
+      await assert.rejects(() => manager.show(name), /Invalid profile name/);
+    }
+    assert.equal(({} as Record<string, unknown>).baseURL, undefined, 'Object.prototype polluted');
+    const file = await readGlobal(home);
+    assert.deepEqual(Object.keys(file.profiles as object), ['z.ai']);
+    assert.equal(file.activeProfile, 'z.ai');
+  });
+});
+
+test('membership is own-property only — an inherited name is not an existing profile', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('z.ai', { preset: 'zai' });
+    await assert.rejects(() => manager.use('toString'), /Unknown profile "toString"/);
+    await assert.rejects(() => manager.set('toString', 'baseURL', 'https://x.dev/v1'), /Unknown/);
+    await assert.rejects(() => manager.get('toString', 'baseURL'), /Unknown/);
+    await assert.rejects(() => manager.remove('toString'), /Unknown/);
+    await assert.rejects(() => manager.show('toString'), /Unknown/);
+  });
+});
+
+test('add accepts a name that merely shadows an inherited key', async () => {
+  await withManager(async ({ manager }) => {
+    await manager.add('toString', { baseURL: 'https://x.dev/v1' });
+    assert.equal(await manager.get('toString', 'baseURL'), 'https://x.dev/v1');
+    assert.deepEqual(Object.keys((await manager.list()).profiles), ['toString']);
+  });
+});
+
+test('a hand-edited __proto__ profile key is unreachable and dropped on the next write', async () => {
+  await withManager(async ({ manager, home }) => {
+    await writeFile(
+      join(home, '.aitm.json'),
+      '{"profiles":{"__proto__":{"baseURL":"https://evil.example/v1"}}}',
+    );
+    assert.deepEqual((await manager.list()).profiles, {});
+    await assert.rejects(() => manager.use('__proto__'), /Invalid profile name/);
+    await manager.add('z.ai', { preset: 'zai' });
+    const file = await readGlobal(home);
+    assert.deepEqual(Object.keys(file.profiles as object), ['z.ai']);
+    assert.equal(({} as Record<string, unknown>).baseURL, undefined, 'Object.prototype polluted');
+  });
+});
+
 test('remove deletes the profile and clears active when it was active', async () => {
   await withManager(async ({ manager }) => {
     await manager.add('z.ai', { preset: 'zai' });

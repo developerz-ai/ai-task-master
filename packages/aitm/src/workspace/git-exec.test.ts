@@ -62,8 +62,74 @@ test('assertGitAllowed: the rule keys off the push subcommand, not the --force t
   assert.doesNotThrow(() => assertGitAllowed(['checkout', '-B', 'br', 'main']));
 });
 
+test('assertGitAllowed: finds the push subcommand behind leading global options', () => {
+  assert.throws(() => assertGitAllowed(['-C', '/tmp/repo', 'push', '--force']), GitGuardError);
+  assert.throws(() => assertGitAllowed(['-c', 'k=v', 'push', '-f']), GitGuardError);
+  assert.throws(
+    () => assertGitAllowed(['--git-dir=/tmp/repo/.git', 'push', '--force']),
+    GitGuardError,
+  );
+  assert.throws(
+    () => assertGitAllowed(['--no-optional-locks', 'push', 'origin', '+main']),
+    GitGuardError,
+  );
+  assert.throws(
+    () => assertGitAllowed(['-C', '/tmp/repo', '-c', 'k=v', '-p', 'push', '--force']),
+    GitGuardError,
+  );
+  assert.throws(
+    () => assertGitAllowed(['--work-tree', '/tmp/repo', '--namespace', 'ns', 'push', '--force']),
+    GitGuardError,
+  );
+});
+
+test('assertGitAllowed: policy applies behind leading global options', () => {
+  assert.throws(
+    () =>
+      assertGitAllowed(['-C', '/tmp/repo', 'push', '--force-with-lease'], {
+        allowForcePush: false,
+      }),
+    GitGuardError,
+  );
+  assert.doesNotThrow(() => assertGitAllowed(['-C', '/tmp/repo', 'push', '--force-with-lease']));
+  assert.doesNotThrow(() => assertGitAllowed(['-c', 'k=v', 'push', '-u', 'origin', 'feature/x']));
+});
+
+test('assertGitAllowed: a global option value is not read as the subcommand or a force token', () => {
+  // A directory literally named `push` is not a push; a `+`/`--force` VALUE is not a force-push.
+  assert.doesNotThrow(() => assertGitAllowed(['-C', 'push', 'status', '--porcelain']));
+  assert.doesNotThrow(() => assertGitAllowed(['-C', '+weird-dir', 'status']));
+  assert.doesNotThrow(() => assertGitAllowed(['-c', 'user.name=--force', 'status']));
+  // …but the real subcommand behind it is still guarded.
+  assert.throws(() => assertGitAllowed(['-C', 'push', 'push', '--force']), GitGuardError);
+});
+
+test('assertGitAllowed: refuses an unrecognized leading option instead of guessing', () => {
+  assert.throws(() => assertGitAllowed(['--not-a-git-option', 'push', '--force']), GitGuardError);
+  // git itself rejects the attached forms (`-C<dir>`, `-c<k>=<v>`); the guard will not guess either.
+  assert.throws(() => assertGitAllowed(['-C/tmp/repo', 'push', '--force']), GitGuardError);
+  assert.throws(() => assertGitAllowed(['-ck=v', 'push', '-f']), GitGuardError);
+});
+
+test('assertGitAllowed: refuses an inline alias definition', () => {
+  // `git -c alias.p='push --force' p` force-pushes behind a subcommand the guard cannot follow.
+  assert.throws(() => assertGitAllowed(['-c', 'alias.p=push --force', 'p']), GitGuardError);
+  assert.throws(() => assertGitAllowed(['-c', 'ALIAS.p=push --force', 'p']), GitGuardError);
+  assert.throws(() => assertGitAllowed(['--config-env', 'alias.p=VAR', 'p']), GitGuardError);
+  assert.throws(() => assertGitAllowed(['--config-env=alias.p=VAR', 'p']), GitGuardError);
+  // Ordinary `-c` settings stay allowed.
+  assert.doesNotThrow(() => assertGitAllowed(['-c', 'core.editor=true', 'rebase', '--continue']));
+});
+
+test('assertGitAllowed: allows a global-option-only invocation with no subcommand', () => {
+  assert.doesNotThrow(() => assertGitAllowed([]));
+  assert.doesNotThrow(() => assertGitAllowed(['--version']));
+  assert.doesNotThrow(() => assertGitAllowed(['-C', '/tmp/repo']));
+});
+
 test('runGit: rejects a force-push before spawning git', async () => {
   await assert.rejects(() => runGit(['push', '--force']), GitGuardError);
+  await assert.rejects(() => runGit(['-C', '/tmp', 'push', '--force']), GitGuardError);
 });
 
 test('commitsAheadOfBase: 0 on a fresh branch, counts new commits, null when unmeasurable', async () => {

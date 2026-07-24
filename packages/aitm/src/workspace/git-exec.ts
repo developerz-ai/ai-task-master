@@ -31,6 +31,91 @@ function isForceWithLeaseFlag(arg: string): boolean {
   return arg === '--force-with-lease' || arg.startsWith('--force-with-lease=');
 }
 
+// Git global options whose value is the next argv element (`--opt <value>`); the long ones also
+// accept `--opt=<value>`. Both tokens have to be skipped: stopping on the value would read
+// `<dir>` / `<k>=<v>` as the subcommand and wave `git -C dir push --force` straight through.
+const VALUED_LONG_OPTIONS = [
+  '--git-dir',
+  '--work-tree',
+  '--namespace',
+  '--super-prefix',
+  '--attr-source',
+  '--config-env',
+] as const;
+const VALUED_GLOBAL_OPTIONS = new Set<string>(['-C', '-c', ...VALUED_LONG_OPTIONS]);
+const ATTACHED_VALUE_PREFIXES = [
+  ...VALUED_LONG_OPTIONS.map((option) => `${option}=`),
+  '--exec-path=',
+  '--list-cmds=',
+];
+
+// Git global options that consume no value.
+const VALUELESS_GLOBAL_OPTIONS = new Set([
+  '-p',
+  '--paginate',
+  '-P',
+  '--no-pager',
+  '--bare',
+  '--no-replace-objects',
+  '--no-lazy-fetch',
+  '--no-optional-locks',
+  '--no-advice',
+  '--literal-pathspecs',
+  '--glob-pathspecs',
+  '--noglob-pathspecs',
+  '--icase-pathspecs',
+  '--exec-path',
+  '--html-path',
+  '--man-path',
+  '--info-path',
+  '-v',
+  '--version',
+  '-h',
+  '--help',
+]);
+
+function configSetting(arg: string, next: string | undefined): string | undefined {
+  if (arg === '-c' || arg === '--config-env') return next;
+  if (arg.startsWith('--config-env=')) return arg.slice('--config-env='.length);
+  return undefined;
+}
+
+// Index of the subcommand, skipping leading global options. Throws on an option this table does
+// not know, because guessing where the subcommand starts is how the guard gets disabled: a
+// mis-located subcommand silently reads as "not a push".
+function subcommandIndex(args: readonly string[]): number {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === undefined || !arg.startsWith('-')) return index;
+
+    // `git -c alias.p='push --force' p` really is a force-push, and no amount of arg inspection
+    // can follow an alias to its expansion — so defining one inline is refused outright.
+    const setting = configSetting(arg, args[index + 1]);
+    if (setting?.toLowerCase().startsWith('alias.')) {
+      throw new GitGuardError(
+        `Refusing git invocation that defines an alias inline (\`${arg}\`): an alias can expand to a force-push behind an innocent subcommand.`,
+      );
+    }
+
+    if (VALUED_GLOBAL_OPTIONS.has(arg)) {
+      index += 2;
+      continue;
+    }
+    if (
+      VALUELESS_GLOBAL_OPTIONS.has(arg) ||
+      ATTACHED_VALUE_PREFIXES.some((prefix) => arg.startsWith(prefix))
+    ) {
+      index += 1;
+      continue;
+    }
+    throw new GitGuardError(
+      `Refusing git invocation with unrecognized global option \`${arg}\`: the subcommand cannot be located, so the push guard cannot be applied.`,
+    );
+  }
+  return index;
+}
+
 // Policy for the git guard. `allowForcePush` (default true) permits `--force-with-lease` on a
 // push; set false for repos that forbid ALL force-pushes, so even the lease variant is rejected.
 export type GitPolicy = { allowForcePush?: boolean };
@@ -43,14 +128,19 @@ export type GitPolicy = { allowForcePush?: boolean };
 // because git lets a trailing `--force` override the lease (`push --force-with-lease --force`
 // is a plain force-push). `--force-with-lease` on its own is the only sanctioned force path,
 // UNLESS `allowForcePush` is false, in which case it too is rejected.
+//
+// Only the tokens AFTER the subcommand are inspected, so a global option's value (`-C +dir`,
+// `-c k=--force`) is never mistaken for a force-push.
 export function assertGitAllowed(args: readonly string[], policy?: GitPolicy): void {
-  if (args[0] !== 'push') return;
-  if (args.some(isForceFlag) || args.some(isForceRefspec)) {
+  const index = subcommandIndex(args);
+  if (args[index] !== 'push') return;
+  const pushArgs = args.slice(index + 1);
+  if (pushArgs.some(isForceFlag) || pushArgs.some(isForceRefspec)) {
     throw new GitGuardError(
       'Refusing `git push --force` / -f / +refspec: the only sanctioned force-push is --force-with-lease (rebase first).',
     );
   }
-  if (policy?.allowForcePush === false && args.some(isForceWithLeaseFlag)) {
+  if (policy?.allowForcePush === false && pushArgs.some(isForceWithLeaseFlag)) {
     throw new GitGuardError(
       'Refusing `git push --force-with-lease`: force-push is disabled by policy (allowForcePush=false).',
     );

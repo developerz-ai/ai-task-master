@@ -6,6 +6,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ZodError } from 'zod';
 import { atomicWrite } from '../fs/atomic-write.ts';
+import { UNTRUSTED_PROJECT_FIELDS } from './config-loader.ts';
 import { FORBIDDEN_KEY_SEGMENTS } from './profiles.ts';
 import { CONFIG_KEYS, type ConfigFile, ConfigFileSchema } from './schema.ts';
 
@@ -20,6 +21,13 @@ const PROJECT_FILE = 'config.json';
 // CONFIG_KEYS: they are valid config keys, just not writable through this surface.
 const PROFILE_MANAGED_KEYS: ReadonlySet<string> = new Set(['activeProfile', 'profiles']);
 
+// Same fields ConfigLoader strips + warns on when read back from a project config.json
+// (see UNTRUSTED_PROJECT_FIELDS) — refused at write time too, so `config set --project`
+// can't persist a value the loader will silently discard on the next run.
+const UNTRUSTED_PROJECT_FIELD_REASONS: ReadonlyMap<string, string> = new Map(
+  UNTRUSTED_PROJECT_FIELDS.map(({ key, reason }) => [key, reason]),
+);
+
 export class ConfigWriter {
   constructor(
     private readonly cwd: string,
@@ -32,6 +40,9 @@ export class ConfigWriter {
     assertNotProfileManaged(top);
     if (!CONFIG_KEYS.has(top)) {
       throw new Error(unknownKeyMessage(top));
+    }
+    if (scope === 'project') {
+      assertNotUntrustedProjectField(top);
     }
     const file = await this.readRaw(scope);
     setDottedKey(file, parts, parseValue(value));
@@ -180,6 +191,19 @@ function getDottedKey(obj: Record<string, unknown>, parts: readonly string[]): u
 function assertNotProfileManaged(top: string): void {
   if (PROFILE_MANAGED_KEYS.has(top)) {
     throw new Error(`"${top}" is managed by \`aitm profile …\`. Use the profile commands instead.`);
+  }
+}
+
+// Guard the project-scope trust boundary at write time: ConfigLoader ignores these fields when
+// it reads a project config.json (see UNTRUSTED_PROJECT_FIELDS), so persisting them via
+// `config set --project` would only produce a file whose value is silently dropped on the next
+// run — reject the write instead of storing dead data.
+function assertNotUntrustedProjectField(top: string): void {
+  const reason = UNTRUSTED_PROJECT_FIELD_REASONS.get(top);
+  if (reason !== undefined) {
+    throw new Error(
+      `"${top}" cannot be set in project scope — ${reason}; honored only from the user-owned ~/.aitm.json. Use \`aitm config set ${top} <value>\` (without --project) instead.`,
+    );
   }
 }
 

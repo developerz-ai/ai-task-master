@@ -66,6 +66,8 @@ Every key `ConfigLoader` accepts, grouped by area. **Scope** is where a key is h
 - *project + global* — either file; the project file (`./.ai-task-master/config.json`) wins.
 - *+ profile* — also settable inside a named profile (resolved below explicit config, above env).
 - *CLI `--flag`* — also a `aitm start` flag, which wins over every file.
+- *project **deny-only*** — both files are read, but the project file may only **tighten** the key
+  (`bashRules`); a widening entry is ignored and warned.
 
 Keys marked *global* carry a trust boundary: the same key in a repo-shippable project file is
 parsed but **ignored and warned**, so a cloned repo can't set it (credential, endpoint, or
@@ -125,7 +127,7 @@ code-execution surfaces). Keys absent from a file fall through per the
 
 | Key | Type | Default | Scope | Purpose |
 | --- | --- | --- | --- | --- |
-| `bashRules` | `{pattern, action}[]` | built-in denies | project + global | Deny/allow rules for the bash tool (#113); appended before the built-in destructive-command defaults, first-match-wins. |
+| `bashRules` | `{pattern, action}[]` | built-in denies | global; project **deny-only** | Deny/allow rules for the bash tool (#113). See [bashRules](#bashrules). |
 | `hooks` | `{preToolUse, postToolUse}` | unset | global | PreToolUse/PostToolUse shell hooks. See [hooks](#hooks). |
 | `mcpServers` | map | `{}` | project + global (+ Claude interop) | External MCP servers to mount. See [mcp.md](./mcp.md). |
 | `mcpRoleAllowlist` | map | unset (every server to every role) | project + global | Per-role MCP server/tool allowlist. See [MCP tool controls](#mcp-tool-controls). |
@@ -258,6 +260,25 @@ Two keys tune how a role's Model Context Protocol tools are exposed; both are **
 
 - `mcpRoleAllowlist` — restrict which servers/tools each role (Planner, Worker, Reviewer) sees. Entries are whole servers by name, or per-server `*`-glob tool patterns. Unset → every role gets every connected server.
 - `mcpDeferToolsOver` — default `20`; `0` = always defer. Once a role's MCP tool count exceeds this threshold, those tools are deferred to name-only stubs plus a `tool_search` tool, keeping their full JSON schemas out of every request until the model asks for them. Bounds request size on servers that expose many tools.
+
+## bashRules
+
+Deny/allow rules for the model-facing bash tool (issue #113) — a guardrail on the shell boundary, not a sandbox. Each rule is `{ "pattern": "git push --force*", "action": "deny" | "allow" }`; the pattern's first token is anchored on the command (basename-normalized), its remaining tokens match a subsequence of the arguments, and `*` globs within one token. Every subcommand of a compound command is checked independently; the **first** matching rule wins, and an unmatched command runs.
+
+The effective list is assembled in this order:
+
+1. `./.ai-task-master/config.json` rules — **denies only**.
+2. `~/.aitm.json` rules.
+3. The built-in destructive-command denies: `git push --force*`, `git push -f`, `git push +*`, `gh pr merge`, `git reset --hard`.
+
+**Trust boundary:** because the first match wins, an earlier `allow` clears a later deny — so a project config may only **tighten** shell governance. Its `deny` rules are honored (a repo narrowing what the model may run is always safe) and merged *in front of* the global rules rather than replacing them; its `allow` rules are **ignored and warned**. Only the user-owned `~/.aitm.json` can allow-override a built-in deny:
+
+```jsonc
+// ~/.aitm.json — the operator opts back into force-push for the model's shell
+{ "bashRules": [{ "pattern": "git push --force-with-lease", "action": "allow" }] }
+```
+
+The same entry in a checked-in project config is dropped, so a cloned repo can never re-enable `git push --force`, `gh pr merge`, or `git reset --hard`.
 
 ## hooks
 

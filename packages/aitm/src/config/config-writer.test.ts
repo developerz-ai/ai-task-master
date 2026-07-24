@@ -225,6 +225,42 @@ test('set on project scope creates .ai-task-master/ parent dir', async () => {
   });
 });
 
+test('set rejects untrusted fields in project scope before any write', async () => {
+  await withWriter(async ({ writer, cwd }) => {
+    for (const key of [
+      'baseURL',
+      'openrouterApiKey',
+      'hooks',
+      'formatCommand',
+      'verifyCommand',
+      'stylePath',
+    ]) {
+      await assert.rejects(
+        () => writer.set('project', key, '"v"'),
+        new RegExp(`"${key}" cannot be set in project scope`),
+      );
+    }
+    const entries = await readdir(join(cwd, '.ai-task-master')).catch(() => []);
+    assert.deepEqual(entries, []);
+  });
+});
+
+test('set allows untrusted fields in global scope', async () => {
+  await withWriter(async ({ writer }) => {
+    await writer.set('global', 'baseURL', '"https://example.com"');
+    assert.equal(await writer.get('global', 'baseURL'), 'https://example.com');
+  });
+});
+
+test('set allows a nested untrusted-field key to be rejected too', async () => {
+  await withWriter(async ({ writer }) => {
+    await assert.rejects(
+      () => writer.set('project', 'hooks.postToolUse', '"v"'),
+      /"hooks" cannot be set in project scope/,
+    );
+  });
+});
+
 test('list returns the parsed file', async () => {
   await withWriter(async ({ writer, home }) => {
     await writeFile(

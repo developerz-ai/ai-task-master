@@ -24,6 +24,10 @@ aitm profile show [<name>]
 Profiles are **global-only** (always written to `~/.aitm.json`); there is no `--project`
 selector. `<key>` for `set`/`get` is `openrouterApiKey`, `baseURL`, or `models.<tier>`.
 
+`<name>` must be non-empty and cannot be `__proto__`, `prototype`, or `constructor`: those name
+`Object.prototype` members, so every subcommand rejects them up front and profile lookups are
+own-property only — an inherited key is never mistaken for a profile.
+
 ## Subcommands
 
 | Command | Effect |

@@ -15,10 +15,10 @@
 // comparison reviews by hand.
 
 import { appendFile, readFile } from 'node:fs/promises';
-import { compareLedgers, renderComparison } from '../test/integration/benchmark/bench-compare.ts';
-import { parseJsonl, toJsonl } from '../test/integration/benchmark/bench-row.ts';
+import { compareLedgers, renderComparison } from '../src/benchmark/bench-compare.ts';
+import { parseJsonl, toJsonl } from '../src/benchmark/bench-row.ts';
+import { BENCH_SCENARIOS, scenarioById } from '../src/benchmark/scenarios.ts';
 import { readBenchConfig, runScenario } from '../test/integration/benchmark/bench-runner.ts';
-import { BENCH_SCENARIOS, scenarioById } from '../test/integration/benchmark/scenarios.ts';
 
 // Thrown on a malformed invocation so the top-level dispatcher can turn it into a clean message + the
 // documented validation exit code (2) rather than an unhandled stack trace.

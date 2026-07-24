@@ -5,8 +5,8 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { BENCH_SCENARIOS } from '../../../src/benchmark/scenarios.ts';
 import { readBenchConfig, runScenario } from './bench-runner.ts';
-import { BENCH_SCENARIOS } from './scenarios.ts';
 
 // ---- PURE: readBenchConfig (the live-run gate) -----------------------------
 
@@ -48,9 +48,11 @@ for (const scenario of BENCH_SCENARIOS) {
     const row = await runScenario(cfg, scenario, (s) => console.log(`[bench] ${s}`));
     assert.equal(row.scenario, scenario.id);
     assert.ok(row.model.length > 0, 'model recorded');
-    assert.ok(row.durationMs >= 0, 'duration recorded');
     assert.ok(row.repo.includes('/'), 'kept sandbox repo slug recorded');
     assert.ok(row.outcome === 'pass' || row.outcome === 'fail', 'a verdict was reached');
-    assert.ok(row.tokens.overall.calls >= 0, 'usage totals present');
+    // A real live run always records at least one model call and takes nonzero time — a zero here
+    // means the persisted usage (issue #114) was missing, so the "full row" would be hollow.
+    assert.ok(row.tokens.overall.calls > 0, 'persisted usage records at least one call');
+    assert.ok(row.durationMs > 0, 'a real run took nonzero time');
   });
 }

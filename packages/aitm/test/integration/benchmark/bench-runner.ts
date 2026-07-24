@@ -13,12 +13,12 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execa } from 'execa';
+import type { BenchRow } from '../../../src/benchmark/bench-row.ts';
+import { buildBenchRow } from '../../../src/benchmark/bench-row.ts';
+import type { BenchScenario } from '../../../src/benchmark/scenarios.ts';
 import { main } from '../../../src/cli/cli.ts';
 import { StateStore } from '../../../src/state/state-store.ts';
 import { buildFixtureConfig } from '../e2e-smoke.ts';
-import type { BenchRow } from './bench-row.ts';
-import { buildBenchRow } from './bench-row.ts';
-import type { BenchScenario } from './scenarios.ts';
 
 export type BenchConfig = {
   apiKey: string;

@@ -4,8 +4,8 @@
 // of its inputs and the JSONL it produces is snapshot-testable. The live runner (bench-runner.ts) is
 // the only impure caller; the compare command (bench-compare.ts) reads the rows back.
 
-import type { Role } from '../../../src/credentials/credentials.ts';
-import type { RunState, RunStatus } from '../../../src/state/schema.ts';
+import type { Role } from '../credentials/credentials.ts';
+import type { RunState, RunStatus } from '../state/schema.ts';
 
 // Per-role (and overall) token counts flattened to the four figures a model comparison actually reads.
 // Costs live on the row (overall only) since per-role pricing rarely drives a model choice.

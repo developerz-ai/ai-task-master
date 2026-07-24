@@ -45,8 +45,11 @@ test('single-file verify: passes when FOO contains BAR, fails when absent or wro
 test('multi-file-feature verify: a well-formed module + test passes; a stub test fails', async () => {
   const s = scenarioById('multi-file-feature');
   assert.ok(s);
+  // A real implementation so the fixture actually satisfies goodTest's assertion (slugify('A B') === 'a-b').
   const goodMod =
-    'export function slugify(input: string): string {\n  return input.toLowerCase();\n}\n';
+    'export function slugify(input: string): string {\n' +
+    "  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n" +
+    '}\n';
   const goodTest =
     "import assert from 'node:assert';\nimport { test } from 'node:test';\nimport { slugify } from './slugify.ts';\ntest('slugify', () => { assert.equal(slugify('A B'), 'a-b'); });\n";
   assert.equal(

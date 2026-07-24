@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { RunState } from '../../../src/state/schema.ts';
+import type { RunState } from '../state/schema.ts';
 import { buildBenchRow, parseJsonl, toJsonl } from './bench-row.ts';
 
 export function fixtureState(overrides: Partial<RunState> = {}): RunState {

@@ -4,6 +4,7 @@
 
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { redactCopy } from './redact.ts';
 import { scrubSecrets } from './secret-scrubber.ts';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -33,9 +34,6 @@ const LEVEL_RANK: Readonly<Record<LogLevel, number>> = {
   warn: 30,
   error: 40,
 };
-
-const REDACT_KEY = /key|token|secret|authorization/i;
-const REDACTED = '[REDACTED]';
 
 export class Logger implements LoggerLike {
   private writeTail: Promise<void> = Promise.resolve();
@@ -69,7 +67,7 @@ export class Logger implements LoggerLike {
   }
 
   static redact(fields: Record<string, unknown>): Record<string, unknown> {
-    const out = redactValue(fields);
+    const out = redactCopy(fields);
     return out as Record<string, unknown>;
   }
 
@@ -136,32 +134,6 @@ export class Logger implements LoggerLike {
     await mkdir(dirname(file), { recursive: true });
     this.parentEnsured = true;
   }
-}
-
-// `seen` holds only the CURRENT ancestor chain (added before recursing into a value's children,
-// removed after) so exactly true cycles read "[CYCLE]". A grow-only set would also flag an object
-// that merely appears twice as siblings (SDK messages share references freely, e.g. one
-// providerOptions object across tool-result parts) — corrupting valid data into a string that then
-// fails modelMessageSchema on transcript reconstruction (issue #251).
-function redactValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
-  if (Array.isArray(value)) {
-    if (seen.has(value)) return '[CYCLE]';
-    seen.add(value);
-    const out = value.map((v) => redactValue(v, seen));
-    seen.delete(value);
-    return out;
-  }
-  if (value !== null && typeof value === 'object') {
-    if (seen.has(value)) return '[CYCLE]';
-    seen.add(value);
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) {
-      out[k] = REDACT_KEY.test(k) ? REDACTED : redactValue(v, seen);
-    }
-    seen.delete(value);
-    return out;
-  }
-  return typeof value === 'string' ? scrubSecrets(value) : value;
 }
 
 function bigintReplacer(_key: string, value: unknown): unknown {

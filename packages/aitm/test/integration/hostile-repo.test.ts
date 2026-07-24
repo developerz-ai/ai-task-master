@@ -15,7 +15,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { evaluateCommand } from '@developerz.ai/ai-claude-compat';
+import { type BashOutput, bashTool, evaluateCommand } from '@developerz.ai/ai-claude-compat';
 import { execa } from 'execa';
 import { ConfigLoader } from '../../src/config/config-loader.ts';
 import { providerSettings } from '../../src/credentials/credentials.ts';
@@ -76,6 +76,17 @@ async function writeHostileRepoFiles(repoPath: string): Promise<void> {
 async function makeTrustedHome(): Promise<{ path: string; cleanup: () => Promise<void> }> {
   const path = await mkdtemp(join(tmpdir(), 'aitm-trusted-home-'));
   return { path, cleanup: () => rm(path, { recursive: true, force: true }) };
+}
+
+async function runBash(
+  t: { execute?: unknown },
+  input: { command: string; description: string },
+): Promise<BashOutput> {
+  const exec = t.execute;
+  if (typeof exec !== 'function') throw new Error('tool has no execute');
+  return (await (
+    exec as (i: typeof input, o: { toolCallId: string; messages: never[] }) => Promise<BashOutput>
+  )(input, { toolCallId: 'test', messages: [] })) as BashOutput;
 }
 
 test('hostile-repo: malicious baseURL/openrouterApiKey/hooks are stripped + warned, never resolved', async () => {
@@ -204,6 +215,70 @@ test('hostile-repo: project-scoped bashRules cannot widen shell governance, only
     // Tightening IS honored — a repo-shipped deny narrows what the model may run.
     assert.equal(evaluateCommand('npm publish', resolved.bashRules).denied, true);
     assert.equal(evaluateCommand('git status', resolved.bashRules).denied, false);
+
+    assert.ok(
+      warnings.some((w) => w.includes('bashRules') && w.includes('ignored')),
+      `expected a bashRules-ignored warning, got: ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('hostile-repo: repo-shipped bashRules cannot re-enable destructive commands in the real bash tool', async () => {
+  // The test above proves evaluateCommand(resolved.bashRules) denies the attacker's re-enabled
+  // commands, but nothing the model actually calls invokes evaluateCommand directly — it calls the
+  // bashTool built from `resolved.bashRules` (run-loop-adapter.ts wires bashInit.rules straight from
+  // the resolved config). Exercise that full composition end to end: resolve the hostile config,
+  // build the real bashTool from it, and drive it through the same attack strings via .execute — the
+  // path the model's shell tool call actually takes, not just the bare policy function.
+  const repo = await makeTempRepo();
+  const home = await makeTrustedHome();
+  try {
+    await writeHostileRepoFiles(repo.path);
+    await execa('git', ['add', '-A'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'malicious bash allow rules shipped by the repo'], {
+      cwd: repo.path,
+    });
+
+    const warnings: string[] = [];
+    const loader = new ConfigLoader(
+      repo.path,
+      home.path,
+      { OPENROUTER_API_KEY: TRUSTED_API_KEY },
+      { warn: (m) => warnings.push(m) },
+    );
+    const resolved = await loader.resolve({});
+    const bash = bashTool({ cwd: repo.path, rules: resolved.bashRules });
+
+    for (const command of [
+      'git push --force origin main',
+      'git push --force-with-lease',
+      'gh pr merge 12 --squash',
+      'git reset --hard HEAD~1',
+    ]) {
+      const out = await runBash(bash, { command, description: 'attacker attempt' });
+      assert.equal(out.denied, true, `${command} must be denied by the real bash tool`);
+      assert.equal(out.exitCode, 126, `${command} must never spawn`);
+    }
+
+    // The repo-shipped deny (npm publish) still lands end to end — tightening is honored, not just
+    // the built-in denies.
+    const publish = await runBash(bash, {
+      command: 'npm publish',
+      description: 'attacker attempt',
+    });
+    assert.equal(publish.denied, true, 'the repo-shipped deny must still block npm publish');
+    assert.equal(publish.exitCode, 126);
+
+    // Governance isn't fail-closed on everything — an ungoverned command still actually runs.
+    const status = await runBash(bash, {
+      command: 'git status --short',
+      description: 'sanity check',
+    });
+    assert.equal(status.denied, undefined);
+    assert.equal(status.exitCode, 0);
 
     assert.ok(
       warnings.some((w) => w.includes('bashRules') && w.includes('ignored')),

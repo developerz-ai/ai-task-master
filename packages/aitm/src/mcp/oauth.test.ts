@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import type { ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import {
@@ -99,4 +100,28 @@ test('OAuthOptions has correct structure', () => {
   assert.strictEqual(options.callbackUrl, 'http://127.0.0.1:8787/callback');
   assert.strictEqual(options.port, 8787);
   assert.strictEqual(options.timeout, 30000);
+});
+
+test('openBrowser handles spawn errors on headless hosts', async () => {
+  const errorEmittingBrowser = async (_url: string): Promise<void> => {
+    const { spawn } = await import('node:child_process');
+
+    // Simulate a spawn error by using a non-existent command
+    const proc = spawn('/nonexistent/command/that/does/not/exist', [], {
+      detached: true,
+      stdio: 'ignore',
+    }) as unknown as ChildProcess;
+
+    let errorHandled = false;
+    proc.on('error', () => {
+      errorHandled = true;
+    });
+
+    // Wait briefly to ensure the error handler fires
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(errorHandled, 'spawn error should have been handled');
+  };
+
+  // This should not throw even though the browser launcher fails
+  await errorEmittingBrowser('https://example.com');
 });

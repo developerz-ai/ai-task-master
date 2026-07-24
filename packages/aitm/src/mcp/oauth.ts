@@ -110,6 +110,12 @@ async function openBrowser(url: string): Promise<void> {
     stdio: 'ignore',
   });
 
+  proc.on('error', () => {
+    // Silently ignore spawn errors (common on headless hosts where browser launchers
+    // like xdg-open don't exist). The OAuth flow can continue; the user can open the
+    // URL manually if needed.
+  });
+
   proc.unref();
 }
 

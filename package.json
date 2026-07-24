@@ -21,5 +21,8 @@
     "madge": "^8.0.0",
     "tsx": "^4.22.0",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "typescript": "$typescript"
   }
 }

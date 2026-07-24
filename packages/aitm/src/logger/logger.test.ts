@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import { Logger, type LogRecord } from './logger.ts';
 import { clearRegisteredSecrets, registerSecretValues } from './secret-registry.ts';
 
@@ -355,4 +356,52 @@ test('a redacted tool message with a shared providerOptions object still passes 
   };
   const parsed = modelMessageSchema.safeParse(Logger.redact(message));
   assert.equal(parsed.success, true, JSON.stringify(parsed.success ? '' : parsed.error.issues));
+});
+
+// Smoke test (finding 06/arch-1): every buildCompactionStep test elsewhere stubs the logger
+// (captureLogger), so nothing proves a real Logger — the class now wired into every compaction
+// call site — actually turns a compaction warning into a line on process.stderr. Wire the two real
+// classes together here and watch the pipe.
+test('smoke: a compaction warning from buildCompactionStep, wired to a real Logger, reaches stderr', async () => {
+  const compactor: CompactorLike = {
+    shouldCompact: async () => {
+      throw new Error('lookup boom');
+    },
+    compact: async () => 'SUMMARY',
+    usableInputTokensFor: async () => 1_000_000,
+  };
+  const err = captureStream(process.stderr);
+  let result: unknown;
+  try {
+    const log = new Logger('info', 'run-compaction-smoke');
+    const prepareStep = buildCompactionStep({ compactor, modelId: 'openai/gpt-5', logger: log });
+    result = await prepareStep({
+      steps: [
+        {
+          response: {
+            messages: [
+              { role: 'assistant', content: 'r0' },
+              { role: 'assistant', content: 'r1' },
+            ],
+          },
+        },
+      ],
+      stepNumber: 1,
+      model: {},
+      messages: [
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: 'r0' },
+        { role: 'tool', content: 'ok' },
+      ],
+      experimental_context: undefined,
+    });
+  } finally {
+    err.restore();
+  }
+  assert.equal(result, undefined, 'threshold lookup failure passes messages through uncompacted');
+  const [record] = parseLines(err.lines);
+  assert.ok(record, 'the compaction warning actually reached process.stderr');
+  assert.equal(record.level, 'warn');
+  assert.match(String(record.msg), /threshold lookup failed/i);
+  assert.equal(record.runId, 'run-compaction-smoke');
 });

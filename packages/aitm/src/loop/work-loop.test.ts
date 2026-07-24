@@ -2555,19 +2555,26 @@ test('run(): session cap reached → WorkLoopResult.kind === "session-cap"', asy
 
 test('state write failure after mergePr → outcome stays merged', async () => {
   const { orchestrator } = makeOrchestrator({ prNumber: 88 });
-  let callCount = 0;
+  // Fail the state write that persists the terminal 'merged' stage — the one the dispatcher runs
+  // right after github.mergePr returns. Keyed off the actual merge event rather than a fixed call
+  // index, so a new pre-merge write (e.g. the reviewGraceApplied grace-guard persist) can't silently
+  // shift the injection onto a pre-merge write and turn this into a genuine block.
+  const events: string[] = [];
+  const { github } = makeGithub({ events });
+  let failedPostMergeWrite = false;
   const state: WorkLoopState = {
     update: async (mutator) => {
-      callCount++;
-      // Stage-dispatcher write order: 1 sessionCount, 2 in-progress(+working), 3 task-done,
-      // 4 working→pr-open, 5 pr-persist, 6 pr-open→waiting-ci, 7 waiting-ci→waiting-reviews,
-      // 8 waiting-reviews→ready-to-merge, 9 ready-to-merge→merged after mergePr (fail here).
-      if (callCount === 9) throw new Error('disk full');
+      if (events.includes('merge:88') && !failedPostMergeWrite) {
+        failedPostMergeWrite = true;
+        throw new Error('disk full');
+      }
       return mutator(baseState());
     },
   };
   const ready = makeGraph([group('xi')], { completeAfter: 1 });
-  const loop = new WorkLoop(makeDeps({ orchestrator, state, graph: ready.graph, autoMerge: true }));
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, graph: ready.graph, autoMerge: true }),
+  );
   const result = await loop.run();
 
   assert.equal(result.outcomes.length, 1);

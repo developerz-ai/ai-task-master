@@ -855,6 +855,7 @@ export function planToPrGroups(
     pr: null,
     status: 'pending' as const,
     stage: 'pending' as const,
+    reviewGraceApplied: false,
   }));
 }
 

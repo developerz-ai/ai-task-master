@@ -32,6 +32,7 @@ function group(overrides: Partial<PrGroup> = {}): PrGroup {
     pr: null,
     status: 'in-progress',
     stage: 'working',
+    reviewGraceApplied: false,
     ...overrides,
   };
 }
@@ -424,10 +425,7 @@ test('handleWaitingCi: grace sleep skipped when reviewGraceApplied is true', asy
     },
   });
   // On a group that already has the grace applied, sleep should be skipped.
-  await handleWaitingCi(
-    deps,
-    group({ stage: 'waiting-ci', pr: 5, reviewGraceApplied: true }),
-  );
+  await handleWaitingCi(deps, group({ stage: 'waiting-ci', pr: 5, reviewGraceApplied: true }));
   assert.deepEqual(slept, [], 'grace sleep should be skipped when reviewGraceApplied is true');
 });
 

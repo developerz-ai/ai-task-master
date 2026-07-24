@@ -465,6 +465,7 @@ function runCiFixSession(
     pr: input.pr,
     status: 'in-progress',
     stage: 'ci-failed',
+    reviewGraceApplied: false,
   };
   return runFixSession({
     github: input.github,

@@ -19,6 +19,7 @@
 //   chunk-04.md §"ToolLoopAgent" (agent class)
 //   chunk-02.md §"Tool Calling" (parallelToolCalls)
 
+import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import type {
   BashInput,
@@ -73,10 +74,11 @@ import {
   type OnUsage,
   prependContextBlock,
   reportUsage,
-  type SubagentInit,
+  type WorkerSubagentInit,
 } from './factory.ts';
 import { EDITOR_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
 import { buildEditorRolePrompt } from './role-prompt.ts';
+import { discardStrayEdits } from './stray-edits.ts';
 
 // The Claude-Code-style tool surface (from @developerz.ai/ai-claude-compat) the Worker drives:
 // read/write whole files, edit by exact string replace (single + atomic batch), and search the
@@ -274,9 +276,9 @@ const MANIFEST_WRITE_TOOLS: ReadonlySet<string> = new Set(['writeFile', 'editFil
 
 // Module-private link from a Worker agent back to its init, so runWorker can spawn editor
 // sub-agents with the same model + tool handles without exposing them on the public surface.
-const workerInitRegistry = new WeakMap<WorkerAgent, SubagentInit<WorkerTools>>();
+const workerInitRegistry = new WeakMap<WorkerAgent, WorkerSubagentInit<WorkerTools>>();
 
-export function createWorkerAgent(init: SubagentInit<WorkerTools>): WorkerAgent {
+export function createWorkerAgent(init: WorkerSubagentInit<WorkerTools>): WorkerAgent {
   const agent = createSubagent<WorkerTools>(
     {
       model: init.model,
@@ -425,7 +427,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
     if (input.verifyCommand) {
       // Verify gate: format + verify, one bounded fix pass, commit only when green. A red diff
       // never reaches the remote when the operator has configured a verify command (issue #122).
-      const gated = await commitWithVerify(agent, init, input, branch, planned.draftCommitMessage);
+      const gated = await commitWithVerify(agent, init, input, branch, planned);
       if (gated.kind === 'blocked') {
         // The verify gate's failed fix left its edits uncommitted — restore a clean tree.
         await discardStrayEdits(init.tools.bash, input.checkoutPath);
@@ -468,12 +470,17 @@ type PlanEditResult =
   | { kind: 'blocked'; reason: string }
   | { kind: 'error'; error: string };
 
+// A completed plan+edit pass: its recorded changes, draft message, and the conversation handle. The
+// verify gate needs all three — the handle to continue the fix pass from, the changes and message to
+// reconcile against what the commit ships.
+type PlannedEdit = Extract<PlanEditResult, { kind: 'ok' }>;
+
 // Phase 1 + Phase 2 only: plan the file manifest, then fan editors out over it. No verify, no
 // commit. Shared by the main pass and the single bounded verify fix pass — because the fix pass
 // runs through here (which never verifies), it can never trigger a second fix pass.
 async function planAndEdit(
   agent: WorkerAgent,
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   input: WorkerInput,
   branch: string,
 ): Promise<PlanEditResult> {
@@ -603,10 +610,10 @@ function appliedPhantomReason(paths: string[]): string {
 // returning any files the fix pass touched so runWorker can fold them into the delivery.
 async function commitWithVerify(
   agent: WorkerAgent,
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   input: WorkerInput,
   branch: string,
-  message: string,
+  planned: PlannedEdit,
 ): Promise<{ kind: 'ok'; extraChanges: FileChange[] } | { kind: 'blocked'; reason: string }> {
   const exec = requireExec(init.tools.bash);
   // The group branch was already created by the first planAndEdit pass (branch-before-edit); verify
@@ -641,21 +648,25 @@ async function commitWithVerify(
     });
   }
 
-  let extraChanges: FileChange[] = [];
+  let fixChanges: FileChange[] = [];
   if (out.exitCode !== 0) {
     // One bounded fix pass. planAndEdit never verifies, so this cannot recurse. Its edits are
     // captured for the delivery; an empty/blocked fix manifest simply makes zero edits, and the
     // re-verify below is still authoritative (per the spec, a still-red gate blocks on the tail).
+    // Continue THIS pass's conversation (planned.handle), not input.priorHandle — that is an earlier
+    // CI-fix pass's handle (or unset), so replaying it would re-plan the fix from a conversation two
+    // passes stale instead of building on the manifest the first pass just produced (issue #107).
     const fixed = await planAndEdit(
       agent,
       init,
       {
         ...input,
         task: buildVerifyFixTask(input.group.id, out),
+        priorHandle: planned.handle,
       },
       branch,
     );
-    if (fixed.kind === 'ok') extraChanges = fixed.changes;
+    if (fixed.kind === 'ok') fixChanges = fixed.changes;
     await runFormat(exec, input);
     started = Date.now();
     out = await runVerify(exec, input);
@@ -668,8 +679,85 @@ async function commitWithVerify(
     }
   }
 
-  await stageAndCommit(exec, input, message);
-  return { kind: 'ok', extraChanges };
+  await stageAndCommit(exec, input, planned.draftCommitMessage);
+  // stageAndCommit commits the WHOLE tree, so the fix manifest is not the authoritative list of what
+  // shipped: a fix-pass editor's write, the formatter, or a phantom-adjacent edit all land in the
+  // commit even when no manifest named them, and a blocked/no-changes fix pass reports no changes yet
+  // may still have left committed edits. Derive the extras from the commit's own tree diff so
+  // delivery.changes names every committed file the first pass didn't already record (audit).
+  const committed = await committedFileChanges(exec, input.checkoutPath);
+  return { kind: 'ok', extraChanges: deriveExtraChanges(committed, planned.changes, fixChanges) };
+}
+
+// One committed file from the verify-gate commit's tree diff: its path and the change kind git
+// recorded (authoritative over any manifest's declared kind).
+type CommittedFile = { path: string; kind: FileChange['kind'] };
+
+// The files in the just-created verify-gate commit (HEAD vs its parent). stageAndCommit adds the whole
+// tree, so this — not the fix manifest — is the record of what actually shipped. Rename detection is
+// off (no -M), so a moved file reads as a delete plus a create, both kept.
+async function committedFileChanges(
+  exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
+  checkoutPath: string,
+): Promise<CommittedFile[]> {
+  const out = await exec(
+    {
+      command: `git -C ${shQuote(checkoutPath)} --no-optional-locks diff-tree --no-commit-id --name-status -r HEAD`,
+      description: 'list the files in the verify-gate commit',
+    },
+    { toolCallId: `worker-difftree-${randomUUID()}`, messages: [] },
+  );
+  if (isAsyncIterable(out)) {
+    throw new Error('bash tool returned an async iterable; expected a single result');
+  }
+  if (out.exitCode !== 0) {
+    throw new Error(`git diff-tree failed (${out.exitCode})\n${out.stderr}`);
+  }
+  const committed: CommittedFile[] = [];
+  for (const line of out.stdout.split('\n')) {
+    const tab = line.indexOf('\t');
+    if (tab === -1) continue;
+    const path = line.slice(tab + 1).trim();
+    if (path === '') continue;
+    committed.push({ path, kind: statusToKind(line.slice(0, tab)) });
+  }
+  return committed;
+}
+
+// git diff-tree --name-status status letter → FileChange kind. `A` is a create and `D` a delete;
+// `M`/`R`/`C`/`T` and anything else are a modification of existing content for the delivery's purposes.
+function statusToKind(status: string): FileChange['kind'] {
+  const letter = status.trim().charAt(0);
+  if (letter === 'A') return 'create';
+  if (letter === 'D') return 'delete';
+  return 'modify';
+}
+
+// The summary attached to a committed file the fix manifest never named — the formatter's or a
+// phantom-adjacent write's doing. Files the fix manifest did name carry its own per-file summary.
+const VERIFY_FIX_SUMMARY = 'Changed by the verify fix pass';
+
+// Reconcile the committed tree diff against what the first pass already recorded: every committed file
+// the first pass did not name becomes an "extra" the delivery must carry. Prefer the fix manifest's
+// own summary for it, falling back to a generic note; the committed kind wins, since it is what git
+// recorded. Paths already in planned.changes are dropped — the first pass carries those.
+function deriveExtraChanges(
+  committed: readonly CommittedFile[],
+  plannedChanges: readonly FileChange[],
+  fixChanges: readonly FileChange[],
+): FileChange[] {
+  const plannedPaths = new Set(plannedChanges.map((c) => c.path));
+  const fixSummaries = new Map(fixChanges.map((c) => [c.path, c.summary]));
+  const extra: FileChange[] = [];
+  for (const file of committed) {
+    if (plannedPaths.has(file.path)) continue;
+    extra.push({
+      path: file.path,
+      kind: file.kind,
+      summary: fixSummaries.get(file.path) ?? VERIFY_FIX_SUMMARY,
+    });
+  }
+  return extra;
 }
 
 // Retries a botched `submit` up to this many times (matches the runWithSchemaRetry default).
@@ -792,6 +880,39 @@ type EditorOutcome = { changed: true; change: FileChange } | { changed: false; p
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
+// Parse porcelain output from `git status --porcelain=v1 -z` (NUL-separated). Handles renames/copies
+// and quoted paths correctly, unlike the newline format which breaks on special characters and renames.
+// A regular change is one status field `XY<space>path`. A rename/copy is a status field naming the
+// DESTINATION followed by a BARE field (no `XY ` prefix) naming the source —
+// `XY<space><dest><NUL><src><NUL>` (with `-z` git emits destination first, then source). Returns every
+// affected path (both dest and src for renames/copies) so `dirtyPaths` builds the full baseline.
+// Exported for the unit test of the rename/copy case.
+export function parsePorcelainZ(porcelainOutput: string): readonly string[] {
+  const fields = porcelainOutput.split('\0').filter((f) => f !== '');
+  const paths: string[] = [];
+
+  for (let i = 0; i < fields.length; i++) {
+    const entry = fields[i];
+    if (entry === undefined || entry.length <= 3) {
+      // A status field is `XY ` plus at least one path char; anything shorter is malformed — skip it.
+      continue;
+    }
+    // Status is the first 2 chars, a space is the 3rd; the path starts at index 3.
+    const status = entry.slice(0, 2);
+    const dest = entry.slice(3);
+    if (dest !== '') paths.push(dest);
+    // A rename (`R`) or copy (`C`) in either the index or work-tree column is followed by a bare
+    // source-path field with no `XY ` prefix — consume it whole and skip it so it is not mis-sliced.
+    if (status.includes('R') || status.includes('C')) {
+      const src = fields[i + 1];
+      if (src !== undefined && src !== '') paths.push(src);
+      i++;
+    }
+  }
+
+  return paths;
+}
+
 // Paths already dirty in the working tree, as a set. Taken BEFORE planning so the inline-edit
 // inference can tell "the Coordinator just wrote this" from "this was already dirty when the task
 // started". Never throws — but a status that won't run returns `undefined`, NOT an empty set: an
@@ -806,18 +927,13 @@ async function dirtyPaths(
     const exec = requireExec(bash);
     const out = await exec(
       {
-        command: `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain`,
+        command: `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain -z`,
         description: 'snapshot the working tree before planning',
       },
-      { toolCallId: `worker-status-pre-${Date.now()}`, messages: [] },
+      { toolCallId: `worker-status-pre-${randomUUID()}`, messages: [] },
     );
     if (isAsyncIterable(out) || out.exitCode !== 0) return undefined;
-    return new Set(
-      out.stdout
-        .split('\n')
-        .map((line) => line.slice(3).trim())
-        .filter((path) => path !== ''),
-    );
+    return new Set(parsePorcelainZ(out.stdout));
   } catch {
     return undefined;
   }
@@ -1000,7 +1116,7 @@ export function buildTeamBrief(input: WorkerInput, files: readonly FileManifestE
 // one concurrent LLM request per file (slice 05). Each leaf yields one outcome per file it owns; the
 // per-group results are flattened back to one outcome per manifest entry for planAndEdit.
 async function runEditorFanout(
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   manifest: FileManifest,
   input: WorkerInput,
 ): Promise<EditorOutcome[]> {
@@ -1062,7 +1178,7 @@ async function runEditorFanout(
 // Exactly one: a second narration after being told "you wrote nothing" is a real capability failure,
 // and retrying it again would just burn a leaf's worth of tokens before blocking anyway.
 async function runEditor(
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   leaf: EditorLeaf,
   input: WorkerInput,
   signal: AbortSignal,
@@ -1100,7 +1216,7 @@ async function runEditor(
 
 // One generateText call for a leaf, returning its one-line summary ('' when it said nothing).
 async function runEditorPass(
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   leaf: EditorLeaf,
   input: WorkerInput,
   signal: AbortSignal,
@@ -1133,7 +1249,7 @@ async function runEditorPass(
         ...(init.providerOptions !== undefined ? { providerOptions: init.providerOptions } : {}),
         ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
         // Editor-fanout progress (silent-run fix): per-step-field-only handlers, safe under the
-        // parallel fanout — see SubagentInit.onEditorStepFinish.
+        // parallel fanout — see WorkerSubagentInit.onEditorStepFinish.
         ...(editorStepFinish ? { onStepFinish: editorStepFinish } : {}),
       }),
     init.timeout,
@@ -1148,7 +1264,7 @@ async function runEditorPass(
 // writeFile/editFile, and every unwritten path must surface as a phantom rather than a FileChange the
 // committed diff can't back (audit 05).
 async function verifyEditorOutcomes(
-  init: SubagentInit<WorkerTools>,
+  init: WorkerSubagentInit<WorkerTools>,
   input: WorkerInput,
   group: readonly FileManifestEntry[],
   summary: string,
@@ -1182,10 +1298,10 @@ async function editorTouchedPath(
   filePath: string,
 ): Promise<boolean> {
   const exec = requireExec(bash);
-  const command = `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain -- ${shQuote(filePath)}`;
+  const command = `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain -z -- ${shQuote(filePath)}`;
   const out = await exec(
     { command, description: 'verify the editor changed the file on disk' },
-    { toolCallId: `worker-status-${Date.now()}`, messages: [] },
+    { toolCallId: `worker-status-${randomUUID()}`, messages: [] },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');
@@ -1309,8 +1425,9 @@ async function checkoutBranch(
   await runBash(exec, `git -C ${shQuote(input.checkoutPath)} checkout -B ${shQuote(branch)}`);
 }
 
-// aitm's own state dir, relative to the checkout root. Every git command in this module that could
-// otherwise sweep it into a commit — or delete it — names it, so the three call sites agree.
+// aitm's own state dir, relative to the checkout root. stageAndCommit names it so `git add -A` never
+// sweeps the run's own bookkeeping into a target-repo commit. (The clean-tree restore that also spares
+// it lives in stray-edits.ts, which sources the same path from workspace/dirty-tree.ts.)
 const STATE_DIR = '.ai-task-master';
 
 // Stage (excluding aitm's own state dir) + commit — the post-verify steps shared by both paths.
@@ -1330,59 +1447,6 @@ async function stageAndCommit(
   await runBash(exec, `git -C ${wt} add -A`);
   await runBash(exec, `git -C ${wt} reset -q -- ${STATE_DIR}`);
   await runBash(exec, `git -C ${wt} commit -m ${shQuote(message)}`);
-}
-
-// Restore the checkout to a clean tree after a worker pass that committed nothing. The planning
-// agent and any fix-pass fanout can leave edits behind (an empty manifest declared clean — the
-// self-review "clean" case — a blocked fix, a phantom edit, a verify failure, or a mid-commit
-// throw), and the shared in-place checkout never auto-resets uncommitted changes: a later
-// `checkout -B` carries them onto whatever branch comes next, so a stray edit surfaced post-merge
-// as an uncommitted file (the README.md leftover). When the tree is dirty, reset tracked files to
-// HEAD and drop untracked ones. aitm's own state dir must survive that: `git clean` without `-x`
-// spares it only when the TARGET repo happens to gitignore it, so `-e .ai-task-master` protects it
-// when the repo does not — otherwise this cleanup deletes the run's own plan, style cache, generated
-// specialists, and scratch mid-run (same guard as InPlaceCheckout.ensureCleanTree). For the same
-// reason the dirty check ignores state-dir entries: in a repo that doesn't ignore it, the untracked
-// state dir alone would read as "dirty" and hard-reset the tree on every non-committing pass.
-// A clean tree is a no-op (one cheap status check). Best-effort: a cleanup fault never masks the
-// worker's real result. Safe because a successful stageAndCommit already captured any real work;
-// whatever remains is, by definition, not meant to ship.
-async function discardStrayEdits(
-  bash: Tool<BashInput, BashOutput>,
-  checkoutPath: string,
-): Promise<void> {
-  const exec = bash?.execute;
-  if (typeof exec !== 'function') return; // best-effort: no cleanup without a runnable bash tool
-  const wt = shQuote(checkoutPath);
-  const out = await exec(
-    {
-      command: `git -C ${wt} status --porcelain`,
-      description: 'check for stray edits left by a non-committing worker pass',
-    },
-    { toolCallId: `worker-tree-status-${Date.now()}`, messages: [] },
-  );
-  if (isAsyncIterable(out)) return;
-  if (out.exitCode !== 0) return;
-  if (!hasStrayEdit(out.stdout)) return;
-  for (const command of [
-    `git -C ${wt} reset --hard HEAD`,
-    `git -C ${wt} clean -fd -e ${STATE_DIR}`,
-  ]) {
-    try {
-      await runBash(exec, command);
-    } catch {
-      // best-effort: never mask the worker's real result with a cleanup failure
-    }
-  }
-}
-
-// Does this `git status --porcelain` output show anything worth cleaning? State-dir entries do not
-// count: in a repo that does not gitignore `.ai-task-master`, its own untracked files would
-// otherwise make every tree look dirty. Exported for the unit test of that exact case.
-export function hasStrayEdit(porcelain: string): boolean {
-  return porcelain
-    .split('\n')
-    .some((line) => line.trim() !== '' && !line.slice(3).startsWith(STATE_DIR));
 }
 
 function requireExec(
@@ -1418,7 +1482,7 @@ async function runVerify(
   const command = `cd ${shQuote(input.checkoutPath)} && ${input.verifyCommand}`;
   const out = await exec(
     { command, description: 'run the configured verify command', timeoutMs: VERIFY_TIMEOUT_MS },
-    { toolCallId: `worker-verify-${Date.now()}`, messages: [] },
+    { toolCallId: `worker-verify-${randomUUID()}`, messages: [] },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');
@@ -1482,7 +1546,7 @@ async function runBash(
 ): Promise<void> {
   const out = await exec(
     { command, description: 'worker commit-phase git/format step' },
-    { toolCallId: `worker-bash-${Date.now()}`, messages: [] },
+    { toolCallId: `worker-bash-${randomUUID()}`, messages: [] },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');

@@ -32,6 +32,7 @@ import {
   type SubagentInit,
 } from './factory.ts';
 import { render } from './prompts/templates.ts';
+import { discardStrayEdits } from './stray-edits.ts';
 import type { WorkerTools } from './worker.ts';
 
 // Subset of GitHubClient methods exposed to the agent. Kept as a single discriminated tool so
@@ -159,6 +160,12 @@ export async function runReviewer(
   try {
     for (const thread of input.threads) {
       resolutions.push(await resolveOneThread(agent, init, input, thread));
+      // Restore a clean tree between threads. A 'replied'/'wontfix' thread's agent still holds the
+      // edit/write tools and can leave uncommitted edits behind; without this, the NEXT thread's
+      // `git add -A` fix commit would sweep those strays in (commitFix stages the whole tree, not a
+      // path list). A committed 'fixed' thread already left a clean tree, so this is a cheap status
+      // no-op there. Also leaves the tree clean for the caller's post-pass rebase (take-over-flow).
+      await discardStrayEdits(init.tools.bash, input.checkoutPath);
     }
     return { kind: 'ok', resolutions };
   } catch (err) {
@@ -273,8 +280,10 @@ async function commitFix(
       );
     }
   }
-  // Never commit aitm's own state dir (in-place mode keeps it at the repo root). add -A skips it when
-  // gitignored; the reset drops it when it isn't. See stageAndCommit in worker.ts.
+  // Stage the whole tree, then unstage aitm's own state dir (in-place mode keeps it at the repo root):
+  // add -A skips it when gitignored; the reset drops it when it isn't. See stageAndCommit in worker.ts.
+  // The tree holds only THIS thread's edits — runReviewer discards any prior thread's strays between
+  // threads (stray-edits.ts) — so add -A cannot sweep another thread's leftovers into this fix commit.
   await runBash(exec, `git -C ${wt} add -A`);
   await runBash(exec, `git -C ${wt} reset -q -- .ai-task-master`);
   // Guard the commit: `git commit` on an empty index exits non-zero ("nothing to commit"), which

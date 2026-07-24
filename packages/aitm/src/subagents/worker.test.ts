@@ -18,10 +18,10 @@ import {
   type FileManifest,
   type FileManifestEntry,
   groupManifestByDir,
-  hasStrayEdit,
   labelEditorGroups,
   MANIFEST_SURVEY_BUDGET,
   MAX_FILES_PER_EDITOR,
+  parsePorcelainZ,
   type ReadFileInput,
   type ReadFileOutput,
   readOnlyStreak,
@@ -288,6 +288,42 @@ test('EDITOR_TOOL_ALLOWLIST lists every WorkerTools field (allowlist is the full
     ],
   );
   assert.equal(new Set(EDITOR_TOOL_ALLOWLIST).size, EDITOR_TOOL_ALLOWLIST.length, 'no duplicates');
+});
+
+test('parsePorcelainZ: regular changes yield one path each', () => {
+  assert.deepEqual(parsePorcelainZ(' M src/a.ts\0?? src/b.ts\0'), ['src/a.ts', 'src/b.ts']);
+});
+
+test('parsePorcelainZ: rename record returns BOTH dest and source (issue: -z rename handling)', () => {
+  // `git status --porcelain -z` emits a rename as `XY <dest>\0<src>\0` — the source is a BARE field
+  // with no `XY ` prefix. Slicing it like a status entry would corrupt or drop it; both paths must
+  // land in dirtyPaths so everyPlannedFileTouched sees the real baseline.
+  assert.deepEqual(parsePorcelainZ('R  src/new.ts\0src/old.ts\0'), ['src/new.ts', 'src/old.ts']);
+});
+
+test('parsePorcelainZ: copy record returns both dest and source', () => {
+  assert.deepEqual(parsePorcelainZ('C  dst.ts\0orig.ts\0'), ['dst.ts', 'orig.ts']);
+});
+
+test('parsePorcelainZ: rename detected in the work-tree column is handled too', () => {
+  assert.deepEqual(parsePorcelainZ(' R after.ts\0before.ts\0'), ['after.ts', 'before.ts']);
+});
+
+test('parsePorcelainZ: a rename does not swallow a following regular entry', () => {
+  assert.deepEqual(parsePorcelainZ('R  n.ts\0o.ts\0 M keep.ts\0'), ['n.ts', 'o.ts', 'keep.ts']);
+});
+
+test('parsePorcelainZ: a short bare source path is kept, not dropped by length', () => {
+  // The bare source is consumed as a whole field, so even a ≤3-char source survives (the old
+  // slice-every-field parser dropped it).
+  assert.deepEqual(parsePorcelainZ('R  newfile.ts\0ab\0'), ['newfile.ts', 'ab']);
+});
+
+test('parsePorcelainZ: paths with spaces survive unquoted (the point of -z)', () => {
+  assert.deepEqual(parsePorcelainZ('R  new file.ts\0old file.ts\0'), [
+    'new file.ts',
+    'old file.ts',
+  ]);
 });
 
 test('runWorker: prepends the contextBlock to the manifest (first user) message, ahead of the task text (issue #106)', async () => {
@@ -631,7 +667,7 @@ test('runWorker: a narrate-only editor (no on-disk write) records no change and 
   }
   // The path was verified on disk. The group branch is created before the editor fanout
   // (branch-before-edit), but the phantom is caught before staging — nothing is added or committed.
-  assert.ok(calls.statuses.some((s) => s.command.includes("status --porcelain -- 'src/a.ts'")));
+  assert.ok(calls.statuses.some((s) => s.command.includes("status --porcelain -z -- 'src/a.ts'")));
   const cmds = calls.bashes.map((b) => b.command);
   assert.equal(
     cmds.some((c) => /add -A|commit -m/.test(c)),
@@ -894,20 +930,6 @@ test('runWorker: a blocked pass with stray edits restores a clean tree (no parti
     cmds.some((c) => /clean -fd/.test(c)),
     'untracked stray files are cleaned',
   );
-});
-
-test('hasStrayEdit: state-dir entries never count as a dirty tree', () => {
-  // In a repo that does not gitignore `.ai-task-master`, aitm's own untracked state files show up in
-  // `git status --porcelain`. Counting them would hard-reset the checkout on every non-committing
-  // pass — and `git clean` would delete the run's own plan and scratch.
-  assert.equal(hasStrayEdit(''), false);
-  assert.equal(hasStrayEdit('?? .ai-task-master/\n'), false);
-  assert.equal(
-    hasStrayEdit('?? .ai-task-master/state.json\n?? .ai-task-master/scratch/fuzz.ts\n'),
-    false,
-  );
-  assert.equal(hasStrayEdit(' M README.md\n'), true);
-  assert.equal(hasStrayEdit('?? .ai-task-master/state.json\n M README.md\n'), true);
 });
 
 test('runWorker: the stray-edit cleanup never deletes aitm own state dir', async () => {
@@ -1613,7 +1635,13 @@ const VERIFY_TIMEOUT_MS = 600_000;
 // Bash fake that discriminates the verify invocation by its 600s timeout — only the verify call
 // carries `timeoutMs`. verifyExitCodes[] drives successive verify outcomes; every other command
 // (checkout / format / add / commit) exits 0. Records all bash inputs and the verify subset.
-function makeVerifyTools(verifyExitCodes: number[]): {
+// `committedNameStatus` is the `git diff-tree --name-status` stdout the post-commit probe returns —
+// the authoritative committed set delivery.changes is reconciled against; it stays out of `bashes`
+// (a read-only probe, like status --porcelain) so the commit-sequence assertions are unaffected.
+function makeVerifyTools(
+  verifyExitCodes: number[],
+  committedNameStatus = 'A\tsrc/a.ts\n',
+): {
   tools: WorkerTools;
   bashes: BashInput[];
   verifies: BashInput[];
@@ -1639,6 +1667,10 @@ function makeVerifyTools(verifyExitCodes: number[]): {
           return { stdout: '', stderr: '', exitCode: 0 };
         }
         return { stdout: ` M ${path}\n`, stderr: '', exitCode: 0 };
+      }
+      // The post-commit tree-diff probe: return the simulated committed file set, unrecorded.
+      if (input.command.includes('diff-tree')) {
+        return { stdout: committedNameStatus, stderr: '', exitCode: 0 };
       }
       bashes.push(input);
       if (input.timeoutMs === VERIFY_TIMEOUT_MS) {
@@ -1723,6 +1755,11 @@ const fixManifest: FileManifest = {
   files: [{ path: 'src/a.ts', kind: 'modify', purpose: 'fix the failing test' }],
   draftCommitMessage: 'fix: make verify pass',
 };
+// A fix manifest that touches a DIFFERENT file than the first pass, so its edit is a genuine extra.
+const fixBManifest: FileManifest = {
+  files: [{ path: 'src/b.ts', kind: 'modify', purpose: 'fix the failing test' }],
+  draftCommitMessage: 'fix: make verify pass',
+};
 
 test('runWorker verifyCommand green: one verify (timeoutMs 600000) before git add, then normal commit', async () => {
   const { model } = makeManifestModel([{ at: 0, manifest: oneFileManifest }]);
@@ -1765,16 +1802,66 @@ test('runWorker verifyCommand red→green: exactly one fix pass, two verifies, t
     bashes.some((b) => b.command.includes('commit -m')),
     'the change is committed after the green re-verify',
   );
-  // delivery.changes reflects the first-pass edit AND the fix-pass edit (all committed files).
+  // delivery.changes is derived from the commit's tree diff, so the one committed file (created by
+  // the first pass, then fixed) is listed ONCE — not double-listed create+modify as the old union of
+  // the two manifests did.
   if (result.kind === 'ok') {
     assert.deepEqual(
       result.delivery.changes.map((c) => `${c.kind} ${c.path}`),
-      ['create src/a.ts', 'modify src/a.ts'],
+      ['create src/a.ts'],
     );
   }
   // The fix-task manifest prompt (model call 2) carries the failing verify output tail.
   assert.match(prompts[2] ?? '', /verify command failed/i);
   assert.match(prompts[2] ?? '', /VERIFY FAILED marker-0/);
+});
+
+test('runWorker verifyCommand: delivery.changes names every committed file from the tree diff, not just the manifests', async () => {
+  // The verify gate commits the whole tree, so a file a fix-pass editor touched but no manifest named
+  // (a formatter rewrite, a phantom-adjacent write) must still surface in delivery.changes — the
+  // Orchestrator narrates the PR body off it. Deriving from the commit's own tree diff catches it.
+  const { model } = makeManifestModel([
+    { at: 0, manifest: oneFileManifest }, // first pass: create src/a.ts
+    { at: 2, manifest: fixBManifest }, // fix pass names only src/b.ts
+  ]);
+  // Committed tree diff: a.ts (planned, created), b.ts (fix manifest, modified), c.ts (touched by
+  // NEITHER manifest — the formatter's doing, and the file the old code silently dropped).
+  const { tools } = makeVerifyTools([1, 0], 'A\tsrc/a.ts\nM\tsrc/b.ts\nM\tsrc/c.ts\n');
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), verifyCommand: 'run-verify' });
+  assert.equal(result.kind, 'ok');
+  if (result.kind === 'ok') {
+    assert.deepEqual(result.delivery.changes, [
+      { path: 'src/a.ts', kind: 'create', summary: 'edited #1' }, // first-pass editor summary
+      { path: 'src/b.ts', kind: 'modify', summary: 'edited #3' }, // fix-pass editor summary
+      { path: 'src/c.ts', kind: 'modify', summary: 'Changed by the verify fix pass' }, // tree-only
+    ]);
+  }
+});
+
+test('runWorker verifyCommand: the fix pass continues the first-pass conversation, not a stale prior handle', async () => {
+  // Regression: the verify fix pass spread `input.priorHandle` (an earlier CI-fix pass's handle, or
+  // unset) instead of the handle the first pass just produced, so it re-planned from a conversation
+  // two passes out of date. It must continue planned.handle — the manifest this Worker just planned.
+  const { model, prompts } = makeManifestModel([
+    { at: 0, manifest: oneFileManifest },
+    { at: 2, manifest: fixManifest },
+  ]);
+  const { tools } = makeVerifyTools([1, 0]);
+  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
+
+  const result = await runWorker(agent, { ...baseInput(), verifyCommand: 'run-verify' });
+  assert.equal(result.kind, 'ok');
+  // The fix-pass manifest call (model call 2) is fed the fix task AND replays the first pass's
+  // submitted manifest — its unique draftCommitMessage `feat: a` rides the continued conversation. A
+  // fresh run (the bug) would carry only the new fix-task user message, never `feat: a`.
+  assert.match(prompts[2] ?? '', /verify command failed/i, 'model call 2 is the fix-pass manifest');
+  assert.match(
+    prompts[2] ?? '',
+    /feat: a/,
+    'the first-pass manifest is replayed into the fix pass',
+  );
 });
 
 test('runWorker verifyCommand red twice: blocked with the verify tail, nothing staged or committed', async () => {

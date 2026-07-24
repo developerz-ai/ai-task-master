@@ -9,6 +9,7 @@ import {
   reportUsage,
   type SubagentFactory,
   type SubagentInit,
+  type WorkerSubagentInit,
 } from './factory.ts';
 
 test('SubagentInit / SubagentFactory types are exported (compile-time check)', () => {
@@ -127,12 +128,29 @@ test('forwardInit: forwards every createSubagent-shaped field, including the run
 
 test('forwardInit: drops the aitm-only sinks createSubagent does not accept', () => {
   // onUsage / onEditorStepFinish are read by the runners off the init registry, not by the agent.
-  const forwarded = forwardInit({
+  // onEditorStepFinish is Worker-only, so it lives on WorkerSubagentInit — type the input as one.
+  const workerInit: WorkerSubagentInit = {
     model: 'test/model',
     tools: {},
     systemPrompt: 'sys',
     onUsage: () => {},
     onEditorStepFinish: () => () => {},
-  });
-  assert.deepEqual(Object.keys(forwarded), []);
+  };
+  assert.deepEqual(Object.keys(forwardInit(workerInit)), []);
+});
+
+test('WorkerSubagentInit is a superset of SubagentInit — forwardInit accepts it, minus the worker sink', () => {
+  // Only the Worker consumes onEditorStepFinish, so it is off the shared SubagentInit: setting it on a
+  // Planner/Reviewer/scout init is now a compile error, not a silent drop. A worker init still flows
+  // through the shared forwardInit unchanged (it is a superset), and createSubagent never sees the sink.
+  const workerInit: WorkerSubagentInit = {
+    model: 'test/model',
+    tools: {},
+    systemPrompt: 'sys',
+    maxSteps: 3,
+    onEditorStepFinish: () => () => {},
+  };
+  const asBase: SubagentInit = workerInit;
+  assert.deepEqual(Object.keys(forwardInit(asBase)), ['maxSteps']);
+  assert.deepEqual(Object.keys(forwardInit(workerInit)), ['maxSteps']);
 });

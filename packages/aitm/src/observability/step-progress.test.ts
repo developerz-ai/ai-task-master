@@ -107,6 +107,91 @@ test('clip strips C0/C1 controls but keeps the newline marker', () => {
   assert.equal(summarizeToolInput('bash', { command: 'a\x1b[1m\nb\r\x07\x9b' }), 'a ⏎ b');
 });
 
+test('summarizeToolInput redacts a credential carried in a bash command', () => {
+  assert.equal(
+    summarizeToolInput('bash', {
+      command: 'curl -H "Authorization: Bearer sk-abcdef1234567890" https://api.example.com',
+    }),
+    'curl -H "Authorization: Bearer [REDACTED]" https://api.example.com',
+  );
+});
+
+test('summarizeToolInput redacts a credential in the JSON fallback for unknown shapes', () => {
+  assert.equal(
+    summarizeToolInput('mystery', { headers: { authorization: 'Bearer sk-abcdef1234567890' } }),
+    '{"headers":{"authorization":"Bearer [REDACTED]"}}',
+  );
+});
+
+test('summarizeToolInput redacts a token-bearing query param in a url input', () => {
+  assert.equal(
+    summarizeToolInput('webFetch', { url: 'https://api.example.com/v1?api_key=abcd1234efgh5678' }),
+    'https://api.example.com/v1?api_key=[REDACTED]',
+  );
+});
+
+test('summarizeToolInput scrubs before truncating, so a clipped token cannot survive', () => {
+  // Truncating first would cut the token at the 250-char cap and print the surviving `sk-abcd`.
+  const out = summarizeToolInput('bash', {
+    command: `${'x'.repeat(234)} Bearer sk-abcdefghijklmnopqrstuv`,
+  });
+  assert.ok(!out.includes('sk-'));
+  assert.ok(out.includes('Bearer [REDACT'));
+  assert.equal(out.length, 250);
+});
+
+test('summarizeToolInput strips control bytes before scrubbing, so they cannot hide a token', () => {
+  assert.equal(
+    summarizeToolInput('bash', { command: 'Bearer sk-abc\x00defghijklmnop' }),
+    'Bearer [REDACTED]',
+  );
+});
+
+test('renderStepLines redacts credentials in agent text, reasoning and tool detail', () => {
+  const { sink } = stubSink();
+  const lines = renderStepLines(
+    'worker g1',
+    {
+      reasoningText: 'I will reuse the key sk-abcdef1234567890 for this call',
+      text: 'exporting GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz',
+      toolCalls: [{ toolName: 'bash', input: { command: 'curl https://user:hunter2@x.test' } }],
+    },
+    sink,
+  );
+  const joined = lines.join('');
+  assert.ok(!joined.includes('abcdef1234567890'));
+  assert.ok(!joined.includes('ghp_1234567890'));
+  assert.ok(!joined.includes('hunter2'));
+  assert.equal(joined.match(/\[REDACTED\]/g)?.length, 3);
+});
+
+test('renderStepLines sanitizes the tool name so it cannot forge a harness prefix', () => {
+  const { sink } = stubSink();
+  const lines = renderStepLines(
+    'worker g1',
+    { toolCalls: [{ toolName: 'ba\rsh', input: '' }] },
+    sink,
+  );
+  assert.deepEqual(lines, ['\n', '[worker g1 03:04:05] Using tool: bash\n']);
+});
+
+test('createLiveStreamRenderer redacts credentials in streamed text and tool calls', () => {
+  const { sink, lines } = stubSink();
+  const render = createLiveStreamRenderer('worker g1', undefined, sink);
+  render({ type: 'text-delta', text: 'using sk-abcdef1234567890 now\n' });
+  render({ type: 'tool-call', toolName: 'bash', input: { command: 'gh auth login --with-token' } });
+  assert.equal(lines[1], '[worker g1 03:04:05] using sk-[REDACTED] now\n');
+  assert.ok(!lines.join('').includes('abcdef1234567890'));
+});
+
+test('harnessProgress redacts credentials in a harness message', () => {
+  const { sink, lines } = stubSink();
+  harnessProgress('pushing to https://user:hunter2@github.com/org/repo.git', undefined, sink);
+  assert.deepEqual(lines, [
+    '[aitm 03:04:05] pushing to https://[REDACTED]github.com/org/repo.git\n',
+  ]);
+});
+
 test('renderStepLines strips ANSI/control so text cannot forge a harness prefix', () => {
   const { sink } = stubSink();
   const lines = renderStepLines(

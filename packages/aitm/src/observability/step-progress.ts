@@ -11,6 +11,7 @@
 // (issue #175).
 
 import { basename, isAbsolute, relative } from 'node:path';
+import { scrubSecrets } from '../logger/secret-scrubber.ts';
 
 const DETAIL_MAX = 250;
 const SHORT_DETAIL_MAX = 120;
@@ -177,7 +178,9 @@ function dimLine(label: StreamLabel, sink: ProgressSink, tag: string, message: s
 // under a colored `[aitm …]`/`[<agent> …]` prefix. Left raw they could carry ANSI escapes (recolor
 // a forged line to impersonate the cyan harness prefix) or C0/C1 controls (CR/BS to overwrite what
 // was printed, ESC/BEL to drive the operator's terminal). Strip both before any emit so untrusted
-// text can neither spoof a harness line nor manipulate the terminal.
+// text can neither spoof a harness line nor manipulate the terminal. They also carry CREDENTIALS —
+// a `bash` step running `curl -H "Authorization: Bearer sk-…"` puts the key straight on the
+// operator's terminal and into CI logs — so `clip` scrubs secret-shaped substrings too.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control bytes is the intent.
 const ANSI_ESCAPE = /\x1b[[\]()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[@-~]/g;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control bytes is the intent.
@@ -187,8 +190,13 @@ function stripControl(s: string): string {
   return s.replace(ANSI_ESCAPE, '').replace(CONTROL_CHARS, '');
 }
 
+// The single chokepoint every emitted fragment passes through — text, reasoning, tool detail,
+// harness messages, labels — so scrubbing here covers the whole stream. Order is load-bearing:
+// control bytes go first (a `\x00` planted mid-token would otherwise hide the secret from the
+// scrubber, then vanish before printing), and truncation goes LAST (clipping first could cut a
+// token below the scrubber's minimum length and leak the surviving prefix).
 function clip(s: string, max = DETAIL_MAX): string {
-  const flat = stripControl(s.replace(/\s*\n\s*/g, ' ⏎ ')).trim();
+  const flat = scrubSecrets(stripControl(s.replace(/\s*\n\s*/g, ' ⏎ '))).trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
@@ -287,7 +295,7 @@ export function renderStepLines(
   for (const call of toolCalls) {
     const detail = summarizeToolInput(call.toolName, call.input);
     lines.push(
-      `${prefix(label, sink, ORANGE_BOLD, tag)} Using tool: ${call.toolName}${detail ? ` → ${detail}` : ''}\n`,
+      `${prefix(label, sink, ORANGE_BOLD, tag)} Using tool: ${clip(call.toolName, SHORT_DETAIL_MAX)}${detail ? ` → ${detail}` : ''}\n`,
     );
   }
   return lines;
@@ -381,7 +389,7 @@ export function createLiveStreamRenderer(
       flushBuffer();
       const detail = summarizeToolInput(event.toolName, event.input);
       sink.write(
-        `${prefix(label, sink, ORANGE_BOLD, tag)} Using tool: ${event.toolName}${detail ? ` → ${detail}` : ''}\n`,
+        `${prefix(label, sink, ORANGE_BOLD, tag)} Using tool: ${clip(event.toolName, SHORT_DETAIL_MAX)}${detail ? ` → ${detail}` : ''}\n`,
       );
     } catch {
       // observability must never break the run

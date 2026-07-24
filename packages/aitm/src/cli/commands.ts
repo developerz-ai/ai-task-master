@@ -153,6 +153,10 @@ export type StartCtx = {
   runLoop?: (input: RunLoopInput) => Promise<WorkLoopResult>;
   // Sink for the pre-run notice (e.g. the auto-merge banner). Defaults to process.stdout.
   stdout?: (chunk: string) => void;
+  // Sink for non-fatal warnings (missing CLAUDE.md, config precedence, GitHub pagination, etc.).
+  // Defaults to process.stderr. Injected so tests can assert on warnings without capturing the
+  // real stream.
+  stderr?: (chunk: string) => void;
   // Resolve the distilled coding-style digest threaded to subagents as `styleDigest`. Default:
   // reuse the cached `coding-style.md`, else distill once and cache it — never blocking the run
   // (degrades to raw AgentConfig.contents). Injected so unit tests skip the real LLM call.
@@ -187,6 +191,8 @@ export type MergePrCtx = {
   resolveStyle?: (input: ResolveStyleInput) => Promise<string>;
   // Sink for the end-of-run usage summary line (issue #114/#190). Defaults to process.stdout.
   stdout?: (chunk: string) => void;
+  // See StartCtx.stderr — same non-fatal-warnings sink for the take-over flow.
+  stderr?: (chunk: string) => void;
   // Abort handle, threaded into the take-over loop. When aborted, the flow returns `cancelled`
   // → exit code 2. The CLI can wire this to a SIGINT handler; tests drive it directly.
   signal?: AbortSignal;
@@ -379,23 +385,26 @@ export function usageSummaryLine(totals: UsageTotals): string {
   return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached, ${cacheHitPct(overall)} cache hit), ${cost}${discount}${perRole ? ` — ${perRole}` : ''}\n`;
 }
 
-// Non-fatal warnings go to stderr so they never contaminate the plain-status stdout contract.
-const warnToStderr = (message: string): void => {
-  process.stderr.write(`${message}\n`);
-};
+// Non-fatal warnings go to the injected stderr sink (default process.stderr) so they never
+// contaminate the plain-status stdout contract, and so tests can capture them without patching
+// the real stream.
+function warnToStderr(stderr: (chunk: string) => void): (message: string) => void {
+  return (message) => stderr(`${message}\n`);
+}
 
 // AgentConfigDetector options from the CLI's stylePath sources + the homeDir seam (issue #117):
 // the user-global CLAUDE.md lives in <homeDir>/.claude, and a nested-file budget overflow is logged
-// to stderr. `--style-path` (start) wins over resolved config; merge-pr passes only its persisted
+// via `warn`. `--style-path` (start) wins over resolved config; merge-pr passes only its persisted
 // path (argStylePath undefined).
 function buildDetectOpts(
   argStylePath: string | null | undefined,
   fallbackStylePath: string | null,
   homeDir: string,
+  warn: (message: string) => void,
 ): DetectOptions {
   const opts: DetectOptions = {
     userConfigDir: join(homeDir, '.claude'),
-    onWarn: (message) => process.stderr.write(`${message}\n`),
+    onWarn: warn,
   };
   if (argStylePath !== undefined) opts.stylePath = argStylePath;
   else if (fallbackStylePath !== null) opts.stylePath = fallbackStylePath;
@@ -409,8 +418,10 @@ export async function runStart(
   const cwd = ctx.cwd ?? process.cwd();
   const homeDir = ctx.homeDir ?? homedir();
   const env = ctx.env ?? process.env;
+  const stderr = ctx.stderr ?? ((chunk: string) => process.stderr.write(chunk));
+  const warn = warnToStderr(stderr);
 
-  const loader = new ConfigLoader(cwd, homeDir, env);
+  const loader = new ConfigLoader(cwd, homeDir, env, { warn });
   let resolved: ResolvedConfig;
   try {
     resolved = await loader.resolve(toCliOverrides(args));
@@ -441,7 +452,7 @@ export async function runStart(
     return { code: 1, message: errMsg(err) };
   }
   const detector = new AgentConfigDetector(cwd);
-  const detectOpts = buildDetectOpts(args.stylePath, resolved.stylePath, homeDir);
+  const detectOpts = buildDetectOpts(args.stylePath, resolved.stylePath, homeDir, warn);
 
   let agentConfig: AgentConfig | null;
   try {
@@ -450,7 +461,7 @@ export async function runStart(
     return { code: 1, message: errMsg(err) };
   }
   if (!agentConfig) {
-    process.stderr.write(
+    stderr(
       'No CLAUDE.md or AGENTS.md in the repo and no --style — using a generic default style, ' +
         "distilled with the repo's config files. Add a CLAUDE.md/AGENTS.md or pass --style for a sharper guide.\n",
     );
@@ -469,14 +480,7 @@ export async function runStart(
   }
   // The run's abort handle is bound in here so a SIGINT kills an in-flight `gh` child, not just the
   // poll loops around it (see GitHubClient's constructor).
-  const github = new GitHubClient(
-    cwd,
-    defaultRunCmd,
-    defaultSleep,
-    ctx.signal,
-    undefined,
-    warnToStderr,
-  );
+  const github = new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal, undefined, warn);
 
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
@@ -772,8 +776,10 @@ export async function runMergePr(
   const cwd = ctx.cwd ?? process.cwd();
   const homeDir = ctx.homeDir ?? homedir();
   const env = ctx.env ?? process.env;
+  const stderr = ctx.stderr ?? ((chunk: string) => process.stderr.write(chunk));
+  const warn = warnToStderr(stderr);
 
-  const loader = new ConfigLoader(cwd, homeDir, env);
+  const loader = new ConfigLoader(cwd, homeDir, env, { warn });
   let resolved: ResolvedConfig;
   try {
     // `--admin` on merge-pr is a per-run override that forces the final merge past base-branch
@@ -808,13 +814,12 @@ export async function runMergePr(
 
   try {
     const github =
-      ctx.github ??
-      new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal, undefined, warnToStderr);
+      ctx.github ?? new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal, undefined, warn);
 
     // Detect agentConfig early so it can be passed to synthesizeTakeoverState, ensuring
     // the take-over state carries the actual detected config file rather than a hardcoded default.
     const detector = new AgentConfigDetector(cwd);
-    const detectOpts = buildDetectOpts(undefined, null, homeDir);
+    const detectOpts = buildDetectOpts(undefined, null, homeDir, warn);
 
     let agentConfig: AgentConfig | null;
     try {

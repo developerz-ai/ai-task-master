@@ -563,6 +563,31 @@ test('runStart: no CLAUDE.md/AGENTS.md and no --style → proceeds with a defaul
   }
 });
 
+test('runStart: no CLAUDE.md/AGENTS.md notice goes through ctx.stderr, not bare process.stderr', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: false });
+  const home = await tempHome();
+  try {
+    const err = collectStdout();
+    const result = await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        stderr: err.out,
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0);
+    assert.match(err.text(), /No CLAUDE\.md or AGENTS\.md/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 test('runStart: gh not authenticated → exit 1', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();
@@ -1241,6 +1266,37 @@ test('runMergePr: happy path with --pr override', async () => {
     assert.equal(captured?.pr, 99);
     assert.equal(captured?.resume, true);
     assert.equal(captured?.styleDigest, STUB_DIGEST, 'resolved digest threaded to merge flow');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: config-resolution warnings go through ctx.stderr, not bare process.stderr', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    const dir = join(repo.path, '.ai-task-master');
+    await mkdir(dir, { recursive: true });
+    // An unknown project config key is a ConfigLoader-level warning (routed via the injected `warn`
+    // option), distinct from the CommandExit error path — this is what proves the seam is wired.
+    await writeFile(join(dir, 'config.json'), `${JSON.stringify({ bogusKey: true })}\n`);
+    const err = collectStdout();
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 99 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        stderr: err.out,
+        runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.match(err.text(), /unknown config key "bogusKey"/);
   } finally {
     await repo.cleanup();
     await home.cleanup();

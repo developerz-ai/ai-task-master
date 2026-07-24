@@ -155,6 +155,43 @@ test('usableInputTokens: window minus the reserve, floored at zero', () => {
   assert.equal(usableInputTokens(8_000, undefined), 0, 'never negative');
 });
 
+test('usableInputTokensFor: returns the window minus the reserve for the model', async () => {
+  assert.equal(
+    await new Compactor({
+      summarizer: new MockLanguageModelV3(),
+      limits: stubLimits(100_000),
+    }).usableInputTokensFor('openai/gpt-5'),
+    80_000,
+  );
+  assert.equal(
+    await new Compactor({
+      summarizer: new MockLanguageModelV3(),
+      limits: stubLimits(100_000, 4_000),
+    }).usableInputTokensFor('openai/gpt-5'),
+    96_000,
+  );
+  assert.equal(
+    await new Compactor({
+      summarizer: new MockLanguageModelV3(),
+      limits: stubLimits(100_000),
+      reserveTokens: 50_000,
+    }).usableInputTokensFor('openai/gpt-5'),
+    50_000,
+  );
+});
+
+test('usableInputTokensFor: undefined for an absent, non-finite, or non-positive window', async () => {
+  for (const contextLength of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(
+      await new Compactor({
+        summarizer: new MockLanguageModelV3(),
+        limits: stubLimits(contextLength),
+      }).usableInputTokensFor('openai/gpt-5'),
+      undefined,
+    );
+  }
+});
+
 test('shouldCompact returns compact above the threshold and carries keepLastSteps override', async () => {
   const c = new Compactor({
     summarizer: new MockLanguageModelV3(),

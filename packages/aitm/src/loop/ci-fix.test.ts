@@ -281,6 +281,7 @@ test('runFixSession: threads compaction into the real CI-fix worker when a compa
   const stubCompactor: CompactorLike = {
     shouldCompact: async () => ({ kind: 'skip' }),
     compact: async () => '',
+    usableInputTokensFor: async () => 1_000_000,
   };
 
   const result = await runFixSession(

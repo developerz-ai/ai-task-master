@@ -21,10 +21,11 @@ type CompactionPrepareStep<TOOLS extends ToolSet> = NonNullable<
   ToolLoopAgentSettings<never, TOOLS>['prepareStep']
 >;
 
-// Narrow port over the two Compactor methods this step calls, so tests/stubs can satisfy it
+// Narrow port over the Compactor methods this step calls, so tests/stubs can satisfy it
 // structurally (Compactor is a class with private state; a plain object can't otherwise match it,
-// and the repo forbids `as unknown as`). The real Compactor satisfies it.
-export type CompactorLike = Pick<Compactor, 'shouldCompact' | 'compact'>;
+// and the repo forbids `as unknown as`). The real Compactor satisfies it. `usableInputTokensFor`
+// exposes the budget so each stage's result can be verified to fit before it is sent.
+export type CompactorLike = Pick<Compactor, 'shouldCompact' | 'compact' | 'usableInputTokensFor'>;
 
 export type CompactionStepInit = {
   compactor: CompactorLike;
@@ -135,13 +136,30 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
     // Nothing older than the kept tail → summarizing would drop nothing; pass through.
     if (older.length === 0) return undefined;
 
+    // The usable input-token budget for this model (its window minus the reply reserve) — the same
+    // figure shouldCompact just fired on. Every stage below VERIFIES its result against this before
+    // returning it: a stage that reclaims some context but not enough must never be sent, or it is the
+    // exact overflow compaction exists to prevent (finding 08, HIGH). undefined = a window we cannot
+    // reason about, which shouldCompact would already have skipped — treat as "cannot verify, fits".
+    const usable = await init.compactor.usableInputTokensFor(init.modelId);
+    // Fixed overhead the message char-estimate cannot see (system prompt + tool schemas): the gap
+    // between the grounded live size and the char estimate of those same live messages. Carried onto
+    // every candidate so a "fits" verdict measures what the provider actually bills, not just message
+    // text. `fits` uses `<` to match shouldCompact's boundary (it compacts AT the budget, not just
+    // over it), so a candidate exactly at the budget is treated as still needing to shrink.
+    const overhead = Math.max(0, liveInputTokens - estimatedInputTokens);
+    const fits = (candidate: readonly ModelMessage[]): boolean =>
+      usable === undefined || estimateTokens(candidate) + overhead < usable;
+
     // Cheap prune stage first (no model call): clear the payloads of large, older tool results,
     // keeping a recency shield of recent tool output and the kept-steps tail verbatim. Stale results
     // (a `git status` from 40 steps ago, a file re-read since) are the bulk of a bloated window and
-    // are re-runnable, so clearing them often reclaims enough context that the LLM summarize never
-    // has to run. Only when it frees too little do we fall through to the summarizer below.
+    // are re-runnable, so clearing them often reclaims enough context that the LLM summarize never has
+    // to run. Skip the summarizer only when a prune both freed a lot AND leaves a context that
+    // verifiably fits — a large prune that is still over budget (a window 20k tokens over is only ~5k
+    // under after clearing 20k chars) now falls through to summarize instead of returning overflowing.
     const pruned = pruneOldToolResults(messages, splitAt);
-    if (pruned.freedChars >= PRUNE_FREED_THRESHOLD) {
+    if (pruned.freedChars >= PRUNE_FREED_THRESHOLD && fits(pruned.messages)) {
       init.logger?.info('compaction: pruned stale tool results (no summarize)', {
         modelId: init.modelId,
         liveInputTokens,
@@ -152,31 +170,58 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
     }
 
     let summary: string | undefined;
+    let summarizerThrew = false;
     try {
       // Summarize the PRUNED older prefix: results the prune pass cleared are already gone, so the
       // summarizer neither re-reads their bulk nor re-describes soon-to-be-cleared output. Thread the
       // prior summary so a repeat compaction updates that anchor in place rather than drifting.
       summary = await init.compactor.compact(pruned.messages.slice(0, splitAt), priorSummary);
     } catch (err) {
-      init.logger?.warn('compaction: summarizer failed; passing through', {
+      summarizerThrew = true;
+      init.logger?.warn('compaction: summarizer failed', {
         modelId: init.modelId,
         error: errText(err),
       });
-      return undefined;
     }
 
-    // Empty/whitespace summary → the summarizer produced nothing usable. Passing through
-    // uncompacted is safer than replacing real history with a blank note (issue: empty-summary
-    // context loss).
+    // No usable summary: the call threw, or returned empty/whitespace (replacing real history with a
+    // blank note is its own context-loss bug). If the pruned context already fits, passing it through
+    // is safe; if it is still over budget, hard-truncate rather than send an overflowing context —
+    // the backstop must not depend on the summarizer, which is exactly what may have just failed.
     if (summary === undefined) {
-      init.logger?.warn('compaction: summarizer returned empty text; passing through', {
+      if (!summarizerThrew) {
+        init.logger?.warn('compaction: summarizer returned empty text', { modelId: init.modelId });
+      }
+      if (fits(pruned.messages)) return { messages: pruned.messages };
+      const truncated = truncateOldestToFit(pruned.messages, fits);
+      init.logger?.warn('compaction: no usable summary and over budget; hard-truncated to fit', {
         modelId: init.modelId,
+        liveInputTokens,
+        keptMessages: truncated.length,
       });
-      return undefined;
+      return { messages: truncated };
     }
 
     // Anchor the next compaction in this run to this summary so it updates in place, not from scratch.
     priorSummary = summary;
+    const summaryMessage: ModelMessage = {
+      role: 'user',
+      content: `${SUMMARY_HEADER}\n\n${summary}`,
+    };
+    const compacted: ModelMessage[] = [summaryMessage, ...tail];
+
+    // Post-compaction verification. Summary + kept tail is normally far under budget, but a single
+    // huge verbatim tool result inside the kept steps — or a long summary — can still exceed it. Drop
+    // the oldest tail messages, keeping the summary pinned first, until it provably fits.
+    if (!fits(compacted)) {
+      const truncated = truncateOldestToFit(compacted, fits, 1);
+      init.logger?.warn('compaction: summary still over budget; hard-truncated tail to fit', {
+        modelId: init.modelId,
+        liveInputTokens,
+        keptMessages: truncated.length,
+      });
+      return { messages: truncated };
+    }
 
     init.logger?.info('compaction: compacted context', {
       modelId: init.modelId,
@@ -185,12 +230,7 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
       keptSteps: decision.keepLastSteps,
       prunedChars: pruned.freedChars,
     });
-
-    const summaryMessage: ModelMessage = {
-      role: 'user',
-      content: `${SUMMARY_HEADER}\n\n${summary}`,
-    };
-    return { messages: [summaryMessage, ...tail] };
+    return { messages: compacted };
   };
 }
 
@@ -263,6 +303,36 @@ export function pruneOldToolResults(
   }
 
   return { messages: out, freedChars, clearedResults };
+}
+
+// Last-resort, model-free hard truncation: drop the oldest messages — after an optional protected
+// leading prefix, e.g. a pinned summary — until `fits` reports the remainder is within budget, so a
+// step can never be sent overflowing even when prune and summarize together did not reclaim enough.
+// Cuts only before a non-`tool` message, so a tool-result is never left without the assistant
+// tool-call that produced it (the API rejects that pairing). Returns the LARGEST suffix that fits;
+// when nothing fits (the fixed overhead alone exceeds the budget — no message trimming can help) it
+// returns the smallest structurally valid candidate it built. Never returns empty for a non-empty
+// input, and never mutates the input.
+export function truncateOldestToFit(
+  messages: readonly ModelMessage[],
+  fits: (candidate: readonly ModelMessage[]) => boolean,
+  keepLeading = 0,
+): ModelMessage[] {
+  const clamp = Math.min(Math.max(keepLeading, 0), messages.length);
+  const head = messages.slice(0, clamp);
+  const body = messages.slice(clamp);
+  let smallest: ModelMessage[] | undefined;
+  // i counts how many oldest body messages to drop; i === body.length drops the whole body, leaving
+  // just the protected head. i === 0 keeps the whole body, which starts on a step boundary (an
+  // assistant message), so the largest candidate is always structurally valid.
+  for (let i = 0; i <= body.length; i++) {
+    if (i > 0 && i < body.length && body[i]?.role === 'tool') continue;
+    const candidate = [...head, ...body.slice(i)];
+    if (candidate.length === 0) break;
+    smallest = candidate;
+    if (fits(candidate)) return candidate;
+  }
+  return smallest ?? [...head];
 }
 
 // Char size of a tool result's payload — the text the model actually reads, so the prune thresholds

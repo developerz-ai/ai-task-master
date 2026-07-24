@@ -3,7 +3,12 @@ import { test } from 'node:test';
 import type { ModelMessage } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
-import { buildCompactionStep, type CompactorLike, pruneOldToolResults } from './compaction-step.ts';
+import {
+  buildCompactionStep,
+  type CompactorLike,
+  pruneOldToolResults,
+  truncateOldestToFit,
+} from './compaction-step.ts';
 import { type CompactionDecision, Compactor } from './compactor.ts';
 
 // A prepareStep `steps` entry. `ai@6` exposes `response.messages` as the CUMULATIVE response list up
@@ -70,6 +75,10 @@ function stubCompactor(opts: {
   onCompact?: (older: readonly unknown[], priorSummary?: string) => void;
   shouldThrows?: boolean;
   compactThrows?: boolean;
+  // The usable input-token budget the post-compaction fit check verifies against. Defaults large so
+  // control-flow tests (whose small message arrays trivially fit) exercise the intended path; the
+  // overflow-guarantee tests set it small to force the summarize / hard-truncate escalation.
+  usable?: number;
 }): CompactorLike {
   return {
     shouldCompact: async () => {
@@ -82,6 +91,7 @@ function stubCompactor(opts: {
       if (opts.compactReturnsUndefined) return undefined;
       return opts.summary ?? 'SUMMARY';
     },
+    usableInputTokensFor: async () => opts.usable ?? 1_000_000,
   };
 }
 
@@ -338,8 +348,9 @@ test('buildCompactionStep: threshold lookup failure → pass-through + warning (
   );
 });
 
-test('buildCompactionStep: summarizer failure → pass-through + warning (non-fatal)', async () => {
+test('buildCompactionStep: summarizer failure but context already fits → pass-through + warning (non-fatal)', async () => {
   const events: Array<Record<string, unknown>> = [];
+  const messages = msgs(5);
   const compactor = stubCompactor({
     decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
     compactThrows: true,
@@ -348,13 +359,16 @@ test('buildCompactionStep: summarizer failure → pass-through + warning (non-fa
     compactor,
     modelId: 'm',
     logger: captureLogger(events),
-  })(prepInput([step(2), step(4)], msgs(5)));
-  assert.equal(result, undefined);
+  })(prepInput([step(2), step(4)], messages));
+  // The pruned context fits, so a summarizer failure passes it through with no context dropped.
+  assert.ok(result && Array.isArray(result.messages));
+  assert.equal(result.messages.length, messages.length);
   assert.ok(events.some((e) => e.level === 'warn' && /summarizer failed/i.test(String(e.msg))));
 });
 
-test('buildCompactionStep: empty/whitespace summary → pass-through + warning, no context dropped', async () => {
+test('buildCompactionStep: empty/whitespace summary but context already fits → pass-through + warning, no context dropped', async () => {
   const events: Array<Record<string, unknown>> = [];
+  const messages = msgs(5);
   const compactor = stubCompactor({
     decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
     compactReturnsUndefined: true,
@@ -363,10 +377,11 @@ test('buildCompactionStep: empty/whitespace summary → pass-through + warning, 
     compactor,
     modelId: 'm',
     logger: captureLogger(events),
-  })(prepInput([step(2), step(4)], msgs(5)));
-  assert.equal(result, undefined);
+  })(prepInput([step(2), step(4)], messages));
+  assert.ok(result && Array.isArray(result.messages));
+  assert.equal(result.messages.length, messages.length);
   assert.ok(
-    events.some((e) => e.level === 'warn' && /empty text; passing through/i.test(String(e.msg))),
+    events.some((e) => e.level === 'warn' && /summarizer returned empty text/i.test(String(e.msg))),
   );
 });
 
@@ -501,6 +516,146 @@ test('buildCompactionStep: <20k freed → summarizes the pruned older prefix (cl
   // The summarizer received the pruned older prefix: the cleared placeholder is present, AAA_OLD gone.
   assert.match(JSON.stringify(compactedOlder), CLEARED);
   assert.doesNotMatch(JSON.stringify(compactedOlder), /AAA_OLD/);
+});
+
+test('buildCompactionStep: prune frees ≥20k but is still over budget → falls through to summarize, never returned overflowing (finding 08 HIGH)', async () => {
+  // The bug: freeing ≥20k chars returned immediately without checking the result fits. Here the prune
+  // clears a 60k older result (freed ≫ 20k) but a 50k shielded result stays, so the pruned context is
+  // still ~12.5k tokens against a 5k budget. It must NOT be returned — it must summarize.
+  let compactCalls = 0;
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    summary: 'SUMOUT',
+    usable: 5_000,
+    onCompact: () => {
+      compactCalls++;
+    },
+  });
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'goal' },
+    toolCallMsg('a'),
+    toolResultMsg('a', `AAA_OLD${'x'.repeat(60_000)}`),
+    toolCallMsg('b'),
+    toolResultMsg('b', `BBB_SHIELD${'x'.repeat(50_000)}`),
+    toolCallMsg('c'),
+    toolResultMsg('c', 'small-c'),
+  ];
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4), step(6)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  assert.equal(compactCalls, 1, 'the prune fast-path did NOT short-circuit — summarize ran');
+  // Summary + kept tail, not the still-overflowing pruned array; older content is summarized away.
+  assert.equal(result.messages.length, 3);
+  assert.match(String(result.messages[0]?.content), /SUMOUT/);
+  assert.doesNotMatch(JSON.stringify(result.messages), /BBB_SHIELD|AAA_OLD/);
+});
+
+test('buildCompactionStep: summary still over budget → hard-truncates the tail, summary pinned first', async () => {
+  // A single huge verbatim tool result in the kept tail keeps summary+tail over budget; the escalation
+  // drops the oldest tail messages (the huge result and its tool-call together) until it provably fits.
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    summary: 'SUMOUT2',
+    usable: 1_000,
+  });
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'goal' },
+    toolCallMsg('a'),
+    toolResultMsg('a', 'older-a'),
+    toolCallMsg('b'),
+    toolResultMsg('b', `BIG_TAIL${'x'.repeat(50_000)}`),
+  ];
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  assert.equal(result.messages.length, 1);
+  assert.match(String(result.messages[0]?.content), /SUMOUT2/);
+  assert.doesNotMatch(JSON.stringify(result.messages), /BIG_TAIL/);
+});
+
+test('buildCompactionStep: no usable summary + over budget → hard-truncates the pruned history to fit + warns', async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    compactThrows: true,
+    usable: 100,
+  });
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'goal' },
+    toolCallMsg('a'),
+    toolResultMsg('a', `AAA${'x'.repeat(50_000)}`),
+    toolCallMsg('b'),
+    toolResultMsg('b', `BBB${'x'.repeat(50_000)}`),
+    toolCallMsg('c'),
+    toolResultMsg('c', 'small-c'),
+  ];
+  const result = await buildCompactionStep({
+    compactor,
+    modelId: 'm',
+    logger: captureLogger(events),
+  })(prepInput([step(2), step(4), step(6)], messages));
+  assert.ok(result && Array.isArray(result.messages));
+  // Dropped down to the newest step (its tool-call + result), never the still-overflowing full array.
+  assert.equal(result.messages.length, 2);
+  assert.equal(
+    result.messages[0]?.role,
+    'assistant',
+    'newest step kept its tool-call, not orphaned',
+  );
+  assert.doesNotMatch(JSON.stringify(result.messages), /BBB|AAA/);
+  assert.ok(
+    events.some(
+      (e) =>
+        e.level === 'warn' &&
+        /over budget/i.test(String(e.msg)) &&
+        /hard-truncated/i.test(String(e.msg)),
+    ),
+  );
+});
+
+test('truncateOldestToFit: keeps the largest fitting suffix, dropping the oldest messages', () => {
+  const messages = [
+    msg('user', 'a'),
+    msg('assistant', 'b'),
+    msg('user', 'c'),
+    msg('assistant', 'd'),
+  ];
+  const out = truncateOldestToFit(messages, (c) => c.length <= 2);
+  assert.deepEqual(out, messages.slice(2));
+});
+
+test('truncateOldestToFit: never orphans a tool-result — cuts before the assistant tool-call', () => {
+  const messages: ModelMessage[] = [
+    toolCallMsg('a'),
+    toolResultMsg('a', 'ra'),
+    toolCallMsg('b'),
+    toolResultMsg('b', 'rb'),
+  ];
+  // An impossible budget (nothing fits): still returns the smallest STRUCTURALLY VALID candidate,
+  // which starts on the assistant tool-call, never a bare tool-result.
+  const out = truncateOldestToFit(messages, () => false);
+  assert.deepEqual(out, [toolCallMsg('b'), toolResultMsg('b', 'rb')]);
+  assert.equal(out[0]?.role, 'assistant');
+});
+
+test('truncateOldestToFit: protects the leading prefix and can drop the whole body down to it', () => {
+  const summary = msg('user', 'SUMMARY');
+  const messages: ModelMessage[] = [summary, toolCallMsg('a'), toolResultMsg('a', 'ra')];
+  const out = truncateOldestToFit(messages, (c) => c.length <= 1, 1);
+  assert.deepEqual(out, [summary]);
+});
+
+test('truncateOldestToFit: never returns empty and never mutates its input', () => {
+  const messages = [msg('user', 'a'), msg('assistant', 'b')];
+  const before = messages.map((m) => JSON.stringify(m));
+  const out = truncateOldestToFit(messages, () => false);
+  assert.ok(out.length >= 1);
+  assert.deepEqual(
+    messages.map((m) => JSON.stringify(m)),
+    before,
+  );
 });
 
 test('pruneOldToolResults: clears shield-exceeding results, keeps recent + tail, never mutates input', () => {

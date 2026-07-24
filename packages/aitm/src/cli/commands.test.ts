@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import type { LlmFetch } from '../credentials/llm-fetch.ts';
 import { Logger } from '../logger/logger.ts';
@@ -17,6 +18,7 @@ import type {
 } from './commands.ts';
 import {
   autoMergeNotice,
+  drainStdin,
   isRunComplete,
   prLinksBlock,
   runClean,
@@ -557,6 +559,31 @@ test('runStart: no CLAUDE.md/AGENTS.md and no --style → proceeds with a defaul
       'runs on a bare repo instead of aborting on the missing style file',
     );
     assert.equal(loopCalls, 1, 'reached the run loop past the style gate');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: no CLAUDE.md/AGENTS.md notice goes through ctx.stderr, not bare process.stderr', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: false });
+  const home = await tempHome();
+  try {
+    const err = collectStdout();
+    const result = await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        stderr: err.out,
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0);
+    assert.match(err.text(), /No CLAUDE\.md or AGENTS\.md/);
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -1241,6 +1268,37 @@ test('runMergePr: happy path with --pr override', async () => {
     assert.equal(captured?.pr, 99);
     assert.equal(captured?.resume, true);
     assert.equal(captured?.styleDigest, STUB_DIGEST, 'resolved digest threaded to merge flow');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: config-resolution warnings go through ctx.stderr, not bare process.stderr', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    const dir = join(repo.path, '.ai-task-master');
+    await mkdir(dir, { recursive: true });
+    // An unknown project config key is a ConfigLoader-level warning (routed via the injected `warn`
+    // option), distinct from the CommandExit error path — this is what proves the seam is wired.
+    await writeFile(join(dir, 'config.json'), `${JSON.stringify({ bogusKey: true })}\n`);
+    const err = collectStdout();
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 99 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        stderr: err.out,
+        runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.match(err.text(), /unknown config key "bogusKey"/);
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -2035,6 +2093,43 @@ test('runProfile: add --api-key-stdin with empty stdin exits 1', async () => {
   } finally {
     await home.cleanup();
   }
+});
+
+test('drainStdin: timeout interrupts an open-but-idle stream (never a chunk)', async () => {
+  const stream = new PassThrough(); // stays open, emits no data, never ends
+  await assert.rejects(drainStdin({ stream, timeoutMs: 50 }), /timed out after 50ms/);
+});
+
+test('drainStdin: abort interrupts an open-but-idle stream mid-read', async () => {
+  const stream = new PassThrough();
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(new Error('aborted-mid-read')), 10);
+  await assert.rejects(
+    drainStdin({ stream, timeoutMs: 60_000, signal: ac.signal }),
+    /aborted-mid-read/,
+  );
+});
+
+test('drainStdin: already-aborted signal rejects before reading', async () => {
+  const stream = new PassThrough();
+  await assert.rejects(
+    drainStdin({ stream, signal: AbortSignal.abort(new Error('pre-aborted')) }),
+    /pre-aborted/,
+  );
+});
+
+test('drainStdin: reads piped chunks then resolves on end', async () => {
+  const stream = new PassThrough();
+  stream.write('sk-or-');
+  stream.write('piped-123\n');
+  stream.end();
+  assert.equal(await drainStdin({ stream, timeoutMs: 5_000 }), 'sk-or-piped-123\n');
+});
+
+test('drainStdin: rejects when data exceeds maxBytes', async () => {
+  const stream = new PassThrough();
+  stream.write('x'.repeat(50));
+  await assert.rejects(drainStdin({ stream, maxBytes: 10, timeoutMs: 5_000 }), /maximum size/);
 });
 
 test('runProfile: use on an unknown profile exits 1 with a helpful message', async () => {

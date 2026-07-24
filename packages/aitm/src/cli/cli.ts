@@ -17,6 +17,7 @@ import {
   runResume,
   runStart,
 } from './commands.ts';
+import { HELP_TEXT } from './help.ts';
 
 export type MainCtx = {
   cwd?: string;
@@ -156,38 +157,6 @@ async function readVersion(): Promise<string> {
   }
   return 'unknown';
 }
-
-const HELP_TEXT = `aitm — autonomous task orchestrator
-
-Usage:
-  aitm start "<goal>" [--criteria "..."] [--max-prs N] [--max-sessions N]
-                      [--no-automerge] [--admin] [--style <path>] [--model <id>]
-                      [--concurrency N] [--branch <name>] [--allow-dirty]
-  aitm resume         [same flags as start; the goal comes from .ai-task-master/]
-  aitm merge-pr [--pr N] [--no-resume] [--admin]
-  aitm config set <key> <value> [--project]
-  aitm config unset <key>       [--project]
-  aitm config get <key>         [--project]
-  aitm config list              [--project]
-  aitm profile list
-  aitm profile use <name>
-  aitm profile add <name> [--preset openrouter|zai] [--base-url <url>]
-                          [--api-key <key> | --api-key-stdin]
-  aitm profile set <name> <key> <value>
-  aitm profile get <name> <key>
-  aitm profile remove <name>
-  aitm profile show [<name>]
-  aitm mcp-login <server-url> [--callback-url <url>] [--timeout <ms>]
-  aitm clean [--force|-f]
-  aitm help | --help | -h
-  aitm version | --version | -v
-
-Exit codes:
-  0  success
-  1  precondition failure or run blocked
-  2  cancelled, or invalid/malformed command-line usage
-
-Docs: docs/commands/start.md, docs/commands/merge-pr.md, docs/commands/config.md, docs/commands/profile.md`;
 
 // Minimal process surface the shutdown wiring touches. Injectable so the abort, force-exit and
 // exit-code branches are unit-testable without attaching handlers to — or calling `exit`/`exitCode`

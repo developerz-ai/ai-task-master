@@ -135,7 +135,7 @@ code-execution surfaces). Keys absent from a file fall through per the
 
 ## baseURL
 
-Overrides the OpenAI-compatible inference endpoint (provider default `https://openrouter.ai/api/v1`). Set it to target a self-hosted gateway, a proxy, or another provider's OpenAI-compatible API — e.g. the z.ai GLM coding plan at `https://api.z.ai/api/coding/paas/v4`. Resolution order: project config > global config > env `OPENROUTER_BASE_URL`; unset everywhere → the provider default. Validated as a URL. When set, point `models.*` at ids the endpoint serves (e.g. `glm-5.2`). This is an OpenAI-compatible path only — see [auth.md](./auth.md) §Anthropic. Not a CLI flag. See also [auth.md](./auth.md) §"Base URL" and [providers.md](./providers.md) for per-provider configs (OpenRouter / z.ai / generic).
+Overrides the OpenAI-compatible inference endpoint (provider default `https://openrouter.ai/api/v1`). Set it to target a self-hosted gateway, a proxy, or another provider's OpenAI-compatible API — e.g. the z.ai GLM coding plan at `https://api.z.ai/api/coding/paas/v4`. Resolution order: global config > active profile > env `OPENROUTER_BASE_URL`; unset everywhere → the provider default. A project-scoped `baseURL` is a trust boundary and is stripped + warned (never honored). Validated as a URL. When set, point `models.*` at ids the endpoint serves (e.g. `glm-5.2`). This is an OpenAI-compatible path only — see [auth.md](./auth.md) §Anthropic. Not a CLI flag. See also [auth.md](./auth.md) §"Base URL" and [providers.md](./providers.md) for per-provider configs (OpenRouter / z.ai / generic).
 
 ## Profiles
 
@@ -147,13 +147,20 @@ targets `~/.aitm.json`).
 The active profile supplies provider defaults that sit between explicit top-level config and env:
 
 ```text
-apiKey / baseURL:  project > global top-level > active profile > env
+apiKey / baseURL:  global top-level > active profile > env
 models:            defaults < active profile < global < project < --model
 ```
 
-So an explicit key/baseURL in a config file still wins, but the active profile beats a stale
-`OPENROUTER_API_KEY` in the environment. No `activeProfile` set → resolution is identical to
-before profiles existed (full back-compat). A dangling `activeProfile` (named but absent from
+So an explicit top-level key/baseURL in the **global** config still wins, but the active profile
+beats a stale `OPENROUTER_API_KEY` in the environment. (A project-scoped `baseURL`/`openrouterApiKey`
+never participates — it is stripped and warned as a trust boundary, so it can't reorder any of this.)
+One carve-out on `baseURL`: a top-level `baseURL` only
+outranks the active profile's `baseURL` when the global config *also* has a top-level
+`openrouterApiKey` (a self-consistent endpoint+key pair). A top-level `baseURL` with no matching
+top-level key is treated as **stale** — the active profile's `baseURL` wins so the profile's key is
+sent to the profile's own host, not the leftover one. aitm warns in both directions (stale
+top-level dropped, or coherent top-level shadowing the profile), so the shadow is never silent. No
+`activeProfile` set → resolution is identical to before profiles existed (full back-compat). A dangling `activeProfile` (named but absent from
 `profiles`) warns and falls back rather than failing the run. Full command reference and presets:
 [`commands/profile.md`](./commands/profile.md).
 

@@ -27,14 +27,22 @@ it is **not** an Anthropic SDK path (see [Anthropic](#anthropic) below).
 
 | Source | Order | Owner |
 | --- | --- | --- |
-| `baseURL` in `./.ai-task-master/config.json` (project) | 1 | `ConfigLoader` |
-| `baseURL` in `~/.aitm.json` (global) | 2 | `ConfigLoader` |
-| `baseURL` in the **active profile** (`~/.aitm.json`) | 3 | `ConfigLoader` |
-| Env `OPENROUTER_BASE_URL` | 4 | `ConfigLoader` |
+| `baseURL` in `~/.aitm.json` (global top-level) | 1 | `ConfigLoader` |
+| `baseURL` in the **active profile** (`~/.aitm.json`) | 2 | `ConfigLoader` |
+| Env `OPENROUTER_BASE_URL` | 3 | `ConfigLoader` |
 
+A project-scoped `baseURL` (`./.ai-task-master/config.json`) never participates: it is a trust
+boundary (a repo could redirect inference and leak the key), so `ConfigLoader` strips it and warns.
 Unset in every source → the provider default. The value is validated as a URL. When a
 custom base URL is set, point `models.*` at model ids the endpoint serves (e.g. `glm-5.2`).
 See [`providers.md`](./providers.md) for ready-to-copy OpenRouter / z.ai / generic configs.
+
+A top-level (global) `baseURL` only outranks the **active profile**'s `baseURL` when the global
+config also carries a top-level `openrouterApiKey` — a coherent endpoint+key pair. A top-level
+`baseURL` with no matching top-level key is **stale**: the active profile's `baseURL` wins instead
+(so the profile's key targets its own host, not the leftover endpoint), and aitm warns. When the
+top-level pair is coherent it still wins, but aitm warns that `aitm profile use` did not switch the
+host — the shadow is never silent. See [`config.md`](./config.md) §Profiles.
 
 Error cases:
 

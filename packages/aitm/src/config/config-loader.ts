@@ -143,7 +143,7 @@ export class ConfigLoader {
     const active = this.resolveActiveProfile(global);
     const profile = active?.profile;
 
-    const { baseURL, baseURLSource } = this.resolveBaseURL(global, profile);
+    const { baseURL, baseURLSource } = this.resolveBaseURL(global, profile, active?.name);
     const { apiKey, apiKeySource } = this.resolveApiKey(global, profile, baseURLSource);
 
     if (apiKey === undefined || apiKeySource === undefined) {
@@ -568,7 +568,17 @@ export class ConfigLoader {
   }
 
   // Precedence: global > active profile > env OPENROUTER_BASE_URL — user config wins, env is the
-  // fallback. Project scope is NEVER consulted: a project-set baseURL is stripped upstream
+  // fallback — with ONE carve-out: a top-level `baseURL` only outranks an active profile's `baseURL`
+  // when the global config ALSO carries a top-level `openrouterApiKey`, i.e. a self-consistent
+  // endpoint+key pair. A top-level `baseURL` with no matching top-level key is STALE (typically an
+  // old `aitm config set baseURL` left behind before the profile was created): keeping it would pair
+  // that host with the active profile's (or env's) key and send the key to a different provider —
+  // the exact mismatch resolveApiKey guards against. So when the profile supplies its own `baseURL`,
+  // it wins and owns the endpoint (its key then follows via baseURLSource='profile'); the stale
+  // top-level `baseURL` is dropped with a loud warning. When the top-level IS a coherent pair it
+  // still wins (an explicit top-level config is deliberate), but we warn that `profile use` did not
+  // switch the host. Identical URLs are a no-op (no shadowing, no warning).
+  // Project scope is NEVER consulted: a project-set baseURL is stripped upstream
   // (stripUntrustedProjectFields) so an untrusted repo can't redirect inference or leak the key.
   // Undefined → provider default. Config-file values are already URL-validated by ConfigFileSchema;
   // the env value is validated here so every source honors the same "validated as a URL" contract
@@ -576,8 +586,28 @@ export class ConfigLoader {
   private resolveBaseURL(
     global: ConfigFile | null,
     profile: Profile | undefined,
+    profileName: string | undefined,
   ): { baseURL: string | undefined; baseURLSource: 'global' | 'profile' | 'env' | undefined } {
-    if (global?.baseURL) return { baseURL: global.baseURL, baseURLSource: 'global' };
+    if (global?.baseURL) {
+      if (profile?.baseURL && profile.baseURL !== global.baseURL) {
+        const label = profileName ? `the active profile "${profileName}"` : 'the active profile';
+        if (global.openrouterApiKey) {
+          this.warn(
+            `Top-level "baseURL" (${global.baseURL}) in ~/.aitm.json overrides ${label}'s baseURL ` +
+              `(${profile.baseURL}); the profile switch did not change the endpoint. Remove the ` +
+              `top-level "baseURL"/"openrouterApiKey" to let the profile own the endpoint.`,
+          );
+        } else {
+          this.warn(
+            `Top-level "baseURL" (${global.baseURL}) in ~/.aitm.json has no matching top-level ` +
+              `"openrouterApiKey" — it is stale. Using ${label}'s baseURL (${profile.baseURL}) ` +
+              `instead so its key reaches the right host. Remove the top-level "baseURL" to silence this.`,
+          );
+          return { baseURL: profile.baseURL, baseURLSource: 'profile' };
+        }
+      }
+      return { baseURL: global.baseURL, baseURLSource: 'global' };
+    }
     if (profile?.baseURL) return { baseURL: profile.baseURL, baseURLSource: 'profile' };
     const env = this.env.OPENROUTER_BASE_URL?.trim();
     if (!env) return { baseURL: undefined, baseURLSource: undefined };

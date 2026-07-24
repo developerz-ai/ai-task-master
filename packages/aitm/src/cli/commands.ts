@@ -9,6 +9,7 @@
 import { homedir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import type { Readable } from 'node:stream';
 import {
   type AgentConfig,
   AgentConfigDetector,
@@ -153,6 +154,10 @@ export type StartCtx = {
   runLoop?: (input: RunLoopInput) => Promise<WorkLoopResult>;
   // Sink for the pre-run notice (e.g. the auto-merge banner). Defaults to process.stdout.
   stdout?: (chunk: string) => void;
+  // Sink for non-fatal warnings (missing CLAUDE.md, config precedence, GitHub pagination, etc.).
+  // Defaults to process.stderr. Injected so tests can assert on warnings without capturing the
+  // real stream.
+  stderr?: (chunk: string) => void;
   // Resolve the distilled coding-style digest threaded to subagents as `styleDigest`. Default:
   // reuse the cached `coding-style.md`, else distill once and cache it — never blocking the run
   // (degrades to raw AgentConfig.contents). Injected so unit tests skip the real LLM call.
@@ -187,6 +192,8 @@ export type MergePrCtx = {
   resolveStyle?: (input: ResolveStyleInput) => Promise<string>;
   // Sink for the end-of-run usage summary line (issue #114/#190). Defaults to process.stdout.
   stdout?: (chunk: string) => void;
+  // See StartCtx.stderr — same non-fatal-warnings sink for the take-over flow.
+  stderr?: (chunk: string) => void;
   // Abort handle, threaded into the take-over loop. When aborted, the flow returns `cancelled`
   // → exit code 2. The CLI can wire this to a SIGINT handler; tests drive it directly.
   signal?: AbortSignal;
@@ -226,11 +233,79 @@ export type McpLoginCtx = {
   ) => Promise<import('../mcp/oauth.js').OAuthConfig>;
 };
 
-async function drainStdin(): Promise<string> {
-  let data = '';
-  process.stdin.setEncoding('utf8');
-  for await (const chunk of process.stdin) data += chunk;
-  return data;
+// Exported for unit testing (drives the timeout/abort/size paths against an injected stream).
+export async function drainStdin(options?: {
+  timeoutMs?: number;
+  maxBytes?: number;
+  signal?: AbortSignal;
+  stream?: Readable;
+}): Promise<string> {
+  const timeoutMs = options?.timeoutMs ?? 30_000; // 30 second default
+  const maxBytes = options?.maxBytes ?? 1_000_000; // 1MB default
+  const signal = options?.signal;
+
+  if (signal?.aborted) throw signal.reason ?? new Error('Aborted');
+
+  const stdin = options?.stream ?? process.stdin;
+  stdin.setEncoding('utf8');
+
+  // Event-driven, not `for await`: an open-but-idle stdin (no chunk ever arrives) blocks the async
+  // iterator forever, so the timer and abort signal must *actively* settle the read rather than only
+  // being checked when the next chunk lands. `finish` runs exactly once and always tears down the
+  // timer, listeners, and the stream flow so no path leaks or holds the event loop open.
+  return await new Promise<string>((resolve, reject) => {
+    let data = '';
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      stdin.off('data', onData);
+      stdin.off('end', onEnd);
+      stdin.off('error', onError);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      stdin.pause();
+    };
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      finish(() =>
+        reject(
+          new Error(
+            `Reading from stdin timed out after ${timeoutMs}ms. Pass the API key via --api-key or OPENROUTER_API_KEY env var instead.`,
+          ),
+        ),
+      );
+    }, timeoutMs);
+
+    const onData = (chunk: string) => {
+      data += chunk;
+      if (data.length > maxBytes) {
+        finish(() =>
+          reject(
+            new Error(
+              `stdin data exceeded maximum size of ${maxBytes} bytes. API keys should be much smaller.`,
+            ),
+          ),
+        );
+      }
+    };
+    const onEnd = () => finish(() => resolve(data));
+    const onError = (err: Error) => finish(() => reject(err));
+    const onAbort = signal
+      ? () => finish(() => reject(signal.reason ?? new Error('Aborted')))
+      : undefined;
+
+    stdin.on('data', onData);
+    stdin.on('end', onEnd);
+    stdin.on('error', onError);
+    if (onAbort) signal?.addEventListener('abort', onAbort, { once: true });
+    stdin.resume();
+  });
 }
 
 // Pre-run banner shown when auto-merge is active. aitm merges its own PRs via a `gh` subprocess,
@@ -347,23 +422,26 @@ export function usageSummaryLine(totals: UsageTotals): string {
   return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached, ${cacheHitPct(overall)} cache hit), ${cost}${discount}${perRole ? ` — ${perRole}` : ''}\n`;
 }
 
-// Non-fatal warnings go to stderr so they never contaminate the plain-status stdout contract.
-const warnToStderr = (message: string): void => {
-  process.stderr.write(`${message}\n`);
-};
+// Non-fatal warnings go to the injected stderr sink (default process.stderr) so they never
+// contaminate the plain-status stdout contract, and so tests can capture them without patching
+// the real stream.
+function warnToStderr(stderr: (chunk: string) => void): (message: string) => void {
+  return (message) => stderr(`${message}\n`);
+}
 
 // AgentConfigDetector options from the CLI's stylePath sources + the homeDir seam (issue #117):
 // the user-global CLAUDE.md lives in <homeDir>/.claude, and a nested-file budget overflow is logged
-// to stderr. `--style-path` (start) wins over resolved config; merge-pr passes only its persisted
+// via `warn`. `--style-path` (start) wins over resolved config; merge-pr passes only its persisted
 // path (argStylePath undefined).
 function buildDetectOpts(
   argStylePath: string | null | undefined,
   fallbackStylePath: string | null,
   homeDir: string,
+  warn: (message: string) => void,
 ): DetectOptions {
   const opts: DetectOptions = {
     userConfigDir: join(homeDir, '.claude'),
-    onWarn: (message) => process.stderr.write(`${message}\n`),
+    onWarn: warn,
   };
   if (argStylePath !== undefined) opts.stylePath = argStylePath;
   else if (fallbackStylePath !== null) opts.stylePath = fallbackStylePath;
@@ -377,8 +455,10 @@ export async function runStart(
   const cwd = ctx.cwd ?? process.cwd();
   const homeDir = ctx.homeDir ?? homedir();
   const env = ctx.env ?? process.env;
+  const stderr = ctx.stderr ?? ((chunk: string) => process.stderr.write(chunk));
+  const warn = warnToStderr(stderr);
 
-  const loader = new ConfigLoader(cwd, homeDir, env);
+  const loader = new ConfigLoader(cwd, homeDir, env, { warn });
   let resolved: ResolvedConfig;
   try {
     resolved = await loader.resolve(toCliOverrides(args));
@@ -409,7 +489,7 @@ export async function runStart(
     return { code: 1, message: errMsg(err) };
   }
   const detector = new AgentConfigDetector(cwd);
-  const detectOpts = buildDetectOpts(args.stylePath, resolved.stylePath, homeDir);
+  const detectOpts = buildDetectOpts(args.stylePath, resolved.stylePath, homeDir, warn);
 
   let agentConfig: AgentConfig | null;
   try {
@@ -418,7 +498,7 @@ export async function runStart(
     return { code: 1, message: errMsg(err) };
   }
   if (!agentConfig) {
-    process.stderr.write(
+    stderr(
       'No CLAUDE.md or AGENTS.md in the repo and no --style — using a generic default style, ' +
         "distilled with the repo's config files. Add a CLAUDE.md/AGENTS.md or pass --style for a sharper guide.\n",
     );
@@ -437,14 +517,7 @@ export async function runStart(
   }
   // The run's abort handle is bound in here so a SIGINT kills an in-flight `gh` child, not just the
   // poll loops around it (see GitHubClient's constructor).
-  const github = new GitHubClient(
-    cwd,
-    defaultRunCmd,
-    defaultSleep,
-    ctx.signal,
-    undefined,
-    warnToStderr,
-  );
+  const github = new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal, undefined, warn);
 
   const stateDir = resolvePath(cwd, '.ai-task-master');
   const state = new StateStore(stateDir);
@@ -740,8 +813,10 @@ export async function runMergePr(
   const cwd = ctx.cwd ?? process.cwd();
   const homeDir = ctx.homeDir ?? homedir();
   const env = ctx.env ?? process.env;
+  const stderr = ctx.stderr ?? ((chunk: string) => process.stderr.write(chunk));
+  const warn = warnToStderr(stderr);
 
-  const loader = new ConfigLoader(cwd, homeDir, env);
+  const loader = new ConfigLoader(cwd, homeDir, env, { warn });
   let resolved: ResolvedConfig;
   try {
     // `--admin` on merge-pr is a per-run override that forces the final merge past base-branch
@@ -776,8 +851,22 @@ export async function runMergePr(
 
   try {
     const github =
-      ctx.github ??
-      new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal, undefined, warnToStderr);
+      ctx.github ?? new GitHubClient(cwd, defaultRunCmd, defaultSleep, ctx.signal, undefined, warn);
+
+    // Detect agentConfig early so it can be passed to synthesizeTakeoverState, ensuring
+    // the take-over state carries the actual detected config file rather than a hardcoded default.
+    const detector = new AgentConfigDetector(cwd);
+    const detectOpts = buildDetectOpts(undefined, resolved.stylePath, homeDir, warn);
+
+    let agentConfig: AgentConfig | null;
+    try {
+      agentConfig = await detector.detect(detectOpts);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+    if (!agentConfig) {
+      agentConfig = defaultAgentConfig();
+    }
 
     // Take-over flow: `aitm merge-pr` (no args, no prior state) should work against any PR
     // the user built by hand — e.g. via Claude Code or `gh pr create`. We mirror the
@@ -790,7 +879,7 @@ export async function runMergePr(
     // number is junk, so the take-over PR is written in place: a mid-plan run keeps its plan,
     // group stages, options and runId rather than being replaced by a bare take-over state.
     if (args.resume === false) {
-      const synth = await synthesizeTakeoverState({ args, github, resolved });
+      const synth = await synthesizeTakeoverState({ args, github, resolved, agentConfig });
       if (synth.kind === 'error') return synth.exit;
       const takeover = synth.state;
       try {
@@ -809,7 +898,7 @@ export async function runMergePr(
         runState = await state.read();
       } catch (err) {
         if (!isFileNotFound(err)) return unreadableStateExit(stateDir, err);
-        const synth = await synthesizeTakeoverState({ args, github, resolved });
+        const synth = await synthesizeTakeoverState({ args, github, resolved, agentConfig });
         if (synth.kind === 'error') return synth.exit;
         runState = synth.state;
         try {
@@ -843,22 +932,6 @@ export async function runMergePr(
         message:
           'No PR to merge. Pass --pr <N>, switch to the PR branch, or run `aitm start` to populate state.',
       };
-    }
-
-    const detector = new AgentConfigDetector(cwd);
-    const detectOpts = buildDetectOpts(undefined, runState.options.stylePath, homeDir);
-
-    let agentConfig: AgentConfig | null;
-    try {
-      agentConfig = await detector.detect(detectOpts);
-    } catch (err) {
-      return { code: 1, message: errMsg(err) };
-    }
-    if (!agentConfig) {
-      process.stderr.write(
-        'No CLAUDE.md or AGENTS.md in the repo and no stylePath in state — using a generic default style.\n',
-      );
-      agentConfig = defaultAgentConfig();
     }
 
     const authStatus = ctx.authStatus ?? defaultAuthStatus;
@@ -1011,14 +1084,24 @@ export async function runClean(args: CleanArgs, ctx: CleanCtx = {}): Promise<Com
 }
 
 // Interactive yes/no over stdin. Non-TTY stdin (CI, pipes) denies without prompting: an unattended
-// `aitm clean` must opt into deletion with --force, never hang waiting for input.
-async function ttyConfirm(question: string): Promise<boolean> {
+// `aitm clean` must opt into deletion with --force, never hang waiting for input. AbortSignal support
+// allows testing/cancellation without patching globals.
+async function ttyConfirm(question: string, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error('Aborted');
+  }
   if (process.stdin.isTTY !== true) return false;
   const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const listener = () => rl.close();
+  signal?.addEventListener('abort', listener);
   try {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Aborted');
+    }
     const answer = await rl.question(question);
     return /^y(es)?$/i.test(answer.trim());
   } finally {
+    signal?.removeEventListener('abort', listener);
     rl.close();
   }
 }
@@ -1371,8 +1454,9 @@ async function synthesizeTakeoverState(input: {
   args: Extract<ParsedArgs, { kind: 'merge-pr' }>;
   github: GitHubClient;
   resolved: ResolvedConfig;
+  agentConfig: AgentConfig;
 }): Promise<SynthesizeTakeoverResult> {
-  const { args, github, resolved } = input;
+  const { args, github, resolved, agentConfig } = input;
   let pr = args.pr ?? null;
   if (pr === null) {
     let branch: string;
@@ -1406,6 +1490,12 @@ async function synthesizeTakeoverState(input: {
   }
 
   const now = new Date().toISOString();
+  const agentConfigFile: RunState['agentConfigFile'] =
+    agentConfig.flavor === 'claude'
+      ? 'CLAUDE.md'
+      : agentConfig.flavor === 'agents'
+        ? 'AGENTS.md'
+        : 'custom';
   const state: RunState = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     status: 'awaiting-pr',
@@ -1417,7 +1507,7 @@ async function synthesizeTakeoverState(input: {
     runId: `takeover-${Date.now().toString(36)}`,
     provider: 'openrouter',
     model: resolved.models.generic ?? DEFAULT_MODELS.generic,
-    agentConfigFile: 'CLAUDE.md',
+    agentConfigFile,
     createdAt: now,
     updatedAt: now,
     options: {

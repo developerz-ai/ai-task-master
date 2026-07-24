@@ -212,7 +212,9 @@ test('buildCompactionStep: an oversized brief is dropped rather than sent overfl
 test('buildCompactionStep: threads the prior summary into the next compaction (anchored update, not fresh)', async () => {
   // Two compactions in one run (one build closure). The first has no prior summary; the second must
   // receive the first's output as `priorSummary` so Compactor takes the anchored-update path instead
-  // of re-summarizing from scratch and letting the note drift each round (PR #232 review).
+  // of re-summarizing from scratch and letting the note drift each round (PR #232 review). The second
+  // call uses a longer `messages` array than the first (a later step, growing history — not a same-
+  // length retry) so the messages-length cache doesn't collapse them into one compaction.
   const priorSummaries: Array<string | undefined> = [];
   const compactor = stubCompactor({
     decision: { kind: 'compact', keepLastSteps: 2, contextLength: 100_000 },
@@ -223,10 +225,12 @@ test('buildCompactionStep: threads the prior summary into the next compaction (a
   });
   const build = buildCompactionStep({ compactor, modelId: 'm' });
   // String-content messages are un-prunable → 0 freed → the LLM summarize path runs both times.
-  const steps = [step(2), step(4), step(6), step(8)];
   const messages = [{ role: 'user', content: 'goal' }, ...msgs(8)];
-  const first = await build(prepInput(steps, messages));
-  const second = await build(prepInput(steps, messages));
+  const first = await build(prepInput([step(2), step(4), step(6), step(8)], messages));
+  const moreMessages = [...messages, ...msgs(2)];
+  const second = await build(
+    prepInput([step(2), step(4), step(6), step(8), step(10)], moreMessages),
+  );
   assert.ok(first && second);
   assert.deepEqual(priorSummaries, [undefined, 'ANCHOR']);
 });
@@ -328,10 +332,10 @@ test('buildCompactionStep: usage-grounded trigger compacts when the char estimat
       warnings: [],
     }),
   });
-  const build = buildCompactionStep({
+  const compactorInit = {
     compactor: new Compactor({ summarizer, limits, keepLastSteps: 1, reserveTokens: 20 }),
     modelId: 'm',
-  });
+  };
   const messages = [
     { role: 'user', content: 'goal' },
     { role: 'assistant', content: 'aaaa' },
@@ -341,13 +345,63 @@ test('buildCompactionStep: usage-grounded trigger compacts when the char estimat
   // Four short messages estimate ~4 tokens, far under the 80-token budget (a 100 window minus a
   // 20-token reply reserve). But the last step reported 80 input tokens — the system prompt + tool
   // schemas the estimate can't see — so the grounded size reaches the budget and compaction runs.
-  const grounded = await build(prepInput([step(2), stepWithUsage(4, 80)], messages));
+  const grounded = await buildCompactionStep(compactorInit)(
+    prepInput([step(2), stepWithUsage(4, 80)], messages),
+  );
   assert.ok(grounded && Array.isArray(grounded.messages));
   assert.match(String(grounded.messages[0].content), /REAL SUMMARY/);
 
   // Same messages, but the last step reports no usage → estimate-only (~4) stays under → pass-through.
-  const passthrough = await build(prepInput([step(2), step(4)], messages));
+  // A separate build closure: same message-array length as above, but this is an independently sized
+  // scenario, not a same-length retry of the call above — the messages-length cache is per-closure.
+  const passthrough = await buildCompactionStep(compactorInit)(
+    prepInput([step(2), step(4)], messages),
+  );
   assert.equal(passthrough, undefined);
+});
+
+test('buildCompactionStep: a same-length repeat (within-step retry) reuses the cached result — no second summarizer call', async () => {
+  // `ai` calls prepareStep again with an unchanged `messages` array on within-step retries, and —
+  // since the override isn't persisted across steps — the step right after a compaction also sees
+  // `messages` back at its pre-compaction length. Either way, a repeat call whose message-array
+  // length is unchanged from the last call must reuse that result instead of paying a second
+  // summarizer round trip.
+  let compactCalls = 0;
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 2, contextLength: 100_000 },
+    summary: 'ONE SUMMARY',
+    onCompact: () => {
+      compactCalls++;
+    },
+  });
+  const build = buildCompactionStep({ compactor, modelId: 'm' });
+  const steps = [step(2), step(4), step(6), step(8)];
+  const messages = [{ role: 'user', content: 'goal' }, ...msgs(8)];
+
+  const first = await build(prepInput(steps, messages));
+  const retry = await build(prepInput(steps, messages));
+
+  assert.equal(compactCalls, 1);
+  assert.ok(first && retry);
+  assert.deepEqual(retry, first);
+});
+
+test('buildCompactionStep: cache miss on a grown message array recomputes (not stuck on the first result)', async () => {
+  // Guards against an over-eager cache: once the array grows past the cached length, a fresh
+  // compaction must run again rather than returning the stale first result forever.
+  let compactCalls = 0;
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 2, contextLength: 100_000 },
+    summary: 'S',
+    onCompact: () => {
+      compactCalls++;
+    },
+  });
+  const build = buildCompactionStep({ compactor, modelId: 'm' });
+  const messages = [{ role: 'user', content: 'goal' }, ...msgs(8)];
+  await build(prepInput([step(2), step(4), step(6), step(8)], messages));
+  await build(prepInput([step(2), step(4), step(6), step(8), step(10)], [...messages, ...msgs(2)]));
+  assert.equal(compactCalls, 2);
 });
 
 test('buildCompactionStep: below threshold → pass-through, summarizer never called', async () => {

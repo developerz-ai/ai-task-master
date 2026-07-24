@@ -58,6 +58,20 @@ test('Logger.status writes plain text to stdout (no JSON, no stderr)', () => {
   assert.equal(err.lines.join(''), '');
 });
 
+test('Logger.status scrubs secrets before writing to stdout', () => {
+  const out = captureStream(process.stdout);
+  const err = captureStream(process.stderr);
+  try {
+    const log = new Logger('info', 'run-1');
+    log.status('PR opened with token: Bearer sk-abcdef1234567890');
+  } finally {
+    out.restore();
+    err.restore();
+  }
+  assert.equal(out.lines.join(''), 'PR opened with token: Bearer [REDACTED]\n');
+  assert.equal(err.lines.join(''), '');
+});
+
 test('Logger.info writes JSON to stderr with level/msg/ts/runId', () => {
   const err = captureStream(process.stderr);
   try {

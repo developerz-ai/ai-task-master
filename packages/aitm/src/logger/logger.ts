@@ -65,7 +65,7 @@ export class Logger implements LoggerLike {
   }
 
   status(msg: string): void {
-    process.stdout.write(`${msg}\n`);
+    process.stdout.write(`${scrubSecrets(msg)}\n`);
   }
 
   static redact(fields: Record<string, unknown>): Record<string, unknown> {

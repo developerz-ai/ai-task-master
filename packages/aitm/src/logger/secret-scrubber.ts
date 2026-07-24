@@ -10,9 +10,10 @@ const REDACTED = '[REDACTED]';
 const SECRET_PATTERNS: RegExp[] = [
   // Authorization-style headers embedded in text: "Bearer <token>", "Basic <token>".
   /\b((?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=-]{8,}/gi,
-  // Vendor token prefixes: OpenAI/OpenRouter sk-/pk-/rk-, GitHub gh[pousr]_, Slack xox[abps]-,
-  // AWS AKIA/ASIA.
-  /\b((?:sk|pk|rk)-|gh[pousr]_|xox[abps]-|AKIA|ASIA)[A-Za-z0-9_-]{12,}\b/g,
+  // Vendor token prefixes: OpenAI/OpenRouter sk-/pk-/rk-, GitHub gh[pousr]_/github_pat_,
+  // Slack xox[abps]-/xapp-, AWS AKIA/ASIA, Google AIza, GitLab glpat-, Hugging Face hf_,
+  // npm npm_, and Stripe _live_/_test_ variants.
+  /\b((?:(?:sk|pk|rk)(?:-|_(?:live|test)_)|gh[pousr]_|github_pat_|xox[abps]-|xapp-|AKIA|ASIA|AIza|glpat-|hf_|npm_))[A-Za-z0-9_-]{12,}\b/g,
   // JWTs: header.payload.signature, each segment base64url.
   /\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
   // Token-bearing query params: ?token=..., &api_key=..., &access_token=..., &secret=...

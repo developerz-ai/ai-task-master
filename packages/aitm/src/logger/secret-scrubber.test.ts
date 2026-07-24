@@ -35,6 +35,59 @@ test('scrubSecrets: redacts basic-auth URL credentials, keeps scheme and host', 
   );
 });
 
+test('scrubSecrets: redacts GitHub PAT tokens', () => {
+  assert.equal(
+    scrubSecrets('token github_pat_abc123def456ghi789jkl012mnopqrstuv used'),
+    'token github_pat_[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts Stripe _live_ and _test_ variants', () => {
+  assert.equal(
+    scrubSecrets('key sk_live_abc123def456ghij leaked'),
+    'key sk_live_[REDACTED] leaked',
+  );
+  assert.equal(
+    scrubSecrets('key pk_test_abc123def456ghi789jkl012mnopqrstuv leaked'),
+    'key pk_test_[REDACTED] leaked',
+  );
+});
+
+test('scrubSecrets: redacts Slack xapp- app tokens', () => {
+  assert.equal(
+    scrubSecrets('token xapp-abc123def456ghi789jkl012mnopqrstuv used'),
+    'token xapp-[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts GitLab glpat- tokens', () => {
+  assert.equal(
+    scrubSecrets('token glpat-abc123def456ghi789jkl012mnopqrstuv used'),
+    'token glpat-[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts Google AIza API keys', () => {
+  assert.equal(
+    scrubSecrets('key AIza_abc123def456ghi789jkl012mnopqrstuv used'),
+    'key AIza[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts Hugging Face hf_ tokens', () => {
+  assert.equal(
+    scrubSecrets('token hf_abc123def456ghi789jkl012mnopqrstuv used'),
+    'token hf_[REDACTED] used',
+  );
+});
+
+test('scrubSecrets: redacts npm_ tokens', () => {
+  assert.equal(
+    scrubSecrets('token npm_abc123def456ghi789jkl012mnopqrstuv used'),
+    'token npm_[REDACTED] used',
+  );
+});
+
 test('scrubSecrets: plain text with no secrets passes through unchanged', () => {
   assert.equal(
     scrubSecrets('hello world, nothing secret here'),

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   AUTONOMY_CONTRACT_TEXT,
   COMMUNICATION_CONTRACT_TEXT,
+  contextReminder,
   HARNESS_CONTRACT_TEXT,
   SYSTEM_REMINDER_CONTRACT,
 } from '@developerz.ai/ai-claude-compat';
@@ -162,13 +163,16 @@ test('reminderAgentSystemPrompt: the role prompt plus the #106 provenance contra
   assert.ok(prompt.endsWith(SYSTEM_REMINDER_CONTRACT), 'provenance contract is the final block');
 });
 
-test('harnessContextBlock: a byte-stable <system-reminder> carrying only currentDate (issue #106)', () => {
+test('harnessContextBlock: a <system-reminder> carrying only the day-granular currentDate (issue #106)', () => {
   const block = harnessContextBlock();
   assert.match(block, /system-reminder/i, 'framed as advisory system-reminder context');
   assert.match(block, /currentDate/, 'carries the date label');
-  assert.match(block, /\d{4}-\d{2}-\d{2}/, 'carries an ISO date');
-  assert.equal(block, harnessContextBlock(), 'byte-identical across calls (cacheable prefix)');
-  // The style digest and the run position stay OUT so the leading prefix never moves per step.
+  const date = block.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? '';
+  assert.match(date, /^\d{4}-\d{2}-\d{2}$/, 'carries an ISO date');
+  // Byte-stable and cacheable: the block is EXACTLY a single-field currentDate reminder — no style
+  // digest and no per-step run position — so the leading prompt prefix never moves within a day.
+  // Rebuilt from the block's own date (not a second clock read) so this can't flake at UTC midnight.
+  assert.equal(block, contextReminder([{ label: 'currentDate', body: date }]));
   assert.ok(!/Step \d+ of/.test(block), 'no run position — that rides a trailing reminder');
 });
 

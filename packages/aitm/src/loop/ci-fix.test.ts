@@ -10,7 +10,6 @@ import type { RunCmd, RunCmdResult } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
 import type { PrGroup } from '../state/schema.ts';
-import { harnessContextBlock } from '../subagents/role-prompt.ts';
 import type { FileManifest, WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
 import {
   type FixSessionGithub,
@@ -150,11 +149,12 @@ test('runFixSession: the fix Worker carries the #106 context block, mirroring th
   );
   assert.equal(result.kind, 'fixed');
   assert.ok(captured, 'fix worker was invoked');
-  assert.equal(
-    (captured as WorkerInput).contextBlock,
-    harnessContextBlock(),
-    'the advisory date context block is threaded into the fix Worker input',
-  );
+  // The advisory date context block (issue #106) is threaded into the fix Worker input. Asserted
+  // structurally — its own reminder frame + ISO-date shape — so the check can't flake at UTC midnight.
+  const ctx = (captured as WorkerInput).contextBlock ?? '';
+  assert.match(ctx, /system-reminder/i, 'fix Worker gets the #106 advisory context block');
+  assert.match(ctx, /currentDate/, 'the context block carries the date label');
+  assert.match(ctx, /\d{4}-\d{2}-\d{2}/, 'the context block carries an ISO date');
 });
 
 test('runFixSession: CI failure → saves logs+comments to disk, fix prompt references those dirs, rebases + force-with-lease', async () => {

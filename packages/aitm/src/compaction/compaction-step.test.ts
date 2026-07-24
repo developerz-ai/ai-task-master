@@ -3,7 +3,12 @@ import { test } from 'node:test';
 import type { ModelMessage } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
-import { buildCompactionStep, type CompactorLike, pruneOldToolResults } from './compaction-step.ts';
+import {
+  buildCompactionStep,
+  type CompactorLike,
+  pruneOldToolResults,
+  truncateOldestToFit,
+} from './compaction-step.ts';
 import { type CompactionDecision, Compactor } from './compactor.ts';
 
 // A prepareStep `steps` entry. `ai@6` exposes `response.messages` as the CUMULATIVE response list up
@@ -70,6 +75,10 @@ function stubCompactor(opts: {
   onCompact?: (older: readonly unknown[], priorSummary?: string) => void;
   shouldThrows?: boolean;
   compactThrows?: boolean;
+  // The usable input-token budget the post-compaction fit check verifies against. Defaults large so
+  // control-flow tests (whose small message arrays trivially fit) exercise the intended path; the
+  // overflow-guarantee tests set it small to force the summarize / hard-truncate escalation.
+  usable?: number;
 }): CompactorLike {
   return {
     shouldCompact: async () => {
@@ -82,6 +91,7 @@ function stubCompactor(opts: {
       if (opts.compactReturnsUndefined) return undefined;
       return opts.summary ?? 'SUMMARY';
     },
+    usableInputTokensFor: async () => opts.usable ?? 1_000_000,
   };
 }
 
@@ -101,7 +111,7 @@ function captureLogger(events: Array<Record<string, unknown>>) {
   };
 }
 
-test('buildCompactionStep: above threshold → [summary user msg, ...keepLastSteps tail], cut at a step boundary', async () => {
+test('buildCompactionStep: above threshold → [pinned brief, summary user msg, ...keepLastSteps tail], cut at a step boundary', async () => {
   // 4 steps, cumulative response counts [2, 4, 6, 8] (SDK shape) = 8 step-messages, plus the initial
   // user prompt = 9 total. With the pre-fix code this summed the last 2 arrays (6+8=14 > 9) → splitAt
   // pinned to 0 → pass-through: this test is the regression proof that compaction fires (issue #176).
@@ -120,21 +130,91 @@ test('buildCompactionStep: above threshold → [summary user msg, ...keepLastSte
   );
   assert.ok(result && Array.isArray(result.messages));
   // keepLastSteps=2 → last 2 steps' delta = cumulative 8 − 4 = 4 messages → tail = last 4;
-  // summary(1)+tail(4)=5.
-  assert.equal(result.messages.length, 5);
-  assert.equal(result.messages[0].role, 'user');
-  assert.match(String(result.messages[0].content), /TIGHT SUMMARY/);
-  assert.match(String(result.messages[0].content), /summarized to fit the context window/i);
+  // brief(1)+summary(1)+tail(4)=6.
+  assert.equal(result.messages.length, 6);
+  // The run's first user message is pinned verbatim ahead of the summary.
+  assert.deepEqual(result.messages[0], { role: 'user', content: 'goal' });
+  // The summary is the SECOND message, not the first.
+  assert.equal(result.messages[1].role, 'user');
+  assert.match(String(result.messages[1].content), /TIGHT SUMMARY/);
+  assert.match(String(result.messages[1].content), /summarized to fit the context window/i);
   // Tail is the last 4 original messages verbatim (step boundary preserved).
-  assert.deepEqual(result.messages.slice(1), messages.slice(messages.length - 4));
+  assert.deepEqual(result.messages.slice(2), messages.slice(messages.length - 4));
   // Older (summarized) = the first 5 messages (9 - 4).
   assert.equal(compactedOlder.length, 5);
+});
+
+test('buildCompactionStep: pins the run first user message verbatim ahead of the summary (task brief survives)', async () => {
+  // The original task brief (messages[0]) lives in `older` and would be folded into the lossy
+  // summary. It must survive verbatim, ahead of the summary, so a long run never drifts off its goal.
+  const brief = 'ORIGINAL TASK: ship the widget and do not re-plan';
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 2, contextLength: 100_000 },
+    summary: 'LOSSY SUMMARY',
+  });
+  const messages = [{ role: 'user', content: brief }, ...msgs(8)];
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4), step(6), step(8)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  // The brief is pinned first, verbatim (role + content unchanged).
+  assert.deepEqual(result.messages[0], { role: 'user', content: brief });
+  // The summary is the SECOND message — it never displaces the pinned brief.
+  assert.match(String(result.messages[1]?.content), /LOSSY SUMMARY/);
+  assert.match(String(result.messages[1]?.content), /summarized to fit the context window/i);
+  // The brief stands alone, not merely folded into the summary text.
+  assert.notEqual(result.messages[0]?.content, result.messages[1]?.content);
+});
+
+test('buildCompactionStep: no user message in the summarized prefix → nothing to pin, summary leads', async () => {
+  // A prefix that opens on an assistant turn (no user message in `older`) has no brief to pin — the
+  // result is the summary followed by the kept tail, unchanged from the pre-pin behavior.
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    summary: 'NOBRIEF',
+  });
+  // msgs(n) is all assistant/tool — no user message anywhere.
+  const messages = msgs(7);
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4), step(6)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  assert.equal(result.messages[0]?.role, 'user');
+  assert.match(String(result.messages[0]?.content), /NOBRIEF/);
+});
+
+test('buildCompactionStep: an oversized brief is dropped rather than sent overflowing — summary still fits (overflow guarantee wins)', async () => {
+  // A pathologically huge first user message cannot be pinned without blowing the very budget
+  // compaction exists to satisfy. The pin is best-effort: the brief is dropped so summary + tail
+  // provably fit, never returned overflowing (Decision #20 outranks the pin).
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    summary: 'FITS',
+    usable: 1_000,
+  });
+  const messages: ModelMessage[] = [
+    { role: 'user', content: `HUGE_BRIEF${'x'.repeat(60_000)}` },
+    toolCallMsg('a'),
+    toolResultMsg('a', 'older-a'),
+    toolCallMsg('b'),
+    toolResultMsg('b', 'small-tail'),
+  ];
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  // The huge brief is gone; the summary leads and the kept tail rides along, all within budget.
+  assert.doesNotMatch(JSON.stringify(result.messages), /HUGE_BRIEF/);
+  assert.match(String(result.messages[0]?.content), /FITS/);
+  assert.match(JSON.stringify(result.messages), /small-tail/);
 });
 
 test('buildCompactionStep: threads the prior summary into the next compaction (anchored update, not fresh)', async () => {
   // Two compactions in one run (one build closure). The first has no prior summary; the second must
   // receive the first's output as `priorSummary` so Compactor takes the anchored-update path instead
-  // of re-summarizing from scratch and letting the note drift each round (PR #232 review).
+  // of re-summarizing from scratch and letting the note drift each round (PR #232 review). The second
+  // call uses a longer `messages` array than the first (a later step, growing history — not a same-
+  // length retry) so the messages-length cache doesn't collapse them into one compaction.
   const priorSummaries: Array<string | undefined> = [];
   const compactor = stubCompactor({
     decision: { kind: 'compact', keepLastSteps: 2, contextLength: 100_000 },
@@ -145,10 +225,12 @@ test('buildCompactionStep: threads the prior summary into the next compaction (a
   });
   const build = buildCompactionStep({ compactor, modelId: 'm' });
   // String-content messages are un-prunable → 0 freed → the LLM summarize path runs both times.
-  const steps = [step(2), step(4), step(6), step(8)];
   const messages = [{ role: 'user', content: 'goal' }, ...msgs(8)];
-  const first = await build(prepInput(steps, messages));
-  const second = await build(prepInput(steps, messages));
+  const first = await build(prepInput([step(2), step(4), step(6), step(8)], messages));
+  const moreMessages = [...messages, ...msgs(2)];
+  const second = await build(
+    prepInput([step(2), step(4), step(6), step(8), step(10)], moreMessages),
+  );
   assert.ok(first && second);
   assert.deepEqual(priorSummaries, [undefined, 'ANCHOR']);
 });
@@ -250,10 +332,10 @@ test('buildCompactionStep: usage-grounded trigger compacts when the char estimat
       warnings: [],
     }),
   });
-  const build = buildCompactionStep({
+  const compactorInit = {
     compactor: new Compactor({ summarizer, limits, keepLastSteps: 1, reserveTokens: 20 }),
     modelId: 'm',
-  });
+  };
   const messages = [
     { role: 'user', content: 'goal' },
     { role: 'assistant', content: 'aaaa' },
@@ -263,13 +345,63 @@ test('buildCompactionStep: usage-grounded trigger compacts when the char estimat
   // Four short messages estimate ~4 tokens, far under the 80-token budget (a 100 window minus a
   // 20-token reply reserve). But the last step reported 80 input tokens — the system prompt + tool
   // schemas the estimate can't see — so the grounded size reaches the budget and compaction runs.
-  const grounded = await build(prepInput([step(2), stepWithUsage(4, 80)], messages));
+  const grounded = await buildCompactionStep(compactorInit)(
+    prepInput([step(2), stepWithUsage(4, 80)], messages),
+  );
   assert.ok(grounded && Array.isArray(grounded.messages));
   assert.match(String(grounded.messages[0].content), /REAL SUMMARY/);
 
   // Same messages, but the last step reports no usage → estimate-only (~4) stays under → pass-through.
-  const passthrough = await build(prepInput([step(2), step(4)], messages));
+  // A separate build closure: same message-array length as above, but this is an independently sized
+  // scenario, not a same-length retry of the call above — the messages-length cache is per-closure.
+  const passthrough = await buildCompactionStep(compactorInit)(
+    prepInput([step(2), step(4)], messages),
+  );
   assert.equal(passthrough, undefined);
+});
+
+test('buildCompactionStep: a same-length repeat (within-step retry) reuses the cached result — no second summarizer call', async () => {
+  // `ai` calls prepareStep again with an unchanged `messages` array on within-step retries, and —
+  // since the override isn't persisted across steps — the step right after a compaction also sees
+  // `messages` back at its pre-compaction length. Either way, a repeat call whose message-array
+  // length is unchanged from the last call must reuse that result instead of paying a second
+  // summarizer round trip.
+  let compactCalls = 0;
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 2, contextLength: 100_000 },
+    summary: 'ONE SUMMARY',
+    onCompact: () => {
+      compactCalls++;
+    },
+  });
+  const build = buildCompactionStep({ compactor, modelId: 'm' });
+  const steps = [step(2), step(4), step(6), step(8)];
+  const messages = [{ role: 'user', content: 'goal' }, ...msgs(8)];
+
+  const first = await build(prepInput(steps, messages));
+  const retry = await build(prepInput(steps, messages));
+
+  assert.equal(compactCalls, 1);
+  assert.ok(first && retry);
+  assert.deepEqual(retry, first);
+});
+
+test('buildCompactionStep: cache miss on a grown message array recomputes (not stuck on the first result)', async () => {
+  // Guards against an over-eager cache: once the array grows past the cached length, a fresh
+  // compaction must run again rather than returning the stale first result forever.
+  let compactCalls = 0;
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 2, contextLength: 100_000 },
+    summary: 'S',
+    onCompact: () => {
+      compactCalls++;
+    },
+  });
+  const build = buildCompactionStep({ compactor, modelId: 'm' });
+  const messages = [{ role: 'user', content: 'goal' }, ...msgs(8)];
+  await build(prepInput([step(2), step(4), step(6), step(8)], messages));
+  await build(prepInput([step(2), step(4), step(6), step(8), step(10)], [...messages, ...msgs(2)]));
+  assert.equal(compactCalls, 2);
 });
 
 test('buildCompactionStep: below threshold → pass-through, summarizer never called', async () => {
@@ -338,8 +470,9 @@ test('buildCompactionStep: threshold lookup failure → pass-through + warning (
   );
 });
 
-test('buildCompactionStep: summarizer failure → pass-through + warning (non-fatal)', async () => {
+test('buildCompactionStep: summarizer failure but context already fits → pass-through + warning (non-fatal)', async () => {
   const events: Array<Record<string, unknown>> = [];
+  const messages = msgs(5);
   const compactor = stubCompactor({
     decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
     compactThrows: true,
@@ -348,13 +481,16 @@ test('buildCompactionStep: summarizer failure → pass-through + warning (non-fa
     compactor,
     modelId: 'm',
     logger: captureLogger(events),
-  })(prepInput([step(2), step(4)], msgs(5)));
-  assert.equal(result, undefined);
+  })(prepInput([step(2), step(4)], messages));
+  // The pruned context fits, so a summarizer failure passes it through with no context dropped.
+  assert.ok(result && Array.isArray(result.messages));
+  assert.equal(result.messages.length, messages.length);
   assert.ok(events.some((e) => e.level === 'warn' && /summarizer failed/i.test(String(e.msg))));
 });
 
-test('buildCompactionStep: empty/whitespace summary → pass-through + warning, no context dropped', async () => {
+test('buildCompactionStep: empty/whitespace summary but context already fits → pass-through + warning, no context dropped', async () => {
   const events: Array<Record<string, unknown>> = [];
+  const messages = msgs(5);
   const compactor = stubCompactor({
     decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
     compactReturnsUndefined: true,
@@ -363,10 +499,11 @@ test('buildCompactionStep: empty/whitespace summary → pass-through + warning, 
     compactor,
     modelId: 'm',
     logger: captureLogger(events),
-  })(prepInput([step(2), step(4)], msgs(5)));
-  assert.equal(result, undefined);
+  })(prepInput([step(2), step(4)], messages));
+  assert.ok(result && Array.isArray(result.messages));
+  assert.equal(result.messages.length, messages.length);
   assert.ok(
-    events.some((e) => e.level === 'warn' && /empty text; passing through/i.test(String(e.msg))),
+    events.some((e) => e.level === 'warn' && /summarizer returned empty text/i.test(String(e.msg))),
   );
 });
 
@@ -468,8 +605,10 @@ test('buildCompactionStep: tool results ≤1k are never cleared → nothing free
     prepInput([step(2), step(4), step(6)], messages),
   );
   assert.ok(result && Array.isArray(result.messages));
-  // Nothing was large enough to clear → falls through to the LLM summarize path (summary message).
-  assert.match(String(result.messages[0]?.content), /SUMOUT/);
+  // Nothing was large enough to clear → falls through to the LLM summarize path (summary message),
+  // with the run's first user message pinned verbatim ahead of it.
+  assert.deepEqual(result.messages[0], { role: 'user', content: 'goal' });
+  assert.match(String(result.messages[1]?.content), /SUMOUT/);
   assert.ok(compactedOlder.length > 0);
   assert.doesNotMatch(JSON.stringify(compactedOlder), CLEARED);
 });
@@ -497,10 +636,155 @@ test('buildCompactionStep: <20k freed → summarizes the pruned older prefix (cl
     prepInput([step(2), step(4), step(6)], messages),
   );
   assert.ok(result && Array.isArray(result.messages));
-  assert.match(String(result.messages[0]?.content), /SUMOUT/);
+  // Brief pinned first, summary second.
+  assert.deepEqual(result.messages[0], { role: 'user', content: 'goal' });
+  assert.match(String(result.messages[1]?.content), /SUMOUT/);
   // The summarizer received the pruned older prefix: the cleared placeholder is present, AAA_OLD gone.
   assert.match(JSON.stringify(compactedOlder), CLEARED);
   assert.doesNotMatch(JSON.stringify(compactedOlder), /AAA_OLD/);
+});
+
+test('buildCompactionStep: prune frees ≥20k but is still over budget → falls through to summarize, never returned overflowing (finding 08 HIGH)', async () => {
+  // The bug: freeing ≥20k chars returned immediately without checking the result fits. Here the prune
+  // clears a 60k older result (freed ≫ 20k) but a 50k shielded result stays, so the pruned context is
+  // still ~12.5k tokens against a 5k budget. It must NOT be returned — it must summarize.
+  let compactCalls = 0;
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    summary: 'SUMOUT',
+    usable: 5_000,
+    onCompact: () => {
+      compactCalls++;
+    },
+  });
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'goal' },
+    toolCallMsg('a'),
+    toolResultMsg('a', `AAA_OLD${'x'.repeat(60_000)}`),
+    toolCallMsg('b'),
+    toolResultMsg('b', `BBB_SHIELD${'x'.repeat(50_000)}`),
+    toolCallMsg('c'),
+    toolResultMsg('c', 'small-c'),
+  ];
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4), step(6)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  assert.equal(compactCalls, 1, 'the prune fast-path did NOT short-circuit — summarize ran');
+  // Brief + summary + kept tail, not the still-overflowing pruned array; older summarized away.
+  assert.equal(result.messages.length, 4);
+  assert.deepEqual(result.messages[0], { role: 'user', content: 'goal' });
+  assert.match(String(result.messages[1]?.content), /SUMOUT/);
+  assert.doesNotMatch(JSON.stringify(result.messages), /BBB_SHIELD|AAA_OLD/);
+});
+
+test('buildCompactionStep: summary still over budget → hard-truncates the tail, brief + summary pinned first', async () => {
+  // A single huge verbatim tool result in the kept tail keeps brief+summary+tail over budget; the
+  // escalation drops the oldest tail messages (the huge result and its tool-call together) until it
+  // provably fits, keeping the brief + summary pinned first.
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    summary: 'SUMOUT2',
+    usable: 1_000,
+  });
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'goal' },
+    toolCallMsg('a'),
+    toolResultMsg('a', 'older-a'),
+    toolCallMsg('b'),
+    toolResultMsg('b', `BIG_TAIL${'x'.repeat(50_000)}`),
+  ];
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  assert.equal(result.messages.length, 2);
+  assert.deepEqual(result.messages[0], { role: 'user', content: 'goal' });
+  assert.match(String(result.messages[1]?.content), /SUMOUT2/);
+  assert.doesNotMatch(JSON.stringify(result.messages), /BIG_TAIL/);
+});
+
+test('buildCompactionStep: no usable summary + over budget → hard-truncates the pruned history to fit + warns', async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    compactThrows: true,
+    usable: 100,
+  });
+  const messages: ModelMessage[] = [
+    { role: 'user', content: 'goal' },
+    toolCallMsg('a'),
+    toolResultMsg('a', `AAA${'x'.repeat(50_000)}`),
+    toolCallMsg('b'),
+    toolResultMsg('b', `BBB${'x'.repeat(50_000)}`),
+    toolCallMsg('c'),
+    toolResultMsg('c', 'small-c'),
+  ];
+  const result = await buildCompactionStep({
+    compactor,
+    modelId: 'm',
+    logger: captureLogger(events),
+  })(prepInput([step(2), step(4), step(6)], messages));
+  assert.ok(result && Array.isArray(result.messages));
+  // Dropped down to the newest step (its tool-call + result), never the still-overflowing full array.
+  assert.equal(result.messages.length, 2);
+  assert.equal(
+    result.messages[0]?.role,
+    'assistant',
+    'newest step kept its tool-call, not orphaned',
+  );
+  assert.doesNotMatch(JSON.stringify(result.messages), /BBB|AAA/);
+  assert.ok(
+    events.some(
+      (e) =>
+        e.level === 'warn' &&
+        /over budget/i.test(String(e.msg)) &&
+        /hard-truncated/i.test(String(e.msg)),
+    ),
+  );
+});
+
+test('truncateOldestToFit: keeps the largest fitting suffix, dropping the oldest messages', () => {
+  const messages = [
+    msg('user', 'a'),
+    msg('assistant', 'b'),
+    msg('user', 'c'),
+    msg('assistant', 'd'),
+  ];
+  const out = truncateOldestToFit(messages, (c) => c.length <= 2);
+  assert.deepEqual(out, messages.slice(2));
+});
+
+test('truncateOldestToFit: never orphans a tool-result — cuts before the assistant tool-call', () => {
+  const messages: ModelMessage[] = [
+    toolCallMsg('a'),
+    toolResultMsg('a', 'ra'),
+    toolCallMsg('b'),
+    toolResultMsg('b', 'rb'),
+  ];
+  // An impossible budget (nothing fits): still returns the smallest STRUCTURALLY VALID candidate,
+  // which starts on the assistant tool-call, never a bare tool-result.
+  const out = truncateOldestToFit(messages, () => false);
+  assert.deepEqual(out, [toolCallMsg('b'), toolResultMsg('b', 'rb')]);
+  assert.equal(out[0]?.role, 'assistant');
+});
+
+test('truncateOldestToFit: protects the leading prefix and can drop the whole body down to it', () => {
+  const summary = msg('user', 'SUMMARY');
+  const messages: ModelMessage[] = [summary, toolCallMsg('a'), toolResultMsg('a', 'ra')];
+  const out = truncateOldestToFit(messages, (c) => c.length <= 1, 1);
+  assert.deepEqual(out, [summary]);
+});
+
+test('truncateOldestToFit: never returns empty and never mutates its input', () => {
+  const messages = [msg('user', 'a'), msg('assistant', 'b')];
+  const before = messages.map((m) => JSON.stringify(m));
+  const out = truncateOldestToFit(messages, () => false);
+  assert.ok(out.length >= 1);
+  assert.deepEqual(
+    messages.map((m) => JSON.stringify(m)),
+    before,
+  );
 });
 
 test('pruneOldToolResults: clears shield-exceeding results, keeps recent + tail, never mutates input', () => {

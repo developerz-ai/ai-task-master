@@ -36,6 +36,13 @@ Unset in every source → the provider default. The value is validated as a URL.
 custom base URL is set, point `models.*` at model ids the endpoint serves (e.g. `glm-5.2`).
 See [`providers.md`](./providers.md) for ready-to-copy OpenRouter / z.ai / generic configs.
 
+A top-level `baseURL` (row 2) only outranks the **active profile**'s `baseURL` (row 3) when the
+global config also carries a top-level `openrouterApiKey`. A top-level `baseURL` with no matching
+top-level key is **stale**: the active profile's `baseURL` wins instead (so the profile's key
+targets its own host, not the leftover endpoint), and aitm warns. When the top-level pair is
+coherent it still wins, but aitm warns that `aitm profile use` did not switch the host — the shadow
+is never silent. See [`config.md`](./config.md) §Profiles.
+
 Error cases:
 
 | Case | Behavior |

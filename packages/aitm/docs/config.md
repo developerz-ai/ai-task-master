@@ -152,8 +152,13 @@ models:            defaults < active profile < global < project < --model
 ```
 
 So an explicit key/baseURL in a config file still wins, but the active profile beats a stale
-`OPENROUTER_API_KEY` in the environment. No `activeProfile` set → resolution is identical to
-before profiles existed (full back-compat). A dangling `activeProfile` (named but absent from
+`OPENROUTER_API_KEY` in the environment. One carve-out on `baseURL`: a top-level `baseURL` only
+outranks the active profile's `baseURL` when the global config *also* has a top-level
+`openrouterApiKey` (a self-consistent endpoint+key pair). A top-level `baseURL` with no matching
+top-level key is treated as **stale** — the active profile's `baseURL` wins so the profile's key is
+sent to the profile's own host, not the leftover one. aitm warns in both directions (stale
+top-level dropped, or coherent top-level shadowing the profile), so the shadow is never silent. No
+`activeProfile` set → resolution is identical to before profiles existed (full back-compat). A dangling `activeProfile` (named but absent from
 `profiles`) warns and falls back rather than failing the run. Full command reference and presets:
 [`commands/profile.md`](./commands/profile.md).
 

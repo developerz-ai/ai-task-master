@@ -1458,6 +1458,24 @@ async function resolveWith(
   }
 }
 
+async function resolveWithWarns(
+  globalCfg: unknown,
+  env: Record<string, string | undefined> = {},
+): Promise<{ resolved: import('./schema.ts').ResolvedConfig; warns: string[] }> {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  const collector = makeWarnCollector();
+  try {
+    await writeGlobalConfig(home.path, globalCfg);
+    const loader = new ConfigLoader(cwd.path, home.path, env, collector);
+    const resolved = await loader.resolve({});
+    return { resolved, warns: collector.calls };
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+}
+
 test('profile: active profile supplies apiKey, baseURL, and models', async () => {
   const resolved = await resolveWith({
     activeProfile: 'z.ai',
@@ -1544,6 +1562,79 @@ test('profile: an endpoint-switching profile with no key and no env fails fast �
       profiles: { 'z.ai': { baseURL: 'https://api.z.ai/api/coding/paas/v4' } },
     }),
     /sets a baseURL .* but no API key/,
+  );
+});
+
+test('profile: a stale top-level baseURL (no top-level key) yields to the active profile baseURL + key', async () => {
+  // The trap: `aitm config set baseURL <old>` left a top-level baseURL but no top-level key; the
+  // user then `aitm profile use moonshot`. Old behavior kept the stale host and paired it with the
+  // profile's key → moonshot key sent to the old endpoint. The profile must own the endpoint.
+  const { resolved, warns } = await resolveWithWarns({
+    baseURL: 'https://old.example/v1',
+    activeProfile: 'moonshot',
+    profiles: {
+      moonshot: { baseURL: 'https://api.moonshot.ai/v1', openrouterApiKey: 'sk-moonshot' },
+    },
+  });
+  assert.equal(resolved.baseURL, 'https://api.moonshot.ai/v1');
+  assert.equal(resolved.openrouterApiKey, 'sk-moonshot');
+  assert.equal(resolved.apiKeySource, 'profile');
+  assert.ok(
+    warns.some((w) => w.includes('https://old.example/v1') && w.includes('stale')),
+    `expected a stale-baseURL warning, got: ${JSON.stringify(warns)}`,
+  );
+});
+
+test('profile: a stale top-level baseURL yields to the profile baseURL; a keyless profile falls back to env, never the old host', async () => {
+  const { resolved } = await resolveWithWarns(
+    {
+      baseURL: 'https://old.example/v1',
+      activeProfile: 'moonshot',
+      profiles: { moonshot: { baseURL: 'https://api.moonshot.ai/v1' } },
+    },
+    { OPENROUTER_API_KEY: 'sk-env-for-moonshot' },
+  );
+  assert.equal(resolved.baseURL, 'https://api.moonshot.ai/v1');
+  assert.equal(resolved.openrouterApiKey, 'sk-env-for-moonshot');
+  assert.equal(resolved.apiKeySource, 'env');
+});
+
+test('profile: a coherent top-level pair (key + baseURL) still overrides the active profile, but warns', async () => {
+  // Not stale — the top-level baseURL has a matching top-level key, so it is a deliberate, coherent
+  // config that wins (see "explicit top-level key overrides the active profile"). We only warn that
+  // `profile use` did not switch the endpoint, so the shadow is no longer silent.
+  const { resolved, warns } = await resolveWithWarns({
+    openrouterApiKey: 'sk-or-toplevel',
+    baseURL: 'https://top.example/v1',
+    activeProfile: 'z.ai',
+    profiles: {
+      'z.ai': { openrouterApiKey: 'sk-or-zai', baseURL: 'https://api.z.ai/api/coding/paas/v4' },
+    },
+  });
+  assert.equal(resolved.baseURL, 'https://top.example/v1');
+  assert.equal(resolved.openrouterApiKey, 'sk-or-toplevel');
+  assert.equal(resolved.apiKeySource, 'global');
+  assert.ok(
+    warns.some((w) => w.includes('overrides') && w.includes('z.ai')),
+    `expected an override warning, got: ${JSON.stringify(warns)}`,
+  );
+});
+
+test('profile: a top-level baseURL identical to the active profile baseURL is a silent no-op (no shadow warning)', async () => {
+  const { resolved, warns } = await resolveWithWarns({
+    baseURL: 'https://api.z.ai/api/coding/paas/v4',
+    activeProfile: 'z.ai',
+    profiles: {
+      'z.ai': { baseURL: 'https://api.z.ai/api/coding/paas/v4', openrouterApiKey: 'sk-zai' },
+    },
+  });
+  assert.equal(resolved.baseURL, 'https://api.z.ai/api/coding/paas/v4');
+  assert.equal(resolved.openrouterApiKey, 'sk-zai');
+  assert.equal(resolved.apiKeySource, 'profile');
+  assert.equal(
+    warns.filter((w) => w.includes('baseURL')).length,
+    0,
+    `expected no baseURL shadow warning, got: ${JSON.stringify(warns)}`,
   );
 });
 

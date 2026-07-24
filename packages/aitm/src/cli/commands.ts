@@ -1108,9 +1108,9 @@ export async function runMcpLogin(
   try {
     // Endpoint discovery (RFC 8414 metadata + MCP WWW-Authenticate probe) and client-id resolution
     // live in mcp/oauth.ts; the CLI only forwards the server URL and user-supplied overrides.
-    const login = ctx.performOAuth ?? (await import('../mcp/oauth.js')).loginToMcpServer;
+    const login = ctx.performOAuth ?? (await import('../mcp/oauth.ts')).loginToMcpServer;
 
-    const input: import('../mcp/oauth.js').McpOAuthLoginInput = { serverUrl: args.serverUrl };
+    const input: import('../mcp/oauth.ts').McpOAuthLoginInput = { serverUrl: args.serverUrl };
     if (args.callbackUrl) input.callbackUrl = args.callbackUrl;
     if (args.timeout) input.timeout = args.timeout;
 

@@ -7,7 +7,6 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULT_TIMEOUT = 30000;
@@ -162,11 +161,8 @@ export async function openBrowser(url: string, launcher?: BrowserLauncher): Prom
 
 // HTML pages for success/error feedback.
 async function loadHtmlTemplate(name: 'success' | 'error'): Promise<string> {
-  const templatePath = fileURLToPath(
-    join(dirname(import.meta.url), '..', 'templates', `oauth-${name}.html`),
-  );
-
   try {
+    const templatePath = fileURLToPath(new URL(`../templates/oauth-${name}.html`, import.meta.url));
     return await readFile(templatePath, 'utf8');
   } catch {
     return getDefaultHtml(name);
@@ -255,6 +251,7 @@ class NodeServer {
   async stop(): Promise<void> {
     const server = this.server;
     if (server) {
+      server.closeAllConnections();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
       });

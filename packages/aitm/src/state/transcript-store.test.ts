@@ -97,11 +97,8 @@ test('reconstructTranscript: N invalid messages across records aggregate into on
   ].join('\n');
   const out = reconstructTranscript(raw, (m) => warns.push(m));
   assert.deepEqual(out.messages, [msg('user', 'SUMMARY')]);
-  assert.deepEqual(
-    warns,
-    ['skipped 3 invalid transcript messages'],
-    'one aggregated warning for all 3 skips',
-  );
+  assert.equal(warns.length, 1, 'one aggregated warning for all 3 skips');
+  assert.match(warns[0] ?? '', /^skipped 3 invalid transcript messages \(fields: .+\)$/);
 });
 
 test('reconstructTranscript: a mistyped message inside a compaction record is skipped, valid ones kept', () => {
@@ -386,6 +383,58 @@ test('findResumable returns null for a group/stage with no transcripts (missing 
   const dir = await tmp();
   try {
     assert.equal(await new TranscriptStore(dir).findResumable('nope', 'working'), null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('begin prunes an empty ordinal left by a crashed prior process, reusing its ordinal', async () => {
+  const dir = await tmp();
+  try {
+    const first = new TranscriptStore(dir);
+    const rec = await first.begin({ group: 'g', stage: 'working' }); // ordinal 1, reserved
+    await rec.step([msg('assistant', 'a')]); // real content — never pruned
+    await first.begin({ group: 'g', stage: 'working' }); // ordinal 2, reserved, never written — simulates a crash right after begin()
+
+    const filesDir = join(dir, 'transcripts', 'g');
+    assert.deepEqual(
+      (await readdir(filesDir)).sort(),
+      ['working-1.jsonl', 'working-2.jsonl'],
+      'both ordinals exist before the next process starts',
+    );
+
+    // A fresh TranscriptStore (new process) has no record of ordinal 2 being "in flight" — its first
+    // begin() must see it as an empty leftover and prune it before reserving the next ordinal.
+    const second = new TranscriptStore(dir);
+    const reused = await second.begin({ group: 'g', stage: 'working' });
+    await reused.step([msg('assistant', 'b')]);
+
+    assert.deepEqual(
+      (await readdir(filesDir)).sort(),
+      ['working-1.jsonl', 'working-2.jsonl'],
+      'the empty ordinal-2 reservation was pruned and its slot reused, not left as a 3rd file',
+    );
+    assert.deepEqual((await second.findResumable('g', 'working'))?.messages, [
+      msg('assistant', 'b'),
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('begin never prunes an empty ordinal it reserved itself in the same process', async () => {
+  const dir = await tmp();
+  try {
+    const store = new TranscriptStore(dir);
+    await store.begin({ group: 'g', stage: 'working' }); // ordinal 1, reserved, never written
+    await store.begin({ group: 'g', stage: 'working' }); // its own prune pass must skip ordinal 1
+
+    const filesDir = join(dir, 'transcripts', 'g');
+    assert.deepEqual(
+      (await readdir(filesDir)).sort(),
+      ['working-1.jsonl', 'working-2.jsonl'],
+      'same-process reservations survive pruning even while still empty',
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

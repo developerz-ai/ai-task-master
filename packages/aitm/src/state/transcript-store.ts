@@ -8,7 +8,7 @@
 // every step (O(n²)) and lose the crash-tail property. Records pass through Logger.redact before
 // serialization (best-effort key-name redaction of key/token/secret/authorization).
 
-import { access, appendFile, mkdir, open, readdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, open, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LanguageModelUsage, ModelMessage } from 'ai';
 import { modelMessageSchema } from 'ai';
@@ -84,12 +84,16 @@ function isLeadingRun(arr: readonly ModelMessage[], prefix: readonly ModelMessag
   return true;
 }
 
-// Keep only a record's messages that match the ModelMessage shape, tallying skips into `tally` (one
-// aggregated warning per reconstruct, not one per element — see reconstructTranscript). A crash
-// mid-write or a hand-edit can leave a JSON-valid line whose message shape is wrong; dropping the bad
-// element (not the whole line) keeps the rest of the transcript replayable on resume. The failing
-// field is logged at debug so the aggregate warning stays a one-liner while detail is still reachable.
-function validMessages(raw: readonly unknown[], tally: { skipped: number }): ModelMessage[] {
+// Keep only a record's messages that match the ModelMessage shape, tallying skips (and the failing
+// field paths) into `tally` — one aggregated warning per reconstruct, not one per element, and never
+// a direct console call (both routed through the caller's `onWarn`, matching the stdout contract every
+// other diagnostic in this module follows — see reconstructTranscript). A crash mid-write or a
+// hand-edit can leave a JSON-valid line whose message shape is wrong; dropping the bad element (not
+// the whole line) keeps the rest of the transcript replayable on resume.
+function validMessages(
+  raw: readonly unknown[],
+  tally: { skipped: number; paths: string[] },
+): ModelMessage[] {
   const out: ModelMessage[] = [];
   for (const item of raw) {
     const parsed = modelMessageSchema.safeParse(item);
@@ -97,9 +101,9 @@ function validMessages(raw: readonly unknown[], tally: { skipped: number }): Mod
       out.push(parsed.data);
     } else {
       tally.skipped++;
-      console.debug('skipping invalid transcript message', {
-        issues: parsed.error.issues.map((issue) => issue.path.join('.')),
-      });
+      tally.paths.push(
+        parsed.error.issues.map((issue) => issue.path.join('.') || '<root>').join('+'),
+      );
     }
   }
   return out;
@@ -123,7 +127,7 @@ export function reconstructTranscript(
 ): ReconstructedTranscript {
   let messages: ModelMessage[] = [];
   let complete = false;
-  const tally = { skipped: 0 };
+  const tally = { skipped: 0, paths: [] as string[] };
   for (const line of raw.split('\n')) {
     if (line.trim() === '') continue;
     let record: unknown;
@@ -145,7 +149,11 @@ export function reconstructTranscript(
       complete = true;
     }
   }
-  if (tally.skipped > 0) onWarn(`skipped ${tally.skipped} invalid transcript messages`);
+  if (tally.skipped > 0) {
+    onWarn(
+      `skipped ${tally.skipped} invalid transcript messages (fields: ${tally.paths.join(', ')})`,
+    );
+  }
   return { messages, complete };
 }
 
@@ -166,8 +174,11 @@ class FileRecorder implements TranscriptRecorder {
     return this.append({ kind: 'compaction', messages });
   }
 
+  // fsync'd (unlike step/compaction — see append): `run-end` is the record findResumable's
+  // `complete` check depends on, so it must survive a crash right after this call returns, not just
+  // land in the page cache. Mirrors fs/atomic-write.ts's fh.sync() before treating a write as durable.
   end(outcome: RunEndOutcome): Promise<void> {
-    return this.append({ kind: 'run-end', outcome });
+    return this.append({ kind: 'run-end', outcome }, { sync: true });
   }
 
   // Best-effort (issue #108 CR): a serialize or disk failure warns and resolves — a transcript write
@@ -179,11 +190,14 @@ class FileRecorder implements TranscriptRecorder {
   // a transcript that stops mid-run because the PROCESS crashed still has a healthy append history,
   // while one that stops because appends kept failing needs findResumable to say so rather than hand
   // back a transcript nobody was able to keep writing.
-  private append(record: Record<string, unknown>): Promise<void> {
+  private append(record: Record<string, unknown>, options: { sync?: boolean } = {}): Promise<void> {
     const step = this.chain.then(async () => {
+      let fh: Awaited<ReturnType<typeof open>> | undefined;
       try {
         const line = `${JSON.stringify(Logger.redact({ ts: new Date().toISOString(), ...record }))}\n`;
-        await appendFile(this.file, line);
+        fh = await open(this.file, 'a');
+        await fh.appendFile(line);
+        if (options.sync) await fh.sync();
         this.consecutiveFailures = 0;
       } catch (err) {
         this.onWarn(`transcript write failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -191,6 +205,8 @@ class FileRecorder implements TranscriptRecorder {
         if (this.consecutiveFailures === PERSISTENT_FAILURE_THRESHOLD) {
           await this.markPersistentFailure();
         }
+      } finally {
+        await fh?.close();
       }
     });
     this.chain = step;
@@ -210,6 +226,13 @@ class FileRecorder implements TranscriptRecorder {
 }
 
 export class TranscriptStore {
+  // Ordinal files this process has reserved (successful `open(…, 'wx')` in reserveOrdinalFile),
+  // whether or not they've had a record appended yet. pruneEmptyOrdinals must never delete one of
+  // these — it may be a sibling begin()'s reservation still between reserve and its first step — so
+  // "empty and safe to prune" is scoped to files this process didn't reserve, i.e. leftovers from a
+  // PRIOR process that reserved an ordinal (via begin) and crashed before writing anything to it.
+  private readonly reservedFiles = new Set<string>();
+
   constructor(
     private readonly stateDir: string,
     private readonly onWarn: (message: string) => void = (m) =>
@@ -222,12 +245,41 @@ export class TranscriptStore {
 
   // Start a new transcript for a target, allocating the next 1-based ordinal per (subdir, prefix).
   // The ordinal's file is created empty to reserve it (see reserveOrdinalFile); records append to it.
+  // Empty ordinals left behind by a begin() whose process crashed before the first step are pruned
+  // first, so a repeatedly-crashing run doesn't burn one ordinal per attempt forever.
   async begin(target: TranscriptTarget): Promise<TranscriptRecorder> {
     const { subdir, prefix } = locate(target);
     const dir = join(this.dir(), subdir);
     await mkdir(dir, { recursive: true });
+    await this.pruneEmptyOrdinals(dir, prefix);
     const file = await this.reserveOrdinalFile(dir, prefix);
     return new FileRecorder(file, this.onWarn);
+  }
+
+  // Best-effort housekeeping, never blocks or fails begin(): delete zero-byte ordinal files this
+  // process didn't itself reserve. A file already tracked in reservedFiles is skipped even if still
+  // empty — it may belong to a sibling begin() in this process that hasn't appended its first step
+  // yet (see reservedFiles). A stat/unlink race (another process finishes writing, or removes the
+  // file itself, between the listing and the unlink) is swallowed — pruning is opportunistic, not a
+  // correctness requirement.
+  private async pruneEmptyOrdinals(dir: string, prefix: string): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (ordinalOf(entry, prefix) === null) continue;
+      const file = join(dir, entry);
+      if (this.reservedFiles.has(file)) continue;
+      try {
+        const info = await stat(file);
+        if (info.size === 0) await unlink(file);
+      } catch {
+        // Gone, grew, or unlink lost a race — leave it; not this call's problem.
+      }
+    }
   }
 
   // Reserve the next ordinal race-free: a bare readdir→max+1 lets two concurrent begins (in this
@@ -235,15 +287,21 @@ export class TranscriptStore {
   // the file isn't written until the first record. `open(…, 'wx')` creates the file exclusively —
   // EEXIST means someone already took that ordinal, so we bump and retry. The scan seeds a good start;
   // the loop only spins under an actual collision.
+  //
+  // The ordinal is claimed into reservedFiles synchronously, before the `open` await — so a
+  // concurrent begin()'s pruneEmptyOrdinals can never observe this file on disk without also
+  // observing the claim (nothing else runs between the claim and the open attempt starting).
   private async reserveOrdinalFile(dir: string, prefix: string): Promise<string> {
     let ordinal = await this.nextOrdinal(dir, prefix);
     for (;;) {
       const file = join(dir, `${prefix}-${ordinal}.jsonl`);
+      this.reservedFiles.add(file);
       try {
         const handle = await open(file, 'wx');
         await handle.close();
         return file;
       } catch (err) {
+        this.reservedFiles.delete(file);
         if (!isEexist(err)) throw err;
         ordinal++;
       }

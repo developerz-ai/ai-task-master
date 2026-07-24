@@ -3,8 +3,9 @@ import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { makeTempRepo } from '../testing/temp-repo.ts';
+import { UnsupportedSchemaVersion } from './migrations.ts';
 import { RunLockHeld } from './run-lock.ts';
-import { type RunState, RunStateSchema } from './schema.ts';
+import { CURRENT_SCHEMA_VERSION, type RunState, RunStateSchema } from './schema.ts';
 import { StateAlreadyInitialized, StateStore } from './state-store.ts';
 
 function baseState(overrides: Partial<RunState> = {}): RunState {
@@ -48,6 +49,14 @@ function legacyGroup(props: {
     pr: props.pr,
     status: props.status,
   };
+}
+
+// A v0 state.json: the baseline shape with no `schemaVersion`, which is how every file written
+// before versioning looks on disk and what routes a read through the v0 → v1 migration step.
+function v0State(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const state: Record<string, unknown> = JSON.parse(JSON.stringify(baseState()));
+  delete state.schemaVersion;
+  return { ...state, ...overrides };
 }
 
 test('StateStore is constructible', () => {
@@ -191,26 +200,27 @@ test('read: coerces legacy string[] tasks, leaves structured tasks intact', asyn
 
     // Older state.json stored prGroups[].tasks as a bare string[]. Mix in one already-structured
     // task to prove coercion only rewrites strings.
-    const legacy: Record<string, unknown> = JSON.parse(JSON.stringify(baseState()));
-    legacy.prGroups = [
-      {
-        id: 'g1',
-        title: 'Group one',
-        tasks: [
-          'Add the login form',
-          { id: 'kept', text: 'Already structured', complexity: 'complex', done: true },
-        ],
-        dependsOn: [],
-        branch: null,
-        pr: null,
-        status: 'pending',
-      },
-    ];
+    const legacy = v0State({
+      prGroups: [
+        {
+          id: 'g1',
+          title: 'Group one',
+          tasks: [
+            'Add the login form',
+            { id: 'kept', text: 'Already structured', complexity: 'complex', done: true },
+          ],
+          dependsOn: [],
+          branch: null,
+          pr: null,
+          status: 'pending',
+        },
+      ],
+    });
     await writeFile(join(dir, 'state.json'), JSON.stringify(legacy));
 
     const read = await store.read();
     assert.deepEqual(read.prGroups[0]?.tasks, [
-      { id: 'add-the-login-form', text: 'Add the login form', complexity: 'normal', done: false },
+      { id: 'add-the-login-form-1', text: 'Add the login form', complexity: 'normal', done: false },
       { id: 'kept', text: 'Already structured', complexity: 'complex', done: true },
     ]);
   } finally {
@@ -227,12 +237,13 @@ test('read: infers a missing group stage from status/pr', async () => {
 
     // Pre-stage-machine state.json carried no PrGroup.stage. On read it must be inferred:
     // merged → merged, open PR → waiting-ci, otherwise → pending.
-    const legacy: Record<string, unknown> = JSON.parse(JSON.stringify(baseState()));
-    legacy.prGroups = [
-      legacyGroup({ id: 'done', status: 'merged', pr: 5 }),
-      legacyGroup({ id: 'open', status: 'in-progress', pr: 9 }),
-      legacyGroup({ id: 'fresh', status: 'pending', pr: null }),
-    ];
+    const legacy = v0State({
+      prGroups: [
+        legacyGroup({ id: 'done', status: 'merged', pr: 5 }),
+        legacyGroup({ id: 'open', status: 'in-progress', pr: 9 }),
+        legacyGroup({ id: 'fresh', status: 'pending', pr: null }),
+      ],
+    });
     await writeFile(join(dir, 'state.json'), JSON.stringify(legacy));
 
     const read = await store.read();
@@ -253,8 +264,7 @@ test('read: a legacy blocked group stays blocked (not reclassified runnable)', a
 
     // A pre-stage-machine terminal `blocked` group: status blocked, and a pr set (which would
     // otherwise infer 'waiting-ci'). It must stay blocked so resume doesn't re-run halted work.
-    const legacy: Record<string, unknown> = JSON.parse(JSON.stringify(baseState()));
-    legacy.prGroups = [legacyGroup({ id: 'stuck', status: 'blocked', pr: 7 })];
+    const legacy = v0State({ prGroups: [legacyGroup({ id: 'stuck', status: 'blocked', pr: 7 })] });
     await writeFile(join(dir, 'state.json'), JSON.stringify(legacy));
 
     const read = await store.read();
@@ -272,15 +282,65 @@ test('read: preserves an existing group stage instead of inferring', async () =>
     const store = new StateStore(dir);
     await store.init(baseState());
 
-    const legacy: Record<string, unknown> = JSON.parse(JSON.stringify(baseState()));
     // pr is set (would infer waiting-ci) but an explicit stage must win.
-    legacy.prGroups = [
-      { ...legacyGroup({ id: 'g', status: 'in-progress', pr: 3 }), stage: 'ready-to-merge' },
-    ];
+    const legacy = v0State({
+      prGroups: [
+        { ...legacyGroup({ id: 'g', status: 'in-progress', pr: 3 }), stage: 'ready-to-merge' },
+      ],
+    });
     await writeFile(join(dir, 'state.json'), JSON.stringify(legacy));
 
     const read = await store.read();
     assert.equal(read.prGroups[0]?.stage, 'ready-to-merge');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('read: a v0 state.json is stamped with the current schema version', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+    await writeFile(join(dir, 'state.json'), JSON.stringify(v0State()));
+
+    assert.equal((await store.read()).schemaVersion, CURRENT_SCHEMA_VERSION);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('init + update persist schemaVersion on disk', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+    const afterInit: unknown = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'));
+    assert.equal((afterInit as { schemaVersion: unknown }).schemaVersion, CURRENT_SCHEMA_VERSION);
+
+    await store.update((s) => ({ ...s, status: 'working' }));
+    const afterUpdate: unknown = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'));
+    assert.equal((afterUpdate as { schemaVersion: unknown }).schemaVersion, CURRENT_SCHEMA_VERSION);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('read: a state.json from a newer aitm is refused, not read', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    const store = new StateStore(dir);
+    await store.init(baseState());
+    const future = { ...v0State(), schemaVersion: CURRENT_SCHEMA_VERSION + 1 };
+    await writeFile(join(dir, 'state.json'), JSON.stringify(future));
+
+    await assert.rejects(() => store.read(), UnsupportedSchemaVersion);
+    // The run it could not read survives untouched — reading never rewrites.
+    const onDisk: unknown = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'));
+    assert.deepEqual(onDisk, future);
   } finally {
     await repo.cleanup();
   }

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { acquireRunLock } from '../state/run-lock.ts';
-import type { PrGroup, RunState } from '../state/schema.ts';
+import { CURRENT_SCHEMA_VERSION, type PrGroup, type RunState } from '../state/schema.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type {
   CommandExit,
@@ -849,6 +849,43 @@ test('runStart: an unparseable state.json is replaced, not treated as a run to p
       runId: string;
     };
     assert.ok(persisted.runId.length > 0);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: a state.json from a newer aitm is refused, never replaced', async () => {
+  // The contrast with the unparseable case above: a file this build cannot read is not a corrupt
+  // one. Forcing a fresh init over it would destroy a live run purely over a version gap.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const dir = join(repo.path, '.ai-task-master');
+    await mkdir(dir, { recursive: true });
+    const future = JSON.stringify({ schemaVersion: CURRENT_SCHEMA_VERSION + 1, runId: 'from-v2' });
+    await writeFile(join(dir, 'state.json'), future);
+    let plannerCalls = 0;
+    const result = await runStart(
+      { kind: 'start', goal: 'add hello' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        modelBanner: async () => '',
+        runPlanner: async () => {
+          plannerCalls += 1;
+          return { kind: 'ok', groups: [] };
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 1, 'the run must refuse to start');
+    assert.match(result.message ?? '', /newer aitm/);
+    assert.equal(plannerCalls, 0, 'nothing may run on top of a state file we cannot read');
+    assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), future, 'file untouched');
   } finally {
     await repo.cleanup();
     await home.cleanup();

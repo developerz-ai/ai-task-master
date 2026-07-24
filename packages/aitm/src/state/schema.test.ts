@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { GroupStageSchema, PrGroupSchema, RunStateSchema, TaskSchema } from './schema.ts';
+import {
+  CURRENT_SCHEMA_VERSION,
+  GroupStageSchema,
+  PrGroupSchema,
+  RunStateSchema,
+  TaskSchema,
+} from './schema.ts';
 
 test('PrGroupSchema defaults dependsOn to []', () => {
   const parsed = PrGroupSchema.parse({
@@ -122,6 +128,39 @@ test('RunStateSchema rejects unknown provider', () => {
       },
     }),
   );
+});
+
+test('RunStateSchema: schemaVersion defaults to current and rejects any other version', () => {
+  const base = {
+    status: 'planning',
+    prGroups: [],
+    currentGroupIndex: 0,
+    currentTaskIndex: 0,
+    sessionCount: 0,
+    currentPr: null,
+    runId: 'r1',
+    provider: 'openrouter',
+    model: 'x',
+    agentConfigFile: 'CLAUDE.md',
+    createdAt: 'now',
+    updatedAt: 'now',
+    options: {
+      autoMerge: true,
+      maxPrs: 5,
+      maxSessions: null,
+      mergeMethod: 'squash',
+      stylePath: null,
+      concurrency: 1,
+    },
+  };
+  assert.equal(RunStateSchema.parse(base).schemaVersion, CURRENT_SCHEMA_VERSION);
+  assert.equal(
+    RunStateSchema.parse({ ...base, schemaVersion: CURRENT_SCHEMA_VERSION }).schemaVersion,
+    CURRENT_SCHEMA_VERSION,
+  );
+  // Anything else must reach this schema already lifted by state/migrations.ts.
+  assert.throws(() => RunStateSchema.parse({ ...base, schemaVersion: CURRENT_SCHEMA_VERSION + 1 }));
+  assert.throws(() => RunStateSchema.parse({ ...base, schemaVersion: 0 }));
 });
 
 test('RunStateSchema: usage is optional (legacy state parses) and round-trips when present (issue #114)', () => {

@@ -36,8 +36,9 @@ import {
 import { OpenRouterClient } from '../openrouter/client.ts';
 import { type ModelLimitsLookup, ModelLimitsRegistry } from '../openrouter/model-limits.ts';
 import { OpenRouterReferenceCatalog } from '../openrouter/reference-catalog.ts';
+import { UnsupportedSchemaVersion } from '../state/migrations.ts';
 import type { RunLockHandle } from '../state/run-lock.ts';
-import type { PrGroup, RunState } from '../state/schema.ts';
+import { CURRENT_SCHEMA_VERSION, type PrGroup, type RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import type { CleanArgs, ParsedArgs } from './args.ts';
 import { type BannerEntry, modelBanner } from './model-banner.ts';
@@ -1099,6 +1100,7 @@ function buildInitialRunState(input: {
         ? 'AGENTS.md'
         : 'custom';
   return {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     status: 'planning',
     prGroups: [],
     currentGroupIndex: 0,
@@ -1141,6 +1143,9 @@ export function isRunComplete(state: RunState): boolean {
 }
 
 function isMissingOrInvalidState(err: unknown, stateDir: string): boolean {
+  // A run this build cannot read is not an invalid one. Discarding a state.json written by a newer
+  // aitm would destroy a live run over a version gap, so it never routes to a forced fresh init.
+  if (err instanceof UnsupportedSchemaVersion) return false;
   if (
     typeof err === 'object' &&
     err !== null &&
@@ -1314,6 +1319,7 @@ async function synthesizeTakeoverState(input: {
 
   const now = new Date().toISOString();
   const state: RunState = {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     status: 'awaiting-pr',
     prGroups: [],
     currentGroupIndex: 0,

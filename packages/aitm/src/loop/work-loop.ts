@@ -12,6 +12,7 @@
 // Deps are structural ports — concrete classes (Orchestrator, GitHubClient, StateStore,
 // InPlaceCheckout, PlanGraph) satisfy them at runtime; tests pass literal stubs.
 
+import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../config/defaults.ts';
 import type { GroupStage, PrGroup, PrGroupStatus } from '../domain/pr-group.ts';
 import type { Task } from '../domain/task.ts';
 import type { FileChange, WorkerDelivery } from '../domain/worker-delivery.ts';
@@ -28,7 +29,6 @@ import { perTaskBranch } from '../workspace/branch-name.ts';
 import { DirtyWorkingTree } from '../workspace/dirty-tree.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
 import { type CiRoute, chargeCiFixAttempt, routeCiPoll } from './ci-outcome-policy.ts';
-import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from './constants.ts';
 import { Mutex } from './mutex.ts';
 import type { SelfReviewResult } from './self-review.ts';
 import {

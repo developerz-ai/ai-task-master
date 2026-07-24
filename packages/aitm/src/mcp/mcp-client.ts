@@ -13,6 +13,7 @@
 import { experimental_createMCPClient, type MCPClient, type MCPClientConfig } from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { ToolSet } from 'ai';
+import { DEFAULT_MCP_DEFER_TOOLS_OVER } from '../config/defaults.ts';
 import type { Role } from '../domain/role.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { McpRoleAllowlist, McpRoleAllowlistValue, McpServer, McpServers } from './schema.ts';
@@ -21,11 +22,6 @@ import { StdioProcessRegistry } from './stdio-process-registry.ts';
 export type TransportKind = 'stdio' | 'http' | 'sse';
 
 export type CreateMcpClient = (config: MCPClientConfig) => Promise<MCPClient>;
-
-// Above this many role-visible MCP tools, the surplus is deferred (name-only stubs + a `tool_search`
-// tool) instead of mounted directly, so their JSON schemas stay out of every request (issue #119).
-// `0` = always defer. Overridable via the `mcpDeferToolsOver` config key.
-export const DEFAULT_MCP_DEFER_TOOLS_OVER = 20;
 
 // One server's connect — createClient plus its first tools() listing — is bounded by this deadline:
 // a stdio server that spawns but never completes the MCP handshake (createClient resolves, tools()

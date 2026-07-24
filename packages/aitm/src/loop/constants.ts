@@ -10,10 +10,6 @@
 // changes here. It becomes load-bearing when transcripts persist across waits.
 
 export const DEFAULT_MAX_ITERATIONS = 30; // max loop iterations before giving up
-// Cap on CI-fix passes per group per driveStages run, bounding the waiting-ci ⇄ ci-failed recovery
-// loop on an unfixable red PR (flaky infra, missing secret, a failure unrelated to the diff) so an
-// unattended run blocks for a human instead of burning coding-tier tokens forever. See issue #128.
-export const DEFAULT_MAX_CI_FIX_ATTEMPTS = 3;
 // ms: grace period after CI passes before checking reviews. Review bots (CodeRabbit) post their
 // comments a little *after* CI completes rather than as a blocking status check, so without this
 // wait we'd race ahead and merge before the review lands.

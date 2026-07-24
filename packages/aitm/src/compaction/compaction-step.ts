@@ -208,13 +208,23 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
       role: 'user',
       content: `${SUMMARY_HEADER}\n\n${summary}`,
     };
-    const compacted: ModelMessage[] = [summaryMessage, ...tail];
+    // Pin the run's first user message (the original task brief) verbatim ahead of the summary. It
+    // lives in `older` and is being summarized away, so without this it survives only as whatever the
+    // lossy summary chose to keep — letting a long run drift off the goal it is anchored to. Pinning
+    // is best-effort: an oversized brief that would push the protected [brief, summary] core past the
+    // budget is dropped below, so the overflow guarantee (finding 08, HIGH) still holds — a summary
+    // that fits outranks a verbatim brief that does not.
+    const brief = firstUserMessage(older);
+    const tailWithSummary: ModelMessage[] = [summaryMessage, ...tail];
+    const compacted: ModelMessage[] = brief ? [brief, ...tailWithSummary] : tailWithSummary;
 
-    // Post-compaction verification. Summary + kept tail is normally far under budget, but a single
-    // huge verbatim tool result inside the kept steps — or a long summary — can still exceed it. Drop
-    // the oldest tail messages, keeping the summary pinned first, until it provably fits.
+    // Post-compaction verification. Brief + summary + kept tail is normally far under budget, but a
+    // single huge verbatim tool result inside the kept steps — or a long summary — can still exceed
+    // it. Drop the oldest tail messages, keeping the brief + summary pinned first, until it provably
+    // fits; if the brief itself is what overflows the core, drop it and keep just the summary pinned.
     if (!fits(compacted)) {
-      const truncated = truncateOldestToFit(compacted, fits, 1);
+      let truncated = truncateOldestToFit(compacted, fits, brief ? 2 : 1);
+      if (brief && !fits(truncated)) truncated = truncateOldestToFit(tailWithSummary, fits, 1);
       init.logger?.warn('compaction: summary still over budget; hard-truncated tail to fit', {
         modelId: init.modelId,
         liveInputTokens,
@@ -229,6 +239,7 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
       contextLength: decision.contextLength,
       keptSteps: decision.keepLastSteps,
       prunedChars: pruned.freedChars,
+      pinnedBrief: brief !== undefined,
     });
     return { messages: compacted };
   };
@@ -258,6 +269,14 @@ function estimateTokens(messages: readonly ModelMessage[]): number {
 // and adds them to that count. A non-positive delta (no completed step) → nothing.
 function messagesSince(messages: readonly ModelMessage[], delta: number): readonly ModelMessage[] {
   return delta > 0 ? messages.slice(Math.max(0, messages.length - delta)) : [];
+}
+
+// The run's original task brief: the first user-role message in the summarized prefix, pinned
+// verbatim ahead of the summary (see buildCompactionStep) so compaction never folds the run's goal
+// into a lossy note. undefined when the prefix has no user message (e.g. a leading assistant turn) —
+// nothing to pin.
+function firstUserMessage(older: readonly ModelMessage[]): ModelMessage | undefined {
+  return older.find((message) => message.role === 'user');
 }
 
 // Cheap, model-free prune pass over the prunable prefix (`messages[0, splitAt)` — everything older

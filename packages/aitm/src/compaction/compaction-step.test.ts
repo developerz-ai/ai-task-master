@@ -111,7 +111,7 @@ function captureLogger(events: Array<Record<string, unknown>>) {
   };
 }
 
-test('buildCompactionStep: above threshold → [summary user msg, ...keepLastSteps tail], cut at a step boundary', async () => {
+test('buildCompactionStep: above threshold → [pinned brief, summary user msg, ...keepLastSteps tail], cut at a step boundary', async () => {
   // 4 steps, cumulative response counts [2, 4, 6, 8] (SDK shape) = 8 step-messages, plus the initial
   // user prompt = 9 total. With the pre-fix code this summed the last 2 arrays (6+8=14 > 9) → splitAt
   // pinned to 0 → pass-through: this test is the regression proof that compaction fires (issue #176).
@@ -130,15 +130,83 @@ test('buildCompactionStep: above threshold → [summary user msg, ...keepLastSte
   );
   assert.ok(result && Array.isArray(result.messages));
   // keepLastSteps=2 → last 2 steps' delta = cumulative 8 − 4 = 4 messages → tail = last 4;
-  // summary(1)+tail(4)=5.
-  assert.equal(result.messages.length, 5);
-  assert.equal(result.messages[0].role, 'user');
-  assert.match(String(result.messages[0].content), /TIGHT SUMMARY/);
-  assert.match(String(result.messages[0].content), /summarized to fit the context window/i);
+  // brief(1)+summary(1)+tail(4)=6.
+  assert.equal(result.messages.length, 6);
+  // The run's first user message is pinned verbatim ahead of the summary.
+  assert.deepEqual(result.messages[0], { role: 'user', content: 'goal' });
+  // The summary is the SECOND message, not the first.
+  assert.equal(result.messages[1].role, 'user');
+  assert.match(String(result.messages[1].content), /TIGHT SUMMARY/);
+  assert.match(String(result.messages[1].content), /summarized to fit the context window/i);
   // Tail is the last 4 original messages verbatim (step boundary preserved).
-  assert.deepEqual(result.messages.slice(1), messages.slice(messages.length - 4));
+  assert.deepEqual(result.messages.slice(2), messages.slice(messages.length - 4));
   // Older (summarized) = the first 5 messages (9 - 4).
   assert.equal(compactedOlder.length, 5);
+});
+
+test('buildCompactionStep: pins the run first user message verbatim ahead of the summary (task brief survives)', async () => {
+  // The original task brief (messages[0]) lives in `older` and would be folded into the lossy
+  // summary. It must survive verbatim, ahead of the summary, so a long run never drifts off its goal.
+  const brief = 'ORIGINAL TASK: ship the widget and do not re-plan';
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 2, contextLength: 100_000 },
+    summary: 'LOSSY SUMMARY',
+  });
+  const messages = [{ role: 'user', content: brief }, ...msgs(8)];
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4), step(6), step(8)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  // The brief is pinned first, verbatim (role + content unchanged).
+  assert.deepEqual(result.messages[0], { role: 'user', content: brief });
+  // The summary is the SECOND message — it never displaces the pinned brief.
+  assert.match(String(result.messages[1]?.content), /LOSSY SUMMARY/);
+  assert.match(String(result.messages[1]?.content), /summarized to fit the context window/i);
+  // The brief stands alone, not merely folded into the summary text.
+  assert.notEqual(result.messages[0]?.content, result.messages[1]?.content);
+});
+
+test('buildCompactionStep: no user message in the summarized prefix → nothing to pin, summary leads', async () => {
+  // A prefix that opens on an assistant turn (no user message in `older`) has no brief to pin — the
+  // result is the summary followed by the kept tail, unchanged from the pre-pin behavior.
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    summary: 'NOBRIEF',
+  });
+  // msgs(n) is all assistant/tool — no user message anywhere.
+  const messages = msgs(7);
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4), step(6)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  assert.equal(result.messages[0]?.role, 'user');
+  assert.match(String(result.messages[0]?.content), /NOBRIEF/);
+});
+
+test('buildCompactionStep: an oversized brief is dropped rather than sent overflowing — summary still fits (overflow guarantee wins)', async () => {
+  // A pathologically huge first user message cannot be pinned without blowing the very budget
+  // compaction exists to satisfy. The pin is best-effort: the brief is dropped so summary + tail
+  // provably fit, never returned overflowing (Decision #20 outranks the pin).
+  const compactor = stubCompactor({
+    decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+    summary: 'FITS',
+    usable: 1_000,
+  });
+  const messages: ModelMessage[] = [
+    { role: 'user', content: `HUGE_BRIEF${'x'.repeat(60_000)}` },
+    toolCallMsg('a'),
+    toolResultMsg('a', 'older-a'),
+    toolCallMsg('b'),
+    toolResultMsg('b', 'small-tail'),
+  ];
+  const result = await buildCompactionStep({ compactor, modelId: 'm' })(
+    prepInput([step(2), step(4)], messages),
+  );
+  assert.ok(result && Array.isArray(result.messages));
+  // The huge brief is gone; the summary leads and the kept tail rides along, all within budget.
+  assert.doesNotMatch(JSON.stringify(result.messages), /HUGE_BRIEF/);
+  assert.match(String(result.messages[0]?.content), /FITS/);
+  assert.match(JSON.stringify(result.messages), /small-tail/);
 });
 
 test('buildCompactionStep: threads the prior summary into the next compaction (anchored update, not fresh)', async () => {
@@ -483,8 +551,10 @@ test('buildCompactionStep: tool results ≤1k are never cleared → nothing free
     prepInput([step(2), step(4), step(6)], messages),
   );
   assert.ok(result && Array.isArray(result.messages));
-  // Nothing was large enough to clear → falls through to the LLM summarize path (summary message).
-  assert.match(String(result.messages[0]?.content), /SUMOUT/);
+  // Nothing was large enough to clear → falls through to the LLM summarize path (summary message),
+  // with the run's first user message pinned verbatim ahead of it.
+  assert.deepEqual(result.messages[0], { role: 'user', content: 'goal' });
+  assert.match(String(result.messages[1]?.content), /SUMOUT/);
   assert.ok(compactedOlder.length > 0);
   assert.doesNotMatch(JSON.stringify(compactedOlder), CLEARED);
 });
@@ -512,7 +582,9 @@ test('buildCompactionStep: <20k freed → summarizes the pruned older prefix (cl
     prepInput([step(2), step(4), step(6)], messages),
   );
   assert.ok(result && Array.isArray(result.messages));
-  assert.match(String(result.messages[0]?.content), /SUMOUT/);
+  // Brief pinned first, summary second.
+  assert.deepEqual(result.messages[0], { role: 'user', content: 'goal' });
+  assert.match(String(result.messages[1]?.content), /SUMOUT/);
   // The summarizer received the pruned older prefix: the cleared placeholder is present, AAA_OLD gone.
   assert.match(JSON.stringify(compactedOlder), CLEARED);
   assert.doesNotMatch(JSON.stringify(compactedOlder), /AAA_OLD/);
@@ -545,15 +617,17 @@ test('buildCompactionStep: prune frees ≥20k but is still over budget → falls
   );
   assert.ok(result && Array.isArray(result.messages));
   assert.equal(compactCalls, 1, 'the prune fast-path did NOT short-circuit — summarize ran');
-  // Summary + kept tail, not the still-overflowing pruned array; older content is summarized away.
-  assert.equal(result.messages.length, 3);
-  assert.match(String(result.messages[0]?.content), /SUMOUT/);
+  // Brief + summary + kept tail, not the still-overflowing pruned array; older summarized away.
+  assert.equal(result.messages.length, 4);
+  assert.deepEqual(result.messages[0], { role: 'user', content: 'goal' });
+  assert.match(String(result.messages[1]?.content), /SUMOUT/);
   assert.doesNotMatch(JSON.stringify(result.messages), /BBB_SHIELD|AAA_OLD/);
 });
 
-test('buildCompactionStep: summary still over budget → hard-truncates the tail, summary pinned first', async () => {
-  // A single huge verbatim tool result in the kept tail keeps summary+tail over budget; the escalation
-  // drops the oldest tail messages (the huge result and its tool-call together) until it provably fits.
+test('buildCompactionStep: summary still over budget → hard-truncates the tail, brief + summary pinned first', async () => {
+  // A single huge verbatim tool result in the kept tail keeps brief+summary+tail over budget; the
+  // escalation drops the oldest tail messages (the huge result and its tool-call together) until it
+  // provably fits, keeping the brief + summary pinned first.
   const compactor = stubCompactor({
     decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
     summary: 'SUMOUT2',
@@ -570,8 +644,9 @@ test('buildCompactionStep: summary still over budget → hard-truncates the tail
     prepInput([step(2), step(4)], messages),
   );
   assert.ok(result && Array.isArray(result.messages));
-  assert.equal(result.messages.length, 1);
-  assert.match(String(result.messages[0]?.content), /SUMOUT2/);
+  assert.equal(result.messages.length, 2);
+  assert.deepEqual(result.messages[0], { role: 'user', content: 'goal' });
+  assert.match(String(result.messages[1]?.content), /SUMOUT2/);
   assert.doesNotMatch(JSON.stringify(result.messages), /BIG_TAIL/);
 });
 

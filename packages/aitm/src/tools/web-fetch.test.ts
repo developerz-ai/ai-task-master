@@ -210,6 +210,19 @@ test('webFetchTool rejects loopback and private hosts (SSRF guard)', async () =>
     'http://[::ffff:169.254.169.254]/',
     'http://[::ffff:10.0.0.1]/',
     'http://[::ffff:192.168.1.1]/',
+    // CGNAT, protocol assignment, benchmarking, multicast, reserved.
+    'http://100.64.0.1/',
+    'http://100.127.255.255/',
+    'http://192.0.0.1/',
+    'http://198.18.0.1/',
+    'http://198.19.255.255/',
+    'http://224.0.0.1/',
+    'http://240.0.0.1/',
+    'http://255.255.255.255/',
+    // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embedded IPv4.
+    'http://[64:ff9b::127.0.0.1]/',
+    'http://[64:ff9b::a9fe:a9fe]/',
+    'http://[2002:7f00:1::]/',
   ]) {
     await assert.rejects(() => t.execute({ url }), /private\/loopback/);
   }

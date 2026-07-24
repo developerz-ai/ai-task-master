@@ -34,22 +34,45 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 
 - `ai` package, `experimental_Agent` plus the subagents-as-tools pattern from https://ai-sdk.dev/docs/agents/subagents.
 - `Orchestrator` is the top-level agent. `Planner`, `Worker`, `Reviewer` are exposed to it as tools.
-- Provider wiring lives in one place (`Credentials`). Subagents take an injected model handle.
+- Provider wiring is **credentials + openrouter, presets in config**: `credentials/` builds the injected
+  model handle from `OPENROUTER_API_KEY` + resolved `baseURL`; `openrouter/` owns the catalog client,
+  model-limits lookup, and server-tools; `config/provider-presets.ts` owns the named presets
+  (`openrouter`/`zai`/`moonshot`/…) resolved into that baseURL/key pair. Not a single module, but a
+  fixed three-way split — don't add a fourth place that constructs an `OpenRouterClient`.
 
 ## Module map
 
-| Module | Responsibility |
+`src/` has 23 top-level dirs. One line each:
+
+| Dir | Responsibility |
 | --- | --- |
-| `Credentials` | Read `OPENROUTER_API_KEY`, return a configured AI SDK model handle |
-| `AgentConfigDetector` | Find `CLAUDE.md` or `AGENTS.md`, return coding-style payload |
-| `StateStore` | Persist run state, plan, PR groups, current task, PR number |
-| `Planner` | Subagent. Goal in, ordered PR groups (each a list of tasks) out |
-| `Worker` | Subagent. One PR group in, commits and a PR out |
-| `Reviewer` | Subagent. PR review comments in, follow-up commits out |
-| `GitHubClient` | Thin wrapper over `gh` CLI for PR, CI status, review comments |
-| `WorkLoop` | Drives Orchestrator group-by-group through the plan |
-| `CLI` | `aitm start`, `aitm merge-pr`. Arg parsing and exit codes only |
-| `Logger` | Structured logs to stderr, plain status to stdout |
+| `agent-config/` | Find `CLAUDE.md`/`AGENTS.md` in a target repo, return a coding-style payload (+ optional LLM style digest) |
+| `benchmark/` | Scenario definitions and result comparison for the `aitm benchmark` dev tool |
+| `cli/` | Arg parsing, dispatch, exit codes, presentation formatting (`format.ts`, `help.ts`, `model-banner.ts`) |
+| `compaction/` | Shrink an over-budget subagent transcript (prune → summarize → hard-truncate) to fit the model's context |
+| `composition/` | Leaf types shared across the cli↔loop boundary (`RunLoopInput`/`RunMergeFlowInput`), no runtime logic |
+| `config/` | Load/write/merge `~/.aitm.json` + project + env + CLI layers; profiles; provider presets |
+| `credentials/` | Read `OPENROUTER_API_KEY`, resolve model params, return a configured AI SDK model handle |
+| `domain/` | Shared leaf domain types (`Task`, `PrGroup`, `Role`, `WorkerDelivery`, …) with no other module's logic |
+| `fs/` | Atomic file writes (temp + fsync + rename) |
+| `github/` | Thin wrapper over `gh` CLI for PR, CI status, review-thread pagination, check tolerance |
+| `logger/` | Structured logs to stderr, plain status to stdout; secret scrubbing/redaction at every output channel |
+| `loop/` | Drives Planner/Worker/Reviewer group-by-group through the plan; CI-fix, conflict resolution, merge flow |
+| `mcp/` | MCP client: connect to configured servers, expose their tools, OAuth for remote servers |
+| `observability/` | Heartbeat, step-progress rendering, usage tracking, error reporting (Sentry) |
+| `openrouter/` | OpenRouter catalog client, model-limits lookup/reference-catalog fallback, server-side tools |
+| `orchestrator/` | Commit/PR composition (`finalizeCommit`, `openPr`, PR body) — the `WorkLoopOrchestrator` port |
+| `plan/` | Plan schema, markdown render/parse, plan-graph validation, acceptance criteria |
+| `serialization/` | Cycle-safe `safeStringify` shared by logger and compactor |
+| `state/` | Persist run state, plan, PR groups, transcripts, run lock, PR-context cache; schema migrations |
+| `subagents/` | Planner/Worker/Reviewer/scout implementations, bash/editor/explore/memory tool factories |
+| `testing/` | Test-only support (`makeTempRepo`, …) consumed exclusively by `*.test.ts` files |
+| `tools/` | Model-facing tools: `datetime`, `web-fetch`, `fetch-html`, `web-search`, `github` thread tool |
+| `workspace/` | Git plumbing: checkout, dirty-tree guard, branch naming/cleanup, task-commit markers |
+
+`fs/atomic-write.ts` duplicates `ai-claude-compat/src/atomic-write.ts` (same shape, two packages). Known,
+tracked as low-priority — don't "fix" it by importing across the package boundary without an explicit
+task; re-exporting one from the other is the eventual direction, not yet done.
 
 ## Branch protection & `--admin`
 

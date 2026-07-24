@@ -187,6 +187,39 @@ test('runTakeOverFlow: CI failure → invokes Worker, blocks if Worker blocked',
   assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0);
 });
 
+test('runTakeOverFlow: CI red + Worker returns no-changes → blocks, no force-push, no merge', async () => {
+  // A red CI the Worker declares needs no changes is a contradiction — nothing was committed, so
+  // force-pushing zero commits and re-polling the same failing CI would just burn iterations up to
+  // maxIterations. The flow must block on the worker's own reason instead (mirrors ci-fix.ts).
+  const gh = fakeGithub({ checks: ['throw-cifailed'], threads: [[]] });
+  const { runCmd, commands } = recordingRunCmd();
+  const input = baseInput(gh.github, {
+    runCmd,
+    maxIterations: 5,
+    subagents: {
+      reviewerModel: dummyModel,
+      reviewerTools: {} as TakeOverFlowInput['subagents']['reviewerTools'],
+      workerModel: dummyModel,
+      workerTools: {} as TakeOverFlowInput['subagents']['workerTools'],
+      styleContents: '',
+      runWorkerOverride: async () =>
+        ({ kind: 'no-changes', reason: 'nothing to change' }) satisfies WorkerResult,
+    },
+  });
+  const result = await runTakeOverFlow(input);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') {
+    assert.match(result.reason, /nothing to change/);
+    // Blocked on the first pass — never looped toward maxIterations burning coding-tier passes.
+    assert.equal(result.iterations, 0);
+  }
+  assert.ok(
+    !commands.some((c) => c.includes('push')),
+    `no force-push of zero commits, got: ${commands.join(' | ')}`,
+  );
+  assert.equal(gh.calls.filter((c) => c.method === 'mergePr').length, 0, 'never merges');
+});
+
 test('runTakeOverFlow: threads timeout into the real take-over Worker → a stalled step blocks (issue #129)', async () => {
   // CI failed → the Worker runs. With no runWorkerOverride the real agent is built with the
   // forwarded per-step deadline; a stalled model is aborted at { stepMs: 40 } and blocks the flow.

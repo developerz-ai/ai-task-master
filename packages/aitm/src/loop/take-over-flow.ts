@@ -238,11 +238,14 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
 
     if (ciStatus === 'failure' || ciStatus === 'cancelled') {
       const fixed = await runWorkerCiFix(input, ciLogsDir);
-      if (fixed.kind === 'blocked') {
-        return { kind: 'blocked', reason: fixed.reason, iterations: iteration };
-      }
-      if (fixed.kind === 'error') {
-        return { kind: 'blocked', reason: `worker error: ${fixed.error}`, iterations: iteration };
+      // Anything but a delivered fix ends the run. 'blocked'/'error' are explicit failures; a
+      // 'no-changes' verdict while CI is red is a contradiction — claiming nothing needs changing
+      // cannot fix a failing check. Block on the worker's own reason instead of force-pushing zero
+      // commits and re-polling the same red CI until maxIterations. Mirrors ci-fix.ts's
+      // `worker.kind !== 'ok'` guard.
+      if (fixed.kind !== 'ok') {
+        const reason = fixed.kind === 'error' ? `worker error: ${fixed.error}` : fixed.reason;
+        return { kind: 'blocked', reason, iterations: iteration };
       }
       pushedSomething = true;
     }

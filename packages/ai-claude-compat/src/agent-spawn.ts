@@ -46,6 +46,13 @@ export type AgentToolOptions = {
   // Optional tighter child deadline. The parent's per-step deadline already propagates via the
   // execute abortSignal (#129); this bounds the child more aggressively when a caller wants it.
   timeout?: TimeoutConfiguration;
+  // Optional token-usage sink (issue #114). Fired once per generate call with the child's totalUsage,
+  // modelId, and providerMetadata. Fire-and-forget: a recording error must never break the run.
+  onUsage?: (
+    usage: import('ai').LanguageModelUsage,
+    modelId: string | undefined,
+    providerMetadata?: import('ai').ProviderMetadata,
+  ) => void;
 };
 
 export const DEFAULT_AGENT_TOOL_MAX_STEPS = 15;
@@ -169,6 +176,16 @@ export function makeAgentTool(
             }),
           opts.timeout,
         );
+        // Report token usage to the optional sink (fire-and-forget, never breaks the run). Provider
+        // metadata is the top-level `result.providerMetadata`; `result.response` only carries the
+        // response id/modelId/timestamp, so reading providerMetadata off it would always be undefined.
+        if (opts.onUsage) {
+          try {
+            opts.onUsage(result.totalUsage, result.response.modelId, result.providerMetadata);
+          } catch {
+            // Swallow recording errors — a broken sink must never abort the run.
+          }
+        }
         const text = result.text.trim();
         if (text === '') return AGENT_TOOL_NO_CONCLUSION;
         if (text.length <= maxOutputChars) return text;

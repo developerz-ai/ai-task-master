@@ -1,54 +1,41 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { StepTimeoutError } from '@developerz.ai/ai-claude-compat';
-import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { Role } from '../credentials/credentials.ts';
 import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
-import type { GithubToolInput, GithubToolOutput, ReviewerTools } from '../subagents/reviewer.ts';
-import type {
-  BashInput,
-  BashOutput,
-  FileManifest,
-  ReadFileInput,
-  ReadFileOutput,
-  WorkerDelivery,
-  WorkerTools,
-  WriteFileInput,
-  WriteFileOutput,
-} from '../subagents/worker.ts';
+import { MANIFEST_FIELD_MAX, type WorkerDelivery } from '../subagents/worker.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
   assertPrBodySections,
   buildFallbackComposition,
   COMPOSE_PR_MAX_RETRIES,
+  COMPOSER_ROLE_PREFIX,
   compositionOutcome,
   DEFAULT_CMD_TIMEOUT_MS,
-  DEFAULT_MAX_STEPS,
   describeSubmitPayload,
   execaOptions,
+  fallbackCommitSubject,
   type GhClient,
+  type ModelProvider,
   normalizePrBodyHeadings,
-  ORCHESTRATOR_ROLE_PREFIX,
   Orchestrator,
-  type OrchestratorBuildContext,
   PR_BODY_GUIDE,
   PR_BODY_SECTIONS,
   prBodyGuideFor,
   type RunCmd,
   recoverComposition,
   repairPrBody,
-  resolveMaxSteps,
+  resolveCommitMessage,
   resolvePrBodySections,
   SUBMIT_PAYLOAD_PREVIEW_CHARS,
   submitToolInput,
   submittedComposition,
   truncateAtWord,
 } from './orchestrator.ts';
-import type { ModelProvider } from './subagent-tools.ts';
 
 // A PR body that satisfies the section contract (assertPrBodySections), reused by openPr tests.
 const COMPLIANT_BODY =
@@ -153,40 +140,6 @@ function recordingProvider(model: MockLanguageModelV3): {
   };
 }
 
-function workerToolsStub(): WorkerTools {
-  return {
-    readFile: tool<ReadFileInput, ReadFileOutput>({
-      description: 'read',
-      inputSchema: z.object({ path: z.string() }),
-      execute: async () => ({ content: '' }),
-    }),
-    writeFile: tool<WriteFileInput, WriteFileOutput>({
-      description: 'write',
-      inputSchema: z.object({ path: z.string(), content: z.string() }),
-      execute: async () => ({ ok: true }),
-    }),
-    bash: tool<BashInput, BashOutput>({
-      description: 'bash',
-      inputSchema: z.object({ command: z.string() }),
-      execute: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
-    }),
-  };
-}
-
-function reviewerToolsStub(): ReviewerTools {
-  return {
-    ...workerToolsStub(),
-    github: tool<GithubToolInput, GithubToolOutput>({
-      description: 'github',
-      inputSchema: z.discriminatedUnion('action', [
-        z.object({ action: z.literal('replyToThread'), threadId: z.string(), body: z.string() }),
-        z.object({ action: z.literal('resolveThread'), threadId: z.string() }),
-      ]),
-      execute: async () => ({ ok: true }),
-    }),
-  };
-}
-
 function baseGroup(): PrGroup {
   return {
     id: 'core',
@@ -224,107 +177,30 @@ function basePr(headRefName = 'aitm/core'): PullRequest {
   };
 }
 
-function baseContext(): OrchestratorBuildContext {
-  return {
-    plannerTools: {},
-    workerTools: workerToolsStub(),
-    reviewerTools: reviewerToolsStub(),
-    checkoutPath: '/tmp/wt',
-    baseBranch: 'main',
-    group: baseGroup(),
-    pr: 0,
-    threads: [],
-  };
-}
-
-test('resolveMaxSteps: positive caller value overrides the default', () => {
-  assert.equal(resolveMaxSteps(7), 7);
-  assert.equal(resolveMaxSteps(1), 1);
-});
-
-test('resolveMaxSteps: null / 0 / negative fall back to DEFAULT_MAX_STEPS', () => {
-  assert.equal(resolveMaxSteps(null), DEFAULT_MAX_STEPS);
-  assert.equal(resolveMaxSteps(0), DEFAULT_MAX_STEPS);
-  assert.equal(resolveMaxSteps(-3), DEFAULT_MAX_STEPS);
-});
-
-test("build: the Worker subagent tool carries no step-budget reminder, whatever the orchestrator's maxSteps", async () => {
-  const manifest: FileManifest = {
-    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
-    draftCommitMessage: 'feat: x',
-  };
-  let sentSystem = '';
-  let i = 0;
-  const model = new MockLanguageModelV3({
-    doGenerate: async (opts) => {
-      if (sentSystem === '') sentSystem = JSON.stringify(opts.prompt);
-      if (i++ === 0) {
-        return {
-          content: [
-            {
-              type: 'tool-call',
-              toolCallId: 'submit-manifest',
-              toolName: 'submit',
-              input: JSON.stringify(manifest),
-            },
-          ],
-          finishReason: { unified: 'tool-calls', raw: undefined },
-          usage: emptyUsage(),
-          warnings: [],
-        };
-      }
-      return {
-        content: [{ type: 'text', text: 'created x' }],
-        finishReason: { unified: 'stop', raw: undefined },
-        usage: emptyUsage(),
-        warnings: [],
-      };
-    },
-  });
-  const { provider } = recordingProvider(model);
-  // An orchestrator maxSteps wildly different from any role cap — the Worker's prompt must carry no
-  // step-budget number at all (agents run until they submit; see AGENT_STEP_BACKSTOP), so neither
-  // the orchestrator's value nor a role cap can leak into it.
-  const o = new Orchestrator({
-    credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-    rollingContext: '',
-    maxSteps: 3,
-    github: {} as never,
-  });
-  const agent = o.build(baseContext());
-  const workerExec = agent.tools.worker.execute;
-  if (typeof workerExec !== 'function') throw new Error('no worker execute');
-  await workerExec({}, { toolCallId: 'tc', messages: [] });
-  assert.doesNotMatch(sentSystem, /hard budget of/, 'no step-budget reminder in the worker prompt');
-});
-
 test('Orchestrator is constructible', () => {
   const o = new Orchestrator({
     credentials: {} as never,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {} as never,
   });
   assert.ok(o instanceof Orchestrator);
 });
 
-test('buildSystemPrompt = agentConfig.contents + ORCHESTRATOR_ROLE_PREFIX + rollingContext', () => {
+test('buildSystemPrompt = agentConfig.contents + COMPOSER_ROLE_PREFIX + rollingContext', () => {
   const o = new Orchestrator({
     credentials: {} as never,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# repo style' },
     rollingContext: 'prior PRs: 1, 2',
-    maxSteps: null,
     github: {} as never,
   });
   const sys = o.buildSystemPrompt();
   assert.ok(sys.includes('# repo style'), 'style payload must be present');
-  assert.ok(sys.includes(ORCHESTRATOR_ROLE_PREFIX), 'role prefix must be present');
+  assert.ok(sys.includes(COMPOSER_ROLE_PREFIX), 'role prefix must be present');
   assert.ok(sys.includes('prior PRs: 1, 2'), 'rolling context must be present');
   // Ordering: style comes before role prefix, role prefix before rolling context.
-  assert.ok(sys.indexOf('# repo style') < sys.indexOf(ORCHESTRATOR_ROLE_PREFIX));
-  assert.ok(sys.indexOf(ORCHESTRATOR_ROLE_PREFIX) < sys.indexOf('prior PRs: 1, 2'));
+  assert.ok(sys.indexOf('# repo style') < sys.indexOf(COMPOSER_ROLE_PREFIX));
+  assert.ok(sys.indexOf(COMPOSER_ROLE_PREFIX) < sys.indexOf('prior PRs: 1, 2'));
 });
 
 test('buildSystemPrompt: styleDigest replaces agentConfig.contents as the style prefix', () => {
@@ -333,13 +209,12 @@ test('buildSystemPrompt: styleDigest replaces agentConfig.contents as the style 
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# raw style' },
     styleDigest: '# distilled digest',
     rollingContext: 'prior PRs: 1',
-    maxSteps: null,
     github: {} as never,
   });
   const sys = o.buildSystemPrompt();
   assert.ok(sys.includes('# distilled digest'), 'digest must be used as the style prefix');
   assert.ok(!sys.includes('# raw style'), 'raw contents must be suppressed when digest present');
-  assert.ok(sys.includes(ORCHESTRATOR_ROLE_PREFIX), 'role prefix must be present');
+  assert.ok(sys.includes(COMPOSER_ROLE_PREFIX), 'role prefix must be present');
   assert.ok(sys.includes('prior PRs: 1'), 'rolling context must be present');
 });
 
@@ -361,7 +236,6 @@ test('finalizeCommit sends buildSystemPrompt() via the system field, not duplica
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# repo style' },
     rollingContext: 'prior PRs: 1',
-    maxSteps: null,
     github: {} as never,
     runCmd: async (file, args) =>
       args[0] === 'rev-parse'
@@ -375,9 +249,9 @@ test('finalizeCommit sends buildSystemPrompt() via the system field, not duplica
   const rest = JSON.stringify(messages.filter((m) => m.role !== 'system'));
   assert.ok(system, 'a system message must be present');
   assert.match(JSON.stringify(system), /# repo style/);
-  assert.match(JSON.stringify(system), new RegExp(ORCHESTRATOR_ROLE_PREFIX.split('\n')[1] ?? ''));
+  assert.match(JSON.stringify(system), new RegExp(COMPOSER_ROLE_PREFIX.split('\n')[1] ?? ''));
   // The role prefix (part of buildSystemPrompt) must not be re-concatenated into the user turn.
-  assert.doesNotMatch(rest, /Only you spawn; leaves never spawn|## Role: Orchestrator/);
+  assert.doesNotMatch(rest, /## Role: PR composer/);
 });
 
 test('openPr sends buildSystemPrompt() via the system field, not duplicated into the user prompt', async () => {
@@ -406,7 +280,6 @@ test('openPr sends buildSystemPrompt() via the system field, not duplicated into
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# repo style' },
     rollingContext: 'prior PRs: 1',
-    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -416,25 +289,107 @@ test('openPr sends buildSystemPrompt() via the system field, not duplicated into
   const rest = JSON.stringify(messages.filter((m) => m.role !== 'system'));
   assert.ok(system, 'a system message must be present');
   assert.match(JSON.stringify(system), /# repo style/);
-  assert.doesNotMatch(rest, /## Role: Orchestrator/);
+  assert.doesNotMatch(rest, /## Role: PR composer/);
 });
 
-test('build composes planner/worker/reviewer/done tools and resolves orchestrator model', () => {
-  const model = new MockLanguageModelV3();
-  const { provider, roles } = recordingProvider(model);
+// A field long enough that its tail sentinel sits well past the cap; a single unbroken token so the
+// word-boundary truncation hard-slices at exactly MANIFEST_FIELD_MAX rather than retreating earlier.
+function oversized(head: string, tail: string): string {
+  return `${head}${'x'.repeat(MANIFEST_FIELD_MAX + 100)}${tail}`;
+}
+
+test('finalizeCommit: interpolated title/draft/summary are capped at MANIFEST_FIELD_MAX', async () => {
+  let captured: unknown;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      captured = opts.prompt;
+      return {
+        content: [{ type: 'text', text: 'feat: message' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {} as never,
+    runCmd: async (file, args) =>
+      args[0] === 'rev-parse'
+        ? { stdout: 'deadbeef\n', stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: '', exitCode: 0 },
   });
-  const agent = o.build(baseContext());
-  assert.ok(agent);
-  assert.deepEqual(Object.keys(agent.tools).sort(), ['done', 'planner', 'reviewer', 'worker']);
-  // build itself only resolves the orchestrator's own model — subagent role models
-  // resolve lazily inside each tool's execute, so we expect a single entry here.
-  assert.deepEqual(roles, ['orchestrator']);
+  const group = { ...baseGroup(), title: oversized('TITLEHEAD', 'TITLETAIL') };
+  const delivery: WorkerDelivery = {
+    ...baseDelivery(),
+    draftCommitMessage: oversized('DRAFTHEAD', 'DRAFTTAIL'),
+    changes: [{ path: 'src/a.ts', kind: 'create', summary: oversized('SUMMHEAD', 'SUMMTAIL') }],
+  };
+  await o.finalizeCommit(group, delivery, '/tmp/wt');
+
+  const user = JSON.stringify(
+    (captured as ReadonlyArray<{ role: string }>).filter((m) => m.role !== 'system'),
+  );
+  for (const head of ['TITLEHEAD', 'DRAFTHEAD', 'SUMMHEAD']) {
+    assert.match(user, new RegExp(head), `${head} survives the cap`);
+  }
+  for (const tail of ['TITLETAIL', 'DRAFTTAIL', 'SUMMTAIL']) {
+    assert.doesNotMatch(user, new RegExp(tail), `${tail} is truncated past MANIFEST_FIELD_MAX`);
+  }
+});
+
+test('openPr: interpolated title/acceptance/draft/summary are capped at MANIFEST_FIELD_MAX', async () => {
+  let captured: unknown;
+  const composition = { title: 't', body: COMPLIANT_BODY };
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      captured = opts.prompt;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify(composition),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  const group = {
+    ...baseGroup(),
+    title: oversized('TITLEHEAD', 'TITLETAIL'),
+    acceptance: oversized('ACCHEAD', 'ACCTAIL'),
+  };
+  const delivery: WorkerDelivery = {
+    ...baseDelivery(),
+    draftCommitMessage: oversized('DRAFTHEAD', 'DRAFTTAIL'),
+    changes: [{ path: 'src/a.ts', kind: 'create', summary: oversized('SUMMHEAD', 'SUMMTAIL') }],
+  };
+  await o.openPr(group, delivery, 'main');
+
+  const user = JSON.stringify(
+    (captured as ReadonlyArray<{ role: string }>).filter((m) => m.role !== 'system'),
+  );
+  for (const head of ['TITLEHEAD', 'ACCHEAD', 'DRAFTHEAD', 'SUMMHEAD']) {
+    assert.match(user, new RegExp(head), `${head} survives the cap`);
+  }
+  for (const tail of ['TITLETAIL', 'ACCTAIL', 'DRAFTTAIL', 'SUMMTAIL']) {
+    assert.doesNotMatch(user, new RegExp(tail), `${tail} is truncated past MANIFEST_FIELD_MAX`);
+  }
 });
 
 test('finalizeCommit rewrites commit message and amends via runCmd, returning the new SHA', async () => {
@@ -454,7 +409,6 @@ test('finalizeCommit rewrites commit message and amends via runCmd, returning th
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {} as never,
     runCmd,
   });
@@ -474,6 +428,45 @@ test('finalizeCommit rewrites commit message and amends via runCmd, returning th
   });
 });
 
+test('finalizeCommit: an empty refine response amends with the Worker draft, not an empty message', async () => {
+  // Without the total fallback this would run `git commit --amend -m ''` and fail the whole group.
+  const { provider } = recordingProvider(modelEmitting(''));
+  const calls: Array<readonly string[]> = [];
+  const runCmd: RunCmd = async (_file, args) => {
+    calls.push(args);
+    if (args[0] === 'rev-parse') return { stdout: 'shaXYZ\n', stderr: '', exitCode: 0 };
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    github: {} as never,
+    runCmd,
+  });
+  await o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt');
+  assert.deepEqual(calls[0], ['commit', '--amend', '-m', 'feat: add a']);
+});
+
+test('finalizeCommit: a code-fenced refine response amends with the fence stripped', async () => {
+  const { provider } = recordingProvider(modelEmitting('```\nfeat(core): add module a\n```'));
+  const calls: Array<readonly string[]> = [];
+  const runCmd: RunCmd = async (_file, args) => {
+    calls.push(args);
+    if (args[0] === 'rev-parse') return { stdout: 'shaXYZ\n', stderr: '', exitCode: 0 };
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    github: {} as never,
+    runCmd,
+  });
+  await o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt');
+  assert.deepEqual(calls[0], ['commit', '--amend', '-m', 'feat(core): add module a']);
+});
+
 test('finalizeCommit stamps a task-id trailer onto the amended message when taskId is given', async () => {
   const refinedMessage = 'feat(core): add module a';
   const model = modelEmitting(refinedMessage);
@@ -491,7 +484,6 @@ test('finalizeCommit stamps a task-id trailer onto the amended message when task
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {} as never,
     runCmd,
   });
@@ -516,7 +508,6 @@ test('finalizeCommit throws when git amend fails', async () => {
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {} as never,
     runCmd,
   });
@@ -532,7 +523,6 @@ test('finalizeCommit arms the per-step deadline — a stalled refine call surfac
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {} as never,
     runCmd: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     timeout: { stepMs: 40 },
@@ -552,7 +542,6 @@ test('openPr arms the per-step deadline — a stalled compose call surfaces a St
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {
       createPr: async () => {
         createPrCalled = true;
@@ -585,7 +574,6 @@ test('openPr composes title + body via the orchestrator model and calls github.c
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: 'prior: nothing yet',
-    maxSteps: null,
     github,
   });
   const pr = await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -632,7 +620,6 @@ test('composePr requests submit via toolChoice "auto" (thinking-model compat)', 
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: 'prior: nothing yet',
-    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -721,7 +708,6 @@ test('openPr prompt instructs the standard PR body template', async () => {
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -765,7 +751,6 @@ test('openPr prompt carries the group acceptance check for the Evidence section'
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await o.openPr(
@@ -802,7 +787,6 @@ test('openPr prompt omits the acceptance line for a group without a check (legac
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -855,7 +839,6 @@ test('composePr falls back to a deterministic composition when every submission 
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {
       createPr: async (input) => {
         createCalls.push(input);
@@ -895,7 +878,6 @@ test('composePr falls back when the model never submits a composition (#101)', a
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {
       createPr: async (input) => {
         createCalls.push(input);
@@ -921,7 +903,6 @@ test('composePr retries over an over-long title, then accepts the corrected resu
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {
       createPr: async (input) => {
         createCalls.push(input);
@@ -948,7 +929,6 @@ test('composePr retries over a body missing a required section, then accepts the
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {
       createPr: async (input) => {
         createCalls.push(input);
@@ -991,7 +971,6 @@ test('composePr feeds the schema failure back as a corrective user turn, keeping
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -1011,7 +990,6 @@ test('composePr bounds correction to COMPOSE_PR_MAX_RETRIES generations, then fa
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {
       createPr: async (input) => {
         createCalls.push(input);
@@ -1038,7 +1016,6 @@ test('composePr falls back when every retry omits a required section', async () 
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {
       createPr: async (input) => {
         createCalls.push(input);
@@ -1077,7 +1054,6 @@ async function openPrWith(model: MockLanguageModelV3): Promise<{
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {
       createPr: async (input) => {
         createCalls.push(input);
@@ -1359,6 +1335,50 @@ test('buildFallbackComposition: empty group.title falls back to the group id', (
   assert.equal(title, 'feat: core');
 });
 
+test('fallbackCommitSubject: feat:<group.title>, id when blank, capped ≤72 on a word boundary', () => {
+  assert.equal(fallbackCommitSubject(baseGroup()), 'feat: Core');
+  assert.equal(fallbackCommitSubject({ ...baseGroup(), title: '   ' }), 'feat: core');
+  const long = fallbackCommitSubject({ ...baseGroup(), title: 'add '.repeat(40).trim() });
+  assert.ok(long.length <= 72, 'a long title is capped to 72');
+  assert.ok(long.startsWith('feat: add'), 'the feat: prefix and subject survive the cap');
+});
+
+test('resolveCommitMessage: a non-empty refined message is used verbatim', () => {
+  const msg = 'feat(core): add module a\n\nAdds a and fixes b.';
+  assert.equal(resolveCommitMessage(msg, baseGroup(), baseDelivery()), msg);
+});
+
+test('resolveCommitMessage: a wrapping code fence is stripped from the refined message', () => {
+  const fenced = '```\nfeat(core): add module a\n```';
+  assert.equal(
+    resolveCommitMessage(fenced, baseGroup(), baseDelivery()),
+    'feat(core): add module a',
+  );
+  const tagged = '```text\nfeat(core): add module a\n```';
+  assert.equal(
+    resolveCommitMessage(tagged, baseGroup(), baseDelivery()),
+    'feat(core): add module a',
+  );
+});
+
+test('resolveCommitMessage: an empty or whitespace-only refined message falls back to the draft', () => {
+  const delivery = { ...baseDelivery(), draftCommitMessage: 'feat: add a' };
+  assert.equal(resolveCommitMessage('', baseGroup(), delivery), 'feat: add a');
+  assert.equal(resolveCommitMessage('   \n\t', baseGroup(), delivery), 'feat: add a');
+});
+
+test('resolveCommitMessage: a fence with an empty body falls back to the draft', () => {
+  const delivery = { ...baseDelivery(), draftCommitMessage: 'feat: add a' };
+  assert.equal(resolveCommitMessage('```\n\n```', baseGroup(), delivery), 'feat: add a');
+});
+
+test('resolveCommitMessage: empty refined AND empty draft falls back to the deterministic subject', () => {
+  const delivery = { ...baseDelivery(), draftCommitMessage: '   ' };
+  assert.equal(resolveCommitMessage('', baseGroup(), delivery), 'feat: Core');
+  // Never empty — the whole point of the total fallback (no `git commit --amend -m ''`).
+  assert.notEqual(resolveCommitMessage('', baseGroup(), delivery).trim(), '');
+});
+
 test('buildFallbackComposition: body passes assertPrBodySections for the default section set', () => {
   const { body } = buildFallbackComposition(baseGroup(), baseDelivery(), PR_BODY_SECTIONS);
   assert.doesNotThrow(() => assertPrBodySections(body, PR_BODY_SECTIONS));
@@ -1421,7 +1441,6 @@ test('openPr prompt anchors the title on the group goal, not the worker draft me
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: { createPr: async (input) => basePr(input.head) },
   });
   await o.openPr(baseGroup(), baseDelivery(), 'main');
@@ -1449,7 +1468,6 @@ test('openPr uses group.branch when set, otherwise aitm/<id>', async () => {
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github,
   });
   const customGroup = { ...baseGroup(), branch: 'feature/custom' };
@@ -1683,7 +1701,6 @@ test('finalizeCommit: the run signal reaches every git child', async () => {
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {} as never,
     runCmd,
     signal: controller.signal,
@@ -1700,7 +1717,6 @@ test('finalizeCommit: the run signal also cancels the refine generateText call',
     credentials: provider,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     rollingContext: '',
-    maxSteps: null,
     github: {} as never,
     runCmd: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     signal: controller.signal,

@@ -145,7 +145,7 @@ function editorPrompt(slots: EditorPromptSlots): string {
 export type OrchestratorSystemSlots = {
   // Coding-style digest (StyleDistiller output or raw agent-config contents). Trusted, verbatim.
   readonly style: string;
-  // The orchestrator role prefix (ORCHESTRATOR_ROLE_PREFIX). Trusted, verbatim.
+  // The orchestrator role prefix (COMPOSER_ROLE_PREFIX). Trusted, verbatim.
   readonly roleGuidance: string;
   // Rolling summary of prior PRs in this run (aitm-authored). Trusted, verbatim.
   readonly rollingContext: string;

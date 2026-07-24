@@ -156,6 +156,61 @@ test('makeAgentTool: a child provider error is caught and returned as an error l
   assert.ok(out.includes('upstream 500'), 'carries the provider message');
 });
 
+test('makeAgentTool: onUsage receives totalUsage, response modelId, and top-level providerMetadata', async () => {
+  const providerMetadata = { openrouter: { cost: 0.0042 } };
+  const model = new MockLanguageModelV3({
+    modelId: 'child-model-config',
+    doGenerate: async () => ({
+      content: [{ type: 'text', text: 'done' }],
+      finishReason: { unified: 'stop', raw: undefined },
+      usage: emptyUsage(),
+      warnings: [],
+      response: { id: 'r1', timestamp: new Date(0), modelId: 'child-model-xyz' },
+      providerMetadata,
+    }),
+  });
+
+  const calls: Array<{
+    usage: unknown;
+    modelId: string | undefined;
+    providerMetadata: unknown;
+  }> = [];
+  const t = makeAgentTool(SPEC, {
+    model,
+    tools: readTools,
+    allowedTools: ['readFile', 'grep'],
+    onUsage: (usage, modelId, meta) => calls.push({ usage, modelId, providerMetadata: meta }),
+  });
+
+  await run(t, 'q');
+
+  assert.equal(calls.length, 1, 'sink fired once for the generate');
+  assert.equal(
+    (calls[0]?.usage as { totalTokens?: number } | undefined)?.totalTokens,
+    2,
+    'aggregated totalUsage forwarded',
+  );
+  assert.equal(calls[0]?.modelId, 'child-model-xyz', 'response modelId forwarded');
+  assert.deepEqual(
+    calls[0]?.providerMetadata,
+    providerMetadata,
+    'top-level result.providerMetadata forwarded (not the always-undefined response.providerMetadata)',
+  );
+});
+
+test('makeAgentTool: a throwing onUsage sink is swallowed → never aborts the run', async () => {
+  const { model } = textModel('answer');
+  const t = makeAgentTool(SPEC, {
+    model,
+    tools: readTools,
+    allowedTools: ['readFile', 'grep'],
+    onUsage: () => {
+      throw new Error('sink blew up');
+    },
+  });
+  assert.equal(await run(t, 'q'), 'answer', 'run returns the child answer despite the broken sink');
+});
+
 test('makeAgentTool: a toolset key outside allowedTools fails construction with a typed error', () => {
   const withWriter: ToolSet = {
     ...readTools,

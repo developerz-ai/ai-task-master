@@ -23,32 +23,26 @@ import {
 } from '@developerz.ai/ai-claude-compat';
 import {
   generateText,
-  hasToolCall,
+  type LanguageModel,
   type ModelMessage,
-  stepCountIs,
   type TimeoutConfiguration,
-  type Tool,
-  ToolLoopAgent,
   tool,
 } from 'ai';
 import { ExecaError, execa } from 'execa';
 import { z } from 'zod';
 import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
+import type { Role } from '../credentials/credentials.ts';
 import type { CreatePrInput } from '../github/github-client.ts';
-import type { PullRequest, ReviewThread } from '../github/schema.ts';
+import type { PullRequest } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
 import { type OnUsage, reportUsage } from '../subagents/factory.ts';
-import type { PlannerTools } from '../subagents/planner.ts';
 import { render } from '../subagents/prompts/templates.ts';
-import type { ReviewerTools } from '../subagents/reviewer.ts';
-import type { WorkerDelivery, WorkerTools } from '../subagents/worker.ts';
+import { MANIFEST_FIELD_MAX, type WorkerDelivery } from '../subagents/worker.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
-import {
-  type ModelProvider,
-  makePlannerTool,
-  makeReviewerTool,
-  makeWorkerTool,
-} from './subagent-tools.ts';
+
+// Minimal model-resolver surface. The concrete `Credentials` class is structurally compatible;
+// tests substitute a `{ modelFor }` literal so they don't need to construct the real provider.
+export type ModelProvider = { modelFor(role: Role): LanguageModel };
 
 // Narrow surface — orchestrator only opens PRs, never shells `gh` itself.
 // Structural so tests can drop in a literal stub without subclassing GitHubClient.
@@ -119,25 +113,21 @@ function failureStderr(err: ExecaError): string {
   return err.timedOut || err.isCanceled ? (err.shortMessage ?? err.message) : '';
 }
 
-// The orchestrator's role guidance. buildSystemPrompt weaves it with the style digest and rolling
-// context through render('orchestrator-system', …) — the one prompt-assembly seam, no call-site concat.
-export const ORCHESTRATOR_ROLE_PREFIX = [
+// The orchestrator's role guidance for its two model calls — refining the final commit message and
+// composing the PR title + body. buildSystemPrompt weaves it with the style digest and rolling context
+// through render('orchestrator-system', …), the one prompt-assembly seam, no call-site concat. Kept
+// accurate to the tool surface: the production Orchestrator authors prose, it does not route subagents.
+export const COMPOSER_ROLE_PREFIX = [
   '',
-  '## Role: Orchestrator',
+  '## Role: PR composer',
   '',
-  'You coordinate Planner, Worker (Coordinator), and Reviewer, each exposed as a tool. You see the whole',
-  'plan and the rolling context, so you own the per-PR prose: the final commit message and the PR title',
-  '+ body.',
-  '',
-  'Flow:',
-  '  1. planner → the PR-group DAG (once).',
-  '  2. each ready group → worker; the harness commits + opens the PR.',
-  '  3. each PR with unresolved threads → reviewer.',
-  '  4. stop when every group is merged or blocked.',
+  'You author the per-PR prose for one PR group: the final commit message and the pull-request title',
+  '+ body. You see the whole plan and the rolling context of prior PRs, so the prose you write reads',
+  'coherently across the run.',
   '',
   'Rules:',
-  '  - Only you route between subagents; subagents are leaves and never spawn each other.',
   '  - Specific and terse. No marketing prose. Conventional commit subjects, ≤72 chars.',
+  '  - Describe what actually changed; never restate the diff line by line.',
 ].join('\n');
 
 export type OrchestratorInit = {
@@ -149,9 +139,6 @@ export type OrchestratorInit = {
   // prefix for the orchestrator prompt and every subagent tool; absent → raw contents.
   styleDigest?: string;
   rollingContext: string;
-  // LLM step budget for the orchestrator loop (separate from maxSessions, a PR/session count).
-  // Null/0/negative → DEFAULT_MAX_STEPS. Caller responsibility to set a sensible value.
-  maxSteps: number | null;
   github: GhClient;
   // Optional per-repo PR body section headings (each a `## ` heading). Undefined/empty/malformed
   // falls back to the default Summary/Changes/Testing/Evidence. See resolvePrBodySections.
@@ -164,37 +151,13 @@ export type OrchestratorInit = {
   // Usage sink for the two direct generateText sites, recorded under the orchestrator role (#114).
   onUsage?: OnUsage;
   // Run-scoped cancellation for the Orchestrator's OWN work — the two direct generateText calls and
-  // the `git commit --amend` plumbing. Orthogonal to `timeout`, which is a per-step deadline. The
-  // subagent tools are cancelled through OrchestratorBuildContext.signal instead, since a build is
-  // per-group. Unset → this work is not cancellable.
+  // the `git commit --amend` plumbing. Orthogonal to `timeout`, which is a per-step deadline. Unset →
+  // this work is not cancellable.
   signal?: AbortSignal;
   // Harness-level notice sink for the direct generateText sites — currently only composePr's
   // deterministic fallback (`PR composition fell back …`). Injected so the Orchestrator stays free of
   // the observability rendering details; the adapter wires it to harnessProgress. Mirrors `onUsage`.
   onProgress?: (message: string) => void;
-};
-
-// Per-group state needed to wire the subagent tools. Built fresh for each Orchestrator
-// invocation since checkoutPath / group / pr / threads vary between groups.
-export type OrchestratorBuildContext = {
-  plannerTools: PlannerTools;
-  workerTools: WorkerTools;
-  reviewerTools: ReviewerTools;
-  checkoutPath: string;
-  baseBranch: string;
-  group: PrGroup;
-  pr: number;
-  threads: ReviewThread[];
-  // Run-scoped cancellation, handed to every subagent tool this build wires (see
-  // SubagentInit.signal). Unset → subagent generations are not cancellable.
-  signal?: AbortSignal;
-};
-
-export type OrchestratorTools = {
-  planner: ReturnType<typeof makePlannerTool>;
-  worker: ReturnType<typeof makeWorkerTool>;
-  reviewer: ReturnType<typeof makeReviewerTool>;
-  done: Tool<Record<string, never>, Record<string, never>>;
 };
 
 // The default PR body section headings, in order. Used when a repo does not configure its own
@@ -671,6 +634,15 @@ export function repairPrBody(
     .join('\n\n');
 }
 
+// The deterministic conventional-commit subject for a group when no model-authored message is usable:
+// `feat: <group.title>` (or the group id when the title is blank), collapsed to one line and capped
+// ≤72 chars on a word boundary. Shared by buildFallbackComposition (the PR title) and
+// resolveCommitMessage's total fallback so the two never drift. Exported for unit testing.
+export function fallbackCommitSubject(group: PrGroup): string {
+  const subject = group.title.trim() || group.id;
+  return truncateAtWord(`feat: ${oneLine(subject)}`, 72);
+}
+
 // Deterministic PR composition used when the model's composePr attempts are exhausted (invalid
 // schema, a missing section, or no submission at all). Built purely from in-memory group + delivery
 // data, so it is total (never throws) and does no I/O. The body emits every configured section
@@ -681,12 +653,34 @@ export function buildFallbackComposition(
   delivery: WorkerDelivery,
   sections: readonly string[],
 ): PrComposition {
-  const subject = group.title.trim() || group.id;
-  const title = truncateAtWord(`feat: ${oneLine(subject)}`, 72);
+  const title = fallbackCommitSubject(group);
   const body = sections
     .map((heading) => `${heading}\n${fallbackSectionContent(heading, group, delivery)}`)
     .join('\n\n');
   return { title, body };
+}
+
+// The final commit message from the orchestrator's refine output, made total so an empty or
+// code-fenced model response never produces `git commit --amend -m ''` and blocks the whole group at
+// finalizeCommit. Mirrors composePr's fallback ladder: strip a wrapping code fence (weak models emit
+// the message inside ```), and when nothing usable survives, fall back to the Worker's own draft, then
+// to a deterministic feat: subject built from the group. Exported for unit testing.
+export function resolveCommitMessage(
+  text: string,
+  group: PrGroup,
+  delivery: WorkerDelivery,
+): string {
+  const refined = cleanCommitText(text);
+  if (refined !== '') return refined;
+  const draft = cleanCommitText(delivery.draftCommitMessage);
+  if (draft !== '') return draft;
+  return fallbackCommitSubject(group);
+}
+
+// Strip one wrapping code fence and trim — the normalization applied to both the model output and the
+// Worker draft before either is accepted as a commit message.
+function cleanCommitText(text: string): string {
+  return stripCodeFence(text.trim()).trim();
 }
 
 // Standard PR body every aitm-opened PR follows, so reviewers get a consistent shape. The
@@ -729,15 +723,6 @@ function sameSections(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((s, i) => s === b[i]);
 }
 
-// Fallback LLM step cap when caller passes null / 0 / negative `maxSteps`.
-export const DEFAULT_MAX_STEPS = 50;
-
-// Resolve the agent step cap from caller-provided `maxSteps`. Falls back to the
-// default when the value is null, zero, or negative. Exported for unit testing.
-export function resolveMaxSteps(maxSteps: number | null): number {
-  return typeof maxSteps === 'number' && maxSteps > 0 ? maxSteps : DEFAULT_MAX_STEPS;
-}
-
 export class Orchestrator {
   constructor(private readonly init: OrchestratorInit) {}
 
@@ -751,47 +736,10 @@ export class Orchestrator {
     return resolvePrBodySections(this.init.prBodySections);
   }
 
-  build(context: OrchestratorBuildContext): ToolLoopAgent<never, OrchestratorTools> {
-    const commonDeps = {
-      credentials: this.init.credentials,
-      styleContents: this.styleContents(),
-      rollingContext: this.init.rollingContext,
-      checkoutPath: context.checkoutPath,
-      ...(context.signal ? { signal: context.signal } : {}),
-    };
-    const tools: OrchestratorTools = {
-      planner: makePlannerTool({ ...commonDeps, plannerTools: context.plannerTools }),
-      worker: makeWorkerTool({
-        ...commonDeps,
-        workerTools: context.workerTools,
-        baseBranch: context.baseBranch,
-        group: context.group,
-      }),
-      reviewer: makeReviewerTool({
-        ...commonDeps,
-        reviewerTools: context.reviewerTools,
-        pr: context.pr,
-        threads: context.threads,
-      }),
-      done: tool<Record<string, never>, Record<string, never>>({
-        description:
-          'Signal that all PR groups have been processed and the orchestration is complete.',
-        inputSchema: z.object({}),
-        execute: async () => ({}),
-      }),
-    };
-    return new ToolLoopAgent<never, OrchestratorTools>({
-      model: this.init.credentials.modelFor('orchestrator'),
-      instructions: this.buildSystemPrompt(),
-      tools,
-      stopWhen: [stepCountIs(resolveMaxSteps(this.init.maxSteps)), hasToolCall('done')],
-    });
-  }
-
   buildSystemPrompt(): string {
     return render('orchestrator-system', {
       style: this.styleContents(),
-      roleGuidance: ORCHESTRATOR_ROLE_PREFIX,
+      roleGuidance: COMPOSER_ROLE_PREFIX,
       rollingContext: this.init.rollingContext,
     });
   }
@@ -850,21 +798,26 @@ export class Orchestrator {
       this.init.timeout,
     );
     reportUsage(this.init.onUsage, result);
-    return result.text.trim();
+    return resolveCommitMessage(result.text, group, delivery);
   }
 
   // Task-specific ask only — the shared system prompt (style/role/rolling-context) is sent once via
   // the `system` field (see refineCommitMessage), not re-concatenated here per call.
   private buildCommitPrompt(group: PrGroup, delivery: WorkerDelivery): string {
+    // Cap every interpolated Planner/Worker/editor field at MANIFEST_FIELD_MAX: title, draft message,
+    // and per-file summary are model- or plan-authored, not fixed harness strings, so a runaway plan
+    // or a hostile task description could otherwise blow up (or inject into) this prompt.
     return [
       'Rewrite the worker draft into a final commit message.',
       'Subject ≤72 chars, conventional-commit style. Body optional, one paragraph.',
       'Output ONLY the message — no labels, no quotes.',
       '',
-      `PR group: ${group.id} — ${group.title}`,
-      `Worker draft: ${delivery.draftCommitMessage}`,
+      `PR group: ${group.id} — ${truncateAtWord(group.title, MANIFEST_FIELD_MAX)}`,
+      `Worker draft: ${truncateAtWord(delivery.draftCommitMessage, MANIFEST_FIELD_MAX)}`,
       'Files changed:',
-      ...delivery.changes.map((c) => `  - ${c.kind} ${c.path}: ${c.summary}`),
+      ...delivery.changes.map(
+        (c) => `  - ${c.kind} ${c.path}: ${truncateAtWord(c.summary, MANIFEST_FIELD_MAX)}`,
+      ),
     ].join('\n');
   }
 
@@ -966,16 +919,23 @@ export class Orchestrator {
       '  into a clean, human one-liner describing WHAT changed — and group cohesive files so the list',
       '  stays scannable, not one noisy bullet per file.',
       '',
-      `PR group goal (use this as the title's subject): ${group.id} — ${group.title}`,
+      // Every interpolated field below is Planner/Worker/editor output, not a fixed harness string, so
+      // each is capped at MANIFEST_FIELD_MAX — a runaway plan or hostile task text can't blow up this
+      // prompt. `acceptance` is one-lined first so it can't smuggle a `## …` heading into the body.
+      `PR group goal (use this as the title's subject): ${group.id} — ${truncateAtWord(group.title, MANIFEST_FIELD_MAX)}`,
       // The plan's acceptance check — what this group was supposed to prove. It belongs in the body
       // so a human reviewer sees what "done" meant; whether it HOLDS is only what the material below
       // shows, which is why the Evidence guidance forbids reporting it as demonstrated on faith.
       ...(group.acceptance?.trim()
-        ? [`Acceptance check the plan set for this group: ${oneLine(group.acceptance)}`]
+        ? [
+            `Acceptance check the plan set for this group: ${truncateAtWord(oneLine(group.acceptance), MANIFEST_FIELD_MAX)}`,
+          ]
         : []),
-      `Worker draft message (context for the body only — not the title): ${delivery.draftCommitMessage}`,
+      `Worker draft message (context for the body only — not the title): ${truncateAtWord(delivery.draftCommitMessage, MANIFEST_FIELD_MAX)}`,
       'Files changed:',
-      ...delivery.changes.map((c) => `  - ${c.kind} ${c.path}: ${c.summary}`),
+      ...delivery.changes.map(
+        (c) => `  - ${c.kind} ${c.path}: ${truncateAtWord(c.summary, MANIFEST_FIELD_MAX)}`,
+      ),
     ].join('\n');
   }
 }

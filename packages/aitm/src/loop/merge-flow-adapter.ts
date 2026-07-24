@@ -95,6 +95,8 @@ export async function mergeFlowAdapter(
       ...(input.maxIterations !== undefined ? { maxIterations: input.maxIterations } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       ...(budget ? { budget } : {}),
+      // Threaded through the take-over flow's shared CI-fix session (runCiFixSession forwards it).
+      ...(input.logger ? { logger: input.logger } : {}),
       // Pushes go through take-over-flow's shared rebaseAndForcePush helper (rebase onto
       // origin/<base> → `git push --force-with-lease`); `runCmd` defaults to real git via execa.
       subagents: {
@@ -134,6 +136,7 @@ export async function mergeFlowAdapter(
                 onStepFinish: agentStepProgress(
                   `${shortModelName(input.credentials.modelIdFor('worker'))} conflict-resolve pr-${input.pr}`,
                 ),
+                ...(input.logger ? { logger: input.logger } : {}),
               }),
             }
           : {}),

@@ -24,6 +24,7 @@ import { Credentials } from '../credentials/credentials.ts';
 import { DEFAULT_MODELS } from '../credentials/defaults.ts';
 import { createLlmFetch, type LlmFetch } from '../credentials/llm-fetch.ts';
 import { defaultRunCmd, defaultSleep, GitHubClient } from '../github/github-client.ts';
+import { Logger, type LoggerLike } from '../logger/logger.ts';
 import { Disposer, disposeQuietly } from '../loop/disposer.ts';
 import { mergeFlowAdapter } from '../loop/merge-flow-adapter.ts';
 import { runLoopAdapter } from '../loop/run-loop-adapter.ts';
@@ -75,6 +76,10 @@ export type RunLoopInput = {
   // Abort handle threaded from the CLI's SIGINT/SIGTERM handler (cli.ts). On abort the adapter closes
   // MCP so a force-exit can't orphan its stdio children; unset → no cancellation wiring.
   signal?: AbortSignal;
+  // The run's structured logger, threaded into every loop consumer that accepts `logger?: LoggerLike`
+  // (worker verify, MCP lifecycle, conflict resolution, compaction). Constructed in runStart; unset
+  // in unit tests that stub the loop, where each `logger?.warn(...)` stays a no-op.
+  logger?: LoggerLike;
 };
 
 export type RunMergeFlowInput = {
@@ -96,6 +101,9 @@ export type RunMergeFlowInput = {
   usage?: UsageTracker;
   // Abort handle so a SIGINT (or a test) cancels the take-over loop → exit code 2.
   signal?: AbortSignal;
+  // The run's structured logger — same role as RunLoopInput.logger, threaded through the take-over
+  // flow (its shared CI-fix session + conflict resolver). Constructed in runMergePr.
+  logger?: LoggerLike;
 };
 
 // Inputs for resolving the coding-style digest fed to subagent prompts. The digest is distilled
@@ -528,6 +536,17 @@ export async function runStart(
     if (llmFetch) disposer.add(() => llmFetch.close());
     const credentials = new Credentials(resolved, sessionId, llmFetch?.fetch);
 
+    // The run's structured logger (finding 06/arch-1): every loop module accepts `logger?: LoggerLike`
+    // but nothing ever constructed one, so every `logger?.warn(...)` was a silent no-op in shipped
+    // runs. Build it here at the resolved level + run id, sinking structured records to stderr and to
+    // .ai-task-master/logs/<runId>.log (docs/state.md), then thread it through the loop below. flush()
+    // drains buffered file writes on the command's disposer, next to the transport + lock release.
+    // sessionId is set on both the resume and fresh-init paths above; the `??` only satisfies its
+    // optional type — buildInitialRunState always assigns a runId.
+    const runId = sessionId ?? `run-${Date.now().toString(36)}`;
+    const logger = new Logger(resolved.logLevel, runId, join(stateDir, 'logs', `${runId}.log`));
+    disposer.add(() => logger.flush());
+
     // Planning phase (issue #17): a one-shot step that runs the Planner once, before the loop,
     // so `prGroups` is populated and the loop has something to iterate. Gated on whether a plan
     // is already persisted — not merely on `resuming` — because a prior run whose planning
@@ -617,6 +636,7 @@ export async function runStart(
         branch: args.branch,
         usage,
         modelLimits,
+        logger,
         ...(ctx.signal ? { signal: ctx.signal } : {}),
       });
     } catch (err) {
@@ -807,6 +827,15 @@ export async function runMergePr(
     if (llmFetch) disposer.add(() => llmFetch.close());
     const credentials = new Credentials(resolved, runState.runId, llmFetch?.fetch);
 
+    // The run's structured logger — see runStart. runState.runId is the take-over run's id (fresh or
+    // resumed), so a resumed merge-pr keeps writing to the same .ai-task-master/logs/<runId>.log.
+    const logger = new Logger(
+      resolved.logLevel,
+      runState.runId,
+      join(stateDir, 'logs', `${runState.runId}.log`),
+    );
+    disposer.add(() => logger.flush());
+
     const pr = args.pr ?? runState.currentPr ?? undefined;
     if (pr === undefined) {
       return {
@@ -883,6 +912,7 @@ export async function runMergePr(
         runState,
         github,
         usage,
+        logger,
         ...(args.maxIterations !== undefined ? { maxIterations: args.maxIterations } : {}),
         ...(ctx.signal ? { signal: ctx.signal } : {}),
       });

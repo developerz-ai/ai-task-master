@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { LlmFetch } from '../credentials/llm-fetch.ts';
+import { Logger } from '../logger/logger.ts';
 import { acquireRunLock } from '../state/run-lock.ts';
 import { CURRENT_SCHEMA_VERSION, type PrGroup, type RunState } from '../state/schema.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
@@ -147,6 +148,35 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
       await readFile(join(repo.path, '.ai-task-master', 'config.snapshot.json'), 'utf8'),
     ) as { openrouterApiKey: string };
     assert.match(snapshot.openrouterApiKey, /<from env>/);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runStart: constructs a Logger and threads it into the loop input (finding 06/arch-1)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let captured: RunLoopInput | null = null;
+    const result = await runStart(
+      { kind: 'start', goal: 'add jwt auth' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runLoop: async (input) => {
+          captured = input;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    // Before this wiring every `logger?.warn(...)` in the loop was a runtime no-op — the loop never
+    // received a Logger. Assert a real one now reaches the adapter so those diagnostics can fire.
+    assert.ok(captured?.logger instanceof Logger, 'a live Logger is threaded to the loop');
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -1211,6 +1241,37 @@ test('runMergePr: happy path with --pr override', async () => {
     assert.equal(captured?.pr, 99);
     assert.equal(captured?.resume, true);
     assert.equal(captured?.styleDigest, STUB_DIGEST, 'resolved digest threaded to merge flow');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: constructs a Logger and threads it into the merge flow (finding 06/arch-1)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    let captured: RunMergeFlowInput | null = null;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 99 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        runMergeFlow: async (input) => {
+          captured = input;
+          return { kind: 'success', outcomes: [] };
+        },
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.ok(
+      captured?.logger instanceof Logger,
+      'a live Logger is threaded to the take-over flow',
+    );
   } finally {
     await repo.cleanup();
     await home.cleanup();

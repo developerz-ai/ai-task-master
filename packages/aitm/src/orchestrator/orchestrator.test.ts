@@ -9,16 +9,17 @@ import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
 import type { PrGroup } from '../state/schema.ts';
 import type { GithubToolInput, GithubToolOutput, ReviewerTools } from '../subagents/reviewer.ts';
-import type {
-  BashInput,
-  BashOutput,
-  FileManifest,
-  ReadFileInput,
-  ReadFileOutput,
-  WorkerDelivery,
-  WorkerTools,
-  WriteFileInput,
-  WriteFileOutput,
+import {
+  type BashInput,
+  type BashOutput,
+  type FileManifest,
+  MANIFEST_FIELD_MAX,
+  type ReadFileInput,
+  type ReadFileOutput,
+  type WorkerDelivery,
+  type WorkerTools,
+  type WriteFileInput,
+  type WriteFileOutput,
 } from '../subagents/worker.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
@@ -419,6 +420,108 @@ test('openPr sends buildSystemPrompt() via the system field, not duplicated into
   assert.ok(system, 'a system message must be present');
   assert.match(JSON.stringify(system), /# repo style/);
   assert.doesNotMatch(rest, /## Role: Orchestrator/);
+});
+
+// A field long enough that its tail sentinel sits well past the cap; a single unbroken token so the
+// word-boundary truncation hard-slices at exactly MANIFEST_FIELD_MAX rather than retreating earlier.
+function oversized(head: string, tail: string): string {
+  return `${head}${'x'.repeat(MANIFEST_FIELD_MAX + 100)}${tail}`;
+}
+
+test('finalizeCommit: interpolated title/draft/summary are capped at MANIFEST_FIELD_MAX', async () => {
+  let captured: unknown;
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      captured = opts.prompt;
+      return {
+        content: [{ type: 'text', text: 'feat: message' }],
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: {} as never,
+    runCmd: async (file, args) =>
+      args[0] === 'rev-parse'
+        ? { stdout: 'deadbeef\n', stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: '', exitCode: 0 },
+  });
+  const group = { ...baseGroup(), title: oversized('TITLEHEAD', 'TITLETAIL') };
+  const delivery: WorkerDelivery = {
+    ...baseDelivery(),
+    draftCommitMessage: oversized('DRAFTHEAD', 'DRAFTTAIL'),
+    changes: [{ path: 'src/a.ts', kind: 'create', summary: oversized('SUMMHEAD', 'SUMMTAIL') }],
+  };
+  await o.finalizeCommit(group, delivery, '/tmp/wt');
+
+  const user = JSON.stringify(
+    (captured as ReadonlyArray<{ role: string }>).filter((m) => m.role !== 'system'),
+  );
+  for (const head of ['TITLEHEAD', 'DRAFTHEAD', 'SUMMHEAD']) {
+    assert.match(user, new RegExp(head), `${head} survives the cap`);
+  }
+  for (const tail of ['TITLETAIL', 'DRAFTTAIL', 'SUMMTAIL']) {
+    assert.doesNotMatch(user, new RegExp(tail), `${tail} is truncated past MANIFEST_FIELD_MAX`);
+  }
+});
+
+test('openPr: interpolated title/acceptance/draft/summary are capped at MANIFEST_FIELD_MAX', async () => {
+  let captured: unknown;
+  const composition = { title: 't', body: COMPLIANT_BODY };
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      captured = opts.prompt;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-${submitCallId++}`,
+            toolName: 'submit',
+            input: JSON.stringify(composition),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { provider } = recordingProvider(model);
+  const o = new Orchestrator({
+    credentials: provider,
+    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    rollingContext: '',
+    maxSteps: null,
+    github: { createPr: async (input) => basePr(input.head) },
+  });
+  const group = {
+    ...baseGroup(),
+    title: oversized('TITLEHEAD', 'TITLETAIL'),
+    acceptance: oversized('ACCHEAD', 'ACCTAIL'),
+  };
+  const delivery: WorkerDelivery = {
+    ...baseDelivery(),
+    draftCommitMessage: oversized('DRAFTHEAD', 'DRAFTTAIL'),
+    changes: [{ path: 'src/a.ts', kind: 'create', summary: oversized('SUMMHEAD', 'SUMMTAIL') }],
+  };
+  await o.openPr(group, delivery, 'main');
+
+  const user = JSON.stringify(
+    (captured as ReadonlyArray<{ role: string }>).filter((m) => m.role !== 'system'),
+  );
+  for (const head of ['TITLEHEAD', 'ACCHEAD', 'DRAFTHEAD', 'SUMMHEAD']) {
+    assert.match(user, new RegExp(head), `${head} survives the cap`);
+  }
+  for (const tail of ['TITLETAIL', 'ACCTAIL', 'DRAFTTAIL', 'SUMMTAIL']) {
+    assert.doesNotMatch(user, new RegExp(tail), `${tail} is truncated past MANIFEST_FIELD_MAX`);
+  }
 });
 
 test('build composes planner/worker/reviewer/done tools and resolves orchestrator model', () => {

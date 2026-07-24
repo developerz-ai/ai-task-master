@@ -41,7 +41,7 @@ import { type OnUsage, reportUsage } from '../subagents/factory.ts';
 import type { PlannerTools } from '../subagents/planner.ts';
 import { render } from '../subagents/prompts/templates.ts';
 import type { ReviewerTools } from '../subagents/reviewer.ts';
-import type { WorkerDelivery, WorkerTools } from '../subagents/worker.ts';
+import { MANIFEST_FIELD_MAX, type WorkerDelivery, type WorkerTools } from '../subagents/worker.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
   type ModelProvider,
@@ -887,15 +887,20 @@ export class Orchestrator {
   // Task-specific ask only — the shared system prompt (style/role/rolling-context) is sent once via
   // the `system` field (see refineCommitMessage), not re-concatenated here per call.
   private buildCommitPrompt(group: PrGroup, delivery: WorkerDelivery): string {
+    // Cap every interpolated Planner/Worker/editor field at MANIFEST_FIELD_MAX: title, draft message,
+    // and per-file summary are model- or plan-authored, not fixed harness strings, so a runaway plan
+    // or a hostile task description could otherwise blow up (or inject into) this prompt.
     return [
       'Rewrite the worker draft into a final commit message.',
       'Subject ≤72 chars, conventional-commit style. Body optional, one paragraph.',
       'Output ONLY the message — no labels, no quotes.',
       '',
-      `PR group: ${group.id} — ${group.title}`,
-      `Worker draft: ${delivery.draftCommitMessage}`,
+      `PR group: ${group.id} — ${truncateAtWord(group.title, MANIFEST_FIELD_MAX)}`,
+      `Worker draft: ${truncateAtWord(delivery.draftCommitMessage, MANIFEST_FIELD_MAX)}`,
       'Files changed:',
-      ...delivery.changes.map((c) => `  - ${c.kind} ${c.path}: ${c.summary}`),
+      ...delivery.changes.map(
+        (c) => `  - ${c.kind} ${c.path}: ${truncateAtWord(c.summary, MANIFEST_FIELD_MAX)}`,
+      ),
     ].join('\n');
   }
 
@@ -997,16 +1002,23 @@ export class Orchestrator {
       '  into a clean, human one-liner describing WHAT changed — and group cohesive files so the list',
       '  stays scannable, not one noisy bullet per file.',
       '',
-      `PR group goal (use this as the title's subject): ${group.id} — ${group.title}`,
+      // Every interpolated field below is Planner/Worker/editor output, not a fixed harness string, so
+      // each is capped at MANIFEST_FIELD_MAX — a runaway plan or hostile task text can't blow up this
+      // prompt. `acceptance` is one-lined first so it can't smuggle a `## …` heading into the body.
+      `PR group goal (use this as the title's subject): ${group.id} — ${truncateAtWord(group.title, MANIFEST_FIELD_MAX)}`,
       // The plan's acceptance check — what this group was supposed to prove. It belongs in the body
       // so a human reviewer sees what "done" meant; whether it HOLDS is only what the material below
       // shows, which is why the Evidence guidance forbids reporting it as demonstrated on faith.
       ...(group.acceptance?.trim()
-        ? [`Acceptance check the plan set for this group: ${oneLine(group.acceptance)}`]
+        ? [
+            `Acceptance check the plan set for this group: ${truncateAtWord(oneLine(group.acceptance), MANIFEST_FIELD_MAX)}`,
+          ]
         : []),
-      `Worker draft message (context for the body only — not the title): ${delivery.draftCommitMessage}`,
+      `Worker draft message (context for the body only — not the title): ${truncateAtWord(delivery.draftCommitMessage, MANIFEST_FIELD_MAX)}`,
       'Files changed:',
-      ...delivery.changes.map((c) => `  - ${c.kind} ${c.path}: ${c.summary}`),
+      ...delivery.changes.map(
+        (c) => `  - ${c.kind} ${c.path}: ${truncateAtWord(c.summary, MANIFEST_FIELD_MAX)}`,
+      ),
     ].join('\n');
   }
 }

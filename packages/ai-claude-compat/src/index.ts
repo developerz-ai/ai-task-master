@@ -119,6 +119,8 @@ export {
   type PromptBlock,
   type PromptBlockKind,
   renderPromptBlocks,
+  SAFETY_PREAMBLE_TEXT,
+  safetyPreambleBlock,
   selfIdBlock,
   stepBudgetLine,
   TOOL_RESULT_TRUST_TEXT,

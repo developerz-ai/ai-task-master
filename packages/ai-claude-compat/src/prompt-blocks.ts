@@ -118,9 +118,33 @@ export const AUTONOMY_CONTRACT_TEXT = [
 
 // ---- Block builders --------------------------------------------------------
 
-// #1 identity: one-line role identity + a shared safety preamble.
+// The shared safety preamble that leads every built-in subagent prompt (block #1). Provider-agnostic
+// and behavioral — it states only conduct the loop can actually honor, never a policy it can't
+// enforce. The bash deny-rules (#113) and the harness are the hard boundary; this is the model-facing
+// framing that makes an agent default to caution before it reaches for a destructive action.
+export const SAFETY_PREAMBLE_TEXT =
+  'You are an autonomous agent working directly on a real repository the operator entrusted to you. ' +
+  'Stay within the task’s scope, prefer changes that are safe and reversible, and do not take ' +
+  'destructive or irreversible actions — losing work, force-pushing, or touching systems outside ' +
+  'this repository — beyond what the task requires. When an action is risky or its intent is ' +
+  'unclear, stop and report rather than guess.';
+
+// #1 identity: a one-line role identity followed by the shared safety preamble. An empty roleText
+// yields the safety preamble alone (see safetyPreambleBlock) — used where the role identity already
+// lives inline in the role's session guidance.
 export function identityBlock(roleText: string): PromptBlock {
-  return { kind: 'identity', text: roleText };
+  const role = roleText.trim();
+  return {
+    kind: 'identity',
+    text: role ? `${role}\n\n${SAFETY_PREAMBLE_TEXT}` : SAFETY_PREAMBLE_TEXT,
+  };
+}
+
+// The safety preamble as a standalone block #1 — the identity is carried inline by each role's session
+// guidance today, so production prompts inject the safety preamble via this rather than a per-role
+// identity string. Spread into defaultContractBlocks() and the editor leaf so no subagent lacks it.
+export function safetyPreambleBlock(): PromptBlock {
+  return identityBlock('');
 }
 
 // #4 selfId: model self-identification, so a routed model states which model it actually is. The
@@ -186,6 +210,7 @@ export function contextManagementBlock(): PromptBlock {
 // their block list; the renderer slots each into canonical order.
 export function defaultContractBlocks(): PromptBlock[] {
   return [
+    safetyPreambleBlock(),
     harnessContractBlock(),
     communicationContractBlock(),
     toolResultTrustBlock(),

@@ -85,6 +85,10 @@ test("role guidance: prose carries NO cross-cutting frame — contracts, <env>, 
       `${name}: no communication contract in the prose`,
     );
     assert.ok(!prose.includes('<env>'), `${name}: no <env> block in the prose`);
+    assert.ok(
+      !prose.includes('autonomous agent working directly on a real repository'),
+      `${name}: no safety preamble baked into the prose — it is the template's job (issue #186)`,
+    );
     assert.ok(!/hard budget of/.test(prose), `${name}: no step-budget reminder in the prose`);
     assert.ok(
       !/resume from the summary/i.test(prose),

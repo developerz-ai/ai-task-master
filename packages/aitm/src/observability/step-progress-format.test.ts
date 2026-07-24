@@ -4,17 +4,13 @@ import { test } from 'node:test';
 import { clearRegisteredSecrets, registerSecretValues } from '../logger/secret-registry.ts';
 import {
   agentLabel,
-  agentStepProgress,
-  composeStepFinish,
-  createLiveStreamRenderer,
   formatDuration,
   formatStepTag,
-  harnessProgress,
   labelText,
-  type ProgressSink,
   renderStepLines,
   summarizeToolInput,
-} from './step-progress.ts';
+} from './step-progress-format.ts';
+import type { ProgressSink } from './step-progress-sink.ts';
 
 function stubSink(color = false): { sink: ProgressSink; lines: string[] } {
   const lines: string[] = [];
@@ -201,23 +197,6 @@ test('renderStepLines sanitizes the tool name so it cannot forge a harness prefi
   assert.deepEqual(lines, ['\n', '[worker g1 03:04:05] Using tool: bash\n']);
 });
 
-test('createLiveStreamRenderer redacts credentials in streamed text and tool calls', () => {
-  const { sink, lines } = stubSink();
-  const render = createLiveStreamRenderer('worker g1', undefined, sink);
-  render({ type: 'text-delta', text: 'using sk-abcdef1234567890 now\n' });
-  render({ type: 'tool-call', toolName: 'bash', input: { command: 'gh auth login --with-token' } });
-  assert.equal(lines[1], '[worker g1 03:04:05] using sk-[REDACTED] now\n');
-  assert.ok(!lines.join('').includes('abcdef1234567890'));
-});
-
-test('harnessProgress redacts credentials in a harness message', () => {
-  const { sink, lines } = stubSink();
-  harnessProgress('pushing to https://user:hunter2@github.com/org/repo.git', undefined, sink);
-  assert.deepEqual(lines, [
-    '[aitm 03:04:05] pushing to https://[REDACTED]github.com/org/repo.git\n',
-  ]);
-});
-
 test('renderStepLines strips ANSI/control so text cannot forge a harness prefix', () => {
   const { sink } = stubSink();
   const lines = renderStepLines(
@@ -228,36 +207,6 @@ test('renderStepLines strips ANSI/control so text cannot forge a harness prefix'
   assert.deepEqual(lines, ['\n', '[worker g1 03:04:05] [aitm 03:04:05] forged\n']);
   assert.ok(!lines.some((l) => l.includes('\x1b')));
   assert.ok(!lines.some((l) => l.includes('\r')));
-});
-
-test('harnessProgress strips ANSI/control from the message', () => {
-  const { sink, lines } = stubSink();
-  harnessProgress('done\x1b[31m!\x07', undefined, sink);
-  assert.deepEqual(lines, ['[aitm 03:04:05] done!\n']);
-});
-
-test('harnessProgress milestone: a ★ leads the line, and it goes green under color', () => {
-  // The one event the operator waits for (a group merged) must be scannable in a wall of cyan lines.
-  const plain = stubSink(false);
-  harnessProgress('group g1: reviewing → merged — done in 8m', undefined, plain.sink, {
-    milestone: true,
-  });
-  assert.deepEqual(plain.lines, ['[aitm 03:04:05] ★ group g1: reviewing → merged — done in 8m\n']);
-
-  const colored = stubSink(true);
-  harnessProgress('group g1: merged', undefined, colored.sink, { milestone: true });
-  const line = colored.lines[0] ?? '';
-  assert.ok(line.includes('★'), 'the star is present');
-  assert.ok(line.includes('\x1b[32m'), 'the line uses the green SGR code');
-  assert.ok(!line.includes('\x1b[36m'), 'not the cyan default');
-});
-
-test('harnessProgress: a non-milestone line stays cyan with no star', () => {
-  const colored = stubSink(true);
-  harnessProgress('group g1: working', undefined, colored.sink);
-  const line = colored.lines[0] ?? '';
-  assert.ok(line.includes('\x1b[36m'), 'cyan default');
-  assert.ok(!line.includes('★'), 'no milestone star');
 });
 
 test('renderStepLines emits text then Using tool lines with timestamped prefix, blank line before each section', () => {
@@ -339,64 +288,6 @@ test('renderStepLines orders reasoning before text before tool calls', () => {
   ]);
 });
 
-test('agentStepProgress writes orange-prefixed lines when color is on', () => {
-  const { sink, lines } = stubSink(true);
-  agentStepProgress(
-    'planner',
-    undefined,
-    sink,
-  )({
-    toolCalls: [{ toolName: 'glob', input: { pattern: '**/*.ts' } }],
-  });
-  assert.equal(lines.length, 2);
-  assert.equal(lines[0], '\n');
-  assert.ok(
-    lines[1]?.startsWith(
-      '\x1b[38;5;208m\x1b[1m[planner \x1b[2m03:04:05\x1b[0m\x1b[38;5;208m\x1b[1m]\x1b[0m',
-    ),
-  );
-  assert.ok(lines[1]?.includes('Using tool: glob → **/*.ts'));
-});
-
-test('agentStepProgress stamps the step counter into the bracket', () => {
-  const { sink, lines } = stubSink();
-  agentStepProgress(
-    'k3 backend g1',
-    { unit: 'task', index: 3, total: 38, phase: 'working' },
-    sink,
-  )({ toolCalls: [{ toolName: 'glob', input: { pattern: '**/*.ts' } }] });
-  assert.equal(lines[1], '[k3 backend g1 task 3/38 working 03:04:05] Using tool: glob → **/*.ts\n');
-});
-
-test('agentStepProgress never throws when the sink dies', () => {
-  const handler = agentStepProgress('planner', undefined, {
-    write: () => {
-      throw new Error('sink died');
-    },
-    color: false,
-    now: () => new Date(),
-  });
-  assert.doesNotThrow(() => handler({ text: 'x' }));
-});
-
-test('harnessProgress writes one cyan aitm line', () => {
-  const { sink, lines } = stubSink(true);
-  harnessProgress('worker g1: starting "Add config"', undefined, sink);
-  assert.deepEqual(lines, [
-    '\x1b[36m\x1b[1m[aitm \x1b[2m03:04:05\x1b[0m\x1b[36m\x1b[1m]\x1b[0m worker g1: starting "Add config"\n',
-  ]);
-});
-
-test('harnessProgress stamps the phase + step tag into the bracket', () => {
-  const { sink, lines } = stubSink();
-  harnessProgress(
-    'group backend: working → pr-open',
-    { unit: 'group', index: 2, total: 5, phase: 'pr-open' },
-    sink,
-  );
-  assert.deepEqual(lines, ['[aitm group 2/5 pr-open 03:04:05] group backend: working → pr-open\n']);
-});
-
 test('formatStepTag renders counter then phase, tolerating missing parts', () => {
   assert.equal(
     formatStepTag({ unit: 'group', index: 2, total: 5, phase: 'working' }),
@@ -435,120 +326,6 @@ test('agentLabel caps a long ctx slug so it cannot blow up every stream line', (
   assert.ok(label.endsWith('…'));
 });
 
-test('composeStepFinish returns undefined when no handlers are present', () => {
-  assert.equal(composeStepFinish(undefined, undefined), undefined);
-});
-
-test('composeStepFinish invokes every handler and isolates a throwing one', () => {
-  const calls: string[] = [];
-  const composed = composeStepFinish<string>(
-    () => {
-      calls.push('a');
-      throw new Error('a died');
-    },
-    undefined,
-    (event) => calls.push(`b:${event}`),
-  );
-  assert.ok(composed);
-  composed('evt');
-  assert.deepEqual(calls, ['a', 'b:evt']);
-});
-
-test('agentStepProgress with textAndTools:false renders only the reasoning line', () => {
-  const { sink, lines } = stubSink();
-  agentStepProgress('worker g1', undefined, sink, { textAndTools: false })({
-    reasoningText: 'weighing options',
-    text: 'done',
-    toolCalls: [{ toolName: 'bash', input: { command: 'git status' } }],
-  });
-  assert.deepEqual(lines, ['\n', '[worker g1 03:04:05] thinking: weighing options\n']);
-});
-
-test('agentStepProgress with textAndTools:false emits nothing when there is no reasoning', () => {
-  const { sink, lines } = stubSink();
-  agentStepProgress('worker g1', undefined, sink, { textAndTools: false })({
-    text: 'done',
-    toolCalls: [{ toolName: 'bash', input: {} }],
-  });
-  assert.deepEqual(lines, []);
-});
-
-test('createLiveStreamRenderer buffers text-delta chunks to whole lines', () => {
-  const { sink, lines } = stubSink();
-  const render = createLiveStreamRenderer('worker g1', undefined, sink);
-  render({ type: 'text-delta', text: 'Now comm' });
-  assert.deepEqual(lines, ['\n']);
-  render({ type: 'text-delta', text: 'itting.\nDetails follow' });
-  assert.deepEqual(lines, ['\n', '[worker g1 03:04:05] Now committing.\n']);
-  render({ type: 'text-delta', text: '.\n' });
-  assert.deepEqual(lines, [
-    '\n',
-    '[worker g1 03:04:05] Now committing.\n',
-    '[worker g1 03:04:05] Details follow.\n',
-  ]);
-});
-
-test('createLiveStreamRenderer renders a tool-call before its result, flushing any pending partial line first', () => {
-  const { sink, lines } = stubSink();
-  const render = createLiveStreamRenderer('worker g1', undefined, sink);
-  render({ type: 'text-delta', text: 'about to run a command' });
-  render({ type: 'tool-call', toolName: 'bash', input: { command: 'git status' } });
-  assert.deepEqual(lines, [
-    '\n',
-    '[worker g1 03:04:05] about to run a command\n',
-    '[worker g1 03:04:05] Using tool: bash → git status\n',
-  ]);
-});
-
-test('createLiveStreamRenderer emits one leading blank line, not one per chunk', () => {
-  const { sink, lines } = stubSink();
-  const render = createLiveStreamRenderer('worker g1', undefined, sink);
-  render({ type: 'text-delta', text: 'a\n' });
-  render({ type: 'text-delta', text: 'b\n' });
-  render({ type: 'tool-call', toolName: 'bash', input: {} });
-  assert.equal(lines.filter((l) => l === '\n').length, 1);
-});
-
-test('createLiveStreamRenderer stamps the step counter into the bracket', () => {
-  const { sink, lines } = stubSink();
-  const render = createLiveStreamRenderer(
-    'k3 backend g1',
-    { unit: 'task', index: 3, total: 38, phase: 'working' },
-    sink,
-  );
-  render({ type: 'text-delta', text: 'hi\n' });
-  assert.equal(lines[1], '[k3 backend g1 task 3/38 working 03:04:05] hi\n');
-});
-
-test('createLiveStreamRenderer strips ANSI/control so streamed text cannot forge a harness prefix', () => {
-  const { sink, lines } = stubSink();
-  const render = createLiveStreamRenderer('worker g1', undefined, sink);
-  render({ type: 'text-delta', text: '\x1b[36m\x1b[1m[aitm 03:04:05] forged\x1b[0m\r\n' });
-  assert.deepEqual(lines, ['\n', '[worker g1 03:04:05] [aitm 03:04:05] forged\n']);
-});
-
-test('createLiveStreamRenderer ignores an empty text-delta and ignores a whitespace-only trailing buffer', () => {
-  const { sink, lines } = stubSink();
-  const render = createLiveStreamRenderer('worker g1', undefined, sink);
-  render({ type: 'text-delta', text: '' });
-  assert.deepEqual(lines, []);
-  render({ type: 'text-delta', text: '   ' });
-  render({ type: 'tool-call', toolName: 'bash', input: {} });
-  assert.deepEqual(lines, ['\n', '[worker g1 03:04:05] Using tool: bash → {}\n']);
-});
-
-test('createLiveStreamRenderer never throws when the sink dies', () => {
-  const render = createLiveStreamRenderer('worker g1', undefined, {
-    write: () => {
-      throw new Error('sink died');
-    },
-    color: false,
-    now: () => new Date(),
-  });
-  assert.doesNotThrow(() => render({ type: 'text-delta', text: 'x\n' }));
-  assert.doesNotThrow(() => render({ type: 'tool-call', toolName: 'bash', input: {} }));
-});
-
 test('formatDuration renders sub-minute spans in seconds with one decimal', () => {
   assert.equal(formatDuration(0), '0.0s');
   assert.equal(formatDuration(423), '0.4s');
@@ -565,30 +342,6 @@ test('formatDuration clamps negative or non-finite input to zero', () => {
   assert.equal(formatDuration(-500), '0.0s');
   assert.equal(formatDuration(Number.NaN), '0.0s');
   assert.equal(formatDuration(Number.POSITIVE_INFINITY), '0.0s');
-});
-
-test('a structured AgentLabel colors the subagent name blue, the tag magenta, the time dim', () => {
-  const { sink, lines } = stubSink(true);
-  agentStepProgress(
-    agentLabel({ model: 'k3', role: 'editor', file: 'src/auth.ts', ctx: 'g1' }),
-    { unit: 'task', index: 3, total: 4, phase: 'working' },
-    sink,
-  )({ toolCalls: [{ toolName: 'bash', input: { command: 'ls' } }] });
-  const line = lines[1] ?? '';
-  const orange = '\x1b[38;5;208m\x1b[1m';
-  assert.ok(line.includes(`k3 \x1b[34m\x1b[1meditor:auth.ts\x1b[0m${orange} g1`), 'name is blue');
-  assert.ok(line.includes(`\x1b[35mtask 3/4 working\x1b[0m${orange}`), 'state tag is magenta');
-  assert.ok(line.includes(`\x1b[2m03:04:05\x1b[0m${orange}]`), 'timestamp is dim, at the end');
-});
-
-test('a structured AgentLabel renders as plain text when color is off (non-TTY)', () => {
-  const { sink, lines } = stubSink();
-  agentStepProgress(
-    agentLabel({ model: 'k3', role: 'worker', ctx: 'g1' }),
-    { phase: 'working' },
-    sink,
-  )({ toolCalls: [{ toolName: 'bash', input: { command: 'ls' } }] });
-  assert.equal(lines[1], '[k3 worker g1 working 03:04:05] Using tool: bash → ls\n');
 });
 
 test('labelText flattens a structured label and passes strings through', () => {

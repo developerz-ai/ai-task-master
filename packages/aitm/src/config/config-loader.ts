@@ -19,7 +19,8 @@ import { ZodError, z } from 'zod';
 import { type Capability, DEFAULT_MODELS } from '../domain/model.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { registerSecretValues } from '../logger/secret-registry.ts';
-import { type McpServers, McpServersSchema } from '../mcp/schema.ts';
+import type { McpServers } from '../mcp/schema.ts';
+import { readClaudeProjectMcp, readClaudeUserMcp } from './claude-code-config.ts';
 import {
   DEFAULT_LLM_STEP_TIMEOUT_MS,
   DEFAULT_MAX_CI_FIX_ATTEMPTS,
@@ -116,12 +117,6 @@ const GLOBAL_FILE = '.aitm.json';
 const PROJECT_DIR = '.ai-task-master';
 const PROJECT_FILE = 'config.json';
 const SNAPSHOT_FILE = 'config.snapshot.json';
-// Claude Code's standard MCP config files. Discovering these lets users plug aitm into
-// the same MCP servers their Claude Code session already uses, without re-declaring them.
-// Refs: https://code.claude.com/docs/en/mcp ("Project scope" = .mcp.json in project root;
-// "User scope" = ~/.claude.json with an mcpServers key).
-const CLAUDE_PROJECT_MCP_FILE = '.mcp.json';
-const CLAUDE_USER_FILE = '.claude.json';
 
 // Fields a project-scoped .ai-task-master/config.json must NEVER control — an autonomous run points
 // at untrusted repos, so honoring these would let a checked-in file steer the harness. Honored ONLY
@@ -259,8 +254,8 @@ export class ConfigLoader {
     const global = await this.readGlobal();
     this.registerProviderSecrets(global);
     const project = this.stripUntrustedProjectFields(await this.readProject());
-    const claudeUser = await this.readClaudeUserMcp();
-    const claudeProject = await this.readClaudeProjectMcp();
+    const claudeUser = await readClaudeUserMcp(this.homeDir);
+    const claudeProject = await readClaudeProjectMcp(this.cwd);
 
     // The active provider profile (global-only) supplies provider defaults that sit between
     // explicit top-level config and env — see resolveApiKey/resolveBaseURL/resolveModels.
@@ -659,19 +654,6 @@ export class ConfigLoader {
     this.warn(message);
   }
 
-  // Read Claude Code's project-scoped MCP file (./.mcp.json). Schema is permissive:
-  // we only extract `mcpServers`, ignore any other keys Claude Code may add.
-  async readClaudeProjectMcp(): Promise<McpServers | null> {
-    return this.readMcpEnvelope(join(this.cwd, CLAUDE_PROJECT_MCP_FILE));
-  }
-
-  // Read Claude Code's user-scoped config (~/.claude.json) and extract the `mcpServers`
-  // block, if any. ~/.claude.json holds many unrelated keys (auth tokens, history); we
-  // intentionally read it but only consume `mcpServers`.
-  async readClaudeUserMcp(): Promise<McpServers | null> {
-    return this.readMcpEnvelope(join(this.homeDir, CLAUDE_USER_FILE));
-  }
-
   // Frozen run snapshot. API key value is replaced by its source label so the
   // file is safe to inspect; only the resolution source is recorded. MCP server
   // secrets (headers, env) are also redacted.
@@ -694,19 +676,6 @@ export class ConfigLoader {
     };
     const path = join(stateDir, SNAPSHOT_FILE);
     await atomicWrite(path, `${JSON.stringify(redacted, null, 2)}\n`);
-  }
-
-  // Reads any JSON file whose only field we care about is `mcpServers` (Claude Code's
-  // .mcp.json or the much larger ~/.claude.json). Missing file → null. Malformed JSON
-  // is a hard error — we don't want to silently ignore a corrupted user file.
-  private async readMcpEnvelope(path: string): Promise<McpServers | null> {
-    const parsed = await readJsonFile(path);
-    if (parsed === undefined) return null;
-    const envelope = McpEnvelopeSchema.safeParse(parsed);
-    if (!envelope.success) {
-      throw new Error(`${path}: ${formatZodError(envelope.error)}`);
-    }
-    return envelope.data.mcpServers ?? null;
   }
 
   private resolveMcpServers(sources: {
@@ -1059,11 +1028,3 @@ function pickNullable<T>(
   if (global !== undefined) return global;
   return fallback;
 }
-
-// Permissive envelope for Claude Code config files: we only extract `mcpServers` and
-// ignore every other key (~/.claude.json especially has many auth/history fields).
-const McpEnvelopeSchema = z
-  .object({
-    mcpServers: McpServersSchema.optional(),
-  })
-  .passthrough();

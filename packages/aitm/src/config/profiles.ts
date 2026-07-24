@@ -38,9 +38,10 @@ export class ProfileManager {
   // Switch the active profile. Refuses to point `activeProfile` at a profile that doesn't
   // exist — a dangling pointer would silently fall back to env at run time.
   async use(name: string): Promise<void> {
+    assertProfileName(name);
     const file = await this.readRaw();
     const profiles = asObject(file.profiles);
-    if (!(name in profiles)) {
+    if (!Object.hasOwn(profiles, name)) {
       throw new Error(unknownProfileMessage(name, Object.keys(profiles)));
     }
     file.activeProfile = name;
@@ -51,10 +52,10 @@ export class ProfileManager {
   // the first profile created so `aitm profile add … && aitm start` works without a
   // separate `use`. Refuses to clobber an existing profile (use `set` to modify).
   async add(name: string, input: AddProfileInput = {}): Promise<Profile> {
-    if (name.trim() === '') throw new Error('Profile name must be non-empty.');
+    assertProfileName(name);
     const file = await this.readRaw();
     const profiles = ensureObject(file, 'profiles');
-    if (name in profiles) {
+    if (Object.hasOwn(profiles, name)) {
       throw new Error(
         `Profile "${name}" already exists. Use \`aitm profile set ${name} <key> <value>\` to modify it.`,
       );
@@ -73,9 +74,10 @@ export class ProfileManager {
   // Set a field on an existing profile. `key` is `openrouterApiKey`, `baseURL`, or
   // `models.<tier>`. Value is JSON-parsed (bare strings stay literal), like `config set`.
   async set(name: string, key: string, value: unknown): Promise<Profile> {
+    assertProfileName(name);
     const file = await this.readRaw();
     const profiles = asObject(file.profiles);
-    if (!(name in profiles)) {
+    if (!Object.hasOwn(profiles, name)) {
       throw new Error(unknownProfileMessage(name, Object.keys(profiles)));
     }
     const profile = asObject(profiles[name]);
@@ -87,8 +89,9 @@ export class ProfileManager {
   }
 
   async get(name: string, key: string): Promise<unknown> {
+    assertProfileName(name);
     const { profiles } = await this.list();
-    const profile = profiles[name];
+    const profile = ownProfile(profiles, name);
     if (profile === undefined) {
       throw new Error(unknownProfileMessage(name, Object.keys(profiles)));
     }
@@ -98,9 +101,10 @@ export class ProfileManager {
   // Delete a profile. If it was active, clear `activeProfile` so the next run falls back
   // cleanly to top-level config / env rather than dangling at a removed name.
   async remove(name: string): Promise<void> {
+    assertProfileName(name);
     const file = await this.readRaw();
     const profiles = asObject(file.profiles);
-    if (!(name in profiles)) {
+    if (!Object.hasOwn(profiles, name)) {
       throw new Error(unknownProfileMessage(name, Object.keys(profiles)));
     }
     delete profiles[name];
@@ -117,7 +121,8 @@ export class ProfileManager {
         'No profile specified and no active profile set. Pass a name or run `aitm profile use <name>`.',
       );
     }
-    const profile = profiles[target];
+    assertProfileName(target);
+    const profile = ownProfile(profiles, target);
     if (profile === undefined) {
       throw new Error(unknownProfileMessage(target, Object.keys(profiles)));
     }
@@ -212,6 +217,22 @@ export const FORBIDDEN_KEY_SEGMENTS: ReadonlySet<string> = new Set([
   'prototype',
   'constructor',
 ]);
+
+// Profile names index the `profiles` object, so the same reserved keys are dangerous there:
+// `profiles.__proto__` resolves to Object.prototype and setDotted() would write onto it,
+// polluting every object in the process. Names are validated before any lookup, and membership
+// is own-property only (like isPresetName) so inherited keys — `constructor`, `toString` — can
+// neither masquerade as an existing profile nor be handed back as one.
+function assertProfileName(name: string): void {
+  if (name.trim() === '') throw new Error('Profile name must be non-empty.');
+  if (FORBIDDEN_KEY_SEGMENTS.has(name)) {
+    throw new Error(`Invalid profile name: "${name}" — reserved word. Choose a different name.`);
+  }
+}
+
+function ownProfile<T>(profiles: Record<string, T>, name: string): T | undefined {
+  return Object.hasOwn(profiles, name) ? profiles[name] : undefined;
+}
 
 const KEY_SURFACE_HINT =
   'Allowed keys: openrouterApiKey, baseURL, models.<tier>, providerRouting.<field>, fallbackModels.<tier>, reasoningEffort.<tier>.';

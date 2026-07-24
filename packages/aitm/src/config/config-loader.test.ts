@@ -1562,6 +1562,23 @@ test('profile: dangling activeProfile warns and falls back to env', async () => 
   }
 });
 
+test('profile: activeProfile "__proto__" resolves to nothing, never Object.prototype', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  const warns = makeWarnCollector();
+  try {
+    await writeGlobalConfig(home.path, { activeProfile: '__proto__', profiles: {} });
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' }, warns);
+    const resolved = await loader.resolve({});
+    assert.equal(resolved.activeProfile, undefined);
+    assert.equal(resolved.apiKeySource, 'env');
+    assert.ok(warns.calls.some((m) => m.includes('activeProfile "__proto__"')));
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('profile: no activeProfile leaves resolution identical to before (back-compat)', async () => {
   const resolved = await resolveWith(
     { profiles: { 'z.ai': { openrouterApiKey: 'sk-or-zai' } } },

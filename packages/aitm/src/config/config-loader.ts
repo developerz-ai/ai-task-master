@@ -533,7 +533,11 @@ export class ConfigLoader {
   ): { name: string; profile: Profile } | undefined {
     const name = global?.activeProfile;
     if (!name) return undefined;
-    const profile = global?.profiles?.[name];
+    const profiles = global?.profiles;
+    // Own-property lookup: `profiles.__proto__` would otherwise resolve to Object.prototype and
+    // be treated as a configured profile (a config written before profile names were validated
+    // can still point there).
+    const profile = profiles && Object.hasOwn(profiles, name) ? profiles[name] : undefined;
     if (!profile) {
       this.warn(
         `activeProfile "${name}" is set in ~/.aitm.json but no such profile exists — ignoring it. ` +

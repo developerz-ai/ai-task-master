@@ -720,3 +720,64 @@ test('connectAll: connectTimeoutMs <= 0 disables the deadline — a slow but suc
   assert.deepEqual(Object.keys(m.toolsForRole('worker')), ['mcp__slow__slow']);
   await m.close();
 });
+
+test('connectAll warns on post-sanitization server name collisions (issue #80)', async () => {
+  const { logger, warnings } = recordingLogger();
+  const { createClient } = recordingFactory({
+    'my.server': { ping: fakeTool() },
+    'my server': { pong: fakeTool() },
+    'my/server': { status: fakeTool() },
+  });
+  const m = new McpClientManager({
+    servers: {
+      'my.server': { command: 'a' },
+      'my server': { command: 'b' },
+      'my/server': { command: 'c' },
+    },
+    createClient,
+    logger,
+  });
+
+  await m.connectAll();
+
+  // All three servers should be connected (no deduping of the servers themselves).
+  assert.equal(m.connected().length, 3);
+
+  // But a warning should be issued about the post-sanitization collision.
+  const collisionWarning = warnings.find(
+    (w) => w.msg === 'mcp server name collision after sanitization',
+  );
+  assert.ok(collisionWarning, 'expected a collision warning');
+  // All three original names should be listed.
+  assert.deepEqual(collisionWarning?.fields?.colliding, ['my.server', 'my server', 'my/server']);
+  // They should all sanitize to `my-server`.
+  assert.equal(collisionWarning?.fields?.sanitized, 'my-server');
+
+  await m.close();
+});
+
+test('connectAll: no collision warning when server names sanitize uniquely (issue #80)', async () => {
+  const { logger, warnings } = recordingLogger();
+  const { createClient } = recordingFactory({
+    'my-server': { ping: fakeTool() },
+    'other.srv': { pong: fakeTool() },
+  });
+  const m = new McpClientManager({
+    servers: {
+      'my-server': { command: 'a' },
+      'other.srv': { command: 'b' },
+    },
+    createClient,
+    logger,
+  });
+
+  await m.connectAll();
+
+  // No collision warning should be issued when sanitized names are unique.
+  const collisionWarning = warnings.find(
+    (w) => w.msg === 'mcp server name collision after sanitization',
+  );
+  assert.equal(collisionWarning, undefined);
+
+  await m.close();
+});

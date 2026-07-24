@@ -35,6 +35,16 @@ The same shape (a `mcpServers` object keyed by server name) is used everywhere.
 
 Same shape as Claude Code's `mcpServers` (https://code.claude.com/docs/en/mcp), so a config that works there works here.
 
+## Server naming and collisions
+
+Server names are **sanitized** (non-alphanumeric characters except `-` and `_` replaced with `-`) when constructing the namespaced tool prefix `mcp__<server>__<tool>`. If multiple servers' names sanitize to the same form (e.g., `my.server`, `my server`, `my/server` all become `my-server`), the run will warn on startup:
+
+```
+mcp server name collision after sanitization: sanitized=my-server, colliding=[my.server, my server, my/server]
+```
+
+To avoid collisions, give servers distinct names that don't collapse under sanitization — e.g., `my-server-v1` and `my-server-v2` instead of `my.server` and `my/server`.
+
 ## Transports
 
 | `type` | When | Schema |

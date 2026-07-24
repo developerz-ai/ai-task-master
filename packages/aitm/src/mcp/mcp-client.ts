@@ -104,6 +104,30 @@ export class McpClientManager {
     for (const outcome of outcomes) {
       if (outcome.status === 'fulfilled' && outcome.value) this.servers.push(outcome.value);
     }
+    this.warnOnSanitizationCollisions();
+  }
+
+  // Detect and warn about server name collisions after sanitization (issue #80). When multiple
+  // servers' names map to the same sanitized form (e.g., `my.server`, `my server`, `my/server` all
+  // become `my-server`), the tools from each are merged under a single namespaced prefix, causing
+  // silent overwrites. Warn so the user can rename servers to avoid collisions.
+  private warnOnSanitizationCollisions(): void {
+    const sanitizedToOriginals = new Map<string, string[]>();
+    for (const s of this.servers) {
+      const sanitized = sanitizeServerName(s.name);
+      const originals = sanitizedToOriginals.get(sanitized) ?? [];
+      originals.push(s.name);
+      sanitizedToOriginals.set(sanitized, originals);
+    }
+
+    for (const [sanitized, originals] of sanitizedToOriginals) {
+      if (originals.length > 1) {
+        this.init.logger?.warn('mcp server name collision after sanitization', {
+          sanitized,
+          colliding: originals,
+        });
+      }
+    }
   }
 
   // Connect one server under a single deadline (createClient + its first tools() call, raced together)

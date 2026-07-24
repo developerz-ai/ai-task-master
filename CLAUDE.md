@@ -68,7 +68,15 @@ Add an exception by appending a rule (`match: 'contains'` when a service words o
 
 ## Testing
 
-- Every module has a paired `*.test.ts`. No exceptions.
+- Every module has a paired `*.test.ts`. Two narrow exemptions, applied consistently:
+  - Pure re-export barrels with no logic of their own (only `export { ... } from './x.ts'` /
+    `export type { ... } from './x.ts'`) — nothing to unit-test that isn't already covered by the
+    re-exported module's own paired test. Example: `observability/step-progress.ts`.
+  - Test-only support/fixture modules consumed exclusively by `*.test.ts` files (never imported from
+    production code) — they're test infrastructure, not a module under test. Example:
+    `loop/work-loop-test-support.ts`.
+  Everything else — including small constant/helper files with real logic (e.g. a capping function) —
+  ships a paired test.
 - Integration tests run against a real temp git repo and real `gh` against a sandbox account. They are the source of truth for behavior.
 - Unit tests cover pure modules (`AgentConfigDetector`, `Credentials` resolution, plan parsing, PR-group sizing).
 - No mocking of `gh` or the AI SDK in integration tests. Mock only at module boundaries in unit tests.

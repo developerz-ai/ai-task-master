@@ -101,6 +101,7 @@ import { Disposer, disposeQuietly } from './disposer.ts';
 import { defaultPlanGroups, type PlanGroupsOutcome } from './planner-wiring.ts';
 import { makeProgressTee } from './progress-file.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
+import { investigateReviewThreads } from './review-team-wiring.ts';
 import { runSelfReviewSession } from './self-review.ts';
 import { buildSubagentSession } from './subagent-session.ts';
 import {
@@ -665,6 +666,25 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       ...(session.onStream ? { onStream: session.onStream } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
+    // The review team (review-team.ts): a lead splits the threads and read-only investigators work
+    // them out CONCURRENTLY before the sequential pass below starts writing. The resolution loop
+    // itself stays serial by necessity — every "fixed" thread commits against this one shared
+    // checkout — so the parallelism goes where it is safe: reading the code behind each comment.
+    // Skipped for a single thread: there is no split to make, and the resolver reads it itself.
+    const briefs =
+      threads.length > 1
+        ? await investigateReviewThreads({
+            input,
+            threads,
+            checkoutPath: checkout.path,
+            style,
+            reviewerModelId,
+            ...(reviewerUsage ? { reviewerUsage } : {}),
+            mcp,
+            fetchHtmlAvailable,
+            counter: reviewerCounter,
+          })
+        : new Map<string, string>();
     const stopReviewerHeartbeat = session.start();
     let result: Awaited<ReturnType<typeof runReviewerSubagent>>;
     try {
@@ -672,6 +692,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         pr,
         threads,
         checkoutPath: checkout.path,
+        ...(briefs.size > 0 ? { briefs } : {}),
         // The single checkout is on the PR head branch (the PR was opened from it); pin it so a
         // review fix commit can never land on the wrong branch (audit 02, DECISION 1).
         headBranch: checkout.branch,

@@ -571,3 +571,45 @@ test('createReviewerAgent forwards the run signal → an abort cancels the in-fl
     assert.doesNotMatch(result.error, /deadline/, 'a cancel is never a deadline breach');
   }
 });
+
+test('runReviewer: an investigation brief reaches that thread only, as leads not a verdict', async () => {
+  // The review team (review-team.ts) works the threads out in parallel BEFORE this sequential pass;
+  // its brief is what stops the resolver re-deriving the same location one thread at a time. A
+  // thread with no brief must stay byte-identical to the pre-team prompt.
+  const prompts: string[] = [];
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      prompts.push(JSON.stringify(opts.prompt));
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-x',
+            toolName: 'submit',
+            input: JSON.stringify({ kind: 'replied' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const { tools } = makeTools({});
+  const agent = createReviewerAgent({ model, tools, systemPrompt: REVIEWER_SYSTEM_PREFIX });
+
+  const result = await runReviewer(agent, {
+    ...baseInput([thread('T1', 'this leaks the token'), thread('T2', 'why is this here?')]),
+    briefs: new Map([
+      ['T1', '<investigation>\ntoken is redacted at src/log.ts:20\n</investigation>'],
+    ]),
+  });
+
+  assert.equal(result.kind, 'ok');
+  assert.match(prompts[0] ?? '', /token is redacted at src\/log\.ts:20/);
+  assert.doesNotMatch(
+    prompts[1] ?? '',
+    /investigation/,
+    'an unbriefed thread is prompted as before',
+  );
+});

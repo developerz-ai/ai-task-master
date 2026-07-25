@@ -326,3 +326,23 @@ test('composeStyleGuide: nothing to say → empty, so the prompt omits the style
   assert.equal(composeStyleGuide(null, ''), '');
   assert.equal(composeStyleGuide(claudeConfig('/repo/CLAUDE.md', '  \n'), ''), '');
 });
+
+test('StyleDistiller: an implausibly large file is never sampled', async () => {
+  // Samples are picked biggest-first, so without a ceiling the largest file wins — typically a
+  // generated or minified one, which is both the worst style exemplar and the most expensive read.
+  const repo = await makeTempRepo();
+  try {
+    await writeFile(
+      join(repo.path, 'generated.ts'),
+      `export const GENERATED_MARKER = 1;\n${'// filler\n'.repeat(30_000)}`,
+    );
+    await writeFile(join(repo.path, 'handwritten.ts'), 'export const HANDWRITTEN_MARKER = 1;\n');
+    const { model, prompt } = modelReturning('# Coding Style\n\n- x\nCODING_STYLE_COMPLETE');
+    await new StyleDistiller({ model }).distill({ config: null, repoRoot: repo.path });
+
+    assert.match(prompt(), /HANDWRITTEN_MARKER/, 'real hand-written source is sampled');
+    assert.doesNotMatch(prompt(), /GENERATED_MARKER/, 'the oversized file is skipped entirely');
+  } finally {
+    await repo.cleanup();
+  }
+});

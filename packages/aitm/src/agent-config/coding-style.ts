@@ -45,6 +45,10 @@ export type DistillInput = {
 export const SOURCE_SAMPLE_LIMIT = 5;
 export const TEST_SAMPLE_LIMIT = 3;
 export const SAMPLE_CHAR_LIMIT = 2500;
+// Samples are picked biggest-first, so without a ceiling the single largest file in the repo wins —
+// which on most repos is generated, minified, or vendored: the worst possible style exemplar, and
+// read in full before being sliced to SAMPLE_CHAR_LIMIT. Hand-written source is far below this.
+export const MAX_SAMPLE_FILE_BYTES = 200_000;
 const MAX_WALK_FILES = 4000;
 const MAX_WALK_DEPTH = 8;
 
@@ -240,8 +244,9 @@ async function gatherSourceSamples(repoRoot: string): Promise<Signal[]> {
       size: (await stat(path).catch(() => null))?.size ?? 0,
     })),
   );
-  const tests = sized.filter((f) => isTestPath(relative(repoRoot, f.path)));
-  const sources = sized.filter((f) => !isTestPath(relative(repoRoot, f.path)));
+  const plausible = sized.filter((f) => f.size > 0 && f.size <= MAX_SAMPLE_FILE_BYTES);
+  const tests = plausible.filter((f) => isTestPath(relative(repoRoot, f.path)));
+  const sources = plausible.filter((f) => !isTestPath(relative(repoRoot, f.path)));
   const signals: Signal[] = [];
   const source = await renderSamples(repoRoot, pickSamples(sources, SOURCE_SAMPLE_LIMIT));
   if (source !== null) signals.push({ label: 'source samples', body: source });

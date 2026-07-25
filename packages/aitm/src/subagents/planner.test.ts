@@ -4,6 +4,7 @@ import { MockLanguageModelV3 } from 'ai/test';
 import type { PrGroup } from '../domain/pr-group.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { Plan } from '../plan/schema.ts';
+import { stallingModel } from '../testing/stalling-model.ts';
 import { createPlannerAgent, PLANNER_SYSTEM_PREFIX, runPlanner } from './planner.ts';
 
 let submitCallId = 0;
@@ -366,14 +367,7 @@ test('runPlanner: appends the progressBlock to the END of the first user message
 });
 
 test('createPlannerAgent forwards timeout → a stalled step surfaces as a deadline-named error (issue #129)', async () => {
-  const stalling = new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
-  });
+  const stalling = stallingModel();
   const agent = createPlannerAgent({
     model: stalling,
     tools: {},
@@ -484,14 +478,7 @@ test('runPlanner rejects NaN maxPrs', async () => {
 test('createPlannerAgent forwards the run signal → an abort cancels the in-flight plan generation', async () => {
   // The Planner runs through the schema-retry kernel, which owns its generations — only the agent's
   // own signal can reach them, so a Ctrl-C aborts the leg instead of waiting the provider out.
-  const stalling = new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
-  });
+  const stalling = stallingModel();
   const controller = new AbortController();
   const agent = createPlannerAgent({
     model: stalling,

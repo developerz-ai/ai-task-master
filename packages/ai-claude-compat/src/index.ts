@@ -183,6 +183,7 @@ export {
   type SubagentStreamSink,
   type SubmittedOutput,
   submittedOutput,
+  withTimeout,
 } from './subagent.ts';
 export {
   type ContextSection,

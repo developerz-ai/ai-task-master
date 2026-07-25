@@ -11,6 +11,7 @@ import type { RunCmd, RunCmdResult } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
 import type { FileManifest, WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
+import { stallingModel } from '../testing/stalling-model.ts';
 import {
   type FixSessionGithub,
   type FixSessionInput,
@@ -310,14 +311,7 @@ test('runFixSession: threads compaction into the real CI-fix worker when a compa
 test('runFixSession: threads timeout into the real CI-fix Worker → a stalled step blocks the session (issue #129)', async () => {
   // No runWorkerOverride → the real Worker agent is built with the forwarded per-step deadline. A
   // stalled coding model is aborted at { stepMs: 40 } and surfaces as the session's blocked reason.
-  const stalling = new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
-  });
+  const stalling = stallingModel();
   const result = await runFixSession(
     baseInput({
       runCmd: recordingRunCmd().runCmd,

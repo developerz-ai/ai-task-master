@@ -31,6 +31,7 @@ import {
   SUBMIT_TOOL_NAME,
   type SubagentStreamEvent,
   submittedOutput,
+  withTimeout,
 } from './subagent.ts';
 
 const OutSchema = z.object({ n: z.number() });
@@ -282,6 +283,21 @@ function stallingModel(): MockLanguageModelV3 {
       }),
   });
 }
+
+test('withTimeout: returns the options unchanged when the timeout is undefined (issue #139)', () => {
+  const options = { model: 'm', prompt: 'p' };
+  const result = withTimeout(options, undefined);
+  assert.equal(result, options);
+  assert.deepEqual(result, { model: 'm', prompt: 'p' });
+});
+
+test('withTimeout: merges the timeout into a fresh object when one is configured (issue #139)', () => {
+  const options = { model: 'm', prompt: 'p' };
+  const result = withTimeout(options, { stepMs: 40 });
+  assert.notEqual(result, options);
+  assert.deepEqual(result, { model: 'm', prompt: 'p', timeout: { stepMs: 40 } });
+  assert.deepEqual(options, { model: 'm', prompt: 'p' });
+});
 
 test('createSubagent: arms a per-step deadline at generate time — a stalled provider is aborted (issue #129)', async () => {
   const agent = createSubagent(

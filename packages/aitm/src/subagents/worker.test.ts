@@ -5,6 +5,7 @@ import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { Task } from '../domain/task.ts';
+import { stallingModel } from '../testing/stalling-model.ts';
 import { render } from './prompts/templates.ts';
 import {
   type BashInput,
@@ -421,14 +422,7 @@ test('createWorkerAgent builds an agent that exposes the injected tools', () => 
 
 test('createWorkerAgent forwards timeout → a stalled manifest step surfaces as a deadline error (issue #129)', async () => {
   const { tools } = makeTools();
-  const stalling = new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
-  });
+  const stalling = stallingModel();
   const agent = createWorkerAgent({
     model: stalling,
     tools,
@@ -2771,14 +2765,7 @@ test('runWorker: a failed pre-planning snapshot disables the inline skip — fan
 });
 
 test('createWorkerAgent forwards the run signal → an abort cancels the in-flight manifest generation', async () => {
-  const stalling = new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
-  });
+  const stalling = stallingModel();
   const controller = new AbortController();
   const { tools } = makeTools();
   const agent = createWorkerAgent({

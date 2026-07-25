@@ -8,6 +8,7 @@ import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
 import { MANIFEST_FIELD_MAX } from '../subagents/worker.ts';
+import { stallingModel } from '../testing/stalling-model.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
   COMPOSER_ROLE_PREFIX,
@@ -41,19 +42,6 @@ function modelEmitting(text: string | (() => string)): MockLanguageModelV3 {
       usage: emptyUsage(),
       warnings: [],
     }),
-  });
-}
-
-// A model that only settles by rejecting when its abortSignal fires — proves the direct generateText
-// sites arm the per-step deadline (issue #129).
-function stallingModel(): MockLanguageModelV3 {
-  return new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
   });
 }
 

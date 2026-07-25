@@ -7,6 +7,7 @@ import type { CiResult, RunCmd, RunCmdResult } from '../github/github-client.ts'
 import type { CheckStatus, ReviewThread } from '../github/schema.ts';
 import type { ReviewerResult } from '../subagents/reviewer.ts';
 import type { WorkerInput, WorkerResult } from '../subagents/worker.ts';
+import { stallingModel } from '../testing/stalling-model.ts';
 import type { FixSessionModelSelector } from './ci-fix.ts';
 import { REVIEW_COMMENTS_GRACE } from './constants.ts';
 import {
@@ -356,14 +357,7 @@ test('runTakeOverFlow: threads timeout into the real take-over Worker → a stal
   // CI failed → the Worker runs. With no runWorkerOverride the real agent is built with the
   // forwarded per-step deadline; a stalled model is aborted at { stepMs: 40 } and blocks the flow.
   const gh = fakeGithub({ checks: ['throw-cifailed'], threads: [[]] });
-  const stalling = new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
-  });
+  const stalling = stallingModel();
   const result = await runTakeOverFlow(
     baseInput(gh.github, {
       subagents: {

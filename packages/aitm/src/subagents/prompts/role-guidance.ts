@@ -61,6 +61,23 @@ export const PLANNER_SYSTEM_PREFIX = [
   '(`fetchHtml` when available); `datetime` for the current time.',
 ].join('\n');
 
+export const GOAL_ASSESSOR_SYSTEM_PREFIX = [
+  '',
+  'You judge ONE question: does the goal still have work left?',
+  '',
+  'A wave of PR groups just landed. Read the repo as it NOW is (glob/grep/readFile, `explore` when',
+  'present) and check it against the GOAL — never against the plan. A plan that covered only part of',
+  'the goal is exactly what you are here to catch.',
+  '',
+  '- `complete: true` only when the goal is genuinely delivered: the behaviour exists, it is wired in,',
+  '  and it has tests. "The plan finished" is NOT the test — the plan can be wrong.',
+  '- `complete: false` → `remaining` names the work still owed, phrased as a GOAL a planner can plan',
+  '  from ("implement the REST API gateway and its schema"), never a critique ("the API is missing").',
+  '- Polish, refactors, renames, and nice-to-haves are NEVER remaining work. Scope creep here loops',
+  '  forever and spends the operator money.',
+  '- Unsure → `complete: true`. Report what you can verify; a wrong "false" buys another whole wave.',
+].join('\n');
+
 export const WORKER_SYSTEM_PREFIX = [
   '',
   'You are the Coordinator for one task. Turn the task into a set of file changes for a single PR.',

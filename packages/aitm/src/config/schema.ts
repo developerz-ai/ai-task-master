@@ -152,7 +152,10 @@ export const ConfigFileSchema = z
     // Per-capability OpenRouter reasoning effort (issue #125). Provider-shaped, so also on
     // ProfileSchema; resolved as a per-capability merge (project > global > profile).
     reasoningEffort: ReasoningEffortMapSchema.optional(),
-    maxPrs: z.number().int().positive().optional(),
+    // Opt-in cap on how the plan is PACKAGED into PRs — never on how much work the run does. Unset
+    // (the default) means the Planner sizes the plan to the goal; a set cap means "group everything
+    // to fit", not "plan a prefix and drop the rest". Bound a run with maxCostUsd/maxTotalTokens.
+    maxPrs: z.number().int().positive().nullable().optional(),
     maxSessions: z.number().int().positive().nullable().optional(),
     // Cap on CI-fix passes per PR group before it blocks for a human (issue #128). Bounds the
     // waiting-ci ⇄ ci-failed recovery loop on an unfixable red PR. See src/loop/work-loop.ts.
@@ -263,7 +266,7 @@ export const FORBIDDEN_KEY_SEGMENTS: ReadonlySet<string> = new Set([
 ]);
 
 export type CliOverrides = {
-  maxPrs?: number;
+  maxPrs?: number | null;
   maxSessions?: number | null;
   maxCiFixAttempts?: number;
   autoMerge?: boolean;
@@ -304,7 +307,8 @@ export type ResolvedConfig = {
   // Per-capability OpenRouter reasoning effort (issue #125). Defaults to {} — a capability with no
   // entry gets no `reasoning` key, so with nothing configured every request stays byte-identical.
   reasoningEffort: Partial<Record<Capability, ReasoningEffort>>;
-  maxPrs: number;
+  // null → unbounded: the Planner sizes the plan to the goal. A number caps PR packaging only.
+  maxPrs: number | null;
   maxSessions: number | null;
   // Cap on CI-fix passes per PR group before it blocks. Default DEFAULT_MAX_CI_FIX_ATTEMPTS. #128.
   maxCiFixAttempts: number;

@@ -16,7 +16,7 @@ import {
   runWithSchemaRetry,
 } from '@developerz.ai/ai-claude-compat';
 import { type Tool, type ToolLoopAgent, tool } from 'ai';
-import { type Plan, type PlannedGroup, type PlannedTask, PlanSchema } from '../plan/schema.ts';
+import { type Plan, PlanSchema } from '../plan/schema.ts';
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
 import type { WebSearchInput, WebSearchOutput } from '../tools/web-search.ts';
@@ -48,7 +48,10 @@ export type PlannerInput = {
   goal: string;
   criteria?: string;
   styleContents: string;
-  maxPrs: number;
+  // null → unbounded (the default): the Planner sizes the plan to the goal and nothing is injected
+  // into the prompt. A number is a PACKAGING cap the Planner must group everything to fit; a plan
+  // that exceeds it is rejected outright rather than truncated, so no work is ever silently dropped.
+  maxPrs: number | null;
   // Optional harness context block (a `<system-reminder>` envelope) prepended to the first user
   // message — target-repo instructions + current date, framed as advisory context (issue #106).
   contextBlock?: string;
@@ -98,8 +101,11 @@ export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAge
 }
 
 export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Promise<PlannerResult> {
-  if (!Number.isInteger(input.maxPrs) || input.maxPrs < 1) {
-    return { kind: 'error', error: `maxPrs must be a positive integer, received ${input.maxPrs}` };
+  if (input.maxPrs !== null && (!Number.isInteger(input.maxPrs) || input.maxPrs < 1)) {
+    return {
+      kind: 'error',
+      error: `maxPrs must be a positive integer or null, received ${input.maxPrs}`,
+    };
   }
   const onUsage = plannerInitRegistry.get(agent)?.onUsage;
   try {
@@ -118,7 +124,17 @@ export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Prom
       return { kind: 'blocked', reason: 'planner did not submit a plan after retries' };
     }
     // Schema validation now enforces groups.min(1), so submitted.value.groups is never empty.
-    return { kind: 'ok', plan: capGroups(submitted.value, input.maxPrs) };
+    const plan = submitted.value;
+    // An over-cap plan is a REJECTED plan, never a truncated one. Dropping the tail (or folding it
+    // into a "remainder" stub no Worker executes) would silently ship a fraction of the goal and
+    // report success — the failure the cap exists to prevent, caused by the cap itself.
+    if (input.maxPrs !== null && plan.groups.length > input.maxPrs) {
+      return {
+        kind: 'error',
+        error: `planner emitted ${plan.groups.length} PR groups, exceeding maxPrs ${input.maxPrs}. Raise --max-prs (or pass 0 for unbounded) — the plan is not truncated, because dropping groups would silently drop work.`,
+      };
+    }
+    return { kind: 'ok', plan };
   } catch (err) {
     return { kind: 'error', error: err instanceof Error ? err.message : String(err) };
   }
@@ -129,7 +145,9 @@ function buildUserPrompt(input: PlannerInput): string {
   if (input.criteria?.trim()) {
     lines.push(`Acceptance criteria: ${input.criteria}`);
   }
-  lines.push(`maxPrs: ${input.maxPrs}`);
+  // Injected ONLY when the operator set a cap. With no cap the prompt says nothing about PR count,
+  // so the Planner sizes the plan to the goal instead of to a budget it was handed.
+  if (input.maxPrs !== null) lines.push(`maxPrs: ${input.maxPrs}`);
   const brief = input.surveyBrief?.trim();
   if (brief) {
     lines.push('', brief, '');
@@ -143,67 +161,4 @@ function buildUserPrompt(input: PlannerInput): string {
     prependContextBlock(input.contextBlock, lines.join('\n')),
     input.progressBlock,
   );
-}
-
-// Truncate to maxPrs groups; fold any overflow into a single remainder task on the last kept group
-// so no work is silently dropped, then redirect any dep that pointed at a dropped group to that
-// last-kept group so PlanGraph.validate still sees a closed DAG (issue: capped cross-group deps).
-function capGroups(plan: Plan, maxPrs: number): Plan {
-  if (plan.groups.length <= maxPrs) return plan;
-  const kept = plan.groups.slice(0, maxPrs);
-  const overflow = plan.groups.slice(maxPrs);
-  const lastKept = kept[maxPrs - 1];
-  if (!lastKept) return plan;
-  const remainder: PlannedTask = {
-    description: `remainder: ${overflow.map(summarizeGroup).join('; ')}`,
-    complexity: 'normal',
-  };
-  const merged: PlannedGroup = { ...lastKept, tasks: [...lastKept.tasks, remainder] };
-  const capped = [...kept.slice(0, maxPrs - 1), merged];
-  return { ...plan, groups: remapDanglingDeps(capped, lastKept.id) };
-}
-
-function summarizeGroup(g: PlannedGroup): string {
-  return `${g.id} (${g.tasks.length} tasks)`;
-}
-
-// Dropping overflow groups can leave a kept group depending on a dropped id. The dropped work is
-// folded into lastKept, so redirect each dangling dep there — except when that would self-loop or
-// close a cycle lastKept already sits on, where the edge is dropped instead. Kept deps pass through
-// unchanged (deduped). The result is always a valid DAG over the surviving ids.
-function remapDanglingDeps(groups: PlannedGroup[], lastKeptId: string): PlannedGroup[] {
-  const keptIds = new Set(groups.map((g) => g.id));
-  const reachableFromLast = reachableFrom(groups, lastKeptId, keptIds);
-  return groups.map((group) => {
-    const dependsOn: string[] = [];
-    for (const dep of group.dependsOn) {
-      if (keptIds.has(dep)) {
-        if (!dependsOn.includes(dep)) dependsOn.push(dep);
-        continue;
-      }
-      const wouldCycle = group.id === lastKeptId || reachableFromLast.has(group.id);
-      if (!wouldCycle && !dependsOn.includes(lastKeptId)) dependsOn.push(lastKeptId);
-    }
-    return { ...group, dependsOn };
-  });
-}
-
-// Kept ids that startId transitively depends on (following dependsOn over kept ids only). The
-// visited set keeps it cycle-safe, so a malformed cyclic plan can't spin here.
-function reachableFrom(
-  groups: PlannedGroup[],
-  startId: string,
-  keptIds: ReadonlySet<string>,
-): Set<string> {
-  const depsById = new Map(groups.map((g) => [g.id, g.dependsOn]));
-  const seen = new Set<string>();
-  const stack = [...(depsById.get(startId) ?? [])];
-  while (stack.length > 0) {
-    const id = stack.pop();
-    if (id === undefined || seen.has(id) || !keptIds.has(id)) continue;
-    seen.add(id);
-    const next = depsById.get(id);
-    if (next) stack.push(...next);
-  }
-  return seen;
 }

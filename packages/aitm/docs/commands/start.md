@@ -7,7 +7,7 @@ Kick off an autonomous work session against a goal. With automerge on (default) 
 ```text
 aitm start "<goal>"
   [--criteria "..."]
-  [--max-prs N]            # default 5
+  [--max-prs N]            # default unbounded (0 = unbounded)
   [--max-sessions N]       # default unlimited
   [--max-fix-attempts N]   # default 3 — CI-fix passes per PR group before it blocks
   [--concurrency N]        # default 1 — PR groups worked in parallel
@@ -93,7 +93,7 @@ A **finished** run is different: it is superseded. Re-running `aitm start "<new 
 
 1. `CLI` parses args, validates preconditions, persists run options to `state.json.options` (`autoMerge`, `maxPrs`, `maxSessions`, `stylePath`).
 2. `StateStore` creates `.ai-task-master/`, writes `goal.txt`, optional `criteria.txt`, initial `state.json` with `status: planning`.
-3. `Orchestrator` invokes `Planner` subagent. `Planner` returns **PR groups** — an ordered list of groups, each containing the tasks that ship in one PR. Group count is capped by `--max-prs`. `StateStore` persists this as `plan.md` plus structured `prGroups` in `state.json`.
+3. `Orchestrator` invokes `Planner` subagent. `Planner` returns **PR groups** — an ordered list of groups, each containing the tasks that ship in one PR. Group count is sized to the goal; `--max-prs` caps it only when the operator sets one. `StateStore` persists this as `plan.md` plus structured `prGroups` in `state.json`.
 4. `WorkLoop` iterates groups. For each group:
    1. `Orchestrator` invokes `Worker` with the group's task list plus `context.md`.
    2. `Worker` works the group end-to-end on a dedicated branch, then opens one PR via `GitHubClient`.
@@ -185,7 +185,6 @@ A directory that has never been started says so and exits 1 without touching the
 | --- | --- |
 | All PR groups merged | 0 |
 | PR opened, `--no-automerge`, awaiting `aitm merge-pr` | 0 |
-| `--max-prs` reached before goal complete | 0 |
 | `--max-sessions` reached | 0 |
 | Blocked | 1 |
 | Ctrl-C | 2 |

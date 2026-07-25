@@ -65,7 +65,9 @@ export const RunStateSchema = z.object({
   options: z.object({
     autoMerge: z.boolean(),
     prPerTask: z.boolean().default(false),
-    maxPrs: z.number().int().positive(),
+    // Nullable since 0.0.53 (null = unbounded, the new default). A state file written by an older
+    // version carries a number here and still parses unchanged.
+    maxPrs: z.number().int().positive().nullable(),
     maxSessions: z.number().int().positive().nullable(),
     mergeMethod: z.enum(['squash', 'merge', 'rebase']),
     stylePath: z.string().nullable(),

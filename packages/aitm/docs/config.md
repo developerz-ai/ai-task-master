@@ -124,7 +124,7 @@ code-execution surfaces). Keys absent from a file fall through per the
 
 | Key | Type | Default | Scope | Purpose |
 | --- | --- | --- | --- | --- |
-| `maxPrs` | int > 0 | `5` | project + global, env `AITM_MAX_PRS`, CLI `--max-prs` | Cap on PR groups opened in one run. |
+| `maxPrs` | int > 0 or `null` | `null` (unbounded) | project + global, env `AITM_MAX_PRS`, CLI `--max-prs` | Caps how the plan is **packaged** into PRs, never how much work the run does. Unset → `Planner` sizes the plan to the goal. A plan exceeding a set cap is rejected, not truncated. `0` = unbounded. |
 | `maxSessions` | int > 0 or `null` | `null` (unlimited) | project + global, env `AITM_MAX_SESSIONS`, CLI `--max-sessions` | Cap on work sessions before the run stops. |
 | `maxCiFixAttempts` | int > 0 | `3` | project + global, env `AITM_MAX_CI_FIX_ATTEMPTS`, CLI `--max-fix-attempts` | CI-fix passes per PR group before it blocks. See [maxCiFixAttempts](#maxcifixattempts). |
 | `maxCostUsd` | number > 0 | unset (no ceiling) | project + global | Run-level cost ceiling; stops opening new PR groups when crossed. See [maxCostUsd and maxTotalTokens](#maxcostusd-and-maxtotaltokens). |

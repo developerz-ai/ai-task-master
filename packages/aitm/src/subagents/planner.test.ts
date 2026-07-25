@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
-import type { PrGroup } from '../domain/pr-group.ts';
-import { PlanGraph } from '../plan/plan-graph.ts';
 import type { Plan } from '../plan/schema.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { createPlannerAgent, PLANNER_SYSTEM_PREFIX, runPlanner } from './planner.ts';
@@ -50,39 +48,6 @@ function basicPlan(groupCount: number): Plan {
     dependsOn: i === 0 ? [] : [`g${i}`],
   }));
   return { goal: 'do the thing', groups };
-}
-
-function planWith(specs: ReadonlyArray<{ id: string; dependsOn: string[] }>): Plan {
-  return {
-    goal: 'do the thing',
-    groups: specs.map((s) => ({
-      id: s.id,
-      title: `Group ${s.id}`,
-      tasks: [{ description: `task ${s.id}` }],
-      acceptance: `group ${s.id} check: bun test passes`,
-      dependsOn: s.dependsOn,
-    })),
-  };
-}
-
-// Mirror of run-loop-adapter.planToPrGroups' id/dependsOn mapping — enough to run the real
-// PlanGraph.validate over a capped plan, which is where a dangling dep would actually throw.
-function toPrGroups(plan: Plan): PrGroup[] {
-  return plan.groups.map((g) => ({
-    id: g.id,
-    title: g.title,
-    tasks: g.tasks.map((t, i) => ({
-      id: `${g.id}-${i + 1}`,
-      text: t.description,
-      complexity: t.complexity,
-      done: false,
-    })),
-    dependsOn: g.dependsOn,
-    branch: null,
-    pr: null,
-    status: 'pending' as const,
-    stage: 'pending' as const,
-  }));
 }
 
 async function capPlan(plan: Plan, maxPrs: number): Promise<Plan> {
@@ -142,80 +107,78 @@ test('runPlanner returns ok with a valid Plan when the model produces one', asyn
   assert.equal(result.plan.groups[0]?.id, 'g1');
 });
 
-test('runPlanner caps groups to maxPrs and folds overflow into a remainder task', async () => {
+test('runPlanner rejects an over-cap plan instead of truncating it', async () => {
+  // The cap bounds PACKAGING, so an over-cap plan is an error the operator can act on — never a
+  // silently shortened plan. Truncating here is what shipped a fraction of the goal and called it done.
   const plan = basicPlan(7);
   const agent = createPlannerAgent({
     model: planJsonModel(plan),
     tools: {},
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
-  const result = await runPlanner(agent, {
-    goal: plan.goal,
-    styleContents: '',
-    maxPrs: 3,
-  });
-  assert.equal(result.kind, 'ok');
-  if (result.kind === 'ok') {
-    assert.equal(result.plan.groups.length, 3);
-    const last = result.plan.groups[2];
-    assert.ok(last);
-    // last kept group is g3, gains a remainder task summarizing g4..g7.
-    assert.equal(last.id, 'g3');
-    assert.equal(last.tasks.length, 2);
-    const remainder = last.tasks[1];
-    assert.ok(remainder);
-    assert.match(remainder.description, /^remainder:/);
-    assert.match(remainder.description, /g4/);
-    assert.match(remainder.description, /g7/);
+  const result = await runPlanner(agent, { goal: plan.goal, styleContents: '', maxPrs: 3 });
+  assert.equal(result.kind, 'error');
+  if (result.kind === 'error') {
+    assert.match(result.error, /7 PR groups/);
+    assert.match(result.error, /exceeding maxPrs 3/);
+    assert.match(result.error, /not truncated/);
   }
 });
 
-test('capGroups: a kept group depending on a dropped group is redirected to the last-kept group', async () => {
-  // g2 depends on the dropped g4; g3 (last-kept) depends only on g1, so redirecting g2 → g3 is safe.
-  const plan = planWith([
-    { id: 'g1', dependsOn: [] },
-    { id: 'g2', dependsOn: ['g4'] },
-    { id: 'g3', dependsOn: ['g1'] },
-    { id: 'g4', dependsOn: [] },
-    { id: 'g5', dependsOn: [] },
-  ]);
-  const capped = await capPlan(plan, 3);
-  assert.deepEqual(
-    capped.groups.map((g) => g.id),
-    ['g1', 'g2', 'g3'],
+test('runPlanner accepts a plan exactly at the cap', async () => {
+  const capped = await capPlan(basicPlan(3), 3);
+  assert.equal(capped.groups.length, 3);
+});
+
+test('runPlanner leaves a large plan intact when maxPrs is null (unbounded)', async () => {
+  // The default. "Implement the whole system" must be able to plan the whole system.
+  const plan = basicPlan(14);
+  const agent = createPlannerAgent({
+    model: planJsonModel(plan),
+    tools: {},
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
+  const result = await runPlanner(agent, { goal: plan.goal, styleContents: '', maxPrs: null });
+  if (result.kind !== 'ok') throw new Error(`expected ok, got ${result.kind}`);
+  assert.equal(
+    result.plan.groups.length,
+    14,
+    'every group survives — nothing is dropped or folded',
   );
-  assert.deepEqual(depsOf(capped, 'g2'), ['g3'], 'dangling g4 dep redirected to last-kept g3');
-  assert.deepEqual(depsOf(capped, 'g3'), ['g1']);
-  assert.doesNotThrow(() => PlanGraph.validate(toPrGroups(capped)));
+  assert.deepEqual(depsOf(result.plan, 'g14'), ['g13'], 'deps are untouched, not remapped');
 });
 
-test('capGroups: dangling deps are dropped when redirecting would close a cycle', async () => {
-  // g3 (last-kept) depends on g2, so redirecting g2's dropped-g5 dep onto g3 would form g2⇄g3.
-  // The edge is dropped instead, leaving a valid DAG.
-  const plan = planWith([
-    { id: 'g1', dependsOn: [] },
-    { id: 'g2', dependsOn: ['g1', 'g5'] },
-    { id: 'g3', dependsOn: ['g2'] },
-    { id: 'g4', dependsOn: [] },
-    { id: 'g5', dependsOn: [] },
-  ]);
-  const capped = await capPlan(plan, 3);
-  assert.deepEqual(depsOf(capped, 'g2'), ['g1'], 'cycle-forming dangling dep dropped, g1 kept');
-  assert.deepEqual(depsOf(capped, 'g3'), ['g2']);
-  assert.doesNotThrow(() => PlanGraph.validate(toPrGroups(capped)));
-});
-
-test('capGroups: a dangling dep on the last-kept group itself is dropped, not made a self-loop', async () => {
-  const plan = planWith([
-    { id: 'g1', dependsOn: [] },
-    { id: 'g2', dependsOn: ['g1'] },
-    { id: 'g3', dependsOn: ['g2', 'g4'] },
-    { id: 'g4', dependsOn: [] },
-    { id: 'g5', dependsOn: [] },
-  ]);
-  const capped = await capPlan(plan, 3);
-  assert.deepEqual(depsOf(capped, 'g3'), ['g2'], 'g3 does not depend on itself after remap');
-  assert.doesNotThrow(() => PlanGraph.validate(toPrGroups(capped)));
+test('runPlanner omits the maxPrs line from the prompt when unbounded, and includes it when capped', async () => {
+  // The user message only: the system prose legitimately mentions `maxPrs:` when explaining that a
+  // cap appears there when set, so scanning the whole prompt would never distinguish the two cases.
+  const capture = async (maxPrs: number | null): Promise<string> => {
+    let sent = '';
+    const model = new MockLanguageModelV3({
+      doGenerate: async (opts) => {
+        sent = JSON.stringify(opts.prompt.filter((m) => m.role === 'user'));
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-cap',
+              toolName: 'submit',
+              input: JSON.stringify(basicPlan(1)),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: emptyUsage(),
+          warnings: [],
+        };
+      },
+    });
+    const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+    await runPlanner(agent, { goal: 'ship it', styleContents: '', maxPrs });
+    return sent;
+  };
+  // Handing the Planner a PR budget it never asked for is what made it plan to the budget instead
+  // of to the goal, so with no cap the prompt must not mention one at all.
+  assert.doesNotMatch(await capture(null), /maxPrs/);
+  assert.match(await capture(4), /maxPrs: 4/);
 });
 
 test('runPlanner returns error when the model emits an empty plan (schema validation fails)', async () => {

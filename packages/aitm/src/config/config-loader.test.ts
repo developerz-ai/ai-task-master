@@ -44,7 +44,8 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     const resolved = await loader.resolve({});
     assert.equal(resolved.openrouterApiKey, 'sk-env');
     assert.equal(resolved.apiKeySource, 'env');
-    assert.equal(resolved.maxPrs, 5);
+    // Unbounded by default — the Planner sizes the plan to the goal, no PR budget is imposed.
+    assert.equal(resolved.maxPrs, null);
     assert.equal(resolved.maxSessions, null);
     assert.equal(resolved.maxCiFixAttempts, 3);
     assert.deepEqual(
@@ -699,7 +700,7 @@ test('resolve: an out-of-range AITM_* int env var throws', async () => {
       OPENROUTER_API_KEY: 'sk-env',
       AITM_MAX_PRS: 'not-a-number',
     });
-    await assert.rejects(() => loader.resolve({}), /AITM_MAX_PRS must be a positive integer/);
+    await assert.rejects(() => loader.resolve({}), /AITM_MAX_PRS must be a non-negative integer/);
   } finally {
     await home.cleanup();
     await cwd.cleanup();
@@ -1266,7 +1267,7 @@ test('writeSnapshot writes config.snapshot.json with API key replaced by source 
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     assert.equal(parsed.apiKeySource, 'env');
     assert.match(String(parsed.openrouterApiKey), /env/);
-    assert.equal(parsed.maxPrs, 5);
+    assert.equal(parsed.maxPrs, null);
     assert.equal(parsed.autoMerge, true);
     // tmp file should have been renamed away
     const entries = await readdir(stateDir);

@@ -13,6 +13,9 @@ export type OnUsage = (
   usage: LanguageModelUsage,
   modelId: string | undefined,
   providerMetadata?: ProviderMetadata,
+  // Per-generate diagnostics (issue #168): wall-clock for this call and how many corrective
+  // re-generations preceded it. Optional — a call site that doesn't measure them omits it.
+  meta?: { latencyMs?: number; retries?: number },
 ) => void;
 
 // Feed a generate result's total usage + resolved model id + provider metadata to an optional sink
@@ -26,10 +29,11 @@ export function reportUsage(
     response: { modelId: string };
     providerMetadata?: ProviderMetadata | undefined;
   },
+  meta?: { latencyMs?: number; retries?: number },
 ): void {
   if (!onUsage) return;
   try {
-    onUsage(result.totalUsage, result.response.modelId, result.providerMetadata);
+    onUsage(result.totalUsage, result.response.modelId, result.providerMetadata, meta);
   } catch {
     // observability must never break the run
   }

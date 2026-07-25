@@ -371,6 +371,7 @@ async function runEditorPass(
   // already-disambiguated label naming what it owns, rather than every leaf sharing one anonymous
   // "editor" stream line — chunked-directory leaves no longer collide on that tag.
   const editorStepFinish = init.onEditorStepFinish?.(leaf.label);
+  const started = Date.now();
   const result = await callWithStepTimeout(
     () =>
       generateText({
@@ -398,7 +399,7 @@ async function runEditorPass(
       }),
     init.timeout,
   );
-  reportUsage(init.onUsage, result); // per-leaf editor pass, recorded under the worker role (#114)
+  reportUsage(init.onUsage, result, { latencyMs: Date.now() - started }); // per-leaf editor pass, recorded under the worker role (#114)
   const firstLine = result.text.trim().split('\n')[0];
   return firstLine && firstLine.length > 0 ? firstLine : '';
 }

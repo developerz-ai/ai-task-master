@@ -28,6 +28,9 @@ const RoleUsageSchema = z.object({
   calls: z.number().int().nonnegative(),
   costUsd: z.number().nullable(),
   cacheDiscountUsd: z.number().nullable().default(null),
+  // Latency + retry diagnostics (issue #168); default so a pre-#168 state.json still loads.
+  latencyMsTotal: z.number().nonnegative().default(0),
+  retries: z.number().int().nonnegative().default(0),
 });
 export const UsageTotalsSchema = z.object({
   // partialRecord (not record): only roles that actually ran are present, matching UsageTracker.totals.

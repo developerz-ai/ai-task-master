@@ -101,6 +101,8 @@ test('RunStateSchema: usage is optional (legacy state parses) and round-trips wh
         calls: 2,
         costUsd: 0.001,
         cacheDiscountUsd: 0.0002,
+        latencyMsTotal: 1800,
+        retries: 1,
       },
     },
     overall: {
@@ -111,10 +113,28 @@ test('RunStateSchema: usage is optional (legacy state parses) and round-trips wh
       calls: 2,
       costUsd: 0.001,
       cacheDiscountUsd: 0.0002,
+      latencyMsTotal: 1800,
+      retries: 1,
     },
   };
   const parsed = RunStateSchema.parse({ ...base, usage });
   assert.deepEqual(parsed.usage, usage);
+  // A pre-#168 usage (no latency/retries) still parses — the additive fields default to 0.
+  const preRetryUsage = {
+    perRole: {},
+    overall: {
+      inputTokens: 1,
+      outputTokens: 1,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      calls: 1,
+      costUsd: 0,
+      cacheDiscountUsd: null,
+    },
+  };
+  const preRetry = RunStateSchema.parse({ ...base, usage: preRetryUsage });
+  assert.equal(preRetry.usage?.overall.latencyMsTotal, 0);
+  assert.equal(preRetry.usage?.overall.retries, 0);
   // costUsd may be null (any pricing unknown) — still valid.
   const nullCost = RunStateSchema.parse({
     ...base,

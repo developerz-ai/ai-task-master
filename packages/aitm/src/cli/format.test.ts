@@ -50,6 +50,8 @@ test('usageSummaryLine: renders overall tokens + per-role breakdown + cost + cac
         calls: 1,
         costUsd: 0.001,
         cacheDiscountUsd: null,
+        latencyMsTotal: 3200,
+        retries: 0,
       },
       worker: {
         inputTokens: 500,
@@ -59,6 +61,8 @@ test('usageSummaryLine: renders overall tokens + per-role breakdown + cost + cac
         calls: 4,
         costUsd: 0.009,
         cacheDiscountUsd: null,
+        latencyMsTotal: 15400,
+        retries: 2,
       },
     },
     overall: {
@@ -69,14 +73,21 @@ test('usageSummaryLine: renders overall tokens + per-role breakdown + cost + cac
       calls: 5,
       costUsd: 0.01,
       cacheDiscountUsd: null,
+      latencyMsTotal: 18600,
+      retries: 2,
     },
   });
   assert.match(
     line,
     /^Usage: 5 calls, 600 in \/ 100 out tokens \(50 cached, 8% cache hit\), \$0\.0100/,
   );
-  assert.match(line, /planner 100in\/20out \(0% cache hit\)/);
-  assert.match(line, /worker 500in\/80out \(10% cache hit\)/);
+  assert.match(line, /planner 100in\/20out \(0% cache hit\)/, 'clean role shows no retry note');
+  assert.match(
+    line,
+    /worker 500in\/80out \(10% cache hit, 2 retries\)/,
+    'flaky role shows retries',
+  );
+  assert.match(line, /, 18\.6s, 2 retries/, 'overall latency + retry pressure (issue #168)');
   assert.ok(line.endsWith('\n'), 'exactly one line');
   assert.ok(!line.includes('cache discount'), 'no discount line when never reported');
 
@@ -91,6 +102,8 @@ test('usageSummaryLine: renders overall tokens + per-role breakdown + cost + cac
       calls: 1,
       costUsd: null,
       cacheDiscountUsd: null,
+      latencyMsTotal: 0,
+      retries: 0,
     },
   });
   assert.match(unknown, /cost unknown/);
@@ -108,6 +121,8 @@ test('usageSummaryLine: renders provider-reported cache_discount savings when pr
       calls: 1,
       costUsd: 0.001,
       cacheDiscountUsd: 0.0025,
+      latencyMsTotal: 0,
+      retries: 0,
     },
   });
   assert.match(line, /80% cache hit/);
@@ -125,6 +140,8 @@ test('usageSummaryLine: a reference-priced total is labelled an estimate, a prov
     calls: 1,
     costUsd: 1.5,
     cacheDiscountUsd: null,
+    latencyMsTotal: 0,
+    retries: 0,
   };
   assert.match(
     usageSummaryLine({ perRole: {}, overall, costEstimated: true }),

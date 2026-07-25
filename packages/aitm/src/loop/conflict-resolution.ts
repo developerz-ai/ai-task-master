@@ -73,6 +73,7 @@ export function buildConflictResolver(init: ConflictResolverInit): ConflictResol
       files: conflictedFiles,
     });
     try {
+      const started = Date.now();
       const result = await callWithStepTimeout(
         () =>
           generateText({
@@ -93,7 +94,7 @@ export function buildConflictResolver(init: ConflictResolverInit): ConflictResol
           }),
         init.timeout,
       );
-      reportUsage(init.onUsage, result);
+      reportUsage(init.onUsage, result, { latencyMs: Date.now() - started });
       return { kind: 'resolved' };
     } catch (err) {
       return { kind: 'unresolved', reason: err instanceof Error ? err.message : String(err) };

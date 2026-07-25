@@ -80,10 +80,18 @@ export function usageSummaryLine(totals: UsageTotals): string {
     .filter((entry): entry is [string, RoleUsage] => entry[1] !== undefined)
     .map(
       ([role, u]) =>
-        `${role} ${u.inputTokens}in/${u.outputTokens}out (${cacheHitPct(u)} cache hit)`,
+        `${role} ${u.inputTokens}in/${u.outputTokens}out (${cacheHitPct(u)} cache hit${u.retries > 0 ? `, ${u.retries} retries` : ''})`,
     )
     .join(', ');
-  return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached, ${cacheHitPct(overall)} cache hit), ${cost}${discount}${perRole ? ` — ${perRole}` : ''}\n`;
+  // Latency + retry pressure (issue #168): total wall-clock across all generate calls, and corrective
+  // re-generations — a cheap-but-flaky tier shows high retries a flat token count would hide.
+  const retryNote = overall.retries > 0 ? `, ${overall.retries} retries` : '';
+  return `Usage: ${overall.calls} calls, ${overall.inputTokens} in / ${overall.outputTokens} out tokens (${overall.cachedInputTokens} cached, ${cacheHitPct(overall)} cache hit), ${cost}${discount}, ${fmtSeconds(overall.latencyMsTotal)}${retryNote}${perRole ? ` — ${perRole}` : ''}\n`;
+}
+
+// Total wall-clock as seconds with one decimal (issue #168): `18.4s`. Sub-second still reads e.g. `0.3s`.
+function fmtSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 // Mask a secret for display: keep the non-secret `sk-or-` prefix + last 4 chars so the user can

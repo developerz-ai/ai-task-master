@@ -58,6 +58,7 @@ import { Orchestrator } from '../orchestrator/orchestrator.ts';
 import { withAcceptanceCheck } from '../plan/acceptance.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
+import type { GoalAssessment } from '../subagents/goal-assessor.ts';
 import {
   createReviewerAgent,
   REVIEWER_SYSTEM_PREFIX,
@@ -98,7 +99,12 @@ import {
 import { runFixSession } from './ci-fix.ts';
 import { buildConflictResolver } from './conflict-resolution.ts';
 import { Disposer, disposeQuietly } from './disposer.ts';
-import { defaultPlanGroups, type PlanGroupsOutcome } from './planner-wiring.ts';
+import {
+  defaultAssessGoal,
+  defaultPlanGroups,
+  namespaceWaveGroups,
+  type PlanGroupsOutcome,
+} from './planner-wiring.ts';
 import { makeProgressTee } from './progress-file.ts';
 import { hasInterruptedGroup, normalizeResumeStatus } from './resume-normalize.ts';
 import { investigateReviewThreads } from './review-team-wiring.ts';
@@ -117,6 +123,7 @@ import {
   withActiveTools,
 } from './tool-resolution.ts';
 import {
+  type GroupOutcome,
   type ReviewerInvocation,
   WorkLoop,
   type WorkLoopGithub,
@@ -200,6 +207,14 @@ export type RunLoopAdapterSeams = {
     mcp: McpClientManager,
     fetchHtmlAvailable: boolean,
   ) => Promise<PlanGroupsOutcome>;
+  // Judges the ORIGINAL goal against the repo after a wave lands, deciding whether another wave is
+  // planned. Stubbed in unit tests; the default runs the goal assessor subagent.
+  assessGoal?: (
+    input: RunLoopInput,
+    mcp: McpClientManager,
+    fetchHtmlAvailable: boolean,
+    delivered: readonly string[],
+  ) => Promise<GoalAssessment>;
   makeOrchestrator?: (
     ctx: OrchestratorBridgeCtx,
   ) => WorkLoopOrchestrator | Promise<WorkLoopOrchestrator>;
@@ -278,71 +293,37 @@ export async function runLoopAdapter(
     // orchestrator builder so the probe never runs twice (issue #112).
     const fetchHtmlAvailable = await isFetchHtmlAvailable();
 
-    // ---- Plan (fresh) or resume (prior prGroups present) -------------------
-    let groups: PrGroup[];
-    let freshPlan = false;
-    if (current.prGroups.length > 0) {
-      // Resume: a run interrupted mid-lifecycle persisted its groups as 'in-progress'/'awaiting-pr',
-      // which PlanGraph.ready() won't schedule. Normalize them back to 'pending' (preserving stage +
-      // pr) so they re-enter the loop and resume at their persisted stage instead of being stranded.
-      if (hasInterruptedGroup(current.prGroups)) {
-        const next = await state.update((s) => ({
-          ...s,
-          prGroups: normalizeResumeStatus(s.prGroups),
-        }));
-        groups = next.prGroups;
-      } else {
-        groups = current.prGroups;
-      }
-    } else {
-      const planFn = seams.planGroups ?? defaultPlanGroups;
-      const outcome = await planFn(input, mcp, fetchHtmlAvailable);
-      if (outcome.kind === 'blocked') {
-        return { kind: 'blocked', reason: outcome.reason, outcomes: [] };
-      }
-      if (outcome.kind === 'error') {
-        return { kind: 'blocked', reason: `planner error: ${outcome.error}`, outcomes: [] };
-      }
-      if (outcome.groups.length === 0) {
-        return { kind: 'blocked', reason: 'planner produced no PR groups', outcomes: [] };
-      }
-      groups = outcome.groups;
-      freshPlan = true;
-    }
-
-    // Step counter over the plan (claudetm parity): group N/M in group-mode, task N/M in prPerTask.
-    // Group order + membership are fixed at plan time, so build it once and share it with the
-    // orchestrator bridges (their harness + agent lines) and the WorkLoop (its transition lines).
-    const stepCounter = makeStepCounter(groups, current.options.prPerTask ?? false);
-
-    // ---- Live graph + state proxy ------------------------------------------
-    // Validate the plan's structure ONCE, here at acceptance: duplicate ids, dangling deps, and cycles
-    // are functions of group ids + dependsOn edges, which stay fixed for the whole run. The per-tick
-    // ready()/isComplete() below only read live statuses, so they rebuild via PlanGraph.trusted() and
-    // skip re-paying validate()'s DFS every tick (this gate also keeps that memoized DFS terminating).
-    try {
-      PlanGraph.validate(groups);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { kind: 'blocked', reason: msg, outcomes: [] };
-    }
-    // Persist a freshly-planned roster only after it validates. Writing it before validation would
-    // leave a structurally-invalid plan in resumable state: every later run would take the resume
-    // branch, re-reject the same plan, and never replan.
-    if (freshPlan) {
-      await state.update((s) => ({ ...s, status: 'working', prGroups: groups }));
-    }
+    // ---- Remaining deps ----------------------------------------------------
+    // Agents work in ONE checkout, scheduled as a team. InPlaceCheckout is single-slot, so
+    // concurrency is a single slot: sequential groups, no two subagents mutating the tree at once.
+    // (A later task reframes concurrency as a cap.)
+    // Built ONCE for the whole run — these are wave-invariant, unlike the plan-derived pieces below.
+    const effectiveConcurrency = 1;
+    const checkout =
+      seams.makeCheckout?.(input) ??
+      new InPlaceCheckout(input.cwd, { allowDirty: input.resolved.allowDirty ?? false });
+    const github = seams.makeGithub?.(input) ?? input.github;
+    const budgetCheck = makeBudgetCheck(
+      input.usage,
+      input.resolved.maxCostUsd,
+      input.resolved.maxTotalTokens,
+    );
     // PlanGraph captures its groups at construction, so rebuild it per call against the
     // mirror that workLoopState keeps in sync after every persisted update.
-    let liveGroups: readonly PrGroup[] = groups;
+    let liveGroups: readonly PrGroup[] = [];
     const graph: WorkLoopGraph = {
       ready: () => PlanGraph.trusted(liveGroups).ready(),
       isComplete: () => PlanGraph.trusted(liveGroups).isComplete(),
     };
+    // Mirrored out of every persisted update for the same reason liveGroups is: each wave builds a
+    // FRESH WorkLoop, and seeding it from the run-start snapshot would restart the session counter
+    // per wave — quietly turning maxSessions from a run bound into a per-wave one.
+    let liveSessionCount = current.sessionCount;
     const workLoopState: WorkLoopState = {
       update: async (mutator) => {
         const next = await state.update(mutator);
         liveGroups = next.prGroups;
+        liveSessionCount = next.sessionCount;
         return next;
       },
       writePlan: async (groups) => {
@@ -350,60 +331,166 @@ export async function runLoopAdapter(
       },
     };
 
-    // ---- Remaining deps ----------------------------------------------------
-    // Agents work in ONE checkout, scheduled as a team. InPlaceCheckout is single-slot, so
-    // concurrency is a single slot: sequential groups, no two subagents mutating the tree at once.
-    // (A later task reframes concurrency as a cap.)
-    const effectiveConcurrency = 1;
-    const checkout =
-      seams.makeCheckout?.(input) ??
-      new InPlaceCheckout(input.cwd, { allowDirty: input.resolved.allowDirty ?? false });
-    const github = seams.makeGithub?.(input) ?? input.github;
-    const orchestrator = await (seams.makeOrchestrator ?? defaultMakeOrchestrator)({
-      input,
-      mcp,
-      rollingContext,
-      fetchHtmlAvailable,
-      state,
-      stepCounter,
-      background,
-    });
+    // ---- Wave loop ---------------------------------------------------------
+    // A plan is one WAVE, not the whole run. When every group in a wave lands, the goal assessor
+    // reads the repo as it now is and either ends the run or names what still remains, which the
+    // Planner plans as the next wave against real code rather than a guess. Without this, a plan
+    // that under-covers the goal ships a fraction of it and exits 0.
+    // Any non-success outcome returns immediately, so blocked / cancelled / session-capped runs
+    // behave exactly as they did before waves existed.
+    const allOutcomes: GroupOutcome[] = [];
+    const assessGoal = seams.assessGoal ?? defaultAssessGoal;
+    let waveGoal = input.goal;
+    let landed: PrGroup[] = [];
+    // Every goal this run has already planned a wave for. A run is bounded by cost ceilings, not by a
+    // wave count — but an assessor that keeps naming the SAME remaining work is not making progress,
+    // it is livelocked, and another identical wave would burn the operator's budget for nothing.
+    const plannedGoals = new Set<string>([input.goal]);
+    for (let wave = 1; ; wave++) {
+      let groups: PrGroup[];
+      let freshPlan = false;
+      if (wave === 1 && current.prGroups.length > 0) {
+        // Resume: a run interrupted mid-lifecycle persisted its groups as 'in-progress'/'awaiting-pr',
+        // which PlanGraph.ready() won't schedule. Normalize them back to 'pending' (preserving stage +
+        // pr) so they re-enter the loop and resume at their persisted stage instead of being stranded.
+        if (hasInterruptedGroup(current.prGroups)) {
+          const next = await state.update((s) => ({
+            ...s,
+            prGroups: normalizeResumeStatus(s.prGroups),
+          }));
+          groups = next.prGroups;
+        } else {
+          groups = current.prGroups;
+        }
+      } else {
+        const planFn = seams.planGroups ?? defaultPlanGroups;
+        // Later waves plan the REMAINING goal; wave 1 plans the goal as given.
+        const outcome = await planFn({ ...input, goal: waveGoal }, mcp, fetchHtmlAvailable);
+        // A later wave that cannot plan ends the run on what already shipped. Reporting `blocked`
+        // there would bury several merged PRs under the failure of the follow-up planning call.
+        if (outcome.kind === 'blocked') {
+          if (wave > 1) return { kind: 'success', outcomes: allOutcomes };
+          return { kind: 'blocked', reason: outcome.reason, outcomes: [] };
+        }
+        if (outcome.kind === 'error') {
+          if (wave > 1) return { kind: 'success', outcomes: allOutcomes };
+          return { kind: 'blocked', reason: `planner error: ${outcome.error}`, outcomes: [] };
+        }
+        if (outcome.groups.length === 0) {
+          if (wave > 1) return { kind: 'success', outcomes: allOutcomes };
+          return { kind: 'blocked', reason: 'planner produced no PR groups', outcomes: [] };
+        }
+        // Append, never replace: the landed groups stay in state so the graph still sees them as
+        // satisfied dependencies and the operator keeps the full history in plan.md.
+        groups = [...landed, ...namespaceWaveGroups(outcome.groups, landed, wave)];
+        freshPlan = true;
+      }
 
-    const budgetCheck = makeBudgetCheck(
-      input.usage,
-      input.resolved.maxCostUsd,
-      input.resolved.maxTotalTokens,
-    );
-    const loop = new WorkLoop({
-      orchestrator,
-      github,
-      state: workLoopState,
-      home: checkout,
-      graph,
-      // Persist addressed review threads so the addressing-reviews loop dedups across re-polls.
-      prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
-      concurrency: effectiveConcurrency,
-      autoMerge: input.resolved.autoMerge,
-      selfReview: input.resolved.selfReview,
-      prPerTask: current.options.prPerTask ?? false,
-      maxSessions: input.resolved.maxSessions,
-      maxCiFixAttempts: input.resolved.maxCiFixAttempts,
-      mergeMethod: input.resolved.mergeMethod,
-      adminMerge: input.resolved.adminMerge ?? false,
-      initialSessionCount: current.sessionCount,
-      // Every harness narration line also lands in .ai-task-master/progress.md via the state port.
-      progress: makeProgressTee(
-        state.appendProgress ? { append: state.appendProgress.bind(state) } : {},
-      ),
-      stepCounter,
-      ...(input.signal ? { signal: input.signal } : {}),
-      // Run-level cost/token ceiling (issue #190). Omitted when no ceiling is configured.
-      ...(budgetCheck ? { budget: budgetCheck } : {}),
-    });
-    return await loop.run();
+      // Step counter over the plan (claudetm parity): group N/M in group-mode, task N/M in prPerTask.
+      // Group order + membership are fixed within a wave, so build it once per wave and share it with
+      // the orchestrator bridges (their harness + agent lines) and the WorkLoop (its transition lines).
+      const stepCounter = makeStepCounter(groups, current.options.prPerTask ?? false);
+
+      // ---- Live graph + state proxy ------------------------------------------
+      // Validate the plan's structure ONCE per wave, at acceptance: duplicate ids, dangling deps, and
+      // cycles are functions of group ids + dependsOn edges, which stay fixed for the wave. The
+      // per-tick ready()/isComplete() below only read live statuses, so they rebuild via
+      // PlanGraph.trusted() and skip re-paying validate()'s DFS every tick (this gate also keeps that
+      // memoized DFS terminating).
+      try {
+        PlanGraph.validate(groups);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (wave > 1) return { kind: 'success', outcomes: allOutcomes };
+        return { kind: 'blocked', reason: msg, outcomes: [] };
+      }
+      // Persist a freshly-planned roster only after it validates. Writing it before validation would
+      // leave a structurally-invalid plan in resumable state: every later run would take the resume
+      // branch, re-reject the same plan, and never replan.
+      if (freshPlan) {
+        await state.update((s) => ({ ...s, status: 'working', prGroups: groups }));
+      }
+      liveGroups = groups;
+
+      // Re-read per wave. The accumulator persists each PR's context as it goes, but a wave builds a
+      // FRESH orchestrator with a fresh accumulator — seeding it from the run-start snapshot would
+      // write wave 2's PR bodies as though wave 1's PRs never happened. Wave 1 reads the same value
+      // the snapshot held, so a single-wave run is unchanged.
+      const waveContext = (await state.readContext?.()) ?? rollingContext;
+      const orchestrator = await (seams.makeOrchestrator ?? defaultMakeOrchestrator)({
+        input,
+        mcp,
+        rollingContext: waveContext,
+        fetchHtmlAvailable,
+        state,
+        stepCounter,
+        background,
+      });
+
+      const loop = new WorkLoop({
+        orchestrator,
+        github,
+        state: workLoopState,
+        home: checkout,
+        graph,
+        // Persist addressed review threads so the addressing-reviews loop dedups across re-polls.
+        prContext: new PrContextStore(resolvePath(input.cwd, '.ai-task-master')),
+        concurrency: effectiveConcurrency,
+        autoMerge: input.resolved.autoMerge,
+        selfReview: input.resolved.selfReview,
+        prPerTask: current.options.prPerTask ?? false,
+        maxSessions: input.resolved.maxSessions,
+        maxCiFixAttempts: input.resolved.maxCiFixAttempts,
+        mergeMethod: input.resolved.mergeMethod,
+        adminMerge: input.resolved.adminMerge ?? false,
+        initialSessionCount: liveSessionCount,
+        // Every harness narration line also lands in .ai-task-master/progress.md via the state port.
+        progress: makeProgressTee(
+          state.appendProgress ? { append: state.appendProgress.bind(state) } : {},
+        ),
+        stepCounter,
+        ...(input.signal ? { signal: input.signal } : {}),
+        // Run-level cost/token ceiling (issue #190). Omitted when no ceiling is configured.
+        ...(budgetCheck ? { budget: budgetCheck } : {}),
+      });
+      const result = await loop.run();
+      allOutcomes.push(...result.outcomes);
+      // Only a clean sweep earns another wave. Anything else (blocked, awaiting-pr, session-cap,
+      // cancelled) is the operator's to resolve — planning more work on top would pile onto a run
+      // that already needs attention.
+      if (result.kind !== 'success') return { ...result, outcomes: allOutcomes };
+
+      landed = [...liveGroups];
+      const assessment = await assessGoal(input, mcp, fetchHtmlAvailable, deliveredSummary(landed));
+      if (assessment.complete) {
+        return { kind: 'success', outcomes: allOutcomes };
+      }
+      if (plannedGoals.has(assessment.remaining)) {
+        harnessProgress(
+          `goal still not met, but the remaining work is unchanged from a wave already run — stopping: ${assessment.remaining}`,
+          { phase: 'planning' },
+        );
+        return { kind: 'success', outcomes: allOutcomes };
+      }
+      plannedGoals.add(assessment.remaining);
+      harnessProgress(`goal not yet met — planning another wave: ${assessment.remaining}`, {
+        phase: 'planning',
+      });
+      waveGoal = assessment.remaining;
+    }
   } finally {
     await disposeQuietly(disposer);
   }
+}
+
+// One line per landed group for the goal assessor's prompt. It checks the REPO, not this list — the
+// list only tells it what to expect, so an absent capability reads as a gap rather than as something
+// it simply has not found yet.
+function deliveredSummary(groups: readonly PrGroup[]): string[] {
+  return groups.map((g) => {
+    const pr = typeof g.pr === 'number' ? ` (PR #${g.pr}, ${g.status})` : ` (${g.status})`;
+    return `${g.id}: ${g.title}${pr}`;
+  });
 }
 
 // The effective verify command for the pre-PR self-review: the configured verifyCommand when set,

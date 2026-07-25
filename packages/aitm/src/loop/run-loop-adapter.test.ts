@@ -192,6 +192,9 @@ function seams(over: Partial<RunLoopAdapterSeams> = {}): RunLoopAdapterSeams {
   const { state } = makeState();
   return {
     planGroups: async (): Promise<PlanGroupsOutcome> => ({ kind: 'ok', groups: [group('only')] }),
+    // The goal assessor is outside-world too: stub it complete so a test that says nothing about
+    // waves runs exactly one, and only the wave tests below opt into a second.
+    assessGoal: async () => ({ complete: true, remaining: '', rationale: 'stub' }),
     makeOrchestrator: () => makeOrchestrator(),
     makeCheckout: () => makeCheckout(),
     makeGithub: () => makeGithub(),
@@ -1677,4 +1680,199 @@ test('defaultMakeOrchestrator: a discoverSpecialists failure never leaks an unha
   }
   const leaked = captured.filter((r) => r instanceof Error && r.message.includes('boom'));
   assert.deepEqual(leaked, [], 'discovery failure degraded silently, no unhandled rejection');
+});
+
+// ---- Wave re-planning ------------------------------------------------------
+
+test('a run plans another wave when the goal assessor says work remains', async () => {
+  const goalsSeen: string[] = [];
+  let assessments = 0;
+  const result = await runLoopAdapter(
+    makeInput(),
+    seams({
+      planGroups: async (input): Promise<PlanGroupsOutcome> => {
+        goalsSeen.push(input.goal);
+        return { kind: 'ok', groups: [group(`g${goalsSeen.length}`)] };
+      },
+      assessGoal: async () => {
+        assessments += 1;
+        return assessments === 1
+          ? { complete: false, remaining: 'build the web client', rationale: 'no ui yet' }
+          : { complete: true, remaining: '', rationale: 'done' };
+      },
+    }),
+  );
+  assert.equal(result.kind, 'success');
+  assert.equal(goalsSeen.length, 2, 'a second wave was planned');
+  assert.equal(goalsSeen[1], 'build the web client', 'wave 2 plans the REMAINING goal');
+  assert.equal(assessments, 2, 'each landed wave is assessed');
+  assert.equal(result.outcomes.length, 2, 'outcomes accumulate across waves');
+});
+
+test('a complete verdict after the first wave ends the run', async () => {
+  let plans = 0;
+  const result = await runLoopAdapter(
+    makeInput(),
+    seams({
+      planGroups: async (): Promise<PlanGroupsOutcome> => {
+        plans += 1;
+        return { kind: 'ok', groups: [group('only')] };
+      },
+      assessGoal: async () => ({ complete: true, remaining: '', rationale: 'shipped' }),
+    }),
+  );
+  assert.equal(result.kind, 'success');
+  assert.equal(plans, 1, 'no extra wave when the goal is met');
+});
+
+test('a blocked wave is never assessed and never extended', async () => {
+  let assessed = false;
+  const result = await runLoopAdapter(
+    makeInput(),
+    seams({
+      planGroups: async () => ({ kind: 'blocked', reason: 'cannot parse goal' }),
+      assessGoal: async () => {
+        assessed = true;
+        return { complete: false, remaining: 'more', rationale: '' };
+      },
+    }),
+  );
+  assert.equal(result.kind, 'blocked');
+  assert.equal(assessed, false, 'a run that needs attention is not piled onto with more work');
+});
+
+test('a later wave that cannot be planned ends the run on what already shipped', async () => {
+  let plans = 0;
+  const result = await runLoopAdapter(
+    makeInput(),
+    seams({
+      planGroups: async (): Promise<PlanGroupsOutcome> => {
+        plans += 1;
+        return plans === 1
+          ? { kind: 'ok', groups: [group('g1')] }
+          : { kind: 'error', error: 'planner exploded' };
+      },
+      assessGoal: async () => ({ complete: false, remaining: 'more work', rationale: '' }),
+    }),
+  );
+  // Wave 1 merged a real PR. Reporting `blocked` would bury that under a follow-up planning failure.
+  assert.equal(result.kind, 'success');
+  assert.equal(result.outcomes.length, 1);
+});
+
+test('wave groups are appended to the landed ones, with ids namespaced apart', async () => {
+  const persisted: string[][] = [];
+  const { state } = makeState();
+  let assessments = 0;
+  await runLoopAdapter(
+    makeInput(),
+    seams({
+      state: {
+        ...state,
+        update: async (mutator) => {
+          const next = await state.update(mutator);
+          persisted.push(next.prGroups.map((g) => g.id));
+          return next;
+        },
+      },
+      // Both waves emit `g1`, exactly as a real Planner would — the collision is the point.
+      planGroups: async (): Promise<PlanGroupsOutcome> => ({ kind: 'ok', groups: [group('g1')] }),
+      assessGoal: async () => {
+        assessments += 1;
+        return assessments === 1
+          ? { complete: false, remaining: 'more', rationale: '' }
+          : { complete: true, remaining: '', rationale: '' };
+      },
+    }),
+  );
+  const last = persisted.at(-1) ?? [];
+  assert.ok(last.includes('g1'), 'the landed group is still there');
+  assert.ok(last.includes('w2-g1'), 'the second wave was namespaced, not collided');
+});
+
+test('an assessor that keeps naming the same remaining work does not loop forever', async () => {
+  // Livelock guard: the wave ran, the assessor asked for the identical thing again. Another wave
+  // would repeat work that just failed to satisfy it and bill the operator for it.
+  let plans = 0;
+  const result = await runLoopAdapter(
+    makeInput(),
+    seams({
+      planGroups: async (): Promise<PlanGroupsOutcome> => {
+        plans += 1;
+        return { kind: 'ok', groups: [group(`g${plans}`)] };
+      },
+      assessGoal: async () => ({ complete: false, remaining: 'the same thing', rationale: '' }),
+    }),
+  );
+  assert.equal(result.kind, 'success');
+  assert.equal(plans, 2, 'one follow-up wave, then the repeat is refused');
+});
+
+test('the original goal is never re-planned as remaining work', async () => {
+  let plans = 0;
+  await runLoopAdapter(
+    makeInput(),
+    seams({
+      planGroups: async (): Promise<PlanGroupsOutcome> => {
+        plans += 1;
+        return { kind: 'ok', groups: [group(`g${plans}`)] };
+      },
+      // Echoing the original goal back is the degenerate case — it would replan wave 1 verbatim.
+      assessGoal: async (input) => ({ complete: false, remaining: input.goal, rationale: '' }),
+    }),
+  );
+  assert.equal(plans, 1, 'the run stops instead of replanning the goal it just planned');
+});
+
+test('maxSessions bounds the whole run, not each wave separately', async () => {
+  // Each wave builds a fresh WorkLoop. Seeding it from the run-start snapshot would reset the
+  // session counter every wave, so maxSessions would never actually stop a multi-wave run.
+  let plans = 0;
+  const result = await runLoopAdapter(
+    makeInput({ maxSessions: 2 }),
+    seams({
+      planGroups: async (): Promise<PlanGroupsOutcome> => {
+        plans += 1;
+        return { kind: 'ok', groups: [group(`g${plans}`)] };
+      },
+      // Distinct remaining work each time, so the livelock guard never fires and only the
+      // session cap can end this run.
+      assessGoal: async () => ({
+        complete: false,
+        remaining: `more work ${plans}`,
+        rationale: '',
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'session-cap', 'the run-wide session cap stops the wave loop');
+});
+
+test('each wave reads the rolling context fresh, so later PRs know about earlier ones', async () => {
+  // A wave builds a fresh orchestrator with a fresh context accumulator. Seeding it from the
+  // run-start snapshot would write wave 2's PR bodies as though wave 1's PRs never happened.
+  const seen: string[] = [];
+  let stored = '';
+  const { state } = makeState();
+  let assessments = 0;
+  await runLoopAdapter(
+    makeInput(),
+    seams({
+      state: { ...state, readContext: async () => stored },
+      makeOrchestrator: (ctx) => {
+        seen.push(ctx.rollingContext);
+        stored = 'PR #1 (merged): the first wave';
+        return makeOrchestrator();
+      },
+      planGroups: async (): Promise<PlanGroupsOutcome> => ({ kind: 'ok', groups: [group('g1')] }),
+      assessGoal: async () => {
+        assessments += 1;
+        return assessments === 1
+          ? { complete: false, remaining: 'wave two work', rationale: '' }
+          : { complete: true, remaining: '', rationale: '' };
+      },
+    }),
+  );
+  assert.equal(seen.length, 2, 'two waves each built an orchestrator');
+  assert.equal(seen[0], '', 'wave 1 starts from the empty run-start context');
+  assert.match(seen[1] ?? '', /the first wave/, 'wave 2 inherits what wave 1 persisted');
 });

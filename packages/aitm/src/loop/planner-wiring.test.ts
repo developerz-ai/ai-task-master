@@ -11,7 +11,9 @@ import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
 import type { RunLoopInput } from '../composition/run-input.ts';
+import type { PrGroup } from '../domain/pr-group.ts';
 import type { McpClientManager } from '../mcp/mcp-client.ts';
+import { PlanGraph } from '../plan/plan-graph.ts';
 import type { Plan } from '../plan/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
@@ -19,6 +21,7 @@ import {
   branchFor,
   defaultPlanGroups,
   listTrackedFiles,
+  namespaceWaveGroups,
   parseRemoteHeads,
   planToPrGroups,
   remoteBranchNames,
@@ -592,4 +595,74 @@ test('listTrackedFiles: returns the tracked paths, and [] where git cannot answe
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// ---- namespaceWaveGroups (pure) --------------------------------------------
+
+function waveGroup(
+  id: string,
+  opts: { branch?: string | null; dependsOn?: string[] } = {},
+): PrGroup {
+  return {
+    id,
+    title: `Group ${id}`,
+    acceptance: 'check',
+    tasks: [{ id: `${id}-1`, text: 'a', complexity: 'normal', done: false }],
+    dependsOn: opts.dependsOn ?? [],
+    branch: opts.branch === undefined ? `aitm/${id}` : opts.branch,
+    pr: null,
+    status: 'pending',
+    stage: 'pending',
+    reviewGraceApplied: false,
+  };
+}
+
+test('namespaceWaveGroups: colliding ids, branches, and task ids are all rewritten', () => {
+  const landed = [waveGroup('g1'), waveGroup('g2')];
+  const next = namespaceWaveGroups([waveGroup('g1'), waveGroup('g2')], landed, 2);
+  assert.deepEqual(
+    next.map((g) => g.id),
+    ['w2-g1', 'w2-g2'],
+  );
+  assert.deepEqual(
+    next.map((g) => g.branch),
+    ['aitm/g1-w2', 'aitm/g2-w2'],
+  );
+  assert.deepEqual(
+    next[0]?.tasks.map((t) => t.id),
+    ['w2-g1-1'],
+    'task ids follow the group id',
+  );
+});
+
+test('namespaceWaveGroups: dependsOn follows the rename, so the DAG stays closed', () => {
+  const landed = [waveGroup('g1')];
+  const next = namespaceWaveGroups(
+    [waveGroup('g1'), waveGroup('g2', { dependsOn: ['g1'] })],
+    landed,
+    2,
+  );
+  // g2 depended on the NEW g1, not the landed one — the edge must point at the renamed id.
+  assert.deepEqual(next[1]?.dependsOn, ['w2-g1']);
+  assert.doesNotThrow(() => PlanGraph.validate([...landed, ...next]));
+});
+
+test('namespaceWaveGroups: non-colliding ids are left completely alone', () => {
+  const next = namespaceWaveGroups([waveGroup('api')], [waveGroup('g1')], 2);
+  assert.equal(next[0]?.id, 'api');
+  assert.equal(next[0]?.branch, 'aitm/api');
+});
+
+test('namespaceWaveGroups: a null branch stays null', () => {
+  const next = namespaceWaveGroups([waveGroup('g1', { branch: null })], [waveGroup('g1')], 2);
+  assert.equal(next[0]?.id, 'w2-g1');
+  assert.equal(next[0]?.branch, null);
+});
+
+test('namespaceWaveGroups: a third wave does not collide with the second', () => {
+  const w1 = [waveGroup('g1')];
+  const w2 = namespaceWaveGroups([waveGroup('g1')], w1, 2);
+  const w3 = namespaceWaveGroups([waveGroup('g1')], [...w1, ...w2], 3);
+  const ids = [...w1, ...w2, ...w3].map((g) => g.id);
+  assert.equal(new Set(ids).size, ids.length, 'every id across three waves is unique');
 });

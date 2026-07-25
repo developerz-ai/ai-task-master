@@ -15,6 +15,13 @@ Single-PR runs scale badly: a 2000-line PR is unreviewable and a 5-task PR is un
 - Reviewable — soft target of ~ 300 changed lines per PR.
 - Reversible — revert of one group leaves the rest of the codebase consistent.
 
+A plan is one **wave**, not the whole run. When every group in a wave lands, the goal assessor
+(`subagents/goal-assessor.ts`) reads the repo as it now is and either ends the run or names what
+still remains; the Planner then plans that as the next wave — against real code rather than a guess.
+Only a clean sweep earns another wave: a blocked, cancelled, or session-capped run returns as-is.
+The loop stops when the assessor reports the goal met, when it names remaining work a previous wave
+already tried (a livelock, not progress), or when a cost ceiling trips.
+
 **No cap by default.** `options.maxPrs` (CLI `--max-prs N`) is unset, so `Planner` emits as many groups as the goal needs. A count cap would decide how much of the goal ships, and the run has no re-planning stage — whatever `Planner` leaves out is never built. Bound a run with `maxCostUsd` / `maxTotalTokens` instead, which stop it without truncating what it set out to do.
 
 When `--max-prs N` **is** set it caps *packaging*, not work: `Planner` is told to group everything to fit. A plan that still exceeds the cap is **rejected with an error**, never trimmed to the first N groups — dropping the tail would ship a fraction of the goal and report success. Pass `--max-prs 0` for explicitly unbounded.

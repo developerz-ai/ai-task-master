@@ -210,7 +210,7 @@ test('WORKER_SYSTEM_PREFIX is the Coordinator: file manifest + the inline/fanout
   assert.match(WORKER_SYSTEM_PREFIX, /applied: true/);
   // The "only the coordinator spawns" boundary and leaf independence, the product principles §2a adds.
   assert.match(WORKER_SYSTEM_PREFIX, /Only you spawn; leaves never spawn\./);
-  assert.match(WORKER_SYSTEM_PREFIX, /DISJOINT, non-interfering scopes/);
+  assert.match(WORKER_SYSTEM_PREFIX, /Carve DISJOINT scopes/);
 });
 
 test('WORKER_SYSTEM_PREFIX carries the explore delegation guidance, gated on availability (issue #126)', () => {

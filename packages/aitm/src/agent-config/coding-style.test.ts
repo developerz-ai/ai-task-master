@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
-import { composeStyleGuide, StyleDistiller } from './coding-style.ts';
+import { composeStyleGuide, isTestPath, StyleDistiller } from './coding-style.ts';
 
 function claudeConfig(path: string, contents: string): AgentConfig {
   return { flavor: 'claude', path, contents };
@@ -49,9 +49,13 @@ test('StyleDistiller is constructible', () => {
   assert.ok(d instanceof StyleDistiller);
 });
 
-test('StyleDistiller: prompt embeds style contents + test globs → returns cleaned digest', async () => {
+test('StyleDistiller: prompt embeds style contents + real source, and returns a cleaned digest', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
   try {
+    // Real files, not a guessed glob: the digest's whole job is the conventions the style file does
+    // not state, and those are only visible in the code.
+    await writeFile(join(repo.path, 'router.ts'), 'export const ROUTE_MARKER = 1;\n');
+    await writeFile(join(repo.path, 'router.test.ts'), 'test("TEST_MARKER", () => {});\n');
     const { model, prompt } = modelReturning('# Coding Style\n\n- use tabs\nCODING_STYLE_COMPLETE');
     const config = claudeConfig(
       join(repo.path, 'CLAUDE.md'),
@@ -62,9 +66,64 @@ test('StyleDistiller: prompt embeds style contents + test globs → returns clea
     assert.equal(digest, '# Coding Style\n\n- use tabs');
     const sent = prompt();
     assert.match(sent, /single quotes only/);
-    assert.ok(sent.includes('**/*.test.ts'), 'prompt must surface the test globs');
+    assert.match(sent, /ROUTE_MARKER/, 'real source reaches the prompt');
+    assert.match(sent, /TEST_MARKER/, 'a real test file reaches the prompt');
+    assert.match(sent, /source samples/);
+    assert.match(sent, /test samples/);
   } finally {
     await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: a repo with no JS tooling at all still yields signals (Rust)', async () => {
+  // The JS-only signal set (biome/tsconfig/package.json) produced an EMPTY digest for Rust, Python,
+  // and Go repos — distill() returned '' before even calling the model.
+  const repo = await makeTempRepo();
+  try {
+    await writeFile(join(repo.path, 'Cargo.toml'), '[package]\nname = "engine"\n');
+    await writeFile(join(repo.path, 'main.rs'), 'pub fn RUST_MARKER() {}\n');
+    const { model, prompt } = modelReturning('# Coding Style\n\n- rust\nCODING_STYLE_COMPLETE');
+    const digest = await new StyleDistiller({ model }).distill({
+      config: null,
+      repoRoot: repo.path,
+    });
+
+    assert.notEqual(digest, '', 'a Rust repo gets a digest instead of nothing');
+    assert.match(prompt(), /Cargo\.toml/);
+    assert.match(prompt(), /RUST_MARKER/);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: vendor directories are never sampled', async () => {
+  const repo = await makeTempRepo();
+  try {
+    await mkdir(join(repo.path, 'node_modules'), { recursive: true });
+    await writeFile(join(repo.path, 'node_modules', 'dep.ts'), 'export const VENDOR_MARKER = 1;\n');
+    await writeFile(join(repo.path, 'app.ts'), 'export const APP_MARKER = 1;\n');
+    const { model, prompt } = modelReturning('# Coding Style\n\n- x\nCODING_STYLE_COMPLETE');
+    await new StyleDistiller({ model }).distill({ config: null, repoRoot: repo.path });
+
+    assert.match(prompt(), /APP_MARKER/);
+    assert.doesNotMatch(prompt(), /VENDOR_MARKER/, 'node_modules must never reach the prompt');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('isTestPath recognizes the conventions each ecosystem actually uses', () => {
+  for (const p of [
+    'src/router.test.ts',
+    'src/router_test.go',
+    'tests/test_router.py',
+    'spec/router_spec.rb',
+    'test/router.ts',
+  ]) {
+    assert.equal(isTestPath(p), true, p);
+  }
+  for (const p of ['src/router.ts', 'src/latest.ts', 'src/contest.rs']) {
+    assert.equal(isTestPath(p), false, p);
   }
 });
 
@@ -266,4 +325,24 @@ test('composeStyleGuide: no style file → the digest alone', () => {
 test('composeStyleGuide: nothing to say → empty, so the prompt omits the style block', () => {
   assert.equal(composeStyleGuide(null, ''), '');
   assert.equal(composeStyleGuide(claudeConfig('/repo/CLAUDE.md', '  \n'), ''), '');
+});
+
+test('StyleDistiller: an implausibly large file is never sampled', async () => {
+  // Samples are picked biggest-first, so without a ceiling the largest file wins — typically a
+  // generated or minified one, which is both the worst style exemplar and the most expensive read.
+  const repo = await makeTempRepo();
+  try {
+    await writeFile(
+      join(repo.path, 'generated.ts'),
+      `export const GENERATED_MARKER = 1;\n${'// filler\n'.repeat(30_000)}`,
+    );
+    await writeFile(join(repo.path, 'handwritten.ts'), 'export const HANDWRITTEN_MARKER = 1;\n');
+    const { model, prompt } = modelReturning('# Coding Style\n\n- x\nCODING_STYLE_COMPLETE');
+    await new StyleDistiller({ model }).distill({ config: null, repoRoot: repo.path });
+
+    assert.match(prompt(), /HANDWRITTEN_MARKER/, 'real hand-written source is sampled');
+    assert.doesNotMatch(prompt(), /GENERATED_MARKER/, 'the oversized file is skipped entirely');
+  } finally {
+    await repo.cleanup();
+  }
 });

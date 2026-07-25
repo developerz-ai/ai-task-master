@@ -8,8 +8,8 @@
 // StateStore's job; see plan slice 01).
 // Mirrors claudetm core/prompts_coding_style.py (reference behavior, not code).
 
-import { readdir, readFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { basename, extname, join, relative } from 'node:path';
 import { withTimeout } from '@developerz.ai/ai-claude-compat';
 import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
 import { type OnUsage, reportUsage } from '../observability/usage-sink.ts';
@@ -38,10 +38,88 @@ export type DistillInput = {
   repoRoot: string;
 };
 
-// Test conventions surfaced verbatim in the prompt so the digest can describe where tests live and
-// how they are named. Only the universal paired-`*.test.ts` convention is hardcoded; a fixed
-// directory layout would bias codegen for target repos that organize tests differently.
-export const TEST_GLOBS = ['**/*.test.ts'] as const;
+// How much real code the digest gets to look at. The config files alone cannot show naming, error
+// handling, or module shape — and on a repo with no biome/tsconfig/package.json they showed nothing
+// at all, so a Rust or Python project got an empty digest. Bounded hard: style detection runs before
+// every plan, and must never become a filesystem crawl or a token sink.
+export const SOURCE_SAMPLE_LIMIT = 5;
+export const TEST_SAMPLE_LIMIT = 3;
+export const SAMPLE_CHAR_LIMIT = 2500;
+const MAX_WALK_FILES = 4000;
+const MAX_WALK_DEPTH = 8;
+
+// Directories that never teach conventions and can be enormous.
+const IGNORED_DIRS: ReadonlySet<string> = new Set([
+  'node_modules',
+  'dist',
+  'build',
+  'target',
+  'vendor',
+  'coverage',
+  'venv',
+  '__pycache__',
+  'out',
+  'Pods',
+  'tmp',
+  'testdata',
+  'fixtures',
+  'snapshots',
+]);
+
+// Source extensions across the ecosystems aitm is pointed at. Adding one here is what gives that
+// language a style digest — the previous JS-only signal set silently produced none.
+const SOURCE_EXTENSIONS: ReadonlySet<string> = new Set([
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.rs',
+  '.py',
+  '.go',
+  '.rb',
+  '.java',
+  '.kt',
+  '.kts',
+  '.php',
+  '.cs',
+  '.swift',
+  '.c',
+  '.cc',
+  '.cpp',
+  '.h',
+  '.hpp',
+  '.ex',
+  '.exs',
+  '.scala',
+  '.sh',
+  '.sql',
+  '.vue',
+  '.svelte',
+]);
+
+// Repo-root config that reveals conventions, across ecosystems — not just the JS trio.
+const CONFIG_FILE_PATTERNS: readonly RegExp[] = [
+  /^biome\.jsonc?$/,
+  /^tsconfig.*\.json$/,
+  /^\.eslintrc.*$/,
+  /^\.prettierrc.*$/,
+  /^Cargo\.toml$/,
+  /^rustfmt\.toml$/,
+  /^clippy\.toml$/,
+  /^pyproject\.toml$/,
+  /^setup\.cfg$/,
+  /^ruff\.toml$/,
+  /^go\.mod$/,
+  /^\.golangci\.(ya?ml|toml)$/,
+  /^Gemfile$/,
+  /^\.rubocop\.ya?ml$/,
+  /^composer\.json$/,
+  /^Makefile$/,
+  /^justfile$/,
+  /^\.editorconfig$/,
+];
 
 const COMPLETION_MARKER = 'CODING_STYLE_COMPLETE';
 
@@ -52,9 +130,9 @@ const INTRO = [
   '',
   'The project style file (CLAUDE.md / AGENTS.md) is injected verbatim alongside your digest, so do',
   'NOT restate or summarize its rules — the agent already has them. Your job is the conventions it',
-  'does not spell out: the patterns actually visible in the config files and scripts below (where',
-  'tests live and how they are named, the commands that gate a commit, what the formatter and',
-  'compiler enforce). Concrete paths and commands beat prose.',
+  'does not spell out: the patterns actually visible in the config files, scripts, and REAL SOURCE',
+  'FILES below (naming, error handling, module shape, where tests live and how they are named, the',
+  'commands that gate a commit). Concrete paths and commands beat prose.',
 ].join('\n');
 
 const OUTPUT_FORMAT = [
@@ -145,16 +223,104 @@ async function gatherSignals(input: DistillInput): Promise<Signal[]> {
   const scripts = await readPackageScripts(repoRoot);
   if (scripts !== null) signals.push({ label: 'package.json scripts', body: scripts });
 
+  for (const block of await gatherSourceSamples(repoRoot)) signals.push(block);
+
   return signals;
 }
 
-// Top-level formatter/linter + compiler config drives the Code Style section. Picks `biome.json`
-// and every `tsconfig*.json` at the repo root (a monorepo may ship several).
+// Real code from the repo — the half the config files cannot show. Sources and tests are separate
+// signals so the digest can speak to each, and each is ONE signal holding several excerpts so the
+// progress line stays a line instead of a file listing.
+async function gatherSourceSamples(repoRoot: string): Promise<Signal[]> {
+  const files = await walkSourceFiles(repoRoot);
+  if (files.length === 0) return [];
+  const sized = await Promise.all(
+    files.map(async (path) => ({
+      path,
+      size: (await stat(path).catch(() => null))?.size ?? 0,
+    })),
+  );
+  const tests = sized.filter((f) => isTestPath(relative(repoRoot, f.path)));
+  const sources = sized.filter((f) => !isTestPath(relative(repoRoot, f.path)));
+  const signals: Signal[] = [];
+  const source = await renderSamples(repoRoot, pickSamples(sources, SOURCE_SAMPLE_LIMIT));
+  if (source !== null) signals.push({ label: 'source samples', body: source });
+  const test = await renderSamples(repoRoot, pickSamples(tests, TEST_SAMPLE_LIMIT));
+  if (test !== null) signals.push({ label: 'test samples', body: test });
+  return signals;
+}
+
+// Biggest first: a large file shows more of a codebase's conventions than a barrel or a stub. Ties
+// break on path so the same repo always yields the same digest inputs.
+function pickSamples(
+  candidates: ReadonlyArray<{ path: string; size: number }>,
+  limit: number,
+): Array<{ path: string; size: number }> {
+  return [...candidates]
+    .sort((a, b) => b.size - a.size || a.path.localeCompare(b.path))
+    .slice(0, limit);
+}
+
+async function renderSamples(
+  repoRoot: string,
+  picked: ReadonlyArray<{ path: string }>,
+): Promise<string | null> {
+  const blocks: string[] = [];
+  for (const file of picked) {
+    const body = await readIfPresent(file.path);
+    if (body === null || body.trim() === '') continue;
+    blocks.push(`--- ${relative(repoRoot, file.path)} ---\n${body.slice(0, SAMPLE_CHAR_LIMIT)}`);
+  }
+  return blocks.length === 0 ? null : blocks.join('\n\n');
+}
+
+// A path is a test by the conventions every ecosystem actually uses: a `test`/`spec` directory, a
+// `*.test.*` / `*_test.*` suffix, or a `test_*` prefix.
+export function isTestPath(relPath: string): boolean {
+  const lower = relPath.toLowerCase().replaceAll('\\\\', '/');
+  const base = lower.split('/').pop() ?? lower;
+  if (
+    lower
+      .split('/')
+      .slice(0, -1)
+      .some((seg) => /^(tests?|specs?)$/.test(seg))
+  )
+    return true;
+  return /[._-](test|spec)\./.test(base) || /^test_/.test(base) || /_(test|spec)\./.test(base);
+}
+
+// Breadth-first, bounded on both depth and total files so a monorepo cannot stall the pre-plan step.
+// Hidden directories are skipped wholesale — `.git` alone would dwarf the repo.
+async function walkSourceFiles(root: string): Promise<string[]> {
+  const found: string[] = [];
+  const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+  while (queue.length > 0 && found.length < MAX_WALK_FILES) {
+    const next = queue.shift();
+    if (!next) break;
+    const entries = await readdir(next.dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const full = join(next.dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORED_DIRS.has(entry.name) && next.depth < MAX_WALK_DEPTH) {
+          queue.push({ dir: full, depth: next.depth + 1 });
+        }
+        continue;
+      }
+      if (entry.isFile() && SOURCE_EXTENSIONS.has(extname(entry.name))) {
+        found.push(full);
+        if (found.length >= MAX_WALK_FILES) break;
+      }
+    }
+  }
+  return found;
+}
+
+// Top-level formatter/linter/build config drives the Code Style section, across ecosystems (a
+// monorepo may ship several matches).
 async function gatherConfigFiles(repoRoot: string): Promise<Signal[]> {
   const names = await readdir(repoRoot).catch((): string[] => []);
-  const picked = names
-    .filter((name) => name === 'biome.json' || /^tsconfig.*\.json$/.test(name))
-    .sort();
+  const picked = names.filter((name) => CONFIG_FILE_PATTERNS.some((re) => re.test(name))).sort();
   const blocks: Signal[] = [];
   for (const name of picked) {
     const body = await readIfPresent(join(repoRoot, name));
@@ -185,16 +351,7 @@ function buildPrompt(signals: Signal[]): string {
   const blocks = signals
     .map((s) => `----- BEGIN ${s.label} -----\n${s.body}\n----- END ${s.label} -----`)
     .join('\n\n');
-  return [
-    INTRO,
-    '',
-    '## Raw style signals',
-    blocks,
-    '',
-    `Test file globs to account for: ${TEST_GLOBS.join(', ')}`,
-    '',
-    OUTPUT_FORMAT,
-  ].join('\n');
+  return [INTRO, '', '## Raw style signals', blocks, '', OUTPUT_FORMAT].join('\n');
 }
 
 // Mirror of claudetm extract_coding_style: drop the completion marker, then return from the

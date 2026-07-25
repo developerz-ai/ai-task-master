@@ -1846,3 +1846,33 @@ test('maxSessions bounds the whole run, not each wave separately', async () => {
   );
   assert.equal(result.kind, 'session-cap', 'the run-wide session cap stops the wave loop');
 });
+
+test('each wave reads the rolling context fresh, so later PRs know about earlier ones', async () => {
+  // A wave builds a fresh orchestrator with a fresh context accumulator. Seeding it from the
+  // run-start snapshot would write wave 2's PR bodies as though wave 1's PRs never happened.
+  const seen: string[] = [];
+  let stored = '';
+  const { state } = makeState();
+  let assessments = 0;
+  await runLoopAdapter(
+    makeInput(),
+    seams({
+      state: { ...state, readContext: async () => stored },
+      makeOrchestrator: (ctx) => {
+        seen.push(ctx.rollingContext);
+        stored = 'PR #1 (merged): the first wave';
+        return makeOrchestrator();
+      },
+      planGroups: async (): Promise<PlanGroupsOutcome> => ({ kind: 'ok', groups: [group('g1')] }),
+      assessGoal: async () => {
+        assessments += 1;
+        return assessments === 1
+          ? { complete: false, remaining: 'wave two work', rationale: '' }
+          : { complete: true, remaining: '', rationale: '' };
+      },
+    }),
+  );
+  assert.equal(seen.length, 2, 'two waves each built an orchestrator');
+  assert.equal(seen[0], '', 'wave 1 starts from the empty run-start context');
+  assert.match(seen[1] ?? '', /the first wave/, 'wave 2 inherits what wave 1 persisted');
+});

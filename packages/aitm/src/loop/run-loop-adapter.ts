@@ -412,10 +412,15 @@ export async function runLoopAdapter(
       }
       liveGroups = groups;
 
+      // Re-read per wave. The accumulator persists each PR's context as it goes, but a wave builds a
+      // FRESH orchestrator with a fresh accumulator — seeding it from the run-start snapshot would
+      // write wave 2's PR bodies as though wave 1's PRs never happened. Wave 1 reads the same value
+      // the snapshot held, so a single-wave run is unchanged.
+      const waveContext = (await state.readContext?.()) ?? rollingContext;
       const orchestrator = await (seams.makeOrchestrator ?? defaultMakeOrchestrator)({
         input,
         mcp,
-        rollingContext,
+        rollingContext: waveContext,
         fetchHtmlAvailable,
         state,
         stepCounter,

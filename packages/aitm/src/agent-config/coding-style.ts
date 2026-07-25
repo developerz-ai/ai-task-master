@@ -96,12 +96,13 @@ export class StyleDistiller {
     if (signals.length === 0) return '';
     reportProgress(this.init.onProgress, signals);
     try {
+      const started = Date.now();
       const result = await generateText({
         model: this.init.model,
         prompt: buildPrompt(signals),
         ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
       });
-      reportUsage(this.init.onUsage, result);
+      reportUsage(this.init.onUsage, result, { latencyMs: Date.now() - started });
       return cleanDigest(result.text);
     } catch {
       return '';

@@ -547,14 +547,17 @@ async function planManifest(
   onUsage: OnUsage | undefined,
 ): Promise<{ submitted: SubmittedOutput<FileManifest>; handle: SubagentHandle<WorkerTools> }> {
   const prompt = buildManifestPrompt(input);
+  const started = Date.now();
   let run = input.priorHandle
     ? await continueSubagent(input.priorHandle, prompt)
     : await runSubagent(agent, prompt);
-  reportUsage(onUsage, run.result);
+  reportUsage(onUsage, run.result, { latencyMs: Date.now() - started, retries: 0 });
   let submitted = submittedOutput(run.result, FileManifestSchema);
   for (let attempt = 0; attempt < MANIFEST_SCHEMA_RETRIES && !submitted.ok; attempt++) {
+    // A manifest correction is a retry too (issue #168) — its own loop, parallel to runWithSchemaRetry.
+    const retryStarted = Date.now();
     run = await continueSubagent(run.handle, correctiveMessage(submitted));
-    reportUsage(onUsage, run.result);
+    reportUsage(onUsage, run.result, { latencyMs: Date.now() - retryStarted, retries: 1 });
     submitted = submittedOutput(run.result, FileManifestSchema);
   }
   return { submitted, handle: run.handle };

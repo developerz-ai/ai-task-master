@@ -36,6 +36,37 @@ function usage(input: number, output: number, cacheRead = 0): LanguageModelUsage
 
 const noLimits = stubLimits({});
 
+test('record accumulates latency + retries per bucket and overall (issue #168)', async () => {
+  const t = new UsageTracker(noLimits);
+  t.record('worker', 'm', usage(100, 20), undefined, { latencyMs: 1200, retries: 0 });
+  t.record('worker', 'm', usage(50, 10), undefined, { latencyMs: 800, retries: 1 });
+  t.record('planner', 'm', usage(30, 5), undefined, { latencyMs: 400 });
+  const { perRole, overall } = await t.totals();
+  assert.equal(perRole.worker?.latencyMsTotal, 2000, 'summed wall-clock across the bucket');
+  assert.equal(perRole.worker?.retries, 1, 'one corrective re-generation');
+  assert.equal(perRole.planner?.latencyMsTotal, 400);
+  assert.equal(perRole.planner?.retries, 0, 'omitted retries → 0');
+  assert.equal(overall.latencyMsTotal, 2400, 'overall sums every bucket');
+  assert.equal(overall.retries, 1);
+});
+
+test('record defaults latency + retries to 0 when the sink omits the meta (issue #168)', async () => {
+  const t = new UsageTracker(noLimits);
+  t.record('worker', 'm', usage(100, 20));
+  const { overall } = await t.totals();
+  assert.equal(overall.latencyMsTotal, 0);
+  assert.equal(overall.retries, 0);
+});
+
+test('roleUsageSink forwards latency + retries meta to record (issue #168)', async () => {
+  const t = new UsageTracker(noLimits);
+  const sink = roleUsageSink(t, 'reviewer', 'fallback/model');
+  sink?.(usage(10, 2), 'm', undefined, { latencyMs: 500, retries: 1 });
+  const { perRole } = await t.totals();
+  assert.equal(perRole.reviewer?.latencyMsTotal, 500);
+  assert.equal(perRole.reviewer?.retries, 1);
+});
+
 test('record accumulates per-role + overall; undefined token fields count as 0', async () => {
   const t = new UsageTracker(noLimits);
   t.record('worker', 'm', usage(100, 20));

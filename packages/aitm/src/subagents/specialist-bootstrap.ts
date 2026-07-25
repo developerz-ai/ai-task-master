@@ -61,12 +61,13 @@ export async function bootstrapSpecialists(
   if (cached.length > 0) return cached;
   try {
     init.onProgress?.('specialists: none in .claude/agents — generating a team for this plan');
+    const started = Date.now();
     const result = await generateText({
       model: init.model,
       prompt: buildPrompt(input),
       ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
     });
-    reportUsage(init.onUsage, result);
+    reportUsage(init.onUsage, result, { latencyMs: Date.now() - started });
     const parsed = parseSpecialists(result.text);
     if (parsed.length === 0) return [];
     await persist(input.stateDir, parsed);

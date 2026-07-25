@@ -231,6 +231,7 @@ export class Orchestrator {
   }
 
   private async refineCommitMessage(group: PrGroup, delivery: WorkerDelivery): Promise<string> {
+    const started = Date.now();
     const result = await callWithStepTimeout(
       () =>
         generateText({
@@ -242,7 +243,7 @@ export class Orchestrator {
         }),
       this.init.timeout,
     );
-    reportUsage(this.init.onUsage, result);
+    reportUsage(this.init.onUsage, result, { latencyMs: Date.now() - started });
     return resolveCommitMessage(result.text, group, delivery);
   }
 
@@ -295,6 +296,7 @@ export class Orchestrator {
     let lastReason = 'orchestrator did not submit a PR composition';
     let lastSubmitted: PrComposition | undefined;
     for (let attempt = 0; attempt <= COMPOSE_PR_MAX_RETRIES; attempt++) {
+      const started = Date.now();
       const result = await callWithStepTimeout(
         () =>
           generateText({
@@ -315,7 +317,10 @@ export class Orchestrator {
           }),
         this.init.timeout,
       );
-      reportUsage(this.init.onUsage, result);
+      reportUsage(this.init.onUsage, result, {
+        latencyMs: Date.now() - started,
+        retries: attempt > 0 ? 1 : 0,
+      });
       const outcome = compositionOutcome(
         submittedComposition(result),
         sections,

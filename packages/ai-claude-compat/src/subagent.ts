@@ -14,6 +14,7 @@ import {
   type LanguageModelUsage,
   type ModelMessage,
   NoOutputGeneratedError,
+  type ProviderMetadata,
   type StreamTextResult,
   stepCountIs,
   type TimeoutConfiguration,
@@ -919,10 +920,18 @@ export function formatSubmitIssues(issues: readonly z.core.$ZodIssue[]): string 
 export type SchemaRetryOptions = {
   // Corrective re-invocations after the first attempt. Default 2 → up to 3 total generations.
   maxRetries?: number;
-  // Optional per-generation usage sink — invoked once per attempt with that generation's total usage
-  // and resolved model id, so a caller can meter cost across the whole retry loop (issue #114).
+  // Optional per-generation usage sink — invoked once per attempt with that generation's total usage,
+  // resolved model id, and per-generate diagnostics (issue #168: this attempt's wall-clock + whether it
+  // was a corrective re-generation), so a caller can meter cost, latency, and retry pressure across the
+  // whole loop (issue #114). `providerMetadata` is not forwarded here (the schema-retry path does not
+  // surface cache_discount), kept in the signature only to align with the aitm-side OnUsage positions.
   // Policy-free passthrough; a throwing sink must not break the loop.
-  onUsage?: (usage: LanguageModelUsage, modelId: string | undefined) => void;
+  onUsage?: (
+    usage: LanguageModelUsage,
+    modelId: string | undefined,
+    providerMetadata?: ProviderMetadata,
+    meta?: { latencyMs?: number; retries?: number },
+  ) => void;
 };
 
 // Run a subagent to a schema-valid `submit`, correcting a botched attempt in-conversation. Runs
@@ -944,8 +953,14 @@ export async function runWithSchemaRetry<TOOLS extends ToolSet, OUTPUT>(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     // One replay step, shared with continuation (#107): run the agent and accumulate the full
     // conversation (prior turns + the model's response — its call and the SDK's tool-error result).
+    const startedAt = Date.now();
     const step = await generateOverMessages(agent, messages);
-    reportUsage(options.onUsage, step.result);
+    // retries: 1 for every attempt past the first, so a bucket sums to "corrective re-generations"
+    // (issue #168). latencyMs: this attempt's wall-clock.
+    reportUsage(options.onUsage, step.result, {
+      latencyMs: Date.now() - startedAt,
+      retries: attempt > 0 ? 1 : 0,
+    });
     last = submittedOutput(step.result, schema);
     if (last.ok) return last;
     if (attempt === maxRetries) break;
@@ -966,10 +981,11 @@ type GenerateResult<TOOLS extends ToolSet> = Awaited<
 function reportUsage<TOOLS extends ToolSet>(
   onUsage: SchemaRetryOptions['onUsage'],
   result: GenerateResult<TOOLS>,
+  meta?: { latencyMs?: number; retries?: number },
 ): void {
   if (!onUsage) return;
   try {
-    onUsage(result.totalUsage, result.response.modelId);
+    onUsage(result.totalUsage, result.response.modelId, undefined, meta);
   } catch {
     // observability must never break the run
   }

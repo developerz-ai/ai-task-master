@@ -25,6 +25,13 @@ export type RoleUsage = {
   // `usage: { include: true }` is set — credentials.ts chatSettings). null when no recorded call ever
   // reported one (not an error state, unlike costUsd — the provider simply may not echo it).
   cacheDiscountUsd: number | null;
+  // Summed per-generate wall-clock across this bucket's `calls` (issue #168). Divide by `calls` for an
+  // average. 0 when no caller reported timing (the sink's `latencyMs` is optional).
+  latencyMsTotal: number;
+  // Corrective re-generations for this bucket — attempts beyond the first (issue #168). The
+  // schema-retry loop (#101) reports its attempt index; a clean single-shot role reports 0. High
+  // retries on a cheap tier is the "cheap-but-flaky" signal a flat token count hides.
+  retries: number;
 };
 
 export type UsageTotals = {
@@ -45,6 +52,8 @@ type Accumulation = {
   cacheWriteInputTokens: number;
   calls: number;
   cacheDiscountUsd: number | null;
+  latencyMsTotal: number;
+  retries: number;
 };
 
 // A record whose model id could not be determined — cannot be priced (cost degrades to null).
@@ -58,6 +67,8 @@ function newAccumulation(): Accumulation {
     cacheWriteInputTokens: 0,
     calls: 0,
     cacheDiscountUsd: null,
+    latencyMsTotal: 0,
+    retries: 0,
   };
 }
 
@@ -114,6 +125,10 @@ export class UsageTracker {
     modelId: string | undefined,
     usage: LanguageModelUsage,
     providerMetadata?: ProviderMetadata,
+    // Per-generate diagnostics (issue #168): wall-clock for this call, and how many corrective
+    // re-generations preceded it (0 for a clean single-shot). Both optional — a caller that doesn't
+    // measure timing/retries just contributes nothing to those totals.
+    meta?: { latencyMs?: number; retries?: number },
   ): void {
     const key = modelId ?? UNKNOWN_MODEL;
     const models = this.byRole.get(role) ?? new Map<string, Accumulation>();
@@ -123,6 +138,8 @@ export class UsageTracker {
     acc.cachedInputTokens += usage.inputTokenDetails?.cacheReadTokens ?? 0;
     acc.cacheWriteInputTokens += usage.inputTokenDetails?.cacheWriteTokens ?? 0;
     acc.calls += 1;
+    acc.latencyMsTotal += Math.max(0, meta?.latencyMs ?? 0);
+    acc.retries += Math.max(0, meta?.retries ?? 0);
     const discount = extractCacheDiscountUsd(providerMetadata);
     if (discount !== undefined) acc.cacheDiscountUsd = (acc.cacheDiscountUsd ?? 0) + discount;
     models.set(key, acc);
@@ -142,6 +159,8 @@ export class UsageTracker {
         roleUsage.cachedInputTokens += acc.cachedInputTokens;
         roleUsage.cacheWriteInputTokens += acc.cacheWriteInputTokens;
         roleUsage.calls += acc.calls;
+        roleUsage.latencyMsTotal += acc.latencyMsTotal;
+        roleUsage.retries += acc.retries;
         const { cost, estimated } = await this.costFor(modelId, acc);
         if (estimated) costEstimated = true;
         if (cost === null) roleUsage.costUsd = null;
@@ -156,6 +175,8 @@ export class UsageTracker {
       overall.cachedInputTokens += roleUsage.cachedInputTokens;
       overall.cacheWriteInputTokens += roleUsage.cacheWriteInputTokens;
       overall.calls += roleUsage.calls;
+      overall.latencyMsTotal += roleUsage.latencyMsTotal;
+      overall.retries += roleUsage.retries;
       if (roleUsage.costUsd === null) overall.costUsd = null;
       else if (overall.costUsd !== null) overall.costUsd += roleUsage.costUsd;
       if (roleUsage.cacheDiscountUsd !== null) {
@@ -209,9 +230,10 @@ export function roleUsageSink(
       usage: LanguageModelUsage,
       modelId: string | undefined,
       providerMetadata?: ProviderMetadata,
+      meta?: { latencyMs?: number; retries?: number },
     ) => void)
   | undefined {
   if (!tracker) return undefined;
-  return (usage, modelId, providerMetadata) =>
-    tracker.record(role, modelId ?? fallbackModelId, usage, providerMetadata);
+  return (usage, modelId, providerMetadata, meta) =>
+    tracker.record(role, modelId ?? fallbackModelId, usage, providerMetadata, meta);
 }

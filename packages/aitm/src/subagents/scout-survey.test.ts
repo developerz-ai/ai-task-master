@@ -1,11 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import {
-  FALLBACK_SCOUT_ASSIGNMENTS,
-  type ScoutAssignment,
-  type ScoutFinding,
-  type ScoutRunner,
-} from './planner-scouts.ts';
+import type { ScoutAssignment, ScoutFinding, ScoutRunner } from './planner-scouts.ts';
 import type { ScoutLeadRunner } from './scout-lead.ts';
 import { runScoutSurvey, SCOUT_MAX_ROUNDS, type ScoutSurveyEvent } from './scout-survey.ts';
 
@@ -65,27 +60,23 @@ test('runScoutSurvey: an empty follow-up is the lead saying the map is complete'
   assert.equal(events.filter((e) => e.kind === 'dispatch').length, 1, 'no second wave is sent');
 });
 
-test('runScoutSurvey: a dead lead on the first round falls back to the fixed assignments', async () => {
-  const events: ScoutSurveyEvent[] = [];
+test('runScoutSurvey: a dead lead means no survey — never a repo-blind fixed wave', async () => {
+  // The fixed lens set the lead replaced is GONE, not kept as a fallback: reviving the discarded
+  // design on a failure path puts untested, repo-blind behaviour back into production runs. The
+  // Planner already has its own read-only tools and the deterministic repo map.
+  let scouts = 0;
   const results = await runScoutSurvey({
     ctx: { goal: 'g' },
     lead: async () => {
       throw new Error('lead died');
     },
-    runScout: reportingScout,
-    onProgress: (e) => events.push(e),
+    runScout: async (a) => {
+      scouts += 1;
+      return finding(a.key);
+    },
   });
-  assert.deepEqual(
-    results.map((r) => r.assignment.key),
-    FALLBACK_SCOUT_ASSIGNMENTS.map((a) => a.key),
-    'the survey still runs, repo-blind but alive',
-  );
-  const dispatch = events.find((e) => e.kind === 'dispatch');
-  assert.equal(
-    dispatch?.kind === 'dispatch' && dispatch.fallback,
-    true,
-    'the fallback is surfaced',
-  );
+  assert.deepEqual(results, []);
+  assert.equal(scouts, 0, 'no scout is dispatched without a lead that asked for one');
 });
 
 test('runScoutSurvey: a re-sent assignment is dropped, so a looping lead cannot double-survey', async () => {

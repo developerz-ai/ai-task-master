@@ -60,49 +60,6 @@ export const ScoutAssignmentSchema = z.object({
 });
 export type ScoutAssignment = z.infer<typeof ScoutAssignmentSchema>;
 
-// Used only when the lead fails to produce a wave (a dead call, or an empty list on the first round).
-// These are the fixed lenses the survey used before the lead existed: repo-blind by construction —
-// `domain-and-data` burns a scout on a repo with no persistence, and no fixed set can cover a
-// monorepo's packages — which is exactly why they are the fallback and not the design.
-export const FALLBACK_SCOUT_ASSIGNMENTS: readonly ScoutAssignment[] = [
-  {
-    key: 'architecture',
-    question:
-      'What is the repo layout and how is it built and run — top-level packages/apps, the module boundaries, and the build/test/lint tooling and commands that drive them?',
-    subQuestions: [],
-    startPaths: [],
-    mustRead: [],
-    searchTerms: [],
-  },
-  {
-    key: 'domain-and-data',
-    question:
-      'What is the existing domain model and persistence — the entities, their types/schemas, how data is stored and accessed, and which of them the goal will touch or extend?',
-    subQuestions: [],
-    startPaths: [],
-    mustRead: [],
-    searchTerms: [],
-  },
-  {
-    key: 'conventions-and-tests',
-    question:
-      'What are the house coding conventions and testing approach — how is an existing feature of the same shape structured and tested, so the plan can match established patterns rather than invent new ones?',
-    subQuestions: [],
-    startPaths: [],
-    mustRead: [],
-    searchTerms: [],
-  },
-  {
-    key: 'integration-points',
-    question:
-      'Where must the goal hook into what already exists — the routes, services, auth, config and entry points it will extend or wire into, and the gaps it must fill?',
-    subQuestions: [],
-    startPaths: [],
-    mustRead: [],
-    searchTerms: [],
-  },
-];
-
 // The scout role frame (fed to reminderAgentSystemPrompt as roleGuidance). A scout is a read-only
 // surveyor, not a planner: it answers its own assignment and submits a finding, and it never writes.
 // The assignment and the output contract come from buildScoutPrompt (the user message).

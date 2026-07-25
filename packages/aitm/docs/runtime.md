@@ -84,7 +84,7 @@ CI-fix flow, which always rebases first). Self-merge is governed separately by `
 
 | Package | Role |
 | --- | --- |
-| `ai` | Vercel AI SDK core. `experimental_Agent`, subagents-as-tools. |
+| `ai` | Vercel AI SDK core. `ToolLoopAgent`, subagents-as-tools. |
 | `@openrouter/ai-sdk-provider` | The only provider. OpenRouter speaks the OpenAI Chat Completions schema, so the same wiring serves every model OpenRouter routes to. |
 
 No `@ai-sdk/anthropic`. No `@ai-sdk/openai` direct. OpenRouter is the single egress point — model swaps happen by changing a string id, not by wiring a new SDK.

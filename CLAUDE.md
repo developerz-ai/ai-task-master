@@ -7,6 +7,14 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 - SOLID. One responsibility per module. If a file grows a second reason to change, split it.
 - Every module ships with tests. SRP + tested is the bar — no test, no merge.
 - No premature abstraction. Inline first, extract on the second real caller.
+- **No legacy.** When a design is replaced, the old one is DELETED — not kept behind a flag, an
+  optional field, a fallback branch, or a rename alias. A superseded path that still runs is worse
+  than no path: it is untested in anger, it drags its assumptions into new code, and it fires exactly
+  when something else already went wrong. If a failure needs a safety net, the net is "do less"
+  (skip the phase, let the caller proceed as it would have), never "run the thing we just rejected".
+  Two exceptions, both about DATA rather than code: an on-disk state/config file written by an older
+  version must still parse (`state/` migrations), and a documented CLI/config key is renamed in one
+  release with the old name removed, not aliased forever.
 - No comments unless the WHY is non-obvious. Names carry intent.
 - Conventional commits. No co-author trailers.
 
@@ -32,7 +40,8 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 
 ## AI SDK
 
-- `ai` package, `experimental_Agent` plus the subagents-as-tools pattern from https://ai-sdk.dev/docs/agents/subagents.
+- `ai` package, `ToolLoopAgent` (v6; `experimental_Agent` was its AI SDK 5 name and is gone) plus the
+  subagents-as-tools pattern from https://ai-sdk.dev/docs/agents/subagents.
 - `Orchestrator` is the top-level agent. `Planner`, `Worker`, `Reviewer` are exposed to it as tools.
 - Provider wiring is **credentials + openrouter, presets in config**: `credentials/` builds the injected
   model handle from `OPENROUTER_API_KEY` + resolved `baseURL`; `openrouter/` owns the catalog client,

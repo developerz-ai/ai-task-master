@@ -11,14 +11,14 @@ Single LLM provider: **OpenRouter** (OpenAI-compatible API). No Anthropic SDK. T
 ```
 CLI
  └─ WorkLoop
-     └─ Orchestrator (experimental_Agent)
+     └─ Orchestrator (ToolLoopAgent)
          ├─ Planner   (subagent-as-tool)
          ├─ Worker    (subagent-as-tool)
          └─ Reviewer  (subagent-as-tool)
               └─ tools: FS, Bash, GitHubClient
 ```
 
-Subagents follow the Vercel AI SDK pattern: each is an `experimental_Agent` exposed to the Orchestrator as a tool. See https://ai-sdk.dev/docs/agents/subagents.
+Subagents follow the Vercel AI SDK pattern: each is a `ToolLoopAgent` exposed to the Orchestrator as a tool. See https://ai-sdk.dev/docs/agents/subagents.
 
 ## Modules (SRP)
 

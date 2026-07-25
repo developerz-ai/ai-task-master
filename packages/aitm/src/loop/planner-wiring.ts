@@ -222,8 +222,10 @@ function reportSurveyProgress(event: ScoutSurveyEvent): void {
   const opts = { phase: 'planning' } as const;
   if (event.kind === 'dispatch') {
     const keys = event.assignments.map((a) => a.key).join(', ');
-    const label = event.fallback ? 'lead unavailable — fixed' : `round ${event.round}`;
-    harnessProgress(`survey: ${label}, ${event.assignments.length} scouts on ${keys}`, opts);
+    harnessProgress(
+      `survey: round ${event.round}, ${event.assignments.length} scouts on ${keys}`,
+      opts,
+    );
     return;
   }
   if (event.kind === 'reported') {

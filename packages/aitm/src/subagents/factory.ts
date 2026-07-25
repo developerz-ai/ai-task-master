@@ -1,7 +1,6 @@
 // docs/subagents.md §"SRP + tested" — every subagent is a pure factory:
 //   (model, tools, systemPrompt) -> Agent
-// SDK reference: docs/vendor/ai-sdk/chunk-04.md §"ToolLoopAgent" (note: CLAUDE.md
-// still says experimental_Agent — that is the legacy AI SDK 5 name; v6 ships ToolLoopAgent).
+// SDK reference: docs/vendor/ai-sdk/chunk-04.md §"ToolLoopAgent".
 //
 // The ToolLoopAgent wrapper (`createSubagent`) and the system-prompt composer
 // (`composeSystemPrompt`) now live in @developerz.ai/ai-claude-compat; the concrete factories

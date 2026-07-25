@@ -129,6 +129,61 @@ What the scouts return is capped and structured on purpose. An unbounded prose r
 
 Planning is the *only* phase that gets a survey team: coding-style distillation and specialist generation are each already a single LLM call over pre-gathered inputs, so parallelizing them would split one call into many for no gain. Best-effort throughout — a git failure yields no map, a dead lead falls back to a fixed assignment set, a dead scout drops just itself (like a failed editor leaf), and a survey that returns nothing leaves the Planner prompt byte-identical to the un-surveyed path. It accelerates planning; it can never fail it.
 
+## Every fan-out is a lead sizing its own team
+
+Three phases fan out, and all three make the same decision the same way: **a lead decides how many
+subagents it needs and what each owns.** No fixed lens set, no directory rule, no per-role constant —
+those are all proxies for a judgment the agent is better placed to make, because it has read the
+thing being split.
+
+The shared rules, wherever a lead appears:
+
+- **One subagent is a good answer.** A subagent is not rationed — it reads and writes as much as its
+  assignment needs — so splitting only pays when the ground genuinely divides. Two agents on the same
+  files return the same facts twice and make the consumer's brief longer to read.
+- **Size each assignment before sending it.** Too big if it spans work that does not inform itself;
+  too small if it lands in a neighbour's files. Split or merge until each agent owns one coherent
+  unit it can carry end to end.
+- **Brief, don't script.** The lead hands over what it already knows — files to read whole, symbols to
+  grep, sub-questions to settle — as a **floor, never a ceiling**. The subagent covers it, corrects it
+  where the lead was wrong, and follows the work past it.
+- **One concurrency knob.** `subagentLimit` (default 10) caps how many run at once, across all three
+  phases. It bounds concurrency, never work.
+
+| Phase | The lead | What the team does |
+| --- | --- | --- |
+| Planning | `scout-lead.ts` — peeks at the repo map, then dispatches | Scouts survey the repo read-only, then a gap round closes what they could not settle |
+| Working | The Coordinator itself (`worker.ts`) — it surveyed the code and wrote the manifest, so there is nothing for a separate lead to re-derive | Editors write the files, grouped by the `editor` tag the Coordinator put on each manifest entry |
+| Reviewing | `review-team.ts` — reads the unresolved threads and groups them | Investigators work the threads out read-only, in parallel, ahead of the resolver |
+
+### Working: the Coordinator assigns its own editors
+
+The fanout used to split a manifest by parent directory, chunked at `MAX_FILES_PER_EDITOR`. That is a
+proxy for cohesion and it is wrong exactly when it matters — a route, its service and its test live in
+three directories and belong to ONE editor, while two unrelated modules under `src/lib/` are two
+editors' work. The Coordinator now says so directly: it tags each manifest entry with an `editor`
+label, and entries sharing a label go to one leaf **whole** — never chunked, because the lead named
+the group deliberately. An untagged manifest falls back to directory grouping, unchanged.
+
+Then it runs verify, and makes the same call again on what broke: a handful of failures in one area
+it fixes itself (`applied: true`); failures spread across independent areas get a second wave, sized
+to what actually broke rather than to whatever the first wave looked like.
+
+### Reviewing: parallel investigation, serial writes
+
+Reviewing is the one phase where the team cannot simply fan out and write. Every `fixed` thread ends
+in `git add -A` + commit against the shared single checkout, so two reviewers editing at once would
+sweep each other's half-finished work into one commit. **The writes stay serial — that is a property
+of the checkout, not a missing feature.**
+
+What parallelizes is everything before the write: reading each comment against the code, finding
+where the thing it complains about lives, and judging whether it holds up. So a lead groups the
+threads (several comments on one file are ONE investigator's work), a read-only wave investigates
+them concurrently, and each brief is handed to the sequential resolver — which still decides the
+outcome itself. The brief is framed as leads, never a verdict: a reviewer that inherits a conclusion
+it did not reach stops checking the code. A single thread skips the team entirely; there is no split
+to make.
+
 ## Schemas
 
 Inputs and outputs of every subagent are Zod-validated. Handoffs between `Orchestrator` and subagents are predictable, typed, and refuse malformed payloads at the boundary.

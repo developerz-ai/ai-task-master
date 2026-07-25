@@ -71,6 +71,11 @@ export type ReviewerInput = {
   // Optional trailing `<system-reminder>` (the run's Step N/M position) appended to the END of each
   // thread's first user message, kept out of the cacheable leading prefix (slice 04 §4).
   progressBlock?: string;
+  // Pre-built investigation briefs, keyed by thread id (review-team.ts). A read-only team worked the
+  // threads out in parallel BEFORE this sequential pass, so each thread starts with the code already
+  // located instead of the resolver re-deriving it one thread at a time. A thread with no brief (a
+  // dead investigator, or a lead that sent none) is prompted exactly as it was before this existed.
+  briefs?: ReadonlyMap<string, string>;
 };
 
 export type ThreadResolution =
@@ -233,6 +238,8 @@ function buildThreadPrompt(input: ReviewerInput, thread: ReviewThread): string {
     `Thread id: ${thread.id}`,
   ];
   if (thread.path) context.push(`File: ${thread.path}`);
+  const brief = input.briefs?.get(thread.id);
+  if (brief) context.push('', brief);
   context.push(
     '',
     'Decide the outcome, take the action, then call submit with the ThreadResolutionOutput.',

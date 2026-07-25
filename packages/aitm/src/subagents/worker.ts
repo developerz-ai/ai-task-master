@@ -108,6 +108,18 @@ export const FileManifestEntrySchema = z.object({
   path: z.string().min(1),
   kind: z.enum(['create', 'modify', 'delete']),
   purpose: z.string().min(1),
+  // Which teammate owns this file in the editor fanout. The Coordinator surveyed the repo and wrote
+  // this manifest, so it is the lead: it decides how many editors the work divides into and what
+  // each owns, and files sharing a tag land on ONE leaf whole (editor-assignment.ts) instead of
+  // being split by a directory rule that cannot see cohesion. Absent → the harness falls back to
+  // grouping by parent directory, exactly as before the tag existed.
+  editor: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Short label for the teammate owning this file (e.g. "auth-routes"). Files sharing a label go to one editor. Group by what must be written together, not by directory; omit to let the harness group by directory.',
+    ),
 });
 export type FileManifestEntry = z.infer<typeof FileManifestEntrySchema>;
 
@@ -596,6 +608,23 @@ function buildManifestPrompt(input: WorkerInput): string {
   // fenced, so re-capping it at MANIFEST_FIELD_MAX would only starve the tail and shear the fence.
   if (input.verifyFailureBlock) {
     lines.push('', input.verifyFailureBlock);
+    // The fix pass is the same lead decision as the first one, made again with new evidence: the team
+    // (or you) just wrote code, you ran verify, and now you size the SECOND wave from what actually
+    // broke. Without this the failure output reads as "go fix it" and the pass defaults to whatever
+    // shape the first one had — a full fanout re-spawned for two type errors, or one inline pass
+    // grinding through failures spread across the whole change.
+    lines.push(
+      '',
+      'That is verify output from the code just written — this pass fixes it, and how you fix it is',
+      'your call to make again:',
+      '- A handful of failures, or all in one area: fix them YOURSELF and submit with `applied: true`.',
+      '  Spinning up editors to fix two type errors costs more than the fix.',
+      '- Failures spread across several independent areas, or a fix that is real work in its own',
+      '  right: dispatch again — manifest the files, tag each with its `editor`, and size that team',
+      'to what actually broke, not to what the first wave looked like.',
+      'Fix the cause, never the symptom: do not delete or skip a failing test, loosen an assertion, or',
+      'silence a type error to get green.',
+    );
   }
   if (input.rollingContext.trim()) {
     lines.push(

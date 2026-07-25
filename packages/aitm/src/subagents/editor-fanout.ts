@@ -13,6 +13,7 @@ import { SUBAGENT_LIMIT_DEFAULT } from '../domain/subagent-limit.ts';
 import type { FileChange } from '../domain/worker-delivery.ts';
 import { harnessProgress } from '../observability/step-progress.ts';
 import { isAsyncIterable, requireExec, shQuote } from './bash-exec.ts';
+import { assignEditors, dirOf, type EditorAssignment } from './editor-assignment.ts';
 import { AGENT_STEP_BACKSTOP, reportUsage, type WorkerSubagentInit } from './factory.ts';
 import { capText, MANIFEST_FIELD_MAX, ROLLING_CONTEXT_MAX } from './prompt-caps.ts';
 import { EDITOR_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
@@ -109,20 +110,16 @@ export type EditorOutcome =
   | { changed: true; change: FileChange }
   | { changed: false; path: string };
 
-// A manifest entry's grouping key: its immediate parent directory (POSIX manifest paths), or '.' for a
-// repo-root file. Files under the same directory are cohesive, so they land on one leaf rather than
-// fragmenting the fanout one-per-file.
-function dirOf(path: string): string {
-  const slash = path.lastIndexOf('/');
-  return slash === -1 ? '.' : path.slice(0, slash);
-}
-
-// The base stream label naming one editor leaf: the lone file's basename for a single-file group
-// (`login.ts`), or the shared parent directory for a multi-file leaf (`auth/`) — issue #131. Two
-// leaves can still share a base (a chunked oversized directory, or same-basename files in sibling
-// dirs); labelEditorGroups disambiguates those before the label reaches an operator.
-function editorGroupLabel(group: readonly FileManifestEntry[]): string {
-  const [first, ...rest] = group;
+// The base stream label naming one editor leaf. The Coordinator's own name for the teammate when it
+// assigned one — it says what the leaf is FOR (`auth-routes`), which no path-derived label can — and
+// otherwise the lone file's basename (`login.ts`) or the shared parent directory (`auth/`) for a
+// group the harness assembled itself (issue #131). Two leaves can still share a base (a chunked
+// oversized directory, same-basename files in sibling dirs, or a repeated tag); labelEditorGroups
+// disambiguates those before the label reaches an operator.
+function editorGroupLabel(assignment: EditorAssignment): string {
+  const named = assignment.editor?.trim();
+  if (named) return named;
+  const [first, ...rest] = assignment.files;
   if (!first) return '.';
   return rest.length === 0 ? basename(first.path) : `${dirOf(first.path)}/`;
 }
@@ -132,22 +129,23 @@ function editorGroupLabel(group: readonly FileManifestEntry[]): string {
 // read one already-disambiguated label instead of each re-deriving (and colliding on) it — issue #131.
 type EditorLeaf = { label: string; files: FileManifestEntry[] };
 
-// Turn directory groups into labeled leaves, disambiguating any shared base label (issue #131).
-// editorGroupLabel is a pure function of a single group, so when groupManifestByDir chunks an oversized
-// directory into several leaves they all resolve to the same `src/` — which makes the roster ambiguous
-// (`src/ (3), src/ (2)`) and, worse, tags separate editors with an identical onEditorStepFinish stream
-// line, defeating the per-editor labels. Any base shared by more than one leaf gets a ` #n` suffix in
-// fanout order; a base owned by a single leaf stays bare, so the common one-leaf-per-directory case is
-// byte-identical to before.
-export function labelEditorGroups(groups: readonly FileManifestEntry[][]): EditorLeaf[] {
+// Turn assignments into labeled leaves, disambiguating any shared base label (issue #131).
+// editorGroupLabel is a pure function of a single assignment, so several leaves can resolve to the
+// same base — a chunked oversized directory all reading `src/`, or a Coordinator that reused one tag
+// — which makes the roster ambiguous (`src/ (3), src/ (2)`) and, worse, tags separate editors with an
+// identical onEditorStepFinish stream line, defeating the per-editor labels. Any base shared by more
+// than one leaf gets a ` #n` suffix in fanout order; a base owned by a single leaf stays bare, so the
+// common one-leaf-per-assignment case is byte-identical to before.
+export function labelEditorGroups(assignments: readonly EditorAssignment[]): EditorLeaf[] {
   const totals = new Map<string, number>();
-  for (const group of groups) {
-    const base = editorGroupLabel(group);
+  for (const assignment of assignments) {
+    const base = editorGroupLabel(assignment);
     totals.set(base, (totals.get(base) ?? 0) + 1);
   }
   const seen = new Map<string, number>();
-  return groups.map((files) => {
-    const base = editorGroupLabel(files);
+  return assignments.map((assignment) => {
+    const base = editorGroupLabel(assignment);
+    const files = assignment.files;
     if ((totals.get(base) ?? 0) <= 1) return { label: base, files };
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
@@ -184,32 +182,6 @@ function outcomeSummary(outcomes: readonly EditorOutcome[]): string {
   const changed = outcomes.filter((o) => o.changed).length;
   const unchanged = outcomes.length - changed;
   return unchanged > 0 ? `${changed} changed, ${unchanged} unchanged` : `${changed} changed`;
-}
-
-// Group manifest entries into per-leaf assignments: entries sharing a parent directory go to the same
-// leaf, and a directory with more than `maxPerGroup` entries is chunked to that size so no single leaf
-// owns an unbounded brief while a large directory still spreads across the pool. Manifest order is
-// preserved within and across groups so the fanout — and its tests — stay deterministic. A single-entry
-// manifest yields one single-entry group, keeping that path byte-identical to the pre-team fanout.
-export function groupManifestByDir(
-  files: readonly FileManifestEntry[],
-  maxPerGroup: number,
-): FileManifestEntry[][] {
-  const byDir = new Map<string, FileManifestEntry[]>();
-  for (const file of files) {
-    const dir = dirOf(file.path);
-    const bucket = byDir.get(dir);
-    if (bucket) bucket.push(file);
-    else byDir.set(dir, [file]);
-  }
-  const size = Math.max(1, Math.floor(maxPerGroup) || 1);
-  const groups: FileManifestEntry[][] = [];
-  for (const bucket of byDir.values()) {
-    for (let i = 0; i < bucket.length; i += size) {
-      groups.push(bucket.slice(i, i + size));
-    }
-  }
-  return groups;
 }
 
 // The shared "team brief" injected into every editor's system prompt when a manifest fans out to more
@@ -280,7 +252,7 @@ export async function runEditorFanout(
   }
   const leaves = collapse
     ? [{ label: collapsedLeafLabel(files), files: [...files] }]
-    : labelEditorGroups(groupManifestByDir(files, MAX_FILES_PER_EDITOR));
+    : labelEditorGroups(assignEditors(files, MAX_FILES_PER_EDITOR));
   // A team brief only makes sense once the work is actually split across leaves; a lone leaf already
   // sees its whole assignment in its own prompt, and injecting nothing keeps that path byte-identical.
   // The roster/per-editor-outcome lines gate on the same condition (issue #131) — a lone leaf stays

@@ -4,6 +4,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { Task } from '../domain/task.ts';
+import { assignEditors } from './editor-assignment.ts';
 import {
   belowFanoutFloor,
   buildPhantomRetryPrompt,
@@ -11,7 +12,6 @@ import {
   EDITOR_TOOL_ALLOWLIST,
   editorToolSet,
   FANOUT_FLOOR_FILES,
-  groupManifestByDir,
   labelEditorGroups,
   MAX_FILES_PER_EDITOR,
 } from './editor-fanout.ts';
@@ -130,62 +130,13 @@ test('EDITOR_TOOL_ALLOWLIST lists every WorkerTools field (allowlist is the full
   assert.equal(new Set(EDITOR_TOOL_ALLOWLIST).size, EDITOR_TOOL_ALLOWLIST.length, 'no duplicates');
 });
 
-test('groupManifestByDir: files in the same directory collapse onto one leaf', () => {
-  const files: FileManifestEntry[] = [
-    { path: 'src/a.ts', kind: 'create', purpose: 'a' },
-    { path: 'src/b.ts', kind: 'modify', purpose: 'b' },
-  ];
-  const groups = groupManifestByDir(files, MAX_FILES_PER_EDITOR);
-  assert.equal(groups.length, 1);
-  assert.deepEqual(
-    groups[0]?.map((f) => f.path),
-    ['src/a.ts', 'src/b.ts'],
-  );
-});
-
-test('groupManifestByDir: distinct directories fan out to separate leaves, order preserved', () => {
-  const files: FileManifestEntry[] = [
-    { path: 'src/a.ts', kind: 'create', purpose: 'a' },
-    { path: 'lib/b.ts', kind: 'create', purpose: 'b' },
-    { path: 'README.md', kind: 'modify', purpose: 'root file' },
-  ];
-  const groups = groupManifestByDir(files, MAX_FILES_PER_EDITOR);
-  assert.deepEqual(
-    groups.map((g) => g.map((f) => f.path)),
-    [['src/a.ts'], ['lib/b.ts'], ['README.md']],
-  );
-});
-
-test('groupManifestByDir: a directory over the cap is chunked, manifest order preserved', () => {
-  const files: FileManifestEntry[] = ['1', '2', '3', '4', '5'].map((n) => ({
-    path: `src/f${n}.ts`,
-    kind: 'create',
-    purpose: n,
-  }));
-  const groups = groupManifestByDir(files, 3);
-  assert.deepEqual(
-    groups.map((g) => g.map((f) => f.path)),
-    [
-      ['src/f1.ts', 'src/f2.ts', 'src/f3.ts'],
-      ['src/f4.ts', 'src/f5.ts'],
-    ],
-  );
-});
-
-test('groupManifestByDir: a single-file manifest yields one single-file group (byte-identical path)', () => {
-  const files: FileManifestEntry[] = [{ path: 'src/a.ts', kind: 'create', purpose: 'a' }];
-  assert.deepEqual(groupManifestByDir(files, MAX_FILES_PER_EDITOR), [
-    [{ path: 'src/a.ts', kind: 'create', purpose: 'a' }],
-  ]);
-});
-
 test('labelEditorGroups: chunked same-directory leaves get distinct #n labels (issue #131)', () => {
   const files: FileManifestEntry[] = ['1', '2', '3', '4', '5'].map((n) => ({
     path: `src/f${n}.ts`,
     kind: 'create',
     purpose: n,
   }));
-  const leaves = labelEditorGroups(groupManifestByDir(files, 3));
+  const leaves = labelEditorGroups(assignEditors(files, 3));
   assert.deepEqual(
     leaves.map((l) => l.label),
     ['src/ #1', 'src/ #2'],
@@ -199,7 +150,7 @@ test('labelEditorGroups: an unchunked directory and a lone file keep bare labels
     { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout' },
     { path: 'README.md', kind: 'modify', purpose: 'docs' },
   ];
-  const leaves = labelEditorGroups(groupManifestByDir(files, MAX_FILES_PER_EDITOR));
+  const leaves = labelEditorGroups(assignEditors(files, MAX_FILES_PER_EDITOR));
   assert.deepEqual(
     leaves.map((l) => ({ label: l.label, count: l.files.length })),
     [
@@ -215,7 +166,7 @@ test('labelEditorGroups: same-basename files in sibling directories get distinct
     { path: 'a/f.ts', kind: 'create', purpose: 'a' },
     { path: 'b/f.ts', kind: 'create', purpose: 'b' },
   ];
-  const leaves = labelEditorGroups(groupManifestByDir(files, MAX_FILES_PER_EDITOR));
+  const leaves = labelEditorGroups(assignEditors(files, MAX_FILES_PER_EDITOR));
   assert.deepEqual(
     leaves.map((l) => l.label),
     ['f.ts #1', 'f.ts #2'],

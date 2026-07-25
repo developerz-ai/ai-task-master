@@ -107,22 +107,67 @@ test('runPlanner returns ok with a valid Plan when the model produces one', asyn
   assert.equal(result.plan.groups[0]?.id, 'g1');
 });
 
-test('runPlanner rejects an over-cap plan instead of truncating it', async () => {
-  // The cap bounds PACKAGING, so an over-cap plan is an error the operator can act on — never a
-  // silently shortened plan. Truncating here is what shipped a fraction of the goal and called it done.
-  const plan = basicPlan(7);
-  const agent = createPlannerAgent({
-    model: planJsonModel(plan),
-    tools: {},
-    systemPrompt: PLANNER_SYSTEM_PREFIX,
+test('runPlanner asks the planner to regroup when it exceeds the cap, then errors if it will not', async () => {
+  // The cap is a schema refinement, so an over-cap plan takes runWithSchemaRetry's corrective path —
+  // the planner is told to regroup. Truncating instead is what shipped a fraction of the goal.
+  let attempts = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      attempts += 1;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-over-${attempts}`,
+            toolName: 'submit',
+            input: JSON.stringify(basicPlan(7)),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
   });
-  const result = await runPlanner(agent, { goal: plan.goal, styleContents: '', maxPrs: 3 });
+  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 3 });
+  assert.ok(
+    attempts > 1,
+    'the planner was asked to regroup rather than failed on first submission',
+  );
   assert.equal(result.kind, 'error');
   if (result.kind === 'error') {
-    assert.match(result.error, /7 PR groups/);
-    assert.match(result.error, /exceeding maxPrs 3/);
-    assert.match(result.error, /not truncated/);
+    assert.match(result.error, /at most 3/);
+    assert.match(result.error, /never drop the tail/);
   }
+});
+
+test('runPlanner accepts a regrouped plan on retry', async () => {
+  // First submission blows the cap, second fits — the run proceeds instead of dying on the first.
+  let attempts = 0;
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      attempts += 1;
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: `submit-regroup-${attempts}`,
+            toolName: 'submit',
+            input: JSON.stringify(attempts === 1 ? basicPlan(7) : basicPlan(3)),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: emptyUsage(),
+        warnings: [],
+      };
+    },
+  });
+  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 3 });
+  if (result.kind !== 'ok') throw new Error(`expected ok, got ${result.kind}`);
+  assert.equal(result.plan.groups.length, 3);
+  assert.equal(attempts, 2, 'exactly one corrective round');
 });
 
 test('runPlanner accepts a plan exactly at the cap', async () => {

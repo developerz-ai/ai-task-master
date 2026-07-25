@@ -12,6 +12,12 @@ import type { Plan } from '../plan/schema.ts';
 import type { RunEndOutcome } from '../state/transcript-store.ts';
 import type { OnUsage } from '../subagents/factory.ts';
 import {
+  createGoalAssessorAgent,
+  GOAL_ASSESSOR_SYSTEM_PREFIX,
+  type GoalAssessment,
+  runGoalAssessor,
+} from '../subagents/goal-assessor.ts';
+import {
   createPlannerAgent,
   PLANNER_SYSTEM_PREFIX,
   type PlannerResult,
@@ -110,6 +116,49 @@ export function planToPrGroups(
     stage: 'pending' as const,
     reviewGraceApplied: false,
   }));
+}
+
+// Make a later wave's groups safe to append to the ones already in state. The Planner numbers every
+// plan from `g1`, so wave 2 collides with wave 1 head-on: same ids, same branches, same task ids.
+// Ids are rewritten `w<wave>-<id>` on collision, `dependsOn` follows the rename, task ids are rebuilt
+// from the new group id, and a colliding branch takes a `-w<wave>` suffix. Cross-wave deps need no
+// edge: earlier groups are already merged, so PlanGraph treats them as satisfied.
+export function namespaceWaveGroups(
+  fresh: readonly PrGroup[],
+  taken: readonly PrGroup[],
+  wave: number,
+): PrGroup[] {
+  const takenIds = new Set(taken.map((g) => g.id));
+  const takenBranches = new Set(
+    taken.map((g) => g.branch).filter((b): b is string => typeof b === 'string'),
+  );
+  const idMap = new Map<string, string>();
+  for (const group of fresh) {
+    let id = group.id;
+    if (takenIds.has(id)) {
+      id = `w${wave}-${group.id}`;
+      for (let n = 2; takenIds.has(id); n++) id = `w${wave}-${group.id}-${n}`;
+    }
+    takenIds.add(id);
+    idMap.set(group.id, id);
+  }
+  return fresh.map((group) => {
+    const id = idMap.get(group.id) ?? group.id;
+    let branch = group.branch;
+    if (typeof branch === 'string' && takenBranches.has(branch)) {
+      const base = branch;
+      branch = `${base}-w${wave}`;
+      for (let n = 2; takenBranches.has(branch); n++) branch = `${base}-w${wave}-${n}`;
+    }
+    if (typeof branch === 'string') takenBranches.add(branch);
+    return {
+      ...group,
+      id,
+      branch,
+      dependsOn: group.dependsOn.map((dep) => idMap.get(dep) ?? dep),
+      tasks: group.tasks.map((task, i) => ({ ...task, id: `${id}-${i + 1}` })),
+    };
+  });
 }
 
 // Branch names already published on `origin`, read in ONE `ls-remote` for the whole run rather than
@@ -366,4 +415,48 @@ export async function defaultPlanGroups(
   }
   if (result.kind === 'blocked') return { kind: 'blocked', reason: result.reason };
   return { kind: 'error', error: result.error };
+}
+
+// The goal assessor's construction site, mirroring defaultPlanGroups' — same model, same read-only
+// tools, same cancellation. It judges `input.goal` (the ORIGINAL goal), never the current wave's
+// remaining-work goal, so a run cannot declare itself finished by shrinking what it is measured
+// against. Never throws: runGoalAssessor resolves every failure to `complete: true`.
+export async function defaultAssessGoal(
+  input: RunLoopInput,
+  mcp: McpClientManager,
+  fetchHtmlAvailable: boolean,
+  delivered: readonly string[],
+): Promise<GoalAssessment> {
+  const style = resolveStyleContents(input);
+  const modelId = input.credentials.modelIdFor('planner');
+  const usage = roleUsageSink(input.usage, 'planner', modelId);
+  harnessProgress('checking the goal against the repo', { phase: 'planning' });
+  const agent = createGoalAssessorAgent({
+    model: input.credentials.modelFor('planner'),
+    tools: applyHooks(
+      resolvePlannerTools(
+        mcp.toolsForRole('planner'),
+        input.cwd,
+        fetchHtmlAvailable,
+        buildExploreFor(input, input.cwd, usage),
+      ),
+      input,
+      input.cwd,
+    ),
+    systemPrompt: reminderAgentSystemPrompt({
+      style,
+      roleGuidance: GOAL_ASSESSOR_SYSTEM_PREFIX,
+      cwd: input.cwd,
+      modelId,
+    }),
+    timeout: { stepMs: input.resolved.llmStepTimeoutMs },
+    ...(usage ? { onUsage: usage } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  return runGoalAssessor(agent, {
+    goal: input.goal,
+    delivered,
+    contextBlock: harnessContextBlock(),
+    ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
+  });
 }

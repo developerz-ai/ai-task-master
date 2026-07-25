@@ -59,6 +59,31 @@ async function seedFile(dir: string, rel: string, contents: string): Promise<voi
   await writeFile(abs, contents);
 }
 
+// True when `bun` is on PATH — the runner the exec hook (issue #308) uses. bun runs node:test-style TS
+// natively, so it needs no node_modules in the bare sandbox; the produced code glm-5.2 shipped already
+// runs under it. Absent → the runner omits runTest and grade-2 falls back to its static check.
+async function bunAvailable(): Promise<boolean> {
+  try {
+    return (await execa('bun', ['--version'], { reject: false })).exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+// Run one produced test file with bun in the local checkout and report pass/fail (issue #308). Bounded
+// by a timeout so a hanging produced test can't wedge the benchmark; a non-zero exit or a timeout is a
+// red verdict, never a throw.
+async function runProducedTest(
+  dir: string,
+  relPath: string,
+): Promise<{ ok: boolean; detail: string }> {
+  const r = await execa('bun', ['test', relPath], { cwd: dir, reject: false, timeout: 120_000 });
+  if (r.timedOut) return { ok: false, detail: 'produced test timed out (120s)' };
+  const ok = r.exitCode === 0;
+  const tail = (r.stderr || r.stdout || '').trim().slice(-160);
+  return { ok, detail: ok ? 'bun test green' : `bun test exit ${r.exitCode}: ${tail}` };
+}
+
 // Run one scenario end to end and return its BenchRow. Throws only on infrastructure failure (the run
 // never produced a state.json); a scenario the model got WRONG returns a row with outcome:'fail', which
 // is exactly the signal a comparison keeps. The sandbox repo is left behind for inspection.
@@ -113,36 +138,52 @@ export async function runScenario(
     log(`[${scenario.id}] start exit=${startCode} pr=${pr ?? 'none'}`);
 
     let verifyRef: string | null = null;
-    if (pr && merge) {
+    if (pr) {
+      // Check out the PR branch so the produced code is LOCAL — readFile still reads the remote ref
+      // below, but the exec hook (runTest, issue #308) runs the produced test files from this checkout.
       await execa('gh', ['pr', 'checkout', String(pr)], { cwd: dir });
-      log(`[${scenario.id}] aitm merge-pr`);
-      await main(['merge-pr'], { cwd: dir, env });
-      verifyRef = (
-        await execa('gh', [
-          'repo',
-          'view',
-          slug,
-          '--json',
-          'defaultBranchRef',
-          '-q',
-          '.defaultBranchRef.name',
-        ])
-      ).stdout.trim();
-    } else if (pr) {
-      // No-merge scenario: verify against the PR head branch instead of the default branch.
-      verifyRef = (
-        await execa('gh', ['pr', 'view', String(pr), '--json', 'headRefName', '-q', '.headRefName'])
-      ).stdout.trim();
+      if (merge) {
+        log(`[${scenario.id}] aitm merge-pr`);
+        await main(['merge-pr'], { cwd: dir, env });
+        verifyRef = (
+          await execa('gh', [
+            'repo',
+            'view',
+            slug,
+            '--json',
+            'defaultBranchRef',
+            '-q',
+            '.defaultBranchRef.name',
+          ])
+        ).stdout.trim();
+      } else {
+        // No-merge scenario: verify against the PR head branch instead of the default branch.
+        verifyRef = (
+          await execa('gh', [
+            'pr',
+            'view',
+            String(pr),
+            '--json',
+            'headRefName',
+            '-q',
+            '.headRefName',
+          ])
+        ).stdout.trim();
+      }
     }
 
     // ---- Scenario verdict on the produced code (independent of the loop's self-reported status) --
     let outcome: 'pass' | 'fail' = 'fail';
     if (verifyRef) {
       const read = fileReader(slug);
+      // Only offer the exec hook when bun can run it; without it a scenario's verify() falls back to
+      // its static check rather than failing (issue #308).
+      const canRunTests = await bunAvailable();
       const result = await scenario.verify({
         slug,
         defaultBranch: verifyRef,
         readFile: (path) => read(path, verifyRef),
+        ...(canRunTests ? { runTest: (rel: string) => runProducedTest(dir, rel) } : {}),
       });
       outcome = result.ok ? 'pass' : 'fail';
       log(`[${scenario.id}] verify: ${outcome} — ${result.detail}`);

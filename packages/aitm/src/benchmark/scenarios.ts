@@ -14,6 +14,11 @@ export type ScenarioVerify = {
   slug: string;
   defaultBranch: string;
   readFile: (path: string) => Promise<string | null>;
+  // Run a produced test file (path relative to the repo root) against the local checkout and report
+  // whether it passed (issue #308). Present only when the runner can execute tests (bun on PATH); a
+  // verify() that wants to gate on a *passing* test uses it when present and falls back to a static
+  // check otherwise, so unit tests and no-exec environments still work.
+  runTest?: (relPath: string) => Promise<{ ok: boolean; detail: string }>;
 };
 
 export type BenchScenario = {
@@ -48,11 +53,11 @@ const singleFile: BenchScenario = {
 };
 
 // Grade 2 — a small module plus its own test. Exercises "write behaviour + a test that proves it",
-// the core Worker contract. The verdict is STATIC: it confirms the module exports the function and the
-// test file references it AND carries a test construct + an assertion (so an empty or assertion-free
-// stub fails), but it does NOT execute the produced test — a well-formed test that is actually wrong
-// still passes. Running the produced test needs an exec-capable verify against the sandbox's own
-// runner, tracked as a follow-up (#308).
+// the core Worker contract. When the runner can execute tests (`runTest`, issue #308), the verdict is
+// the honest one: the produced test must actually run GREEN (after confirming the module exports the
+// function and the test references it, so a green test that exercises nothing still fails). Without an
+// exec hook — a unit test, or bun off PATH — it falls back to a STATIC check: the test references the
+// function AND carries a test construct + an assertion, so an empty or assertion-free stub still fails.
 const multiFileFeature: BenchScenario = {
   id: 'multi-file-feature',
   title: 'Add a module and a test',
@@ -62,21 +67,30 @@ const multiFileFeature: BenchScenario = {
     'slugify(input: string): string which lowercases the input and replaces runs of ' +
     'non-alphanumeric characters with single hyphens, trimming leading/trailing hyphens. ' +
     'Also add src/slugify.test.ts with a passing node:test case covering a couple of inputs.',
-  async verify({ readFile }) {
+  async verify({ readFile, runTest }) {
     const mod = await readFile('src/slugify.ts');
     const test = await readFile('src/slugify.test.ts');
     if (mod === null) return { ok: false, detail: 'src/slugify.ts missing' };
     if (test === null) return { ok: false, detail: 'src/slugify.test.ts missing' };
-    const exported = /export\s+(?:function|const)\s+slugify\b/.test(mod);
-    const references = /slugify/.test(test);
+    if (!/export\s+(?:function|const)\s+slugify\b/.test(mod)) {
+      return { ok: false, detail: 'src/slugify.ts does not export slugify' };
+    }
+    if (!/slugify/.test(test)) {
+      return { ok: false, detail: 'the test does not reference slugify' };
+    }
+    if (runTest) {
+      const r = await runTest('src/slugify.test.ts');
+      return { ok: r.ok, detail: `produced test ${r.ok ? 'passed' : 'failed'} — ${r.detail}` };
+    }
+    // Static fallback: no exec hook, so assert the test at least has a construct + an assertion.
     const hasTest = /\b(?:test|it|describe)\s*\(/.test(test);
     const hasAssert = /\bassert\b|\bexpect\s*\(/.test(test);
-    const ok = exported && references && hasTest && hasAssert;
+    const ok = hasTest && hasAssert;
     return {
       ok,
       detail: ok
-        ? 'module exports slugify; test references it with a test construct + assertion'
-        : `exported=${exported} references=${references} hasTest=${hasTest} hasAssert=${hasAssert}`,
+        ? 'static: test references slugify with a test construct + assertion (not executed)'
+        : `static: hasTest=${hasTest} hasAssert=${hasAssert}`,
     };
   },
 };

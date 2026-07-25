@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { StepTimeoutError } from '@developerz.ai/ai-claude-compat';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
+import { stallingModel } from '../testing/stalling-model.ts';
 import {
   Compactor,
   effectiveInputTokens,
@@ -22,23 +23,6 @@ function grounded(
   estimatedInputTokens: number,
 ): LiveContextSize {
   return { estimatedInputTokens, reported: { lastCallInputTokens, sinceTokens } };
-}
-
-// A summarizer that only settles by rejecting when its abortSignal fires — proves the per-step
-// deadline is armed (issue #129).
-function stallingModel(): MockLanguageModelV3 {
-  return new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(
-            opts.abortSignal?.reason instanceof Error
-              ? opts.abortSignal.reason
-              : new DOMException('This operation was aborted', 'AbortError'),
-          ),
-        );
-      }),
-  });
 }
 
 // A catalog stub. `maxOutputTokens` left undefined means "the catalog published none", which makes

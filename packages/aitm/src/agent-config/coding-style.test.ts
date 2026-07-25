@@ -3,6 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import { stallingModel } from '../testing/stalling-model.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
 import { composeStyleGuide, StyleDistiller } from './coding-style.ts';
@@ -118,14 +119,7 @@ test('StyleDistiller: a stalled step is aborted at the deadline and degrades to 
   try {
     // A summarizer that never settles on its own; the armed { stepMs: 40 } deadline aborts it, and
     // distill's never-throws contract degrades to '' rather than hanging.
-    const stalling = new MockLanguageModelV3({
-      doGenerate: (opts) =>
-        new Promise((_resolve, reject) => {
-          opts.abortSignal?.addEventListener('abort', () =>
-            reject(new DOMException('This operation was aborted', 'AbortError')),
-          );
-        }),
-    });
+    const stalling = stallingModel();
     const config = claudeConfig(join(repo.path, 'CLAUDE.md'), '# raw fallback\n- rule\n');
     const digest = await new StyleDistiller({ model: stalling, timeout: { stepMs: 40 } }).distill({
       config,

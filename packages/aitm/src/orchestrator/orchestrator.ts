@@ -13,7 +13,7 @@
 //   docs/vendor/ai-sdk/chunk-09.md §"Subagents" §"Controlling What the Model Sees"
 //   docs/vendor/ai-sdk/chunk-09.md §"Loop Control" — stopWhen: [stepCountIs(N), hasToolCall('done')]
 
-import { callWithStepTimeout } from '@developerz.ai/ai-claude-compat';
+import { callWithStepTimeout, withTimeout } from '@developerz.ai/ai-claude-compat';
 import {
   generateText,
   type LanguageModel,
@@ -234,13 +234,17 @@ export class Orchestrator {
     const started = Date.now();
     const result = await callWithStepTimeout(
       () =>
-        generateText({
-          model: this.init.credentials.modelFor('orchestrator'),
-          system: this.buildSystemPrompt(),
-          prompt: this.buildCommitPrompt(group, delivery),
-          ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
-          ...(this.init.signal ? { abortSignal: this.init.signal } : {}),
-        }),
+        generateText(
+          withTimeout(
+            {
+              model: this.init.credentials.modelFor('orchestrator'),
+              system: this.buildSystemPrompt(),
+              prompt: this.buildCommitPrompt(group, delivery),
+              ...(this.init.signal ? { abortSignal: this.init.signal } : {}),
+            },
+            this.init.timeout,
+          ),
+        ),
       this.init.timeout,
     );
     reportUsage(this.init.onUsage, result, { latencyMs: Date.now() - started });
@@ -299,22 +303,26 @@ export class Orchestrator {
       const started = Date.now();
       const result = await callWithStepTimeout(
         () =>
-          generateText({
-            model,
-            system: this.buildSystemPrompt(),
-            messages,
-            tools: {
-              submit: tool({
-                description:
-                  'Submit the composed pull-request title and body (the PrComposition schema).',
-                inputSchema: PrCompositionSchema,
-                execute: async (composition) => composition,
-              }),
-            },
-            toolChoice: 'auto',
-            ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
-            ...(this.init.signal ? { abortSignal: this.init.signal } : {}),
-          }),
+          generateText(
+            withTimeout(
+              {
+                model,
+                system: this.buildSystemPrompt(),
+                messages,
+                tools: {
+                  submit: tool({
+                    description:
+                      'Submit the composed pull-request title and body (the PrComposition schema).',
+                    inputSchema: PrCompositionSchema,
+                    execute: async (composition) => composition,
+                  }),
+                },
+                toolChoice: 'auto',
+                ...(this.init.signal ? { abortSignal: this.init.signal } : {}),
+              },
+              this.init.timeout,
+            ),
+          ),
         this.init.timeout,
       );
       reportUsage(this.init.onUsage, result, {

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { AGENT_STEP_BACKSTOP } from '../subagents/factory.ts';
 import type { WorkerTools } from '../subagents/worker.ts';
+import { stallingModel } from '../testing/stalling-model.ts';
 import { buildConflictResolver, CONFLICT_RESOLVER_MAX_STEPS } from './conflict-resolution.ts';
 
 type Captured = { prompt: string; system: string };
@@ -96,14 +97,7 @@ test('buildConflictResolver: second attempt prompt notes the prior pass left fil
 });
 
 test('buildConflictResolver: a stalled/aborted generate → unresolved carrying the reason', async () => {
-  const stalling = new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
-  });
+  const stalling = stallingModel();
   const resolver = buildConflictResolver({
     model: stalling,
     tools: {} as WorkerTools,

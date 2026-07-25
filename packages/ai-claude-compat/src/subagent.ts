@@ -559,6 +559,16 @@ export async function callWithStepTimeout<T>(
   }, retry);
 }
 
+// Spread a per-step `timeout` into a direct-generate options object only when one is configured, so
+// key-absence is preserved (an unset timeout leaves the call byte-identical to before). Collapses the
+// `...(timeout !== undefined ? { timeout } : {})` spread repeated at the direct generateText sites.
+export function withTimeout<T extends object>(
+  options: T,
+  timeout: TimeoutConfiguration | undefined,
+): T | (T & { timeout: TimeoutConfiguration }) {
+  return timeout === undefined ? options : { ...options, timeout };
+}
+
 // Retry an LLM call on transient provider failures with an escalating backoff. Up to 10 retries at
 // 1s, 5s, 10s, 15s … (+5s), so a rate-limit window or a brief overload rides through instead of
 // blocking the run. Non-transient errors (schema failures, timeouts, aborts, 4xx that aren't

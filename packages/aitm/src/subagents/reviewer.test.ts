@@ -4,6 +4,7 @@ import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
+import { stallingModel } from '../testing/stalling-model.ts';
 import type { GithubToolInput, GithubToolOutput } from '../tools/github-thread-tool.ts';
 import { render } from './prompts/templates.ts';
 import {
@@ -185,14 +186,7 @@ test('createReviewerAgent builds an agent that exposes the injected tools', () =
 
 test('createReviewerAgent forwards timeout → a stalled step surfaces as a deadline error (issue #129)', async () => {
   const { tools } = makeTools();
-  const stalling = new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
-  });
+  const stalling = stallingModel();
   const agent = createReviewerAgent({
     model: stalling,
     tools,
@@ -556,14 +550,7 @@ test('runReviewer processes threads sequentially in input order', async () => {
 });
 
 test('createReviewerAgent forwards the run signal → an abort cancels the in-flight thread resolution', async () => {
-  const stalling = new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
-  });
+  const stalling = stallingModel();
   const controller = new AbortController();
   const agent = createReviewerAgent({
     model: stalling,

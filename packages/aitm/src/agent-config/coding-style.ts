@@ -10,6 +10,7 @@
 
 import { readdir, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
+import { withTimeout } from '@developerz.ai/ai-claude-compat';
 import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
 import { type OnUsage, reportUsage } from '../observability/usage-sink.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
@@ -97,11 +98,9 @@ export class StyleDistiller {
     reportProgress(this.init.onProgress, signals);
     try {
       const started = Date.now();
-      const result = await generateText({
-        model: this.init.model,
-        prompt: buildPrompt(signals),
-        ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
-      });
+      const result = await generateText(
+        withTimeout({ model: this.init.model, prompt: buildPrompt(signals) }, this.init.timeout),
+      );
       reportUsage(this.init.onUsage, result, { latencyMs: Date.now() - started });
       return cleanDigest(result.text);
     } catch {

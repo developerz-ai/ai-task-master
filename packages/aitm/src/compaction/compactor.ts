@@ -21,7 +21,7 @@
 //   docs/vendor/ai-sdk/chunk-09.md §"Loop Control" §"Prepare Step"
 //     (use prepareStep to swap in compacted messages between steps)
 
-import { callWithStepTimeout } from '@developerz.ai/ai-claude-compat';
+import { callWithStepTimeout, withTimeout } from '@developerz.ai/ai-claude-compat';
 import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
 import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import { safeStringify } from '../serialization/safe-stringify.ts';
@@ -203,12 +203,7 @@ export class Compactor {
           ].join('\n')
         : `${SUMMARY_INSTRUCTIONS}\n${serialized}`;
     const { text } = await callWithStepTimeout(
-      () =>
-        generateText({
-          model: this.init.summarizer,
-          prompt,
-          ...(this.init.timeout !== undefined ? { timeout: this.init.timeout } : {}),
-        }),
+      () => generateText(withTimeout({ model: this.init.summarizer, prompt }, this.init.timeout)),
       this.init.timeout,
     );
     const summary = text.trim();

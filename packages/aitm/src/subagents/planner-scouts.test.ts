@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MockLanguageModelV3 } from 'ai/test';
+import { stallingModel } from '../testing/stalling-model.ts';
 import {
   buildScoutPrompt,
   createScoutRunner,
@@ -117,14 +117,7 @@ test('SCOUT_LENSES: the built-in lenses are distinct and non-empty', () => {
 test('createScoutRunner: forwards the run signal → an abort cancels an in-flight scout survey', async () => {
   // Scouts sweep concurrently outside the Planner's own generate, so without the signal an abort
   // would leave a whole wave of surveys running until each provider answered.
-  const stalling = new MockLanguageModelV3({
-    doGenerate: (opts) =>
-      new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
-      }),
-  });
+  const stalling = stallingModel();
   const controller = new AbortController();
   const runScout = createScoutRunner({
     model: stalling,

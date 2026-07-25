@@ -184,7 +184,7 @@ export type OrchestratorBridgeCtx = {
   // resolvers so `bash({ run_in_background: true })` backgrounds and bashOutput/killBash are mounted.
   background: BackgroundTools;
   // Test seam (issue #189): override the Worker subagent runner so a test can deterministically
-  // capture the worker input the bridge builds — chiefly that the resolved `editorConcurrency` cap
+  // capture the worker input the bridge builds — chiefly that the resolved `subagentLimit` cap
   // is threaded through. Omitted in production, where it defaults to the real runWorkerSubagent.
   workerRunner?: typeof runWorkerSubagent;
   // Test seam: override specialist discovery so a test can force a discovery failure and assert the
@@ -845,10 +845,10 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           ...(input.resolved.verifyCommand ? { verifyCommand: input.resolved.verifyCommand } : {}),
           // One structured event per verify invocation reaches the run's logger (worker.ts).
           ...(input.logger ? { logger: input.logger } : {}),
-          // Bound the editor fanout at the resolved cap (issue #189). Always a number (config default
-          // 4), so passed unconditionally — with the default it equals EDITOR_CONCURRENCY_DEFAULT, so
-          // behavior is unchanged until an operator sets `editorConcurrency`.
-          editorConcurrency: input.resolved.editorConcurrency,
+          // Bound the editor fanout at the resolved cap (issue #189) — the one subagent knob, shared
+          // with the scout survey. Always a number (config default SUBAGENT_LIMIT_DEFAULT), so passed
+          // unconditionally.
+          subagentLimit: input.resolved.subagentLimit,
           // Cancels the editor fanout: without it an abort stops the Coordinator's generation while
           // every editor leaf runs to completion, burning a fanout's worth of tokens on a dead run.
           ...(workerSignal ? { signal: workerSignal } : {}),

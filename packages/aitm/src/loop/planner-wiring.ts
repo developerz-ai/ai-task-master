@@ -20,19 +20,20 @@ import {
 } from '../subagents/planner.ts';
 import {
   createScoutRunner,
-  SCOUT_LENSES,
   SCOUT_SYSTEM_PREFIX,
-  shouldSurveyInParallel,
-  surveyRepoInParallel,
+  type ScoutAgentInit,
   synthesizeSurveyBrief,
 } from '../subagents/planner-scouts.ts';
 import { harnessContextBlock, reminderAgentSystemPrompt } from '../subagents/role-prompt.ts';
+import { createScoutLeadRunner, SCOUT_LEAD_SYSTEM_PREFIX } from '../subagents/scout-lead.ts';
+import { runScoutSurvey, type ScoutSurveyEvent } from '../subagents/scout-survey.ts';
 import {
   dedupeBranchNames,
   sanitizeBranchComponent,
   slugifyTitle,
 } from '../workspace/branch-name.ts';
 import { runGit } from '../workspace/git-exec.ts';
+import { buildRepoSkeleton, renderRepoSkeleton } from '../workspace/repo-skeleton.ts';
 import {
   beginTranscript,
   memoryIndexFor,
@@ -126,16 +127,16 @@ export async function remoteBranchNames(cwd: string, signal?: AbortSignal): Prom
   }
 }
 
-// Count of git-tracked files — a cheap proxy for "how much codebase the Planner must survey", used to
-// gate the parallel scout sweep (planner-scouts.ts). Tracked files exclude node_modules/dist by
-// construction (gitignored), so no vendor filter is needed. A non-repo or a git failure returns 0,
-// which reads as "small" and skips the sweep — the safe default, since scouts only ever ADD cost.
-export async function countTrackedFiles(cwd: string): Promise<number> {
+// Every git-tracked path, the raw material for the repo map the survey runs on
+// (workspace/repo-skeleton.ts). Tracked files exclude node_modules/dist by construction (gitignored),
+// so no vendor filter is needed. A non-repo or a git failure returns [], which yields an empty map
+// and a survey that simply starts without one — never a failed run.
+export async function listTrackedFiles(cwd: string): Promise<string[]> {
   try {
     const result = await runGit(['ls-files'], { cwd });
-    return result.stdout.split('\n').filter((line) => line.trim() !== '').length;
+    return result.stdout.split('\n').filter((line) => line.trim() !== '');
   } catch {
-    return 0;
+    return [];
   }
 }
 
@@ -151,9 +152,9 @@ export function parseRemoteHeads(stdout: string): string[] {
   return names;
 }
 
-// Run the parallel scout survey before planning, returning the synthesized brief — or undefined when
-// the repo is below the size floor (scouts would be pure added cost) or the sweep produced nothing.
-// Best-effort throughout: a git or scout failure degrades to no brief, never blocks the planner.
+// Run the scout survey before planning and return the synthesized brief — the repo map plus whatever
+// the team found — or undefined when there is nothing at all to hand over. Best-effort throughout: a
+// git, lead, or scout failure degrades the brief, never blocks the planner.
 // Exported for unit testing — it is the only place that builds a real ScoutAgentInit (model, tools,
 // system prompt, timeout, usage sink, signal) from a RunLoopInput; createScoutRunner itself is
 // covered against a hand-built ScoutAgentInit in planner-scouts.test.ts, but that never exercises
@@ -167,13 +168,10 @@ export async function surveyRepoForPlanner(params: {
   fetchHtmlAvailable: boolean;
 }): Promise<string | undefined> {
   const { input, style, plannerModelId, plannerUsage, mcp, fetchHtmlAvailable } = params;
-  const fileCount = await countTrackedFiles(input.cwd);
-  if (!shouldSurveyInParallel(fileCount)) return undefined;
-  harnessProgress(
-    `survey: ${SCOUT_LENSES.length} scouts sweeping ${fileCount} tracked files in parallel`,
-    { phase: 'planning' },
-  );
-  const runScout = createScoutRunner({
+  const skeleton = buildRepoSkeleton(await listTrackedFiles(input.cwd));
+  const repoMap = skeleton.totalFiles === 0 ? '' : renderRepoSkeleton(skeleton);
+  // Lead and scouts differ only in role prose — same model, same read-only tools, same cancellation.
+  const base = {
     model: input.credentials.modelFor('planner'),
     tools: applyHooks(
       resolvePlannerTools(
@@ -185,26 +183,57 @@ export async function surveyRepoForPlanner(params: {
       input,
       input.cwd,
     ),
-    systemPrompt: reminderAgentSystemPrompt({
-      style,
-      roleGuidance: SCOUT_SYSTEM_PREFIX,
-      cwd: input.cwd,
-      modelId: plannerModelId,
-    }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
+  };
+  const scoutInit = (roleGuidance: string): ScoutAgentInit => ({
+    ...base,
+    systemPrompt: reminderAgentSystemPrompt({
+      style,
+      roleGuidance,
+      cwd: input.cwd,
+      modelId: plannerModelId,
+    }),
   });
   const ctx = {
     goal: input.goal,
     ...(input.criteria !== undefined ? { criteria: input.criteria } : {}),
+    ...(repoMap === '' ? {} : { repoMap }),
   };
-  const findings = await surveyRepoInParallel(SCOUT_LENSES, ctx, runScout).catch(() => []);
-  harnessProgress(`survey: ${findings.length}/${SCOUT_LENSES.length} scouts reported`, {
-    phase: 'planning',
-  });
-  const brief = synthesizeSurveyBrief(findings);
+  const findings = await runScoutSurvey({
+    ctx,
+    lead: createScoutLeadRunner(scoutInit(SCOUT_LEAD_SYSTEM_PREFIX)),
+    runScout: createScoutRunner(scoutInit(SCOUT_SYSTEM_PREFIX)),
+    // The one subagent knob, shared with the Worker's editor fanout: an operator throttling a
+    // rate-limited endpoint means "fewer agents at once", not "fewer editors but the same scouts".
+    concurrency: input.resolved.subagentLimit,
+    onProgress: reportSurveyProgress,
+  }).catch(() => []);
+  const brief = synthesizeSurveyBrief(findings, repoMap);
   return brief === '' ? undefined : brief;
+}
+
+// Survey events → the operator's progress lines. Named rather than inlined so the wiring above reads
+// as the survey it is. The dispatch line names the scouts' territories: it is the operator's only
+// window into what the lead decided to look at, and a wave aimed at the wrong areas shows up here
+// long before the plan does.
+function reportSurveyProgress(event: ScoutSurveyEvent): void {
+  const opts = { phase: 'planning' } as const;
+  if (event.kind === 'dispatch') {
+    const keys = event.assignments.map((a) => a.key).join(', ');
+    const label = event.fallback ? 'lead unavailable — fixed' : `round ${event.round}`;
+    harnessProgress(`survey: ${label}, ${event.assignments.length} scouts on ${keys}`, opts);
+    return;
+  }
+  if (event.kind === 'reported') {
+    harnessProgress(`survey: ${event.reported}/${event.dispatched} scouts reported`, opts);
+    return;
+  }
+  harnessProgress(
+    `survey: complete after ${event.rounds} round(s), ${event.findings} finding(s)`,
+    opts,
+  );
 }
 
 export async function defaultPlanGroups(
@@ -221,10 +250,25 @@ export async function defaultPlanGroups(
   // Planner gets the memory index (issue #118) but no memory tool: its read tools are rooted at the
   // repo cwd, so it reads memory files directly and stays read-only.
   const memoryIndex = await memoryIndexFor(input.state);
-  // Transcript (issue #108): the planner run is recorded (never resumed — it always cold-starts).
-  const plannerRecorder = await beginTranscript(input.state.transcripts?.(), { planner: true });
   const plannerModelId = input.credentials.modelIdFor('planner');
   harnessProgress(`planning with ${plannerModelId}: ${input.goal}`, { phase: 'planning' });
+  // Pre-planning survey (scout-survey.ts): a lead sizes and aims a wave of read-only scouts at this
+  // repo, they roam it concurrently, and the Planner is handed the resulting map so its own steps go
+  // to structure instead of discovery. Best-effort: a failed survey degrades to no brief, never
+  // blocks — and with no brief the Planner prompt is byte-identical to the un-surveyed path.
+  // Runs BEFORE the transcript opens, not between it and the try/finally below: the survey is its own
+  // team of agents and none of its records belong to the planner's transcript, and anything throwing
+  // in that gap would leave an open 'working' record that nothing ever comes back to close.
+  const surveyBrief = await surveyRepoForPlanner({
+    input,
+    style,
+    plannerModelId,
+    ...(plannerUsage ? { plannerUsage } : {}),
+    mcp,
+    fetchHtmlAvailable,
+  });
+  // Transcript (issue #108): the planner run is recorded (never resumed — it always cold-starts).
+  const plannerRecorder = await beginTranscript(input.state.transcripts?.(), { planner: true });
   // Shared sink (issue #01b liveliness): the heartbeat needs to see every progress write this call
   // makes (steps + retries) to tell silence from activity, so it must be the SAME sink instance
   // agentStepProgress/onRetry write through — buildSubagentSession bundles this for every call site.
@@ -264,20 +308,6 @@ export async function defaultPlanGroups(
     ...(session.onStream ? { onStream: session.onStream } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
   });
-  // Parallel pre-planning survey (planner-scouts.ts): on a big enough repo, a pool of read-only
-  // scouts sweeps distinct lenses concurrently and hands the Planner a map, so its own steps go to
-  // structure instead of discovery. Gated on tracked-file count — below the floor the sequential
-  // survey is already fast and scouts would be pure added cost, so this returns undefined and the
-  // Planner prompt is byte-identical. Best-effort: a failed sweep degrades to no brief, never blocks.
-  const surveyBrief = await surveyRepoForPlanner({
-    input,
-    style,
-    plannerModelId,
-    ...(plannerUsage ? { plannerUsage } : {}),
-    mcp,
-    fetchHtmlAvailable,
-  });
-
   const stopPlannerHeartbeat = session.start();
   // The transcript is closed in the `finally` below, not after it: a planner that throws (provider
   // 5xx, step timeout) would otherwise leave an open 'working' record behind forever — the planner

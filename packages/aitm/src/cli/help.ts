@@ -32,6 +32,7 @@ export const CLI_COMMANDS: readonly CommandSpec[] = [
       { tokens: ['--max-sessions'], value: 'N' },
       { tokens: ['--max-fix-attempts'], value: 'N' },
       { tokens: ['--concurrency'], value: 'N' },
+      { tokens: ['--subagents'], value: 'N' },
       { tokens: ['--no-automerge'] },
       { tokens: ['--admin'] },
       { tokens: ['--allow-dirty'] },

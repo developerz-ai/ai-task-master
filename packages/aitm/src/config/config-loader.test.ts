@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_MODELS } from '../domain/model.ts';
+import { SUBAGENT_LIMIT_DEFAULT } from '../domain/subagent-limit.ts';
 import { clearRegisteredSecrets } from '../logger/secret-registry.ts';
 import { scrubSecrets } from '../logger/secret-scrubber.ts';
 import { ConfigLoader, DEFAULT_BASH_RULES } from './config-loader.ts';
@@ -61,7 +62,7 @@ test('resolve: uses built-in defaults when only env key is set', async () => {
     assert.equal(resolved.resolveConflicts, true, 'AI conflict resolution is default-on');
     assert.equal(resolved.logLevel, 'info');
     assert.equal(resolved.concurrency, 1);
-    assert.equal(resolved.editorConcurrency, 4);
+    assert.equal(resolved.subagentLimit, SUBAGENT_LIMIT_DEFAULT);
     assert.equal(resolved.allowForcePush, true);
     assert.equal(resolved.mcpDeferToolsOver, 20);
     assert.deepEqual(resolved.models, DEFAULT_MODELS);
@@ -157,22 +158,39 @@ test('resolve: resolveConflicts defaults true and is project over global', async
   }
 });
 
-test('resolve: editorConcurrency defaults 4 and is project over global', async () => {
+test('resolve: subagentLimit defaults to the shared limit and is project over global', async () => {
   const home = await tempDir('aitm-home-');
   const cwd = await tempDir('aitm-cwd-');
   try {
     const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
     assert.equal(
-      (await loader.resolve({})).editorConcurrency,
-      4,
-      'default 4 when nothing configured',
+      (await loader.resolve({})).subagentLimit,
+      SUBAGENT_LIMIT_DEFAULT,
+      'the shared subagent limit when nothing configured',
     );
 
-    await writeGlobalConfig(home.path, { editorConcurrency: 2 });
-    assert.equal((await loader.resolve({})).editorConcurrency, 2, 'global value applies');
+    await writeGlobalConfig(home.path, { subagentLimit: 2 });
+    assert.equal((await loader.resolve({})).subagentLimit, 2, 'global value applies');
 
-    await writeProjectConfig(cwd.path, { editorConcurrency: 8 });
-    assert.equal((await loader.resolve({})).editorConcurrency, 8, 'project wins over global');
+    await writeProjectConfig(cwd.path, { subagentLimit: 8 });
+    assert.equal((await loader.resolve({})).subagentLimit, 8, 'project wins over global');
+
+    // The one fan-out knob is per-run overridable, unlike the project/global-only toggles.
+    assert.equal(
+      (await loader.resolve({ subagentLimit: 3 })).subagentLimit,
+      3,
+      'a --subagents flag beats every file layer',
+    );
+    const envLoader = new ConfigLoader(cwd.path, home.path, {
+      OPENROUTER_API_KEY: 'sk-env',
+      AITM_SUBAGENTS: '5',
+    });
+    assert.equal((await envLoader.resolve({})).subagentLimit, 5, 'AITM_SUBAGENTS applies');
+    assert.equal(
+      (await envLoader.resolve({ subagentLimit: 3 })).subagentLimit,
+      3,
+      'the flag still beats the env var',
+    );
   } finally {
     await home.cleanup();
     await cwd.cleanup();

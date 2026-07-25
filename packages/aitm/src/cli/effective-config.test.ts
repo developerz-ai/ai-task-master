@@ -23,7 +23,7 @@ const makeResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig =
   generateSpecialists: true,
   logLevel: 'info',
   concurrency: 1,
-  editorConcurrency: 4,
+  subagentLimit: 10,
   allowForcePush: true,
   bashRules: [
     { pattern: 'git push --force*', action: 'deny' },

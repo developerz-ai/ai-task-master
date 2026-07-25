@@ -9,6 +9,7 @@ import { basename } from 'node:path';
 import type { BashInput, BashOutput } from '@developerz.ai/ai-claude-compat';
 import { callWithStepTimeout, runPool } from '@developerz.ai/ai-claude-compat';
 import { generateText, stepCountIs, type Tool } from 'ai';
+import { SUBAGENT_LIMIT_DEFAULT } from '../domain/subagent-limit.ts';
 import type { FileChange } from '../domain/worker-delivery.ts';
 import { harnessProgress } from '../observability/step-progress.ts';
 import { isAsyncIterable, requireExec, shQuote } from './bash-exec.ts';
@@ -25,13 +26,12 @@ export const EDITOR_MAX_STEPS = AGENT_STEP_BACKSTOP;
 // Editor fanout shape. The manifest is grouped by directory so one leaf owns a cohesive slice of
 // files instead of the fanout opening one provider call per file, and the groups run through a
 // bounded pool. MAX_FILES_PER_EDITOR caps how many files a leaf owns (a large directory still spreads
-// across several leaves); EDITOR_CONCURRENCY_DEFAULT caps how many leaves run at once so a big
-// manifest can't open dozens of concurrent LLM requests. Bigger than a typical "one file per leaf":
-// modern coding models finish a single file in seconds, so a leaf should own a meaty, multi-file
-// chunk that keeps an editor working for minutes — aitm is built for big work. The per-run config
-// that overrides the concurrency is wired separately; unset falls back to this default.
+// across several leaves); SUBAGENT_LIMIT_DEFAULT caps how many leaves run at once so a big manifest
+// can't open dozens of concurrent LLM requests. Bigger than a typical "one file per leaf": modern
+// coding models finish a single file in seconds, so a leaf should own a meaty, multi-file chunk that
+// keeps an editor working for minutes — aitm is built for big work. The per-run config that overrides
+// the concurrency (`subagentLimit`) is wired separately; unset falls back to that shared default.
 export const MAX_FILES_PER_EDITOR = 6;
-export const EDITOR_CONCURRENCY_DEFAULT = 4;
 
 // Mechanical floor under the fanout decision. WORKER_SYSTEM_PREFIX already tells the Coordinator to
 // fan out only at scale, but prose is not a constraint: an observed run spawned four editors for four
@@ -256,7 +256,7 @@ export function buildTeamBrief(input: WorkerInput, files: readonly FileManifestE
 // rejecting (or the outer WorkerInput.signal aborting, e.g. SIGINT) aborts every sibling's in-flight
 // `generateText` call so a doomed fanout stops burning tokens instead of running to completion (cleanup
 // #2, plan 02-signal-cancellation-cleanup). The manifest is grouped by directory first so one leaf owns
-// cohesive files, then at most `editorConcurrency` leaves run at once — a big manifest no longer opens
+// cohesive files, then at most `subagentLimit` leaves run at once — a big manifest no longer opens
 // one concurrent LLM request per file (slice 05). Each leaf yields one outcome per file it owns; the
 // per-group results are flattened back to one outcome per manifest entry for planAndEdit.
 export async function runEditorFanout(
@@ -287,7 +287,7 @@ export async function runEditorFanout(
   // byte-identical to the pre-team fanout, silence included.
   const isTeam = leaves.length > 1;
   const teamBrief = isTeam ? buildTeamBrief(input, files) : '';
-  const concurrency = input.editorConcurrency ?? EDITOR_CONCURRENCY_DEFAULT;
+  const concurrency = input.subagentLimit ?? SUBAGENT_LIMIT_DEFAULT;
   if (isTeam) {
     harnessProgress(
       `group ${input.group.id}: fanning out ${leaves.length} editors — ${rosterSummary(leaves)}`,

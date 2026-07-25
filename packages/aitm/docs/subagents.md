@@ -158,12 +158,17 @@ The shared rules, wherever a lead appears:
 
 ### Working: the Coordinator assigns its own editors
 
-The fanout used to split a manifest by parent directory, chunked at `MAX_FILES_PER_EDITOR`. That is a
-proxy for cohesion and it is wrong exactly when it matters — a route, its service and its test live in
+The fanout used to split a manifest by parent directory, chunked at a per-leaf cap. That is a proxy
+for cohesion and it is wrong exactly when it matters — a route, its service and its test live in
 three directories and belong to ONE editor, while two unrelated modules under `src/lib/` are two
 editors' work. The Coordinator now says so directly: it tags each manifest entry with an `editor`
-label, and entries sharing a label go to one leaf **whole** — never chunked, because the lead named
-the group deliberately. An untagged manifest falls back to directory grouping, unchanged.
+label, and entries sharing a label go to one leaf **whole** — no size cap, because the lead named the
+group deliberately and an editor is not rationed.
+
+There is **no directory fallback**. That rule is the design the tag replaced, and reviving it
+whenever a model omits the field would run the replaced behaviour on the one path nobody exercises
+deliberately (house style: no legacy). An untagged manifest is a Coordinator that did not divide the
+work, so it is not divided: one editor owns it.
 
 Then it runs verify, and makes the same call again on what broke: a handful of failures in one area
 it fixes itself (`applied: true`); failures spread across independent areas get a second wave, sized

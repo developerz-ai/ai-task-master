@@ -110,15 +110,15 @@ export const FileManifestEntrySchema = z.object({
   purpose: z.string().min(1),
   // Which teammate owns this file in the editor fanout. The Coordinator surveyed the repo and wrote
   // this manifest, so it is the lead: it decides how many editors the work divides into and what
-  // each owns, and files sharing a tag land on ONE leaf whole (editor-assignment.ts) instead of
-  // being split by a directory rule that cannot see cohesion. Absent → the harness falls back to
-  // grouping by parent directory, exactly as before the tag existed.
+  // each owns, and files sharing a tag land on ONE leaf whole (editor-assignment.ts). There is no
+  // grouping rule underneath — every untagged entry joins a single leaf, because a manifest the
+  // lead did not divide is not divided.
   editor: z
     .string()
     .min(1)
     .optional()
     .describe(
-      'Short label for the teammate owning this file (e.g. "auth-routes"). Files sharing a label go to one editor. Group by what must be written together, not by directory; omit to let the harness group by directory.',
+      'Short label for the teammate owning this file (e.g. "auth-routes"). Files sharing a label go to one editor. Group by what must be written together, not by directory; everything you leave untagged becomes a single editor.',
     ),
 });
 export type FileManifestEntry = z.infer<typeof FileManifestEntrySchema>;

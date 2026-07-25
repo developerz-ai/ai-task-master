@@ -1823,3 +1823,26 @@ test('the original goal is never re-planned as remaining work', async () => {
   );
   assert.equal(plans, 1, 'the run stops instead of replanning the goal it just planned');
 });
+
+test('maxSessions bounds the whole run, not each wave separately', async () => {
+  // Each wave builds a fresh WorkLoop. Seeding it from the run-start snapshot would reset the
+  // session counter every wave, so maxSessions would never actually stop a multi-wave run.
+  let plans = 0;
+  const result = await runLoopAdapter(
+    makeInput({ maxSessions: 2 }),
+    seams({
+      planGroups: async (): Promise<PlanGroupsOutcome> => {
+        plans += 1;
+        return { kind: 'ok', groups: [group(`g${plans}`)] };
+      },
+      // Distinct remaining work each time, so the livelock guard never fires and only the
+      // session cap can end this run.
+      assessGoal: async () => ({
+        complete: false,
+        remaining: `more work ${plans}`,
+        rationale: '',
+      }),
+    }),
+  );
+  assert.equal(result.kind, 'session-cap', 'the run-wide session cap stops the wave loop');
+});

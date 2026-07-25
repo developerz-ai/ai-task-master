@@ -315,10 +315,15 @@ export async function runLoopAdapter(
       ready: () => PlanGraph.trusted(liveGroups).ready(),
       isComplete: () => PlanGraph.trusted(liveGroups).isComplete(),
     };
+    // Mirrored out of every persisted update for the same reason liveGroups is: each wave builds a
+    // FRESH WorkLoop, and seeding it from the run-start snapshot would restart the session counter
+    // per wave — quietly turning maxSessions from a run bound into a per-wave one.
+    let liveSessionCount = current.sessionCount;
     const workLoopState: WorkLoopState = {
       update: async (mutator) => {
         const next = await state.update(mutator);
         liveGroups = next.prGroups;
+        liveSessionCount = next.sessionCount;
         return next;
       },
       writePlan: async (groups) => {
@@ -433,7 +438,7 @@ export async function runLoopAdapter(
         maxCiFixAttempts: input.resolved.maxCiFixAttempts,
         mergeMethod: input.resolved.mergeMethod,
         adminMerge: input.resolved.adminMerge ?? false,
-        initialSessionCount: current.sessionCount,
+        initialSessionCount: liveSessionCount,
         // Every harness narration line also lands in .ai-task-master/progress.md via the state port.
         progress: makeProgressTee(
           state.appendProgress ? { append: state.appendProgress.bind(state) } : {},

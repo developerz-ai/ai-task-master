@@ -47,7 +47,7 @@ import {
 // reads. `undefined` per field means "that var was unset/blank" — see the individual parse
 // helpers below.
 type EnvOverrides = {
-  maxPrs: number | undefined;
+  maxPrs: number | null | undefined;
   maxSessions: number | null | undefined;
   maxCiFixAttempts: number | undefined;
   concurrency: number | undefined;
@@ -72,14 +72,14 @@ function parseEnvInt(name: string, raw: string | undefined): number | undefined 
   return parsed.data;
 }
 
-// maxSessions is the one int-typed override that is also nullable: 0 means "unlimited" (null),
-// mirroring toCliOverrides's --max-sessions 0 → null mapping in cli/commands.ts.
-function parseEnvMaxSessions(raw: string | undefined): number | null | undefined {
+// The int-typed overrides that are also nullable (maxSessions, maxPrs): 0 means "unlimited" (null),
+// mirroring toCliOverrides's --max-sessions 0 / --max-prs 0 → null mapping in cli/commands.ts.
+function parseEnvNullableInt(name: string, raw: string | undefined): number | null | undefined {
   const trimmed = raw?.trim();
   if (!trimmed) return undefined;
   const parsed = z.coerce.number().int().nonnegative().safeParse(trimmed);
   if (!parsed.success) {
-    throw new Error(`AITM_MAX_SESSIONS must be a non-negative integer, got ${JSON.stringify(raw)}`);
+    throw new Error(`${name} must be a non-negative integer, got ${JSON.stringify(raw)}`);
   }
   return parsed.data === 0 ? null : parsed.data;
 }
@@ -161,7 +161,9 @@ export const DEFAULT_BASH_RULES: readonly CommandRule[] = [
 ];
 
 const DEFAULTS = {
-  maxPrs: 5,
+  // Unbounded by default: the Planner sizes the plan to the goal, so "do full implementation" plans
+  // the full implementation. A count cap here would silently decide how much of the goal ships.
+  maxPrs: null as number | null,
   maxSessions: null as number | null,
   maxCiFixAttempts: DEFAULT_MAX_CI_FIX_ATTEMPTS,
   llmStepTimeoutMs: DEFAULT_LLM_STEP_TIMEOUT_MS,
@@ -328,7 +330,7 @@ export class ConfigLoader {
       ...(active ? { activeProfile: active.name } : {}),
       baseURL,
       models: models.value,
-      maxPrs: track(
+      maxPrs: trackNullable(
         'maxPrs',
         cliOverrides.maxPrs,
         envOverrides.maxPrs,
@@ -862,9 +864,9 @@ export class ConfigLoader {
   // var means "no override" (falls through to project/global/default), never a parse error.
   private resolveEnvOverrides(): EnvOverrides {
     return {
-      maxPrs: parseEnvInt('AITM_MAX_PRS', this.env.AITM_MAX_PRS),
-      // 0 means unlimited (null), matching --max-sessions's own 0 → null convention.
-      maxSessions: parseEnvMaxSessions(this.env.AITM_MAX_SESSIONS),
+      // 0 means unlimited (null) for both, matching the --max-prs / --max-sessions 0 → null convention.
+      maxPrs: parseEnvNullableInt('AITM_MAX_PRS', this.env.AITM_MAX_PRS),
+      maxSessions: parseEnvNullableInt('AITM_MAX_SESSIONS', this.env.AITM_MAX_SESSIONS),
       maxCiFixAttempts: parseEnvInt('AITM_MAX_CI_FIX_ATTEMPTS', this.env.AITM_MAX_CI_FIX_ATTEMPTS),
       concurrency: parseEnvInt('AITM_CONCURRENCY', this.env.AITM_CONCURRENCY),
       subagentLimit: parseEnvInt('AITM_SUBAGENTS', this.env.AITM_SUBAGENTS),

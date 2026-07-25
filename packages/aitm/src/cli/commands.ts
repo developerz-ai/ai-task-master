@@ -1123,7 +1123,7 @@ export async function runMcpLogin(
 
 function toCliOverrides(args: Extract<ParsedArgs, { kind: 'start' }>): CliOverrides {
   const out: CliOverrides = {};
-  if (args.maxPrs !== undefined) out.maxPrs = args.maxPrs;
+  if (args.maxPrs !== undefined) out.maxPrs = args.maxPrs === 0 ? null : args.maxPrs;
   if (args.maxSessions !== undefined)
     out.maxSessions = args.maxSessions === 0 ? null : args.maxSessions;
   if (args.autoMerge !== undefined) out.autoMerge = args.autoMerge;

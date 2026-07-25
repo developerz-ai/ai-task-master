@@ -1,6 +1,6 @@
 # Task groups (PRs)
 
-A goal is split into ordered **task groups**. One group = one PR. `Planner` chooses the split; `--max-prs` caps how many it may emit.
+A goal is split into ordered **task groups**. One group = one PR. `Planner` chooses the split, and sizes the plan to the goal — "implement the whole system" plans the whole system, however many groups that takes.
 
 ## Why group
 
@@ -15,7 +15,9 @@ Single-PR runs scale badly: a 2000-line PR is unreviewable and a 5-task PR is un
 - Reviewable — soft target of ~ 300 changed lines per PR.
 - Reversible — revert of one group leaves the rest of the codebase consistent.
 
-Hard cap: `options.maxPrs` (CLI `--max-prs N`, default `5`). If `Planner` cannot fit the goal into the cap, it returns the first N groups plus a `remainder` task and `WorkLoop` exits with status `blocked` after the cap is reached — the user re-runs `aitm start` to continue.
+**No cap by default.** `options.maxPrs` (CLI `--max-prs N`) is unset, so `Planner` emits as many groups as the goal needs. A count cap would decide how much of the goal ships, and the run has no re-planning stage — whatever `Planner` leaves out is never built. Bound a run with `maxCostUsd` / `maxTotalTokens` instead, which stop it without truncating what it set out to do.
+
+When `--max-prs N` **is** set it caps *packaging*, not work: `Planner` is told to group everything to fit. A plan that still exceeds the cap is **rejected with an error**, never trimmed to the first N groups — dropping the tail would ship a fraction of the goal and report success. Pass `--max-prs 0` for explicitly unbounded.
 
 ## Schema
 

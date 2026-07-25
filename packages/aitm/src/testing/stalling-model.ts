@@ -9,9 +9,11 @@ export function stallingModel(): MockLanguageModelV3 {
   return new MockLanguageModelV3({
     doGenerate: (opts) =>
       new Promise((_resolve, reject) => {
-        opts.abortSignal?.addEventListener('abort', () =>
-          reject(new DOMException('This operation was aborted', 'AbortError')),
-        );
+        const abort = () => reject(new DOMException('This operation was aborted', 'AbortError'));
+        // Handle a signal that is ALREADY aborted before this call — `addEventListener('abort')`
+        // only catches future aborts, so without this an already-cancelled generate would hang.
+        if (opts.abortSignal?.aborted) return abort();
+        opts.abortSignal?.addEventListener('abort', abort);
       }),
   });
 }

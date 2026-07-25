@@ -159,6 +159,11 @@ export function parseRemoteHeads(stdout: string): string[] {
 // system prompt, timeout, usage sink, signal) from a RunLoopInput; createScoutRunner itself is
 // covered against a hand-built ScoutAgentInit in planner-scouts.test.ts, but that never exercises
 // this wiring.
+// Below this many tracked files, the Planner reads the repo end to end itself faster than a scout
+// wave can survey it. Measured: an 11-file docs-only repo drew 2 rounds / 6 scouts over ~11 minutes,
+// and the Planner then read the same files again anyway — the survey bought nothing but latency.
+export const SURVEY_MIN_TRACKED_FILES = 25;
+
 export async function surveyRepoForPlanner(params: {
   input: RunLoopInput;
   style: string;
@@ -170,6 +175,17 @@ export async function surveyRepoForPlanner(params: {
   const { input, style, plannerModelId, plannerUsage, mcp, fetchHtmlAvailable } = params;
   const skeleton = buildRepoSkeleton(await listTrackedFiles(input.cwd));
   const repoMap = skeleton.totalFiles === 0 ? '' : renderRepoSkeleton(skeleton);
+  // Small repo: hand over the map and skip the wave entirely. No lead call, no scouts, no rounds.
+  // `totalFiles === 0` is NOT small — listTrackedFiles swallows a git failure into an empty list, so
+  // zero means "size unknown" (no origin, not a repo) and must still survey.
+  if (skeleton.totalFiles > 0 && skeleton.totalFiles < SURVEY_MIN_TRACKED_FILES) {
+    harnessProgress(
+      `survey: skipped — ${skeleton.totalFiles} tracked file(s), the planner reads the repo directly`,
+      { phase: 'planning' },
+    );
+    const mapOnly = synthesizeSurveyBrief([], repoMap);
+    return mapOnly === '' ? undefined : mapOnly;
+  }
   // Lead and scouts differ only in role prose — same model, same read-only tools, same cancellation.
   const base = {
     model: input.credentials.modelFor('planner'),

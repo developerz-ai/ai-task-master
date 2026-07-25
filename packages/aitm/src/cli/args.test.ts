@@ -87,6 +87,12 @@ const startCases: Case[] = [
     expected: { kind: 'start', goal: 'goal', maxPrs: 4 },
   },
   {
+    // 0 = unbounded, mapped to null by toCliOverrides — the same convention as --max-sessions 0.
+    name: 'start: --max-prs 0 parses (unbounded)',
+    argv: ['start', 'goal', '--max-prs', '0'],
+    expected: { kind: 'start', goal: 'goal', maxPrs: 0 },
+  },
+  {
     name: 'start: --max-sessions=0 inline form',
     argv: ['start', 'goal', '--max-sessions=0'],
     expected: { kind: 'start', goal: 'goal', maxSessions: 0 },

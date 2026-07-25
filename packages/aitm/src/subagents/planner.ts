@@ -16,6 +16,7 @@ import {
   runWithSchemaRetry,
 } from '@developerz.ai/ai-claude-compat';
 import { type Tool, type ToolLoopAgent, tool } from 'ai';
+import type { z } from 'zod';
 import { type Plan, PlanSchema } from '../plan/schema.ts';
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
 import type { WebFetchInput, WebFetchOutput } from '../tools/web-fetch.ts';
@@ -109,9 +110,14 @@ export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Prom
   }
   const onUsage = plannerInitRegistry.get(agent)?.onUsage;
   try {
-    const submitted = await runWithSchemaRetry(agent, PlanSchema, buildUserPrompt(input), {
-      ...(onUsage ? { onUsage } : {}),
-    });
+    const submitted = await runWithSchemaRetry(
+      agent,
+      cappedPlanSchema(input.maxPrs),
+      buildUserPrompt(input),
+      {
+        ...(onUsage ? { onUsage } : {}),
+      },
+    );
     if (!submitted.ok) {
       // Only after the retry kernel exhausts. Distinguish the two failure modes in the message so
       // a weak model that never submits reads differently from one that keeps mangling the schema.
@@ -124,20 +130,21 @@ export async function runPlanner(agent: PlannerAgent, input: PlannerInput): Prom
       return { kind: 'blocked', reason: 'planner did not submit a plan after retries' };
     }
     // Schema validation now enforces groups.min(1), so submitted.value.groups is never empty.
-    const plan = submitted.value;
-    // An over-cap plan is a REJECTED plan, never a truncated one. Dropping the tail (or folding it
-    // into a "remainder" stub no Worker executes) would silently ship a fraction of the goal and
-    // report success — the failure the cap exists to prevent, caused by the cap itself.
-    if (input.maxPrs !== null && plan.groups.length > input.maxPrs) {
-      return {
-        kind: 'error',
-        error: `planner emitted ${plan.groups.length} PR groups, exceeding maxPrs ${input.maxPrs}. Raise --max-prs (or pass 0 for unbounded) — the plan is not truncated, because dropping groups would silently drop work.`,
-      };
-    }
-    return { kind: 'ok', plan };
+    return { kind: 'ok', plan: submitted.value };
   } catch (err) {
     return { kind: 'error', error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+// The cap as a SCHEMA refinement, so an over-cap plan flows through runWithSchemaRetry's corrective
+// loop: the Planner is handed the violation and regroups, exactly as it would for a malformed field.
+// Enforcing it after the retry kernel instead would fail the run on the first over-cap submission,
+// and enforcing it by trimming groups would silently drop work.
+function cappedPlanSchema(maxPrs: number | null): z.ZodType<Plan> {
+  if (maxPrs === null) return PlanSchema;
+  return PlanSchema.refine((plan) => plan.groups.length <= maxPrs, {
+    message: `too many PR groups: emit at most ${maxPrs}. Group everything to fit — never drop the tail, and never leave part of the goal unplanned.`,
+  });
 }
 
 function buildUserPrompt(input: PlannerInput): string {

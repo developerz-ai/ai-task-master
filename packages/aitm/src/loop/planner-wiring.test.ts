@@ -22,6 +22,7 @@ import {
   parseRemoteHeads,
   planToPrGroups,
   remoteBranchNames,
+  SURVEY_MIN_TRACKED_FILES,
   surveyRepoForPlanner,
 } from './planner-wiring.ts';
 
@@ -487,6 +488,11 @@ test('surveyRepoForPlanner: drives a real lead and the scouts it dispatched, bui
   try {
     await writeFile(join(repo.path, 'router.ts'), 'export const route = 1;\n');
     await writeFile(join(repo.path, 'auth.ts'), 'export const auth = 1;\n');
+    // Clear SURVEY_MIN_TRACKED_FILES — under it the wave is skipped by design, which is a
+    // different test (below). This one is about the lead/scout wiring on a repo worth surveying.
+    for (let i = 0; i < SURVEY_MIN_TRACKED_FILES; i++) {
+      await writeFile(join(repo.path, `filler-${i}.ts`), `export const f${i} = 1;\n`);
+    }
     await execa('git', ['add', '-A'], { cwd: repo.path });
 
     const { model, leadCalls, scoutCalls } = surveyTeamModel([
@@ -509,6 +515,37 @@ test('surveyRepoForPlanner: drives a real lead and the scouts it dispatched, bui
     assert.match(brief ?? '', /^Repo map — \d+ tracked file\(s\)/, 'the map leads the brief');
     assert.match(brief ?? '', /## routing/, 'sections are the areas the lead actually chose');
     assert.match(brief ?? '', /finding 1/);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('surveyRepoForPlanner: a small repo skips the wave and hands over the map alone', async () => {
+  // Measured waste this guards: an 11-file docs-only repo drew 2 rounds / 6 scouts over ~11 minutes,
+  // and the Planner then read the same files itself anyway.
+  const repo = await makeTempRepo();
+  try {
+    for (let i = 0; i < 5; i++) {
+      await writeFile(join(repo.path, `doc-${i}.md`), `# doc ${i}\n`);
+    }
+    await execa('git', ['add', '-A'], { cwd: repo.path });
+
+    const { model, leadCalls, scoutCalls } = surveyTeamModel([
+      { key: 'never', question: 'should not be dispatched' },
+    ]);
+    const brief = await surveyRepoForPlanner({
+      input: fakeInput(repo.path, model),
+      style: '# style\n',
+      plannerModelId: 'openai/gpt-5',
+      mcp: fakeMcp(),
+      fetchHtmlAvailable: false,
+    });
+
+    assert.equal(leadCalls(), 0, 'no lead call — the wave is not sized, it is skipped');
+    assert.equal(scoutCalls(), 0, 'no scouts dispatched');
+    assert.ok(brief, 'the planner still gets the repo map');
+    assert.match(brief ?? '', /^Repo map — \d+ tracked file\(s\)/);
+    assert.doesNotMatch(brief ?? '', /gathered in parallel/, 'no survey section without scouts');
   } finally {
     await repo.cleanup();
   }

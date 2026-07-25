@@ -13,7 +13,7 @@ import { SUBAGENT_LIMIT_DEFAULT } from '../domain/subagent-limit.ts';
 import type { FileChange } from '../domain/worker-delivery.ts';
 import { harnessProgress } from '../observability/step-progress.ts';
 import { isAsyncIterable, requireExec, shQuote } from './bash-exec.ts';
-import { assignEditors, dirOf, type EditorAssignment } from './editor-assignment.ts';
+import { assignEditors, type EditorAssignment } from './editor-assignment.ts';
 import { AGENT_STEP_BACKSTOP, reportUsage, type WorkerSubagentInit } from './factory.ts';
 import { capText, MANIFEST_FIELD_MAX, ROLLING_CONTEXT_MAX } from './prompt-caps.ts';
 import { EDITOR_SYSTEM_PREFIX } from './prompts/role-guidance.ts';
@@ -24,15 +24,11 @@ import type { FileManifestEntry, WorkerInput, WorkerTools } from './worker.ts';
 // tool, so it ends on a plain-text response (runEditorPass); this only guards a non-terminating loop.
 export const EDITOR_MAX_STEPS = AGENT_STEP_BACKSTOP;
 
-// Editor fanout shape. The manifest is grouped by directory so one leaf owns a cohesive slice of
-// files instead of the fanout opening one provider call per file, and the groups run through a
-// bounded pool. MAX_FILES_PER_EDITOR caps how many files a leaf owns (a large directory still spreads
-// across several leaves); SUBAGENT_LIMIT_DEFAULT caps how many leaves run at once so a big manifest
-// can't open dozens of concurrent LLM requests. Bigger than a typical "one file per leaf": modern
-// coding models finish a single file in seconds, so a leaf should own a meaty, multi-file chunk that
-// keeps an editor working for minutes — aitm is built for big work. The per-run config that overrides
-// the concurrency (`subagentLimit`) is wired separately; unset falls back to that shared default.
-export const MAX_FILES_PER_EDITOR = 6;
+// Editor fanout shape. The Coordinator assigns the leaves (editor-assignment.ts); nothing here caps
+// how many files one of them owns, because a leaf is not rationed and the assignment is a deliberate
+// unit of work. SUBAGENT_LIMIT_DEFAULT caps only how many leaves run AT ONCE, so a wide manifest
+// can't open dozens of concurrent LLM requests; the per-run override (`subagentLimit`) is wired
+// separately and unset falls back to that shared default.
 
 // Mechanical floor under the fanout decision. WORKER_SYSTEM_PREFIX already tells the Coordinator to
 // fan out only at scale, but prose is not a constraint: an observed run spawned four editors for four
@@ -40,8 +36,7 @@ export const MAX_FILES_PER_EDITOR = 6;
 // agent spin-ups, four repo surveys, four leaf prompts, for work one leaf finishes in a single step.
 // A leaf's fixed cost dominates trivial work, so below this floor the whole manifest runs inline in
 // ONE editor pass. Only manifest data available at the decision point feeds the predicate:
-//   - FANOUT_FLOOR_FILES (4): at/below MAX_FILES_PER_EDITOR, so the collapsed leaf still respects the
-//     per-leaf cap. 4 is the observed pathological width; a 5+ file slice keeps fanning out.
+//   - FANOUT_FLOOR_FILES (4): the observed pathological width; a 5+ file slice keeps fanning out.
 //   - FANOUT_FLOOR_PURPOSE_CHARS (240): the Coordinator's own prose across the WHOLE manifest. It
 //     writes a clause for a one-line edit ("expand the exports field") and a paragraph for a real
 //     module, so total purpose length is the cheapest honest proxy for how much work it planned.
@@ -109,6 +104,13 @@ export function editorToolSet(tools: WorkerTools): WorkerTools {
 export type EditorOutcome =
   | { changed: true; change: FileChange }
   | { changed: false; path: string };
+
+// A path's parent directory (POSIX manifest paths), or '.' for a repo-root file. Only the leaf LABEL
+// uses this now — grouping is the Coordinator's call (editor-assignment.ts), never a path rule.
+function dirOf(path: string): string {
+  const slash = path.lastIndexOf('/');
+  return slash === -1 ? '.' : path.slice(0, slash);
+}
 
 // The base stream label naming one editor leaf. The Coordinator's own name for the teammate when it
 // assigned one — it says what the leaf is FOR (`auth-routes`), which no path-derived label can — and
@@ -252,7 +254,7 @@ export async function runEditorFanout(
   }
   const leaves = collapse
     ? [{ label: collapsedLeafLabel(files), files: [...files] }]
-    : labelEditorGroups(assignEditors(files, MAX_FILES_PER_EDITOR));
+    : labelEditorGroups(assignEditors(files));
   // A team brief only makes sense once the work is actually split across leaves; a lone leaf already
   // sees its whole assignment in its own prompt, and injecting nothing keeps that path byte-identical.
   // The roster/per-editor-outcome lines gate on the same condition (issue #131) — a lone leaf stays

@@ -13,7 +13,6 @@ import {
   editorToolSet,
   FANOUT_FLOOR_FILES,
   labelEditorGroups,
-  MAX_FILES_PER_EDITOR,
 } from './editor-fanout.ts';
 import type { FileManifestEntry, WorkerInput, WorkerTools } from './worker.ts';
 
@@ -130,47 +129,52 @@ test('EDITOR_TOOL_ALLOWLIST lists every WorkerTools field (allowlist is the full
   assert.equal(new Set(EDITOR_TOOL_ALLOWLIST).size, EDITOR_TOOL_ALLOWLIST.length, 'no duplicates');
 });
 
-test('labelEditorGroups: chunked same-directory leaves get distinct #n labels (issue #131)', () => {
-  const files: FileManifestEntry[] = ['1', '2', '3', '4', '5'].map((n) => ({
-    path: `src/f${n}.ts`,
-    kind: 'create',
-    purpose: n,
-  }));
-  const leaves = labelEditorGroups(assignEditors(files, 3));
+test('labelEditorGroups: a tagged leaf is named by the Coordinator, not by its paths', () => {
+  // The lead's own name says what the leaf is FOR; no path-derived label can. It is what the roster
+  // line and the per-editor stream tag show the operator.
+  const files: FileManifestEntry[] = [
+    { path: 'src/routes/auth.ts', kind: 'modify', purpose: 'route', editor: 'auth-flow' },
+    { path: 'test/auth.test.ts', kind: 'create', purpose: 'test', editor: 'auth-flow' },
+    { path: 'src/db/schema.ts', kind: 'modify', purpose: 'schema', editor: 'persistence' },
+  ];
   assert.deepEqual(
-    leaves.map((l) => l.label),
-    ['src/ #1', 'src/ #2'],
-    'two chunks of one oversized directory no longer collide on the bare `src/` label',
+    labelEditorGroups(assignEditors(files)).map((l) => ({ label: l.label, n: l.files.length })),
+    [
+      { label: 'auth-flow', n: 2 },
+      { label: 'persistence', n: 1 },
+    ],
   );
 });
 
-test('labelEditorGroups: an unchunked directory and a lone file keep bare labels (byte-identical)', () => {
+test('labelEditorGroups: an untagged manifest is one leaf, labeled from its paths', () => {
   const files: FileManifestEntry[] = [
     { path: 'src/auth/login.ts', kind: 'create', purpose: 'login' },
     { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout' },
-    { path: 'README.md', kind: 'modify', purpose: 'docs' },
   ];
-  const leaves = labelEditorGroups(assignEditors(files, MAX_FILES_PER_EDITOR));
   assert.deepEqual(
-    leaves.map((l) => ({ label: l.label, count: l.files.length })),
-    [
-      { label: 'src/auth/', count: 2 },
-      { label: 'README.md', count: 1 },
-    ],
-    'a base label owned by a single leaf stays bare',
+    labelEditorGroups(assignEditors(files)).map((l) => ({ label: l.label, n: l.files.length })),
+    [{ label: 'src/auth/', n: 2 }],
+  );
+  // A lone file is named by its basename.
+  assert.equal(
+    labelEditorGroups(assignEditors([{ path: 'README.md', kind: 'modify', purpose: 'docs' }]))[0]
+      ?.label,
+    'README.md',
   );
 });
 
-test('labelEditorGroups: same-basename files in sibling directories get distinct labels (issue #131)', () => {
+test('labelEditorGroups: a tag colliding with the derived label still yields distinct #n labels', () => {
+  // Distinct tags merge by key and the untagged remainder is a single leaf, so this is the ONE way
+  // two leaves can still want the same label — and identical labels would tag two editors with the
+  // same onEditorStepFinish stream line (issue #131).
   const files: FileManifestEntry[] = [
-    { path: 'a/f.ts', kind: 'create', purpose: 'a' },
-    { path: 'b/f.ts', kind: 'create', purpose: 'b' },
+    { path: 'src/a.ts', kind: 'modify', purpose: 'a', editor: 'src/' },
+    { path: 'src/b.ts', kind: 'modify', purpose: 'b' },
+    { path: 'src/c.ts', kind: 'modify', purpose: 'c' },
   ];
-  const leaves = labelEditorGroups(assignEditors(files, MAX_FILES_PER_EDITOR));
   assert.deepEqual(
-    leaves.map((l) => l.label),
-    ['f.ts #1', 'f.ts #2'],
-    'two single-file leaves sharing a basename no longer collide on the onEditorStepFinish tag',
+    labelEditorGroups(assignEditors(files)).map((l) => l.label),
+    ['src/ #1', 'src/ #2'],
   );
 });
 

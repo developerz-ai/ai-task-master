@@ -335,7 +335,7 @@ test('runWorker: appends the progressBlock to the END of the manifest message, a
 
 test('runWorker: an ok result carries a handle retaining the manifest conversation (issue #107)', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   const { tools } = makeTools();
@@ -438,8 +438,8 @@ test('runWorker: one editor rejecting aborts its siblings (editor-fanout shared 
   // Distinct directories so the manifest fans out to two leaves (same-dir files collapse to one).
   const manifest: FileManifest = {
     files: [
-      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
-      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b' },
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' },
+      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b', editor: 'lib' },
     ],
     draftCommitMessage: 'feat: add a + fix b',
   };
@@ -490,8 +490,8 @@ test('runWorker: manifest → per-file edits → commit sequence', async () => {
   // Distinct directories → two leaves, each fanned out in group order (src first, then lib).
   const manifest: FileManifest = {
     files: [
-      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
-      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b' },
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' },
+      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b', editor: 'lib' },
     ],
     draftCommitMessage: 'feat: add a + fix b',
   };
@@ -530,8 +530,8 @@ test('runWorker: manifest → per-file edits → commit sequence', async () => {
 test('runWorker: creates the group branch before the editor fanout writes (branch-before-edit, audit 02)', async () => {
   const manifest: FileManifest = {
     files: [
-      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
-      { path: 'src/b.ts', kind: 'modify', purpose: 'fix b' },
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' },
+      { path: 'src/b.ts', kind: 'modify', purpose: 'fix b', editor: 'src' },
     ],
     draftCommitMessage: 'feat: a + b',
   };
@@ -574,7 +574,7 @@ test('runWorker: creates the group branch before the editor fanout writes (branc
 
 test('runWorker: a narrate-only editor (no on-disk write) records no change and blocks — no phantom edit', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   // The editor returns a summary but never wrote src/a.ts, so `git status --porcelain` reports it clean.
@@ -603,8 +603,8 @@ test('runWorker: a narrate-only editor (no on-disk write) records no change and 
 test('runWorker: one phantom editor blocks the whole pass and names only the unchanged file — no partial commit', async () => {
   const manifest: FileManifest = {
     files: [
-      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
-      { path: 'src/b.ts', kind: 'modify', purpose: 'fix b' },
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' },
+      { path: 'src/b.ts', kind: 'modify', purpose: 'fix b', editor: 'src' },
     ],
     draftCommitMessage: 'feat: a + b',
   };
@@ -636,7 +636,7 @@ test('runWorker: one phantom editor blocks the whole pass and names only the unc
 
 test('runWorker: scopes the manifest prompt and progress to the current Task slice', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   const { tools } = makeTools();
@@ -687,7 +687,7 @@ test('runWorker: scopes the manifest prompt and progress to the current Task sli
 
 test('runWorker runs formatCommand in the checkout before staging when set (issue #48)', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   const { tools, calls } = makeTools();
@@ -709,7 +709,7 @@ test('runWorker runs formatCommand in the checkout before staging when set (issu
 
 test('runWorker omits the format step when formatCommand is unset', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   const { tools, calls } = makeTools();
@@ -728,7 +728,7 @@ test('runWorker omits the format step when formatCommand is unset', async () => 
 
 test('runWorker collapses multi-line editor responses to a one-line summary', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
+    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x', editor: 'src' }],
     draftCommitMessage: 'feat: x',
   };
   const { tools } = makeTools();
@@ -745,7 +745,7 @@ test('runWorker collapses multi-line editor responses to a one-line summary', as
 
 test('runWorker uses the group.branch when set, instead of the aitm/<id> default', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
+    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x', editor: 'src' }],
     draftCommitMessage: 'feat: x',
   };
   const { tools, calls } = makeTools();
@@ -921,7 +921,7 @@ test('runWorker: persistently schema-invalid manifest → error after retries, n
 
 test('runWorker returns error when bash fails during commit', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x' }],
+    files: [{ path: 'src/x.ts', kind: 'create', purpose: 'create x', editor: 'src' }],
     draftCommitMessage: 'feat: x',
   };
   const { tools } = makeTools({ bashExitCode: 1, bashStderr: 'fatal: nothing to commit' });
@@ -948,9 +948,9 @@ test('runWorker fans out editors in parallel — manifest call comes first, edit
   // Three distinct directories → three leaves, so the fanout has genuine parallelism to observe.
   const manifest: FileManifest = {
     files: [
-      { path: 'src/a.ts', kind: 'create', purpose: 'a' },
-      { path: 'lib/b.ts', kind: 'create', purpose: 'b' },
-      { path: 'api/c.ts', kind: 'create', purpose: 'c' },
+      { path: 'src/a.ts', kind: 'create', purpose: 'a', editor: 'src' },
+      { path: 'lib/b.ts', kind: 'create', purpose: 'b', editor: 'lib' },
+      { path: 'api/c.ts', kind: 'create', purpose: 'c', editor: 'api' },
     ],
     draftCommitMessage: 'feat: abc',
   };
@@ -1024,9 +1024,24 @@ test('runWorker: manifest with `applied: true` skips the editor fanout and commi
   let modelCalls = 0;
   const manifest: FileManifest = {
     files: [
-      { path: 'src/errors/AppError.ts', kind: 'create', purpose: 'base AppError class' },
-      { path: 'src/server/app.ts', kind: 'modify', purpose: 'wire errorHandler into app.onError' },
-      { path: 'tests/errors.test.ts', kind: 'create', purpose: 'error mapper tests' },
+      {
+        path: 'src/errors/AppError.ts',
+        kind: 'create',
+        purpose: 'base AppError class',
+        editor: 'src/errors',
+      },
+      {
+        path: 'src/server/app.ts',
+        kind: 'modify',
+        purpose: 'wire errorHandler into app.onError',
+        editor: 'src/server',
+      },
+      {
+        path: 'tests/errors.test.ts',
+        kind: 'create',
+        purpose: 'error mapper tests',
+        editor: 'tests',
+      },
     ],
     draftCommitMessage: 'feat: typed errors layer',
     applied: true,
@@ -1082,8 +1097,8 @@ test('runWorker: `applied: true` with an unwritten file blocks (phantom guard) a
   // src/b.ts reports clean — the Coordinator claimed `applied` but never wrote it (a phantom).
   const manifest: FileManifest = {
     files: [
-      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
-      { path: 'src/b.ts', kind: 'create', purpose: 'create b' },
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' },
+      { path: 'src/b.ts', kind: 'create', purpose: 'create b', editor: 'src' },
     ],
     draftCommitMessage: 'feat: a + b',
     applied: true,
@@ -1109,8 +1124,8 @@ test('runWorker: `applied: true` with an unwritten file blocks (phantom guard) a
 test('runWorker: a multi-leaf fanout injects the shared team brief into every editor system prompt', async () => {
   const manifest: FileManifest = {
     files: [
-      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
-      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b' },
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' },
+      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b', editor: 'lib' },
     ],
     draftCommitMessage: 'feat: a + b',
   };
@@ -1159,7 +1174,7 @@ test('runWorker: a multi-leaf fanout injects the shared team brief into every ed
 
 test('runWorker: a single-file manifest injects no team brief (single-leaf path byte-identical)', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   let editorPromptSeen = '';
@@ -1211,9 +1226,9 @@ test('runWorker: a single-file manifest injects no team brief (single-leaf path 
 test('runWorker: same-directory files collapse onto one leaf with no team brief', async () => {
   const manifest: FileManifest = {
     files: [
-      { path: 'src/a.ts', kind: 'create', purpose: 'a' },
-      { path: 'src/b.ts', kind: 'create', purpose: 'b' },
-      { path: 'src/c.ts', kind: 'create', purpose: 'c' },
+      { path: 'src/a.ts', kind: 'create', purpose: 'a', editor: 'src' },
+      { path: 'src/b.ts', kind: 'create', purpose: 'b', editor: 'src' },
+      { path: 'src/c.ts', kind: 'create', purpose: 'c', editor: 'src' },
     ],
     draftCommitMessage: 'feat: abc',
   };
@@ -1269,9 +1284,9 @@ test('runWorker: same-directory files collapse onto one leaf with no team brief'
 test("runWorker: onEditorStepFinish is a per-leaf factory, called with each leaf's file/dir tag (issue #131)", async () => {
   const manifest: FileManifest = {
     files: [
-      { path: 'src/auth/login.ts', kind: 'create', purpose: 'login' },
-      { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout' },
-      { path: 'README.md', kind: 'modify', purpose: 'docs' },
+      { path: 'src/auth/login.ts', kind: 'create', purpose: 'login', editor: 'auth' },
+      { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout', editor: 'auth' },
+      { path: 'README.md', kind: 'modify', purpose: 'docs', editor: 'docs' },
     ],
     draftCommitMessage: 'feat: auth + docs',
   };
@@ -1294,8 +1309,8 @@ test("runWorker: onEditorStepFinish is a per-leaf factory, called with each leaf
   assert.equal(result.kind, 'ok');
   assert.deepEqual(
     [...tagsRequested].sort(),
-    ['README.md', 'src/auth/'],
-    'one leaf per directory: the two src/auth/ files collapse onto one leaf, README.md stands alone',
+    ['auth', 'docs'],
+    "each leaf is tagged with the Coordinator's own name for it, not a path the harness derived",
   );
   assert.deepEqual(
     [...tagsAtStepFinish].sort(),
@@ -1314,9 +1329,9 @@ test('runWorker: a multi-leaf fanout prints a roster + per-editor outcome line; 
   try {
     const manifest: FileManifest = {
       files: [
-        { path: 'src/auth/login.ts', kind: 'create', purpose: 'login' },
-        { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout' },
-        { path: 'README.md', kind: 'modify', purpose: 'docs' },
+        { path: 'src/auth/login.ts', kind: 'create', purpose: 'login', editor: 'auth' },
+        { path: 'src/auth/logout.ts', kind: 'create', purpose: 'logout', editor: 'auth' },
+        { path: 'README.md', kind: 'modify', purpose: 'docs', editor: 'docs' },
       ],
       draftCommitMessage: 'feat: auth + docs',
     };
@@ -1327,17 +1342,14 @@ test('runWorker: a multi-leaf fanout prints a roster + per-editor outcome line; 
     assert.equal(result.kind, 'ok');
     const roster = lines.find((l) => l.includes('fanning out 2 editors'));
     assert.ok(roster, 'roster line printed for a multi-leaf fanout');
-    assert.match(
-      roster ?? '',
-      /src\/auth\/ \(2\), README\.md \(1\)|README\.md \(1\), src\/auth\/ \(2\)/,
+    assert.match(roster ?? '', /auth \(2\), docs \(1\)/);
+    assert.ok(
+      lines.some((l) => l.includes('editor auth done — 2 changed')),
+      'per-editor outcome line for the auth leaf',
     );
     assert.ok(
-      lines.some((l) => l.includes('editor src/auth/ done — 2 changed')),
-      'per-editor outcome line for the src/auth/ leaf',
-    );
-    assert.ok(
-      lines.some((l) => l.includes('editor README.md done — 1 changed')),
-      'per-editor outcome line for the README.md leaf',
+      lines.some((l) => l.includes('editor docs done — 1 changed')),
+      'per-editor outcome line for the docs leaf',
     );
   } finally {
     process.stderr.write = realStderrWrite;
@@ -1345,7 +1357,7 @@ test('runWorker: a multi-leaf fanout prints a roster + per-editor outcome line; 
 
   lines.length = 0;
   const lone: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   const realStderrWrite2 = process.stderr.write.bind(process.stderr);
@@ -1372,10 +1384,10 @@ test('runWorker: the editor fanout honors the concurrency cap (never more than t
   // Four distinct directories → four leaves; cap the pool at 2 and prove no third leaf runs concurrently.
   const manifest: FileManifest = {
     files: [
-      { path: 'a/f.ts', kind: 'create', purpose: 'a' },
-      { path: 'b/f.ts', kind: 'create', purpose: 'b' },
-      { path: 'c/f.ts', kind: 'create', purpose: 'c' },
-      { path: 'd/f.ts', kind: 'create', purpose: 'd' },
+      { path: 'a/f.ts', kind: 'create', purpose: 'a', editor: 'a' },
+      { path: 'b/f.ts', kind: 'create', purpose: 'b', editor: 'b' },
+      { path: 'c/f.ts', kind: 'create', purpose: 'c', editor: 'c' },
+      { path: 'd/f.ts', kind: 'create', purpose: 'd', editor: 'd' },
     ],
     draftCommitMessage: 'feat: four dirs',
   };
@@ -1560,16 +1572,16 @@ function makeCaptureLogger(events: Array<Record<string, unknown>>) {
 }
 
 const oneFileManifest: FileManifest = {
-  files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+  files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
   draftCommitMessage: 'feat: a',
 };
 const fixManifest: FileManifest = {
-  files: [{ path: 'src/a.ts', kind: 'modify', purpose: 'fix the failing test' }],
+  files: [{ path: 'src/a.ts', kind: 'modify', purpose: 'fix the failing test', editor: 'src' }],
   draftCommitMessage: 'fix: make verify pass',
 };
 // A fix manifest that touches a DIFFERENT file than the first pass, so its edit is a genuine extra.
 const fixBManifest: FileManifest = {
-  files: [{ path: 'src/b.ts', kind: 'modify', purpose: 'fix the failing test' }],
+  files: [{ path: 'src/b.ts', kind: 'modify', purpose: 'fix the failing test', editor: 'src' }],
   draftCommitMessage: 'fix: make verify pass',
 };
 
@@ -1841,7 +1853,7 @@ test('runWorker: an oversized group.title / task.text is capped in the manifest 
 
 test('runEditor system prompt: drops the harness/communication/autonomy contract stack, keeps role guidance + style + env (lean leaf)', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   let editorSystem = '';
@@ -2097,8 +2109,8 @@ test('runWorker: four one-line edits run inline in ONE editor pass instead of fo
 test('runWorker: a manifest above the floor still fans out (the floor is a floor, not a ceiling)', async () => {
   const manifest: FileManifest = {
     files: [
-      { path: 'a/x.ts', kind: 'create', purpose: 'a new module' },
-      { path: 'b/y.ts', kind: 'modify', purpose: 'wire it in' },
+      { path: 'a/x.ts', kind: 'create', purpose: 'a new module', editor: 'a' },
+      { path: 'b/y.ts', kind: 'modify', purpose: 'wire it in', editor: 'b' },
     ],
     draftCommitMessage: 'feat: x + y',
   };
@@ -2337,7 +2349,9 @@ test('runWorker: a leaf that narrated instead of writing is retried once and the
   // file: apps/api/src/routes/todos.ts …)` — the PR shipped services without its routes because one
   // leaf narrated. One corrective retry recovers it.
   const manifest: FileManifest = {
-    files: [{ path: 'src/routes/todos.ts', kind: 'create', purpose: 'todo routes' }],
+    files: [
+      { path: 'src/routes/todos.ts', kind: 'create', purpose: 'todo routes', editor: 'src/routes' },
+    ],
     draftCommitMessage: 'feat: todo routes',
   };
   const editorPrompts: string[] = [];
@@ -2390,7 +2404,7 @@ test('runWorker: a leaf that narrated instead of writing is retried once and the
 
 test('runWorker: a second narration after the corrective retry blocks — the retry is not repeated', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   const { tools, calls } = makeTools({ cleanStatusPaths: ['src/a.ts'] }); // never written
@@ -2439,8 +2453,8 @@ test('runWorker: a second narration after the corrective retry blocks — the re
 test('runWorker: a leaf that wrote everything is never retried (byte-identical happy path)', async () => {
   const manifest: FileManifest = {
     files: [
-      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
-      { path: 'src/b.ts', kind: 'create', purpose: 'create b' },
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' },
+      { path: 'src/b.ts', kind: 'create', purpose: 'create b', editor: 'src' },
     ],
     draftCommitMessage: 'feat: a + b',
   };
@@ -2488,8 +2502,8 @@ test('runWorker: the manifest `sharedContext` reaches every leaf so it does not 
   // package.json — the exact set the Coordinator had just finished reading during planning.
   const manifest: FileManifest = {
     files: [
-      { path: 'src/a.ts', kind: 'create', purpose: 'create a' },
-      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b' },
+      { path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' },
+      { path: 'lib/b.ts', kind: 'modify', purpose: 'fix b', editor: 'lib' },
     ],
     draftCommitMessage: 'feat: a + b',
     sharedContext: 'repository.ts exposes findById at line 40; errors are AppError subclasses.',
@@ -2536,7 +2550,7 @@ test('runWorker: the manifest `sharedContext` reaches every leaf so it does not 
 
 test('buildEditorPrompt via runWorker: verify/format facts reach the leaf; nothing to distil leaves the prompt untouched', async () => {
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   const capture = async (input: Partial<WorkerInput>): Promise<string> => {
@@ -2597,7 +2611,7 @@ test('buildEditorPrompt via runWorker: verify/format facts reach the leaf; nothi
 test('runWorker: an oversized sharedContext is capped before it is paid once per leaf', async () => {
   const oversized = 'C'.repeat(5_000);
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
     sharedContext: oversized,
   };
@@ -2672,8 +2686,18 @@ test('runWorker: a self-review pass whose planner already edited every file skip
   // restoring a file just to re-prove a test it had not written.
   const manifest: FileManifest = {
     files: [
-      { path: 'src/TodoItem.tsx', kind: 'modify', purpose: 'clear the draft in cancel()' },
-      { path: 'test/TodoItem.test.tsx', kind: 'modify', purpose: 'Escape+blur regression test' },
+      {
+        path: 'src/TodoItem.tsx',
+        kind: 'modify',
+        purpose: 'clear the draft in cancel()',
+        editor: 'src',
+      },
+      {
+        path: 'test/TodoItem.test.tsx',
+        kind: 'modify',
+        purpose: 'Escape+blur regression test',
+        editor: 'test',
+      },
     ],
     draftCommitMessage: 'fix: escape-cancel resurrects the draft',
   };
@@ -2699,7 +2723,7 @@ test('runWorker: the inline inference is off for a normal task, which still fans
   // The normal path must keep planning and editing as distinct phases — a Coordinator that merely
   // looked at files does not get its manifest treated as executed.
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a' }],
+    files: [{ path: 'src/a.ts', kind: 'create', purpose: 'create a', editor: 'src' }],
     draftCommitMessage: 'feat: a',
   };
   const { tools } = makeTools();
@@ -2718,8 +2742,8 @@ test('runWorker: a planned file dirty BEFORE planning does not fool the inline s
   // "not dirty before" test and look newly edited, skipping the fanout on work this pass never did.
   const manifest: FileManifest = {
     files: [
-      { path: 'src/TodoItem.tsx', kind: 'modify', purpose: 'fix a' },
-      { path: 'test/TodoItem.test.tsx', kind: 'modify', purpose: 'test a' },
+      { path: 'src/TodoItem.tsx', kind: 'modify', purpose: 'fix a', editor: 'src' },
+      { path: 'test/TodoItem.test.tsx', kind: 'modify', purpose: 'test a', editor: 'test' },
     ],
     draftCommitMessage: 'fix: a',
   };
@@ -2745,7 +2769,7 @@ test('runWorker: a failed pre-planning snapshot disables the inline skip — fan
   // An unavailable baseline (git status errors) must NOT be read as an empty baseline; that would
   // make every inherited-dirty file look newly edited. A missing snapshot disables the inference.
   const manifest: FileManifest = {
-    files: [{ path: 'src/a.ts', kind: 'modify', purpose: 'fix a' }],
+    files: [{ path: 'src/a.ts', kind: 'modify', purpose: 'fix a', editor: 'src' }],
     draftCommitMessage: 'fix: a',
   };
   const { tools } = makeTools({ preSnapshotFails: true });

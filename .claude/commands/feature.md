@@ -15,7 +15,7 @@ $ARGUMENTS
 
 ## The flow
 
-1. **Understand.** Restate the goal in a line. If the ask cites URLs (article, prior art), `WebFetch` them and extract the *pattern* (the mechanism), then translate it onto our stack — the AI SDK `experimental_Agent` + subagents-as-tools loop, provider wiring through `Credentials` (`OPENROUTER_API_KEY`, never an Anthropic SDK), run state in `StateStore`, the group-by-group drive in `WorkLoop`, and `gh` behind `GitHubClient`. This is a CLI, not a service — there is no UI to drive.
+1. **Understand.** Restate the goal in a line. If the ask cites URLs (article, prior art), `WebFetch` them and extract the *pattern* (the mechanism), then translate it onto our stack — the AI SDK `ToolLoopAgent` + subagents-as-tools loop, provider wiring through `Credentials` (`OPENROUTER_API_KEY`, never an Anthropic SDK), run state in `StateStore`, the group-by-group drive in `WorkLoop`, and `gh` behind `GitHubClient`. This is a CLI, not a service — there is no UI to drive.
 
 2. **Explore (parallel).** Fan out `Task` Explore agents (very thorough; `codegraph_explore` for structure) to map every affected surface: the right workspace (`packages/aitm` for the tool, `packages/ai-claude-compat` for the AI-SDK/Claude-compat layer) and the module(s) under `packages/aitm/src/<module>/` from the module map (`Credentials`, `AgentConfigDetector`, `StateStore`, `Planner`, `Worker`, `Reviewer`, `GitHubClient`, `WorkLoop`, `CLI`, `Logger`), the patterns to mirror (`file:line`), tests (unit `*.test.ts` paired beside the module vs integration in `packages/aitm/test/integration/`), and gotchas. Respect module boundaries — one responsibility per module. Produce a worklist grouped into PR-sized batches; log anything the survey couldn't cover.
 

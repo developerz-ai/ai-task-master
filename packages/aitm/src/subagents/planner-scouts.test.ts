@@ -4,8 +4,6 @@ import { stallingModel } from '../testing/stalling-model.ts';
 import {
   buildScoutPrompt,
   createScoutRunner,
-  FALLBACK_SCOUT_ASSIGNMENTS,
-  SCOUT_MAX_ASSIGNMENTS,
   SCOUT_SYSTEM_PREFIX,
   type ScoutAssignment,
   type ScoutFinding,
@@ -176,16 +174,6 @@ test('synthesizeSurveyBrief: a dead survey still hands over the map, not nothing
     ]),
     '',
   );
-});
-
-test('FALLBACK_SCOUT_ASSIGNMENTS: distinct, substantive, and within the wave cap', () => {
-  assert.ok(FALLBACK_SCOUT_ASSIGNMENTS.length >= 3);
-  assert.ok(FALLBACK_SCOUT_ASSIGNMENTS.length <= SCOUT_MAX_ASSIGNMENTS);
-  const keys = FALLBACK_SCOUT_ASSIGNMENTS.map((a) => a.key);
-  assert.equal(new Set(keys).size, keys.length, 'keys are unique');
-  for (const a of FALLBACK_SCOUT_ASSIGNMENTS) {
-    assert.ok(a.question.length > 20, `${a.key} asks a substantive question`);
-  }
 });
 
 test('createScoutRunner: forwards the run signal → an abort cancels an in-flight scout survey', async () => {

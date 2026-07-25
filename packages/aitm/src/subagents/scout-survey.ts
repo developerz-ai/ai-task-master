@@ -11,7 +11,6 @@
 
 import { SUBAGENT_LIMIT_DEFAULT } from '../domain/subagent-limit.ts';
 import {
-  FALLBACK_SCOUT_ASSIGNMENTS,
   type ScoutAssignment,
   type ScoutContext,
   type ScoutResult,
@@ -26,9 +25,7 @@ import type { ScoutLeadRunner } from './scout-lead.ts';
 export const SCOUT_MAX_ROUNDS = 2;
 
 export type ScoutSurveyEvent =
-  // A wave is going out. `fallback` marks the lead having failed to produce one, so the fixed
-  // assignments are being used — worth surfacing, since it means the wave is repo-blind.
-  | { kind: 'dispatch'; round: number; assignments: readonly ScoutAssignment[]; fallback: boolean }
+  | { kind: 'dispatch'; round: number; assignments: readonly ScoutAssignment[] }
   | { kind: 'reported'; round: number; reported: number; dispatched: number }
   | { kind: 'complete'; rounds: number; findings: number };
 
@@ -59,15 +56,16 @@ export async function runScoutSurvey(init: ScoutSurveyInit): Promise<ScoutResult
   while (round < maxRounds) {
     round += 1;
     const proposed = await lead(ctx, results).catch(() => []);
-    // An empty FIRST wave is a dead or unusable lead — the fixed assignments keep the survey running
-    // rather than handing the Planner nothing. An empty LATER wave is the lead saying it is done.
-    const fallback = round === 1 && proposed.length === 0;
-    const wave = (fallback ? FALLBACK_SCOUT_ASSIGNMENTS : proposed).filter(
-      (assignment) => !dispatched.has(assignment.key),
-    );
+    // No wave, no survey. On the first round that means the lead is dead or judged the repo not
+    // worth scouting; on a later one it means the map is complete. Both end the same way — the
+    // Planner still has its own read-only tools and the deterministic repo map, which is exactly
+    // what it had before any of this existed. There is no fixed wave to fall back to: a repo-blind
+    // survey is the design the lead replaced, and keeping one alive for a failure case would put
+    // the discarded behaviour back on a path nobody tests in anger.
+    const wave = proposed.filter((assignment) => !dispatched.has(assignment.key));
     if (wave.length === 0) break;
     for (const assignment of wave) dispatched.add(assignment.key);
-    onProgress?.({ kind: 'dispatch', round, assignments: wave, fallback });
+    onProgress?.({ kind: 'dispatch', round, assignments: wave });
     const reported = await surveyRepoInParallel(wave, ctx, runScout, concurrency).catch(() => []);
     onProgress?.({ kind: 'reported', round, reported: reported.length, dispatched: wave.length });
     results.push(...reported);

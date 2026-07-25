@@ -28,7 +28,7 @@ $ARGUMENTS
 1-2 sentences: what + why.
 
 ## Context
-- Stack facts the executor needs (Bun dev runtime; must run unchanged on Bun + Node ≥20 + Deno ≥1.40; ESM only; `ai` package with `experimental_Agent` + subagents-as-tools; OpenRouter-only inference via `Credentials`; `gh` CLI wrapper — only what's relevant).
+- Stack facts the executor needs (Bun dev runtime; must run unchanged on Bun + Node ≥20 + Deno ≥1.40; ESM only; `ai` package with `ToolLoopAgent` + subagents-as-tools; OpenRouter-only inference via `Credentials`; `gh` CLI wrapper — only what's relevant).
 - Reference patterns: `packages/aitm/src/<module>/<file>.ts:12` — follow this for Z.
 
 ## Plan files (execute in order)

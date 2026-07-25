@@ -58,13 +58,13 @@ test('ConfigFileSchema accepts maxCostUsd / maxTotalTokens and rejects non-posit
   assert.throws(() => ConfigFileSchema.parse({ maxTotalTokens: 'lots' }));
 });
 
-test('ConfigFileSchema accepts editorConcurrency >= 1 and rejects < 1 / non-int / non-number', () => {
-  assert.equal(ConfigFileSchema.parse({ editorConcurrency: 4 }).editorConcurrency, 4);
-  assert.equal(ConfigFileSchema.parse({ editorConcurrency: 1 }).editorConcurrency, 1);
-  assert.throws(() => ConfigFileSchema.parse({ editorConcurrency: 0 }));
-  assert.throws(() => ConfigFileSchema.parse({ editorConcurrency: -1 }));
-  assert.throws(() => ConfigFileSchema.parse({ editorConcurrency: 2.5 }));
-  assert.throws(() => ConfigFileSchema.parse({ editorConcurrency: 'four' }));
+test('ConfigFileSchema accepts subagentLimit >= 1 and rejects < 1 / non-int / non-number', () => {
+  assert.equal(ConfigFileSchema.parse({ subagentLimit: 4 }).subagentLimit, 4);
+  assert.equal(ConfigFileSchema.parse({ subagentLimit: 1 }).subagentLimit, 1);
+  assert.throws(() => ConfigFileSchema.parse({ subagentLimit: 0 }));
+  assert.throws(() => ConfigFileSchema.parse({ subagentLimit: -1 }));
+  assert.throws(() => ConfigFileSchema.parse({ subagentLimit: 2.5 }));
+  assert.throws(() => ConfigFileSchema.parse({ subagentLimit: 'four' }));
 });
 
 test('ConfigFileSchema accepts a valid llmStepTimeoutMs and rejects < 1000 / non-integer (issue #129)', () => {

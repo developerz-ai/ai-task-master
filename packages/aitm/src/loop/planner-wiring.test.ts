@@ -14,11 +14,11 @@ import type { RunLoopInput } from '../composition/run-input.ts';
 import type { McpClientManager } from '../mcp/mcp-client.ts';
 import type { Plan } from '../plan/schema.ts';
 import { StateStore } from '../state/state-store.ts';
-import { SCOUT_LENSES, SCOUT_REPO_FILE_FLOOR } from '../subagents/planner-scouts.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import {
   branchFor,
   defaultPlanGroups,
+  listTrackedFiles,
   parseRemoteHeads,
   planToPrGroups,
   remoteBranchNames,
@@ -406,12 +406,13 @@ test('defaultPlanGroups: a schema-invalid submission surfaces kind error', async
 test('defaultPlanGroups: a throw during the planner call still ends its transcript', async () => {
   // The planner stage is recorded but never resumed, so an unfinished record is dead weight nothing
   // ever closes. The `end()` therefore rides the same finally as the heartbeat stop. Injected through
-  // the one input the planner call reads and nothing before it does — `criteria` — because runPlanner
-  // itself is total; the guarantee under test is structural, not a specific failure mode.
+  // the one input the planner call reads and nothing before it does — `maxPrs`, since the scout
+  // survey now runs first and reads `criteria` — because runPlanner itself is total; the guarantee
+  // under test is structural, not a specific failure mode.
   const dir = await mkdtemp(join(tmpdir(), 'aitm-planner-transcript-'));
   try {
     const input = fakeInput(dir, planSubmitModel({}));
-    Object.defineProperty(input, 'criteria', {
+    Object.defineProperty(input.resolved, 'maxPrs', {
       get: () => {
         throw new Error('planner input exploded');
       },
@@ -439,29 +440,34 @@ test('defaultPlanGroups: a throw during the planner call still ends its transcri
 
 // ---- surveyRepoForPlanner (real scout-runner wiring) -----------------------
 
-// A model that answers every scout's `submit` call with a valid ScoutFinding. defaultPlanGroups'
-// own tests use a tempdir with zero tracked files, so shouldSurveyInParallel's file-count gate
-// always skips the survey there — the real ScoutAgentInit this function builds (model, tools,
-// system prompt, timeout, usage sink, signal, all derived from a RunLoopInput via
-// applyHooks/resolvePlannerTools/reminderAgentSystemPrompt) is otherwise never constructed.
-function scoutSubmitModel(): { model: MockLanguageModelV3; callCount: () => number } {
-  let calls = 0;
+// One model standing in for the whole survey team: it answers the lead's `submit` with a two-scout
+// wave and every scout's with a ScoutFinding, telling them apart by the prompt each receives. The
+// real ScoutAgentInit this function builds (model, tools, system prompt, timeout, usage sink,
+// signal, all derived from a RunLoopInput via applyHooks/resolvePlannerTools/
+// reminderAgentSystemPrompt) is constructed nowhere else, so this is its only coverage.
+function surveyTeamModel(wave: Array<{ key: string; question: string }>): {
+  model: MockLanguageModelV3;
+  leadCalls: () => number;
+  scoutCalls: () => number;
+} {
+  let lead = 0;
+  let scouts = 0;
   const model = new MockLanguageModelV3({
-    doGenerate: async () => {
-      calls += 1;
-      const n = calls;
+    doGenerate: async (opts) => {
+      const prompt = JSON.stringify(opts.prompt);
+      const isLead =
+        prompt.includes('Dispatch the survey wave') || prompt.includes('follow-up wave');
+      // The gap round is the lead's SECOND call: answer it with an empty wave so the survey ends.
+      const input = isLead
+        ? JSON.stringify({ assignments: lead++ === 0 ? wave : [], rationale: 'scripted' })
+        : JSON.stringify({
+            summary: `finding ${++scouts}`,
+            facts: [`fact ${scouts}`],
+            relevantPaths: [`src/file-${scouts}.ts`],
+          });
       return {
         content: [
-          {
-            type: 'tool-call',
-            toolCallId: `submit-${n}`,
-            toolName: 'submit',
-            input: JSON.stringify({
-              summary: `finding ${n}`,
-              facts: [`fact ${n}`],
-              relevantPaths: [`src/file-${n}.ts`],
-            }),
-          },
+          { type: 'tool-call', toolCallId: `submit-${lead + scouts}`, toolName: 'submit', input },
         ],
         finishReason: { unified: 'tool-calls', raw: undefined },
         usage: {
@@ -473,18 +479,20 @@ function scoutSubmitModel(): { model: MockLanguageModelV3; callCount: () => numb
       };
     },
   });
-  return { model, callCount: () => calls };
+  return { model, leadCalls: () => lead, scoutCalls: () => scouts };
 }
 
-test('surveyRepoForPlanner: above the file floor, drives real scout agents built from a RunLoopInput', async () => {
+test('surveyRepoForPlanner: drives a real lead and the scouts it dispatched, built from a RunLoopInput', async () => {
   const repo = await makeTempRepo();
   try {
-    for (let i = 0; i < SCOUT_REPO_FILE_FLOOR; i++) {
-      await writeFile(join(repo.path, `file-${i}.ts`), `export const x${i} = ${i};\n`);
-    }
+    await writeFile(join(repo.path, 'router.ts'), 'export const route = 1;\n');
+    await writeFile(join(repo.path, 'auth.ts'), 'export const auth = 1;\n');
     await execa('git', ['add', '-A'], { cwd: repo.path });
 
-    const { model, callCount } = scoutSubmitModel();
+    const { model, leadCalls, scoutCalls } = surveyTeamModel([
+      { key: 'routing', question: 'how does routing work?' },
+      { key: 'auth', question: 'how does auth work?' },
+    ]);
     const input = fakeInput(repo.path, model);
 
     const brief = await surveyRepoForPlanner({
@@ -495,23 +503,21 @@ test('surveyRepoForPlanner: above the file floor, drives real scout agents built
       fetchHtmlAvailable: false,
     });
 
-    assert.equal(
-      callCount(),
-      SCOUT_LENSES.length,
-      'every lens ran its own real scout agent, built via the real ScoutAgentInit wiring',
-    );
-    assert.ok(brief, 'the real scout survey synthesized a non-empty brief');
-    assert.match(brief ?? '', /gathered in parallel by \d+ scout/);
+    assert.equal(scoutCalls(), 2, 'exactly the wave the lead asked for ran, not a fixed lens set');
+    assert.equal(leadCalls(), 2, 'the lead ran again to close the gaps, and ended the survey');
+    assert.ok(brief, 'the real survey synthesized a non-empty brief');
+    assert.match(brief ?? '', /^Repo map — \d+ tracked file\(s\)/, 'the map leads the brief');
+    assert.match(brief ?? '', /## routing/, 'sections are the areas the lead actually chose');
     assert.match(brief ?? '', /finding 1/);
   } finally {
     await repo.cleanup();
   }
 });
 
-test('surveyRepoForPlanner: below the file floor, the real scout wiring never runs', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'aitm-scout-below-floor-'));
+test('surveyRepoForPlanner: outside a git repo the survey still runs, just without a map', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-scout-no-repo-'));
   try {
-    const { model, callCount } = scoutSubmitModel();
+    const { model, scoutCalls } = surveyTeamModel([{ key: 'solo', question: 'what is here?' }]);
     const input = fakeInput(dir, model);
 
     const brief = await surveyRepoForPlanner({
@@ -522,8 +528,30 @@ test('surveyRepoForPlanner: below the file floor, the real scout wiring never ru
       fetchHtmlAvailable: false,
     });
 
-    assert.equal(brief, undefined);
-    assert.equal(callCount(), 0, 'no scout agent is built below the file floor');
+    assert.equal(scoutCalls(), 1);
+    assert.ok(brief);
+    assert.doesNotMatch(brief ?? '', /Repo map/, 'no tracked files, so nothing to map');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('listTrackedFiles: returns the tracked paths, and [] where git cannot answer', async () => {
+  const repo = await makeTempRepo();
+  try {
+    await writeFile(join(repo.path, 'kept.ts'), 'export const a = 1;\n');
+    await execa('git', ['add', '-A'], { cwd: repo.path });
+    assert.ok((await listTrackedFiles(repo.path)).includes('kept.ts'));
+  } finally {
+    await repo.cleanup();
+  }
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-not-a-repo-'));
+  try {
+    assert.deepEqual(
+      await listTrackedFiles(dir),
+      [],
+      'a non-repo degrades to no map, never a throw',
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

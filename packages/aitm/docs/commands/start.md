@@ -11,6 +11,7 @@ aitm start "<goal>"
   [--max-sessions N]       # default unlimited
   [--max-fix-attempts N]   # default 3 — CI-fix passes per PR group before it blocks
   [--concurrency N]        # default 1 — PR groups worked in parallel
+  [--subagents N]          # default 10 — subagents one lead may run at once
   [--no-automerge]         # default: automerge on
   [--admin]                # merge past base-branch protection (gh pr merge --admin)
   [--style <path>]         # default: detected CLAUDE.md or AGENTS.md
@@ -35,7 +36,7 @@ knob. See [config.md](../config.md#maxcifixattempts).
 
 How many PR groups may have a Worker running at the same time (default `1`, sequential). Overrides
 the `concurrency` config key for this run. See
-[config.md](../config.md#concurrency-and-editorconcurrency).
+[config.md](../config.md#concurrency-and-subagentlimit).
 
 ### `--admin`
 

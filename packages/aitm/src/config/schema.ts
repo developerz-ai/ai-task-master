@@ -199,9 +199,10 @@ export const ConfigFileSchema = z
     // How many PR groups may have a Worker running at the same time. Default 1 = sequential.
     // See src/loop/work-loop.ts and src/workspace/in-place-checkout.ts.
     concurrency: z.number().int().positive().optional(),
-    // How many editor files the Worker may process in parallel during team fanout. Default 4, min 1.
-    // See src/subagents/worker.ts and issue #178.
-    editorConcurrency: z.number().int().min(1).optional(),
+    // How many subagents one lead may run at once — scouts in a survey wave, editor leaves in the
+    // Worker's fanout. Default SUBAGENT_LIMIT_DEFAULT (10), min 1. One knob for every fan-out: see
+    // src/domain/subagent-limit.ts.
+    subagentLimit: z.number().int().min(1).optional(),
     // Whether aitm may force-push (`--force-with-lease`, used by the CI-fix rebase flow). Default
     // true. Set false on repos that forbid all force-pushes; the CI-fix push then blocks instead.
     allowForcePush: z.boolean().optional(),
@@ -278,6 +279,9 @@ export type CliOverrides = {
   stylePath?: string | null;
   model?: string;
   concurrency?: number;
+  // Cap on how many subagents one lead runs at once, across every fan-out (`--subagents`). The lead
+  // still decides how many it needs; this bounds how many run concurrently.
+  subagentLimit?: number;
 };
 
 export type ResolvedConfig = {
@@ -333,8 +337,8 @@ export type ResolvedConfig = {
   generateSpecialists: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   concurrency: number;
-  // How many editor files may be processed in parallel during team fanout. Default 4.
-  editorConcurrency: number;
+  // How many subagents one lead may run at once, across every fan-out. Default 10.
+  subagentLimit: number;
   // Whether aitm may force-push (`--force-with-lease`). Default true.
   allowForcePush: boolean;
   // Whether OpenRouter web_search rides Worker calls (issue #112) + optional domain filters (#195).

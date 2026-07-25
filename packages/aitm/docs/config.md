@@ -45,6 +45,7 @@ falls through straight to the default (`--pr-per-task` is its only higher-preced
 | `AITM_MAX_SESSIONS` | `maxSessions` | Non-negative integer; `0` means unlimited (`null`), matching `--max-sessions 0`. |
 | `AITM_MAX_CI_FIX_ATTEMPTS` | `maxCiFixAttempts` | Positive integer. |
 | `AITM_CONCURRENCY` | `concurrency` | Positive integer. |
+| `AITM_SUBAGENTS` | `subagentLimit` | Positive integer. |
 | `AITM_AUTO_MERGE` | `autoMerge` | `true`/`false` (or `1`/`0`). |
 | `AITM_PR_PER_TASK` | `prPerTask` | `true`/`false` (or `1`/`0`). Env/CLI-only — no config-file key; overrides no file. |
 | `AITM_SELF_REVIEW` | `selfReview` | `true`/`false` (or `1`/`0`). |
@@ -54,7 +55,7 @@ falls through straight to the default (`--pr-per-task` is its only higher-preced
 This list is deliberately not every key: CLI-only settings (`adminMerge`, `allowDirty`) stay
 CLI-only — force-merging past branch protection and discarding uncommitted work should each be an
 explicit, per-invocation decision — and per-repo toggles with no CLI flag either
-(`resolveConflicts`, `generateSpecialists`, `editorConcurrency`, …) have no env override, since
+(`resolveConflicts`, `generateSpecialists`, `allowForcePush`, …) have no env override, since
 they're a property of the repo, not a knob a CI job tunes per run.
 
 ## Schema
@@ -129,8 +130,8 @@ code-execution surfaces). Keys absent from a file fall through per the
 | `maxCostUsd` | number > 0 | unset (no ceiling) | project + global | Run-level cost ceiling; stops opening new PR groups when crossed. See [maxCostUsd and maxTotalTokens](#maxcostusd-and-maxtotaltokens). |
 | `maxTotalTokens` | int > 0 | unset (no ceiling) | project + global | Run-level token ceiling; stops opening new PR groups when crossed. See [maxCostUsd and maxTotalTokens](#maxcostusd-and-maxtotaltokens). |
 | `llmStepTimeoutMs` | int ≥ 1000 | `900000` (15 min) | project + global | Per-step LLM request deadline. See [llmStepTimeoutMs](#llmsteptimeoutms). |
-| `concurrency` | int > 0 | `1` | project + global, env `AITM_CONCURRENCY`, CLI `--concurrency` | PR groups worked in parallel. See [concurrency and editorConcurrency](#concurrency-and-editorconcurrency). |
-| `editorConcurrency` | int ≥ 1 | `4` | project + global | Editor files fanned out per Worker. See [concurrency and editorConcurrency](#concurrency-and-editorconcurrency). |
+| `concurrency` | int > 0 | `1` | project + global, env `AITM_CONCURRENCY`, CLI `--concurrency` | PR groups worked in parallel. See [concurrency and subagentLimit](#concurrency-and-subagentlimit). |
+| `subagentLimit` | int ≥ 1 | `10` | project + global, env `AITM_SUBAGENTS`, CLI `--subagents` | Subagents one lead may run at once, across every fan-out. See [concurrency and subagentLimit](#concurrency-and-subagentlimit). |
 | `logLevel` | `debug \| info \| warn \| error` | `info` | project + global, env `AITM_LOG_LEVEL` | Log verbosity. |
 | `streaming` | boolean | `false` | project + global | Stream subagent output live. See [streaming](#streaming). |
 
@@ -252,14 +253,16 @@ Set either, or both (whichever trips first stops the run). This is a **guardrail
 
 Default `900000` (15 minutes); minimum `1000`. A per-**step** deadline armed on every LLM generate call so a stalled provider cannot hang an unattended run. It bounds **one** step — a single provider HTTP call plus that step's tool executions — not the whole run, so it must clear the bash tool's own 600s ceiling plus a slow high-effort completion; hence the high default. **Honest limitation:** a step that times out is **not** auto-retried — the deadline aborts the stalled call and the run surfaces the failure; it is a hang guard, not a resiliency/retry layer. Project/global config only — not a CLI flag.
 
-## concurrency and editorConcurrency
+## concurrency and subagentLimit
 
 Two independent parallelism knobs:
 
 - `concurrency` (default `1`) — how many **PR groups** may have a Worker running at the same time. `1` is sequential (groups land one after another); raise it to work independent groups in parallel. Also settable per run with `aitm start --concurrency N`.
-- `editorConcurrency` (default `4`, min `1`) — how many **editor files** a single Worker fans out in parallel while applying one group's file manifest. Project/global config only — no CLI flag.
+- `subagentLimit` (default `10`, min `1`) — how many **subagents one lead may run at once**: scouts in a planning survey wave, editor leaves in a Worker's fanout. One knob rather than one per role, because an operator throttling a rate-limited endpoint means "fewer agents at once", not "fewer editors but the same scouts". Settable per run with `aitm start --subagents N` or `AITM_SUBAGENTS`.
 
-They compose: up to `concurrency × editorConcurrency` editor calls can be in flight at once, so raise them together only with provider rate limits and machine resources in mind.
+  It is a ceiling on *concurrency*, not a work budget. Each lead decides how much help it actually needs — one scout for a focused goal, one per package on a monorepo — and each subagent is itself unrationed, reading as many files as it judges necessary. A lead that asks for more than the limit queues rather than opening an unbounded burst of provider calls.
+
+They compose: up to `concurrency × subagentLimit` subagent calls can be in flight at once, so raise them together only with provider rate limits and machine resources in mind.
 
 ## webSearch
 

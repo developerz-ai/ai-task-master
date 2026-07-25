@@ -1421,7 +1421,7 @@ test('runWorker: the editor fanout honors the concurrency cap (never more than t
   });
   const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
 
-  const run = runWorker(agent, { ...baseInput(), editorConcurrency: 2 });
+  const run = runWorker(agent, { ...baseInput(), subagentLimit: 2 });
   // Wait for the first batch to launch; the barrier holds those leaves so no more than the cap can be
   // in flight at once. A broken (unbounded) pool would launch all four before any settle.
   for (let i = 0; i < 50 && editorCalls < 2; i++) {
@@ -1429,7 +1429,7 @@ test('runWorker: the editor fanout honors the concurrency cap (never more than t
   }
   assert.ok(editorCalls >= 2, 'the fanout launched its first batch');
   await new Promise<void>((r) => setImmediate(r));
-  assert.equal(peak, 2, 'never more than editorConcurrency=2 leaves in flight');
+  assert.equal(peak, 2, 'never more than subagentLimit=2 leaves in flight');
   resolveBarrier();
   const result = await run;
   assert.equal(result.kind, 'ok');

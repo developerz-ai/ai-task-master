@@ -741,8 +741,8 @@ test('defaultMakeOrchestrator.runWorker: a group with no acceptance check adds n
   assert.doesNotMatch(sent, /Acceptance check for this PR group/);
 });
 
-test('defaultMakeOrchestrator.runWorker: threads resolved.editorConcurrency into the worker input (issue #189)', async () => {
-  // The fan-out honors `input.editorConcurrency` — that BEHAVIOR is covered by
+test('defaultMakeOrchestrator.runWorker: threads resolved.subagentLimit into the worker input (issue #189)', async () => {
+  // The fan-out honors `input.subagentLimit` — that BEHAVIOR is covered by
   // worker.test.ts ('the editor fanout honors the concurrency cap'). Here we assert the link the fix
   // restores: the run-loop adapter passes the *resolved* cap into the worker input. Captured
   // deterministically through the workerRunner seam — no fan-out, no timing. A non-default value (7)
@@ -761,14 +761,14 @@ test('defaultMakeOrchestrator.runWorker: threads resolved.editorConcurrency into
   let captured: number | undefined;
   const workerRunner = async (
     _agent: unknown,
-    workerInput: { editorConcurrency?: number },
+    workerInput: { subagentLimit?: number },
   ): Promise<WorkerResult> => {
-    captured = workerInput.editorConcurrency;
+    captured = workerInput.subagentLimit;
     return { kind: 'blocked', reason: 'captured' };
   };
   const input = {
     cwd: '/tmp/adapter-editorcap',
-    resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null, editorConcurrency: 7 },
+    resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null, subagentLimit: 7 },
     credentials,
     agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
     github: {},
@@ -794,7 +794,7 @@ test('defaultMakeOrchestrator.runWorker: threads resolved.editorConcurrency into
   assert.equal(
     captured,
     7,
-    'the run-loop adapter threads resolved.editorConcurrency into the worker input',
+    'the run-loop adapter threads resolved.subagentLimit into the worker input',
   );
 });
 
@@ -1303,12 +1303,13 @@ test('runLoopAdapter: a completed run closes MCP once and detaches the reap list
 test('defaultPlanGroups: a throw during the planner call still ends its transcript', async () => {
   // The planner stage is recorded but never resumed, so an unfinished record is dead weight nothing
   // ever closes. The `end()` therefore rides the same finally as the heartbeat stop. Injected through
-  // the one input the planner call reads and nothing before it does — `criteria` — because runPlanner
-  // itself is total; the guarantee under test is structural, not a specific failure mode.
+  // the one input the planner call reads and nothing before it does — `maxPrs`, since the scout
+  // survey now runs first and reads `criteria` — because runPlanner itself is total; the guarantee
+  // under test is structural, not a specific failure mode.
   const dir = await mkdtemp(join(tmpdir(), 'aitm-planner-transcript-'));
   try {
     const input: RunLoopInput = { ...makeInput(), cwd: dir, state: new StateStore(dir) };
-    Object.defineProperty(input, 'criteria', {
+    Object.defineProperty(input.resolved, 'maxPrs', {
       get: () => {
         throw new Error('planner input exploded');
       },

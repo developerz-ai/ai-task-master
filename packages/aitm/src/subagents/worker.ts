@@ -187,9 +187,11 @@ export type WorkerInput = {
   // run is already cancelled (cleanup #2, plan 02-signal-cancellation-cleanup).
   signal?: AbortSignal;
   // Optional cap on how many editor leaves run concurrently in the fanout pool. Unset →
-  // EDITOR_CONCURRENCY_DEFAULT. Populated from the resolved `editorConcurrency` config key by the
-  // run-loop adapter (issue #189); still optional so direct callers/tests may omit it.
-  editorConcurrency?: number;
+  // SUBAGENT_LIMIT_DEFAULT. Populated from the resolved `subagentLimit` config key by the run-loop
+  // adapter (issue #189) — the same knob that bounds a scout wave, since an operator throttling a
+  // rate-limited endpoint means "fewer agents at once", not "fewer editors". Still optional so
+  // direct callers/tests may omit it.
+  subagentLimit?: number;
   // Set by the self-review pass, the one caller whose Coordinator is expected to fix what it finds
   // with its own tools mid-review rather than delegate. When set, a manifest whose every file was
   // edited during planning is treated as `applied` even without the flag, so the fanout does not

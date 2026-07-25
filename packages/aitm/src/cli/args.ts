@@ -23,6 +23,10 @@ export type StartArgs = {
   stylePath?: string;
   model?: string;
   concurrency?: number;
+  // Cap on how many subagents one lead may run at once — scouts in a survey wave, editors in the
+  // Worker's fanout. From `--subagents`. The lead still decides how many it needs; this only bounds
+  // how many of them run concurrently.
+  subagentLimit?: number;
   // Cap on CI-fix passes per PR group before it blocks for a human. From `--max-fix-attempts`. #128.
   maxFixAttempts?: number;
   // Caller-specified branch for the PR(s). When the plan yields a single group it is used
@@ -234,6 +238,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   let stylePath: string | undefined;
   let model: string | undefined;
   let concurrency: number | undefined;
+  let subagentLimit: number | undefined;
   let maxFixAttempts: number | undefined;
   let branch: string | undefined;
 
@@ -271,6 +276,12 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
       const n = parseNonNegativeInt(v);
       if (n === null) return USAGE_ERROR;
       maxSessions = n;
+      i += consumed(inlineValue !== null);
+    } else if (flag === '--subagents') {
+      const v = takeValue(args, i, inlineValue);
+      const n = parseNonNegativeInt(v);
+      if (n === null || n < 1) return USAGE_ERROR;
+      subagentLimit = n;
       i += consumed(inlineValue !== null);
     } else if (flag === '--concurrency') {
       const v = takeValue(args, i, inlineValue);
@@ -349,6 +360,7 @@ function parseStart(args: ReadonlyArray<string>): ParsedArgs {
   if (stylePath !== undefined) out.stylePath = stylePath;
   if (model !== undefined) out.model = model;
   if (concurrency !== undefined) out.concurrency = concurrency;
+  if (subagentLimit !== undefined) out.subagentLimit = subagentLimit;
   if (maxFixAttempts !== undefined) out.maxFixAttempts = maxFixAttempts;
   if (branch !== undefined) out.branch = branch;
   return out;

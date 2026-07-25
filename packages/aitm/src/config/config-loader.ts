@@ -1,7 +1,7 @@
 // docs/config.md §"Resolution order", docs/auth.md §"LLM provider"
 // Only module allowed to read ~/.aitm.json and .ai-task-master/config.json.
 // Run settings merge low→high: defaults < global < project < env < CLI flags. `env` here is the
-// bounded AITM_* set resolveEnvOverrides() reads (maxPrs/maxSessions/maxCiFixAttempts/concurrency/
+// bounded AITM_* set resolveEnvOverrides() reads (maxPrs/maxSessions/maxCiFixAttempts/concurrency/subagents/
 // autoMerge/prPerTask/selfReview/mergeMethod/logLevel) — CI wrappers that can't/won't write
 // .ai-task-master/config.json tune these without one. Everything else stays project/global-only.
 // Provider credentials (openrouterApiKey, baseURL) are USER-OWNED ONLY: they resolve
@@ -18,6 +18,7 @@ import process from 'node:process';
 import type { CommandRule } from '@developerz.ai/ai-claude-compat';
 import { ZodError, z } from 'zod';
 import { type Capability, DEFAULT_MODELS } from '../domain/model.ts';
+import { SUBAGENT_LIMIT_DEFAULT } from '../domain/subagent-limit.ts';
 import { atomicWrite } from '../fs/atomic-write.ts';
 import { registerSecretValues } from '../logger/secret-registry.ts';
 import type { McpServers } from '../mcp/schema.ts';
@@ -50,6 +51,7 @@ type EnvOverrides = {
   maxSessions: number | null | undefined;
   maxCiFixAttempts: number | undefined;
   concurrency: number | undefined;
+  subagentLimit: number | undefined;
   autoMerge: boolean | undefined;
   prPerTask: boolean | undefined;
   selfReview: boolean | undefined;
@@ -180,7 +182,7 @@ const DEFAULTS = {
   generateSpecialists: true,
   logLevel: 'info' as const,
   concurrency: 1,
-  editorConcurrency: 4,
+  subagentLimit: SUBAGENT_LIMIT_DEFAULT,
   allowForcePush: true,
   mcpDeferToolsOver: DEFAULT_MCP_DEFER_TOOLS_OVER,
   // Streaming is default-OFF (slice 07): gated behind config until burn-in.
@@ -483,14 +485,14 @@ export class ConfigLoader {
         global?.concurrency,
         DEFAULTS.concurrency,
       ),
-      // editorConcurrency is not exposed via CliOverrides or env — project/global only.
-      editorConcurrency: track(
-        'editorConcurrency',
-        undefined,
-        undefined,
-        project?.editorConcurrency,
-        global?.editorConcurrency,
-        DEFAULTS.editorConcurrency,
+      // The one fan-out knob, overridable per run: `--subagents N` / AITM_SUBAGENTS.
+      subagentLimit: track(
+        'subagentLimit',
+        cliOverrides.subagentLimit,
+        envOverrides.subagentLimit,
+        project?.subagentLimit,
+        global?.subagentLimit,
+        DEFAULTS.subagentLimit,
       ),
       // allowForcePush is not exposed via CliOverrides or env — project/global only.
       allowForcePush: track(
@@ -855,7 +857,7 @@ export class ConfigLoader {
   // `.ai-task-master/config.json` (findings/03-cli-config.md: "only OPENROUTER_API_KEY/
   // OPENROUTER_BASE_URL exist as env overrides"). Deliberately NOT exhaustive: CLI-only settings
   // (adminMerge, allowDirty) stay CLI-only on purpose (see their track() call sites), and per-repo
-  // toggles (resolveConflicts, generateSpecialists, editorConcurrency, …) have no per-run env knob.
+  // toggles (resolveConflicts, generateSpecialists, allowForcePush, …) have no per-run env knob.
   // Each var is validated the same way its config-file counterpart is; an unset or blank-string env
   // var means "no override" (falls through to project/global/default), never a parse error.
   private resolveEnvOverrides(): EnvOverrides {
@@ -865,6 +867,7 @@ export class ConfigLoader {
       maxSessions: parseEnvMaxSessions(this.env.AITM_MAX_SESSIONS),
       maxCiFixAttempts: parseEnvInt('AITM_MAX_CI_FIX_ATTEMPTS', this.env.AITM_MAX_CI_FIX_ATTEMPTS),
       concurrency: parseEnvInt('AITM_CONCURRENCY', this.env.AITM_CONCURRENCY),
+      subagentLimit: parseEnvInt('AITM_SUBAGENTS', this.env.AITM_SUBAGENTS),
       autoMerge: parseEnvBool('AITM_AUTO_MERGE', this.env.AITM_AUTO_MERGE),
       prPerTask: parseEnvBool('AITM_PR_PER_TASK', this.env.AITM_PR_PER_TASK),
       selfReview: parseEnvBool('AITM_SELF_REVIEW', this.env.AITM_SELF_REVIEW),

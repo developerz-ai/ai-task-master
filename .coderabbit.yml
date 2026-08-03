@@ -34,7 +34,11 @@ reviews:
     - '!**/docs/vendor/**'
     - '!**/dist/**'
     - '!**/node_modules/**'
+    # Lockfiles stay out of review on purpose: a resync is thousands of generated
+    # lines and the reviewable claim is the enumeration in the PR body, not the diff.
+    # `.lockb` is the format this repo left behind; `bun.lock` is the one it uses.
     - '!**/*.lockb'
+    - '!**/bun.lock'
 
   path_instructions:
     - path: '**/src/**/*.ts'

@@ -5,6 +5,7 @@ import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { Task } from '../domain/task.ts';
+import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { render } from './prompts/templates.ts';
 import {
@@ -26,14 +27,6 @@ import {
   type WriteFileInput,
   type WriteFileOutput,
 } from './worker.ts';
-
-function emptyUsage() {
-  return {
-    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: 1, text: 1, reasoning: undefined },
-    totalTokens: 2,
-  };
-}
 
 function makeWorkerModel(manifest: FileManifest, summaries: string[] = []): MockLanguageModelV3 {
   let i = 0;

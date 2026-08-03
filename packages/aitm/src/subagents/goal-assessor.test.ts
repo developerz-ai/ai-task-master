@@ -5,20 +5,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import {
   createGoalAssessorAgent,
   GOAL_ASSESSOR_SYSTEM_PREFIX,
   runGoalAssessor,
 } from './goal-assessor.ts';
-
-function emptyUsage() {
-  return {
-    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: 1, text: 1, reasoning: undefined },
-    totalTokens: 2,
-  };
-}
 
 let callId = 0;
 

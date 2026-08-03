@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import { textResult } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
@@ -25,12 +26,7 @@ function modelReturning(text: string): { model: MockLanguageModelV3; prompt: () 
           if (part.type === 'text') seen.push(part.text);
         }
       }
-      return {
-        content: [{ type: 'text', text }],
-        finishReason: 'stop',
-        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-        warnings: [],
-      };
+      return textResult(text);
     },
   });
   return { model, prompt: () => seen.join('\n') };

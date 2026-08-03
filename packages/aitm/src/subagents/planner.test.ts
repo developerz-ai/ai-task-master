@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { Plan } from '../plan/schema.ts';
+import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { createPlannerAgent, PLANNER_SYSTEM_PREFIX, runPlanner } from './planner.ts';
 
@@ -29,14 +30,6 @@ function planSubmitModel(value: unknown): MockLanguageModelV3 {
 
 function planJsonModel(plan: Plan): MockLanguageModelV3 {
   return planSubmitModel(plan);
-}
-
-function emptyUsage() {
-  return {
-    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: 1, text: 1, reasoning: undefined },
-    totalTokens: 2,
-  };
 }
 
 function basicPlan(groupCount: number): Plan {

@@ -31,18 +31,18 @@ async function tempHome(): Promise<{ path: string; cleanup: () => Promise<void> 
   return { path, cleanup: () => rm(path, { recursive: true, force: true }) };
 }
 
-function okAuth(): StartCtx['authStatus'] {
+function okAuth(): NonNullable<StartCtx['authStatus']> {
   return async () => ({ ok: true, scopes: ['repo'] });
 }
 
-function badAuth(): StartCtx['authStatus'] {
+function badAuth(): NonNullable<StartCtx['authStatus']> {
   return async () => ({ ok: false, scopes: [] });
 }
 
 const STUB_DIGEST = '# Coding Style\n\nstub digest\n';
 
 // Stub the coding-style seam so unit tests never make a real LLM call via the default distiller.
-function okStyle(): StartCtx['resolveStyle'] {
+function okStyle(): NonNullable<StartCtx['resolveStyle']> {
   return async () => STUB_DIGEST;
 }
 

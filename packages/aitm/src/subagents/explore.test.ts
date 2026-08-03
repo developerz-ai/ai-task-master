@@ -4,15 +4,8 @@ import { AgentToolConstructionError } from '@developerz.ai/ai-claude-compat';
 import { type ToolSet, tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
+import { emptyUsage } from '../testing/model-fixtures.ts';
 import { buildExploreTool, EXPLORE_ALLOWED_TOOLS, EXPLORE_TOOL_NAME } from './explore.ts';
-
-function emptyUsage() {
-  return {
-    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: 1, text: 1, reasoning: undefined },
-    totalTokens: 2,
-  };
-}
 
 function textModel(text: string): MockLanguageModelV3 {
   return new MockLanguageModelV3({

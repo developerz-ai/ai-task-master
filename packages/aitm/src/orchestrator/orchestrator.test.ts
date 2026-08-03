@@ -8,6 +8,7 @@ import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
 import { MANIFEST_FIELD_MAX } from '../subagents/worker.ts';
+import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
@@ -24,14 +25,6 @@ import { assertPrBodySections, COMPOSE_PR_MAX_RETRIES } from './pr-body.ts';
 // A PR body that satisfies the section contract (assertPrBodySections), reused by openPr tests.
 const COMPLIANT_BODY =
   '## Summary\nDid the thing.\n\n## Changes\n- a.ts: added\n\n## Testing\n- ran tests\n\n## Evidence\n- `bun test` exited 0';
-
-function emptyUsage() {
-  return {
-    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: 1, text: 1, reasoning: undefined },
-    totalTokens: 2,
-  };
-}
 
 function modelEmitting(text: string | (() => string)): MockLanguageModelV3 {
   const fn = typeof text === 'function' ? text : (): string => text;

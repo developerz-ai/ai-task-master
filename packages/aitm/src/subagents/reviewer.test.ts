@@ -4,6 +4,7 @@ import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
+import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import type { GithubToolInput, GithubToolOutput } from '../tools/github-thread-tool.ts';
 import { render } from './prompts/templates.ts';
@@ -22,14 +23,6 @@ import type {
   WriteFileInput,
   WriteFileOutput,
 } from './worker.ts';
-
-function emptyUsage() {
-  return {
-    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: 1, text: 1, reasoning: undefined },
-    totalTokens: 2,
-  };
-}
 
 // One agent.generate per thread; the agent delivers each resolution via the submit tool-call.
 function makeReviewerModel(outputs: ThreadResolutionOutput[]): MockLanguageModelV3 {

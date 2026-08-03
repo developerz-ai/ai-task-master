@@ -876,7 +876,11 @@ async function withRealTimers(fn: () => Promise<void>): Promise<void> {
 function countRemovals(signal: AbortSignal): () => number {
   let removals = 0;
   const real = signal.removeEventListener.bind(signal);
-  signal.removeEventListener = (type, listener, options): void => {
+  signal.removeEventListener = (
+    type: Parameters<typeof real>[0],
+    listener: Parameters<typeof real>[1],
+    options?: Parameters<typeof real>[2],
+  ): void => {
     removals += 1;
     real(type, listener, options);
   };

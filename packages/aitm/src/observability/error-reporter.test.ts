@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { ErrorEvent as SentryEvent } from '@sentry/node';
 import { clearRegisteredSecrets, registerSecretValues } from '../logger/secret-registry.ts';
 import { dsnFromEnv, initErrorReporter, type SentrySdk, scrubEvent } from './error-reporter.ts';
+
+// `ErrorEvent` carries a `type: undefined` discriminator that separates it from a transaction
+// event. These tests each assert redaction of ONE field, so they state that field and nothing else;
+// this stamps the discriminator so the literal is the real type rather than a near-miss.
+function errorEvent(over: Partial<SentryEvent>): SentryEvent {
+  return { type: undefined, ...over };
+}
 
 test('dsnFromEnv: AITM_SENTRY_DSN takes precedence over SENTRY_DSN', () => {
   assert.equal(
@@ -56,7 +64,7 @@ test('initErrorReporter: registers beforeSend, which scrubs the event through sc
   let capturedBeforeSend: ((event: SentryEvent, hint: unknown) => unknown) | undefined;
   const sentry: SentrySdk = {
     init: (options) => {
-      capturedBeforeSend = options.beforeSend as typeof capturedBeforeSend;
+      capturedBeforeSend = options?.beforeSend as typeof capturedBeforeSend;
     },
     captureException: () => undefined,
     close: async () => true,
@@ -175,32 +183,41 @@ test('initErrorReporter: a rejecting loadSentry (SDK not installed) degrades to 
 });
 
 test('scrubEvent: redacts secret-shaped substrings in the top-level message', () => {
-  const event = scrubEvent({ message: 'request failed: Bearer sk-abcdef1234567890' });
+  const event = scrubEvent(errorEvent({ message: 'request failed: Bearer sk-abcdef1234567890' }));
   assert.equal(event.message, 'request failed: Bearer [REDACTED]');
 });
 
 test('scrubEvent: redacts secrets embedded in exception values', () => {
-  const event = scrubEvent({
-    exception: {
-      values: [
-        { type: 'Error', value: 'auth failed for token ghp_1234567890abcdefghijklmnopqrstuvwxyz' },
-      ],
-    },
-  });
+  const event = scrubEvent(
+    errorEvent({
+      exception: {
+        values: [
+          {
+            type: 'Error',
+            value: 'auth failed for token ghp_1234567890abcdefghijklmnopqrstuvwxyz',
+          },
+        ],
+      },
+    }),
+  );
   assert.equal(event.exception?.values?.[0]?.value, 'auth failed for token ghp_[REDACTED]');
 });
 
 test('scrubEvent: redacts token-bearing request URLs', () => {
-  const event = scrubEvent({
-    request: { url: 'https://api.example.com/v1?api_key=abcd1234efgh5678' },
-  });
+  const event = scrubEvent(
+    errorEvent({
+      request: { url: 'https://api.example.com/v1?api_key=abcd1234efgh5678' },
+    }),
+  );
   assert.equal(event.request?.url, 'https://api.example.com/v1?api_key=[REDACTED]');
 });
 
 test('scrubEvent: redacts secrets embedded in breadcrumb messages', () => {
-  const event = scrubEvent({
-    breadcrumbs: [{ message: 'cloning https://user:hunter2@github.com/org/repo.git' }],
-  });
+  const event = scrubEvent(
+    errorEvent({
+      breadcrumbs: [{ message: 'cloning https://user:hunter2@github.com/org/repo.git' }],
+    }),
+  );
   assert.equal(
     event.breadcrumbs?.[0]?.message,
     'cloning https://[REDACTED]github.com/org/repo.git',
@@ -208,53 +225,57 @@ test('scrubEvent: redacts secrets embedded in breadcrumb messages', () => {
 });
 
 test('scrubEvent: leaves events with no message/exception/request/breadcrumbs untouched', () => {
-  const event = scrubEvent({ level: 'error' });
-  assert.deepEqual(event, { level: 'error' });
+  const event = scrubEvent(errorEvent({ level: 'error' }));
+  assert.deepEqual(event, { type: undefined, level: 'error' });
 });
 
 test('scrubEvent: redacts stack-frame locals by key name and scrubs the rest', () => {
-  const event = scrubEvent({
-    exception: {
-      values: [
-        {
-          type: 'Error',
-          stacktrace: {
-            frames: [
-              {
-                function: 'fetchPlan',
-                vars: { apiKey: 'opaque-custom-endpoint-key', header: 'Bearer sk-abc123def456' },
-              },
-            ],
+  const event = scrubEvent(
+    errorEvent({
+      exception: {
+        values: [
+          {
+            type: 'Error',
+            stacktrace: {
+              frames: [
+                {
+                  function: 'fetchPlan',
+                  vars: { apiKey: 'opaque-custom-endpoint-key', header: 'Bearer sk-abc123def456' },
+                },
+              ],
+            },
           },
-        },
-      ],
-    },
-  });
+        ],
+      },
+    }),
+  );
   const vars = event.exception?.values?.[0]?.stacktrace?.frames?.[0]?.vars;
   assert.equal(vars?.apiKey, '[REDACTED]');
   assert.equal(vars?.header, 'Bearer [REDACTED]');
 });
 
 test('scrubEvent: scrubs stack-frame paths and source context', () => {
-  const event = scrubEvent({
-    exception: {
-      values: [
-        {
-          type: 'Error',
-          stacktrace: {
-            frames: [
-              {
-                filename: 'https://cdn.example.com/app.js?token=abcd1234efgh5678',
-                abs_path: 'https://user:hunter2@cdn.example.com/app.js',
-                context_line: 'const auth = "Bearer sk-abcdef1234567890";',
-                pre_context: ['fetch("https://api.example.com?api_key=abcd1234efgh5678")'],
-              },
-            ],
+  const event = scrubEvent(
+    errorEvent({
+      exception: {
+        values: [
+          {
+            type: 'Error',
+            stacktrace: {
+              frames: [
+                {
+                  filename: 'https://cdn.example.com/app.js?token=abcd1234efgh5678',
+                  abs_path: 'https://user:hunter2@cdn.example.com/app.js',
+                  context_line: 'const auth = "Bearer sk-abcdef1234567890";',
+                  pre_context: ['fetch("https://api.example.com?api_key=abcd1234efgh5678")'],
+                },
+              ],
+            },
           },
-        },
-      ],
-    },
-  });
+        ],
+      },
+    }),
+  );
   const frame = event.exception?.values?.[0]?.stacktrace?.frames?.[0];
   assert.equal(frame?.filename, 'https://cdn.example.com/app.js?token=[REDACTED]');
   assert.equal(frame?.abs_path, 'https://[REDACTED]cdn.example.com/app.js');
@@ -263,18 +284,20 @@ test('scrubEvent: scrubs stack-frame paths and source context', () => {
 });
 
 test('scrubEvent: walks breadcrumb data', () => {
-  const event = scrubEvent({
-    breadcrumbs: [
-      {
-        category: 'http',
-        data: {
-          url: 'https://api.example.com?access_token=abcd1234efgh5678',
-          authorization: 'Basic ZGVtbzpkZW1v',
-          status: 401,
+  const event = scrubEvent(
+    errorEvent({
+      breadcrumbs: [
+        {
+          category: 'http',
+          data: {
+            url: 'https://api.example.com?access_token=abcd1234efgh5678',
+            authorization: 'Basic ZGVtbzpkZW1v',
+            status: 401,
+          },
         },
-      },
-    ],
-  });
+      ],
+    }),
+  );
   assert.deepEqual(event.breadcrumbs?.[0]?.data, {
     url: 'https://api.example.com?access_token=[REDACTED]',
     authorization: '[REDACTED]',
@@ -283,15 +306,17 @@ test('scrubEvent: walks breadcrumb data', () => {
 });
 
 test('scrubEvent: redacts extra, tags, contexts and user', () => {
-  const event = scrubEvent({
-    extra: {
-      command: 'gh auth login --with-token ghp_1234567890abcdefghijklmnopqrstuvwxyz',
-      openrouterApiKey: 'opaque-custom-endpoint-key',
-    },
-    tags: { deployKey: 'opaque', env: 'prod' },
-    contexts: { auth: { token: 'opaque', scheme: 'bearer' } },
-    user: { id: 'u1', session_token: 'opaque' },
-  });
+  const event = scrubEvent(
+    errorEvent({
+      extra: {
+        command: 'gh auth login --with-token ghp_1234567890abcdefghijklmnopqrstuvwxyz',
+        openrouterApiKey: 'opaque-custom-endpoint-key',
+      },
+      tags: { deployKey: 'opaque', env: 'prod' },
+      contexts: { auth: { token: 'opaque', scheme: 'bearer' } },
+      user: { id: 'u1', session_token: 'opaque' },
+    }),
+  );
   assert.equal(event.extra?.command, 'gh auth login --with-token ghp_[REDACTED]');
   assert.equal(event.extra?.openrouterApiKey, '[REDACTED]');
   assert.deepEqual(event.tags, { deployKey: '[REDACTED]', env: 'prod' });
@@ -300,26 +325,30 @@ test('scrubEvent: redacts extra, tags, contexts and user', () => {
 });
 
 test('scrubEvent: scrubs logentry message and params', () => {
-  const event = scrubEvent({
-    logentry: { message: 'auth failed for %s', params: ['glpat-1234567890abcdefghij'] },
-  });
+  const event = scrubEvent(
+    errorEvent({
+      logentry: { message: 'auth failed for %s', params: ['glpat-1234567890abcdefghij'] },
+    }),
+  );
   assert.equal(event.logentry?.message, 'auth failed for %s');
   assert.deepEqual(event.logentry?.params, ['glpat-[REDACTED]']);
 });
 
 test('scrubEvent: redacts request headers, cookies, query params and body', () => {
-  const event = scrubEvent({
-    request: {
-      headers: {
-        Authorization: 'Bearer sk-abcdef1234567890',
-        'x-api-key': 'opaque-custom-endpoint-key',
-        'user-agent': 'aitm/1',
+  const event = scrubEvent(
+    errorEvent({
+      request: {
+        headers: {
+          Authorization: 'Bearer sk-abcdef1234567890',
+          'x-api-key': 'opaque-custom-endpoint-key',
+          'user-agent': 'aitm/1',
+        },
+        cookies: { csrf_token: 'opaque', theme: 'dark' },
+        query_string: { api_key: 'opaque' },
+        data: { note: 'Bearer sk-abcdef1234567890' },
       },
-      cookies: { csrf_token: 'opaque', theme: 'dark' },
-      query_string: { api_key: 'opaque' },
-      data: { note: 'Bearer sk-abcdef1234567890' },
-    },
-  });
+    }),
+  );
   assert.deepEqual(event.request?.headers, {
     Authorization: '[REDACTED]',
     'x-api-key': '[REDACTED]',
@@ -337,11 +366,13 @@ test('scrubEvent: redacts a registered literal key under innocuous field names',
   let event: ReturnType<typeof scrubEvent>;
   try {
     registerSecretValues([key]);
-    event = scrubEvent({
-      message: `401 from https://llm.internal/v1 using ${key}`,
-      extra: { note: `retried with ${key}`, endpoint: `https://llm.internal/v1#${key}` },
-      breadcrumbs: [{ message: `configured key ${key}` }],
-    });
+    event = scrubEvent(
+      errorEvent({
+        message: `401 from https://llm.internal/v1 using ${key}`,
+        extra: { note: `retried with ${key}`, endpoint: `https://llm.internal/v1#${key}` },
+        breadcrumbs: [{ message: `configured key ${key}` }],
+      }),
+    );
   } finally {
     clearRegisteredSecrets();
   }
@@ -352,7 +383,7 @@ test('scrubEvent: redacts a registered literal key under innocuous field names',
 });
 
 test('scrubEvent: returns the same event object (Sentry beforeSend contract)', () => {
-  const event = { message: 'plain' };
+  const event = errorEvent({ message: 'plain' });
   assert.equal(scrubEvent(event), event);
   assert.equal(event.message, 'plain');
 });
@@ -360,7 +391,7 @@ test('scrubEvent: returns the same event object (Sentry beforeSend contract)', (
 test('scrubEvent: a cyclic payload terminates and is still scrubbed', () => {
   const cyclic: Record<string, unknown> = { note: 'Bearer sk-abcdef1234567890' };
   cyclic.self = cyclic;
-  const event = scrubEvent({ extra: { cyclic } });
+  const event = scrubEvent(errorEvent({ extra: { cyclic } }));
   assert.equal(cyclic.note, 'Bearer [REDACTED]');
   assert.equal(event.extra?.cyclic, cyclic);
 });

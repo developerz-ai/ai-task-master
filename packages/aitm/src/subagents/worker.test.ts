@@ -1,39 +1,35 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type {
+  BashInput,
+  BashOutput,
+  ReadFileInput,
+  ReadFileOutput,
+  WriteFileInput,
+  WriteFileOutput,
+} from '@developerz.ai/ai-claude-compat';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { Task } from '../domain/task.ts';
+import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
+import { workerTools } from '../testing/subagent-tools.ts';
 import { render } from './prompts/templates.ts';
 import {
-  type BashInput,
-  type BashOutput,
   createWorkerAgent,
   type FileManifest,
   type FileManifestEntry,
   MANIFEST_SURVEY_BUDGET,
   parsePorcelainZ,
-  type ReadFileInput,
-  type ReadFileOutput,
   readOnlyStreak,
   runWorker,
   surveyBudgetReminder,
   WORKER_SYSTEM_PREFIX,
   type WorkerInput,
   type WorkerTools,
-  type WriteFileInput,
-  type WriteFileOutput,
 } from './worker.ts';
-
-function emptyUsage() {
-  return {
-    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: 1, text: 1, reasoning: undefined },
-    totalTokens: 2,
-  };
-}
 
 function makeWorkerModel(manifest: FileManifest, summaries: string[] = []): MockLanguageModelV3 {
   let i = 0;
@@ -107,7 +103,7 @@ function makeTools(
   const calls: ToolCallLog = { reads: [], writes: [], bashes: [], statuses: [] };
   const statusQueries = new Map<string, number>();
   let bareStatusCount = 0;
-  const tools: WorkerTools = {
+  const tools: WorkerTools = workerTools({
     readFile: tool<ReadFileInput, ReadFileOutput>({
       description: 'read a file from the checkout',
       inputSchema: z.object({ path: z.string() }),
@@ -126,7 +122,12 @@ function makeTools(
     }),
     bash: tool<BashInput, BashOutput>({
       description: 'run a bash command in the checkout',
-      inputSchema: z.object({ command: z.string() }),
+      inputSchema: z.object({
+        command: z.string(),
+        description: z.string(),
+        timeoutMs: z.number().optional(),
+        run_in_background: z.boolean().optional(),
+      }),
       execute: async (input) => {
         if (input.command.includes('status --porcelain')) {
           const path = /-- '(.*)'\s*$/.exec(input.command)?.[1] ?? '';
@@ -170,7 +171,7 @@ function makeTools(
         };
       },
     }),
-  };
+  });
   return { tools, calls };
 }
 
@@ -398,7 +399,6 @@ test("the Coordinator's rendered prompt carries the compaction continuation cont
   // invariant survives wherever the sentence lives.
   const rendered = render('role-prompt', {
     roleGuidance: WORKER_SYSTEM_PREFIX,
-    maxSteps: 30,
     style: '',
     env: '<env>\n</env>',
   });
@@ -416,7 +416,20 @@ test('createWorkerAgent builds an agent that exposes the injected tools', () => 
   });
   assert.ok(agent);
   // The factory registers the injected tools plus the terminal submit tool.
-  assert.deepEqual(Object.keys(agent.tools).sort(), ['bash', 'readFile', 'submit', 'writeFile']);
+  assert.deepEqual(Object.keys(agent.tools).sort(), [
+    'bash',
+    'datetime',
+    'editFile',
+    'glob',
+    'grep',
+    'multiBash',
+    'multiEdit',
+    'readFile',
+    'submit',
+    'webFetch',
+    'webSearch',
+    'writeFile',
+  ]);
   assert.strictEqual(agent.tools.readFile, tools.readFile);
 });
 
@@ -540,7 +553,12 @@ test('runWorker: creates the group branch before the editor fanout writes (branc
   const order: string[] = [];
   const bash = tool<BashInput, BashOutput>({
     description: 'run a bash command in the checkout',
-    inputSchema: z.object({ command: z.string() }),
+    inputSchema: z.object({
+      command: z.string(),
+      description: z.string(),
+      timeoutMs: z.number().optional(),
+      run_in_background: z.boolean().optional(),
+    }),
     execute: async (input) => {
       if (input.command.includes('status --porcelain')) {
         const path = /-- '(.*)'\s*$/.exec(input.command)?.[1] ?? '';
@@ -1478,7 +1496,9 @@ function makeVerifyTools(
     description: 'run a bash command in the checkout',
     inputSchema: z.object({
       command: z.string(),
+      description: z.string(),
       timeoutMs: z.number().int().positive().optional(),
+      run_in_background: z.boolean().optional(),
     }),
     execute: async (input) => {
       // Editors in the verify path are simulated as having written their file, so the per-file

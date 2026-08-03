@@ -40,6 +40,8 @@ export function fixtureState(overrides: Partial<RunState> = {}): RunState {
           calls: 1,
           costUsd: 0.001,
           cacheDiscountUsd: null,
+          latencyMsTotal: 0,
+          retries: 0,
         },
         worker: {
           inputTokens: 400,
@@ -49,6 +51,8 @@ export function fixtureState(overrides: Partial<RunState> = {}): RunState {
           calls: 3,
           costUsd: 0.004,
           cacheDiscountUsd: null,
+          latencyMsTotal: 0,
+          retries: 0,
         },
       },
       overall: {
@@ -59,6 +63,8 @@ export function fixtureState(overrides: Partial<RunState> = {}): RunState {
         calls: 4,
         costUsd: 0.005,
         cacheDiscountUsd: null,
+        latencyMsTotal: 0,
+        retries: 0,
       },
     },
     ...overrides,

@@ -2,18 +2,24 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../config/defaults.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
 import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import { CiFailed } from '../github/errors.ts';
+import type { ReviewThread } from '../github/schema.ts';
 import type { RunState } from '../state/schema.ts';
+import type { WorkerResult } from '../subagents/worker.ts';
+import { workerHandle } from '../testing/subagent-tools.ts';
 import { DirtyWorkingTree } from '../workspace/dirty-tree.ts';
 import {
   alreadyCommittedDelivery,
   type BudgetStatus,
+  type CheckoutHome,
   mergeDeliveries,
   noChangesDelivery,
   recoveredDelivery,
   WorkLoop,
   type WorkLoopGithub,
+  type WorkLoopGraph,
   type WorkLoopOrchestrator,
   type WorkLoopState,
 } from './work-loop.ts';
@@ -530,7 +536,7 @@ test('group mode (default): a multi-task group opens exactly one PR after the fi
 // A Worker success result. The `ok` variant also carries a `handle` the WorkLoop never reads on this
 // path, so — like makeOrchestrator's default stub — a cast keeps the fixture terse.
 function okWorker(): WorkerResult {
-  return { kind: 'ok', delivery: delivery() } as WorkerResult;
+  return { kind: 'ok', delivery: delivery(), handle: workerHandle() } as WorkerResult;
 }
 
 test('group mode: an earlier task commits then a later one blocks → partial PR merges, run is non-success', async () => {
@@ -678,8 +684,8 @@ test("multi-task group: openPr receives a delivery merging every task's changes"
   const { orchestrator, calls } = makeOrchestrator({
     prNumber: 7,
     workerResults: [
-      { kind: 'ok', delivery: da },
-      { kind: 'ok', delivery: db },
+      { kind: 'ok', delivery: da, handle: workerHandle() },
+      { kind: 'ok', delivery: db, handle: workerHandle() },
     ],
   });
   const { state } = makeState([twoTaskGroup()]);
@@ -698,7 +704,7 @@ test('multi-task group: a later task blocked after earlier commits → PR opens 
   const { orchestrator, calls } = makeOrchestrator({
     prNumber: 7,
     workerResults: [
-      { kind: 'ok', delivery: delivery() },
+      { kind: 'ok', delivery: delivery(), handle: workerHandle() },
       { kind: 'blocked', reason: 'empty file manifest' },
     ],
   });
@@ -1136,7 +1142,7 @@ test('runGroup: a dirty working tree aborts the run instead of blocking the grou
 test('openPr resolving (composition issues absorbed by composePr fallback) never blocks the group', async () => {
   const { state, updates } = makeState([group('mu')]);
   const orchestrator: WorkLoopOrchestrator = {
-    runWorker: async () => ({ kind: 'ok', delivery: delivery() }),
+    runWorker: async () => ({ kind: 'ok', delivery: delivery(), handle: workerHandle() }),
     finalizeCommit: async () => 'sha',
     // Stands in for composePr's fallback path: whatever went wrong composing the title/body,
     // openPr is total and still resolves with a valid PR.
@@ -1155,7 +1161,7 @@ test('openPr resolving (composition issues absorbed by composePr fallback) never
 test('openPr rejecting with a genuine push/gh failure still blocks the group', async () => {
   const { state, updates } = makeState([group('nu')]);
   const orchestrator: WorkLoopOrchestrator = {
-    runWorker: async () => ({ kind: 'ok', delivery: delivery() }),
+    runWorker: async () => ({ kind: 'ok', delivery: delivery(), handle: workerHandle() }),
     finalizeCommit: async () => 'sha',
     openPr: async () => {
       throw new Error('failed to push branch aitm/nu: remote rejected');

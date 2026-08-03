@@ -58,6 +58,7 @@ function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {
     pr: 7,
     status: 'in-progress',
     stage: 'ci-failed',
+    reviewGraceApplied: false,
     ...overrides,
   };
 }
@@ -137,22 +138,22 @@ function submitManifestModel(manifest: FileManifest): MockLanguageModelV3 {
 }
 
 test('runFixSession: the fix Worker carries the #106 context block, mirroring the main-loop Worker (issue #141)', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   const result = await runFixSession(
     baseInput({
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
     }),
   );
   assert.equal(result.kind, 'fixed');
-  assert.ok(captured, 'fix worker was invoked');
+  assert.ok(captured[0], 'fix worker was invoked');
   // The advisory date context block (issue #106) is threaded into the fix Worker input. Asserted
   // structurally — its own reminder frame + ISO-date shape — so the check can't flake at UTC midnight.
-  const ctx = (captured as WorkerInput).contextBlock ?? '';
+  const ctx = (captured[0] as WorkerInput).contextBlock ?? '';
   assert.match(ctx, /system-reminder/i, 'fix Worker gets the #106 advisory context block');
   assert.match(ctx, /currentDate/, 'the context block carries the date label');
   assert.match(ctx, /\d{4}-\d{2}-\d{2}/, 'the context block carries an ISO date');
@@ -175,7 +176,7 @@ test('runFixSession: CI failure → saves logs+comments to disk, fix prompt refe
       threads,
     });
     const { runCmd, commands } = recordingRunCmd();
-    let captured: WorkerInput | null = null;
+    const captured: WorkerInput[] = [];
 
     const result = await runFixSession(
       baseInput({
@@ -184,7 +185,7 @@ test('runFixSession: CI failure → saves logs+comments to disk, fix prompt refe
         runCmd,
         subagents: baseSubagents({
           runWorkerOverride: async (input) => {
-            captured = input;
+            captured.push(input);
             return okWorker();
           },
         }),
@@ -207,8 +208,8 @@ test('runFixSession: CI failure → saves logs+comments to disk, fix prompt refe
     );
 
     // The Worker's fix task points at the exact downloaded dirs.
-    assert.ok(captured, 'worker was invoked');
-    const task = (captured as WorkerInput).task;
+    assert.ok(captured[0], 'worker was invoked');
+    const task = (captured[0] as WorkerInput).task;
     assert.ok(task);
     assert.match(task.text, /debugging.*pr.*7.*ci/s);
     assert.match(task.text, /debugging.*pr.*7.*comments/s);
@@ -331,7 +332,7 @@ test('runFixSession: threads timeout into the real CI-fix Worker → a stalled s
 });
 
 test('runFixSession: threads verifyCommand into the fix Worker input (issue #122)', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   const result = await runFixSession(
     baseInput({
       runCmd: recordingRunCmd().runCmd,
@@ -339,41 +340,41 @@ test('runFixSession: threads verifyCommand into the fix Worker input (issue #122
         formatCommand: 'bun run lint:fix',
         verifyCommand: 'bun test',
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
     }),
   );
   assert.equal(result.kind, 'fixed');
-  assert.ok(captured, 'worker was invoked');
-  assert.equal((captured as WorkerInput).verifyCommand, 'bun test');
-  assert.equal((captured as WorkerInput).formatCommand, 'bun run lint:fix');
+  assert.ok(captured[0], 'worker was invoked');
+  assert.equal((captured[0] as WorkerInput).verifyCommand, 'bun test');
+  assert.equal((captured[0] as WorkerInput).formatCommand, 'bun run lint:fix');
 });
 
 test('runFixSession: threads the run signal into the fix Worker input (editor fanout cancel)', async () => {
   // The agent already gets this signal via SubagentInit; the editor fanout is reachable only
   // through WorkerInput.signal, so an abort must land on both or the leaves outlive the run.
   const controller = new AbortController();
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   await runFixSession(
     baseInput({
       runCmd: recordingRunCmd().runCmd,
       signal: controller.signal,
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
     }),
   );
-  assert.ok(captured, 'fix Worker was invoked');
-  assert.equal((captured as WorkerInput).signal, controller.signal);
+  assert.ok(captured[0], 'fix Worker was invoked');
+  assert.equal((captured[0] as WorkerInput).signal, controller.signal);
 });
 
 test('runFixSession: threads the live rolling context into the fix Worker input (issue #123)', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   const rolling =
     'PR #1 — Auth (group auth, branch aitm/auth)\n- create src/user.ts: adds User model';
   const result = await runFixSession(
@@ -382,7 +383,7 @@ test('runFixSession: threads the live rolling context into the fix Worker input 
       subagents: baseSubagents({
         rollingContext: rolling,
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
@@ -390,30 +391,30 @@ test('runFixSession: threads the live rolling context into the fix Worker input 
   );
   assert.equal(result.kind, 'fixed');
   assert.equal(
-    (captured as WorkerInput).rollingContext,
+    (captured[0] as WorkerInput).rollingContext,
     rolling,
     'fix Worker sees what earlier groups shipped',
   );
 });
 
 test('runFixSession: an unset rolling context falls back to empty (prior behavior)', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   await runFixSession(
     baseInput({
       runCmd: recordingRunCmd().runCmd,
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
     }),
   );
-  assert.equal((captured as WorkerInput).rollingContext, '', 'defaults to empty when omitted');
+  assert.equal((captured[0] as WorkerInput).rollingContext, '', 'defaults to empty when omitted');
 });
 
 test('runFixSession: threads a prior handle into the fix Worker and returns the updated handle (issue #107)', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   const priorHandle = stubHandle('PRIOR-CONVERSATION');
   const nextHandle = stubHandle('AFTER-THIS-PASS');
   const result = await runFixSession(
@@ -422,7 +423,7 @@ test('runFixSession: threads a prior handle into the fix Worker and returns the 
       priorHandle,
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker(nextHandle);
         },
       }),
@@ -437,20 +438,20 @@ test('runFixSession: threads a prior handle into the fix Worker and returns the 
     );
   }
   assert.strictEqual(
-    (captured as WorkerInput | null)?.priorHandle,
+    (captured[0] as WorkerInput | null)?.priorHandle,
     priorHandle,
     'the prior handle was continued by the fix Worker',
   );
 });
 
 test('runFixSession: without a prior handle the fix Worker cold-starts (issue #107)', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   const result = await runFixSession(
     baseInput({
       runCmd: recordingRunCmd().runCmd,
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
@@ -458,7 +459,7 @@ test('runFixSession: without a prior handle the fix Worker cold-starts (issue #1
   );
   assert.equal(result.kind, 'fixed');
   assert.equal(
-    (captured as WorkerInput | null)?.priorHandle,
+    (captured[0] as WorkerInput | null)?.priorHandle,
     undefined,
     'no prior handle threaded',
   );

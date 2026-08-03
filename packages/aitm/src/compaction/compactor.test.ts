@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { StepTimeoutError } from '@developerz.ai/ai-claude-compat';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
+import { textResult } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import {
   Compactor,
@@ -54,12 +55,7 @@ function summarizerReturning(text: string): {
           if (part.type === 'text') prompts.push(part.text);
         }
       }
-      return {
-        content: [{ type: 'text', text }],
-        finishReason: 'stop',
-        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-        warnings: [],
-      };
+      return textResult(text);
     },
   });
   return { model, callPrompts: () => prompts };

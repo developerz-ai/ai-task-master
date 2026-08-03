@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { PrGroup } from '../domain/pr-group.ts';
+import { textResult } from '../testing/model-fixtures.ts';
 import { bootstrapSpecialists, parseSpecialists, sanitizeName } from './specialist-bootstrap.ts';
 
 const OUTPUT = [
@@ -22,12 +23,7 @@ const OUTPUT = [
 
 function mockModel(text: string): MockLanguageModelV3 {
   return new MockLanguageModelV3({
-    doGenerate: async () => ({
-      content: [{ type: 'text', text }],
-      finishReason: 'stop',
-      usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
-      warnings: [],
-    }),
+    doGenerate: async () => textResult(text),
   });
 }
 

@@ -43,6 +43,8 @@ function baseGroup(): PrGroup {
     branch: null,
     pr: null,
     status: 'pending',
+    stage: 'pending',
+    reviewGraceApplied: false,
   };
 }
 

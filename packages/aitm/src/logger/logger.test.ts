@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
+import { prepareStepArg, stepResult } from '../testing/step-results.ts';
 import { Logger, type LogRecord } from './logger.ts';
 import { clearRegisteredSecrets, registerSecretValues } from './secret-registry.ts';
 
@@ -376,24 +377,26 @@ test('smoke: a compaction warning from buildCompactionStep, wired to a real Logg
     const log = new Logger('info', 'run-compaction-smoke');
     const prepareStep = buildCompactionStep({ compactor, modelId: 'openai/gpt-5', logger: log });
     result = await prepareStep({
-      steps: [
-        {
-          response: {
-            messages: [
-              { role: 'assistant', content: 'r0' },
-              { role: 'assistant', content: 'r1' },
-            ],
-          },
-        },
-      ],
-      stepNumber: 1,
-      model: {},
-      messages: [
-        { role: 'user', content: 'go' },
-        { role: 'assistant', content: 'r0' },
-        { role: 'tool', content: 'ok' },
-      ],
-      experimental_context: undefined,
+      ...prepareStepArg(
+        [
+          stepResult({
+            response: {
+              id: 'res-0',
+              modelId: 'test-model',
+              timestamp: new Date(0),
+              messages: [
+                { role: 'assistant', content: 'r0' },
+                { role: 'assistant', content: 'r1' },
+              ],
+            },
+          }),
+        ],
+        [
+          { role: 'user', content: 'go' },
+          { role: 'assistant', content: 'r0' },
+          { role: 'assistant', content: 'ok' },
+        ],
+      ),
     });
   } finally {
     err.restore();

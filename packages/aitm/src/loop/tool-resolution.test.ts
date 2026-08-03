@@ -3,17 +3,19 @@
 // module in the loop/ SRP sweep) so this module ships with its own paired test file.
 
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { backgroundProcessTools, SUBMIT_TOOL_NAME } from '@developerz.ai/ai-claude-compat';
 import type { ToolSet } from 'ai';
-import { tool } from 'ai';
+import { jsonSchema, tool } from 'ai';
 import { z } from 'zod';
 import type { ResolvedConfig } from '../config/schema.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
 import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
+import { buildMemoryTool } from '../subagents/memory-tool.ts';
 import {
   activeToolNames,
   applyHooks,
@@ -73,7 +75,10 @@ test('localEditTools supplies checkout-scoped readFile/writeFile/bash (no-MCP fa
 test('localEditTools: threads bash deny/allow rules into the bash + multiBash tools (issue #113)', async () => {
   const tools = localEditTools('/tmp/wt', [{ pattern: 'git push --force*', action: 'deny' }]);
   const opts = { toolCallId: 't', messages: [] as never[] };
-  const bashOut = (await tools.bash.execute?.({ command: 'git push --force' }, opts)) as {
+  const bashOut = (await tools.bash.execute?.(
+    { command: 'git push --force', description: 'force push' },
+    opts,
+  )) as {
     exitCode: number;
     denied?: boolean;
   };
@@ -142,7 +147,7 @@ test('localEditTools: a file changed on disk after its Read surfaces one file-ch
     const rendered = await tools.readFile.toModelOutput?.({
       toolCallId: 't2',
       input: { path: 'b.ts' },
-      output: '1\tcontents of b',
+      output: { content: '1\tcontents of b' },
     });
     const text = renderedText(rendered);
     assert.equal((text.match(/<system-reminder>/g) ?? []).length, 1, 'exactly one envelope');
@@ -214,12 +219,18 @@ test('resolveWorkerTools mounts explore only when the caller wires it (never MCP
   assert.equal('explore' in withoutExplore, false, 'absent when not wired');
 });
 
-const stubMemory = () =>
-  tool({
-    description: 'stub memory',
-    inputSchema: z.object({ action: z.string(), name: z.string() }),
-    execute: async () => 'ok',
-  });
+// One directory for the whole file, removed in teardown: `buildMemoryTool` does not own the
+// directory's lifetime, so a per-call mkdtemp would leave one behind on every test.
+const memoryDirs: string[] = [];
+const stubMemory = () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aitm-mem-'));
+  memoryDirs.push(dir);
+  return buildMemoryTool(dir);
+};
+
+after(async () => {
+  await Promise.all(memoryDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+});
 
 test('applyHooks wraps the tool record when hooks are configured, no-op otherwise (issue #121)', () => {
   const base = resolveWorkerTools({}, '/tmp/wt');
@@ -270,7 +281,7 @@ test('resolvePlannerTools mounts explore only when the caller wires it', () => {
 // ---- deferred MCP tool loading (issue #119) ----
 
 function mcpFake(desc: string): ToolSet[string] {
-  return { description: desc, inputSchema: { type: 'object' } } as ToolSet[string];
+  return { description: desc, inputSchema: jsonSchema({ type: 'object' }) };
 }
 
 test('mountDeferredTools: below threshold (nothing deferred) mounts surplus direct, no tool_search (issue #119)', () => {

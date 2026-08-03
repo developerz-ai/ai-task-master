@@ -18,9 +18,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { COMPOSER_ROLE_PREFIX } from '../../orchestrator/orchestrator.ts';
-import { PLANNER_MAX_STEPS, PLANNER_SYSTEM_PREFIX } from '../planner.ts';
-import { REVIEWER_MAX_STEPS, REVIEWER_SYSTEM_PREFIX } from '../reviewer.ts';
-import { WORKER_MAX_STEPS, WORKER_SYSTEM_PREFIX } from '../worker.ts';
+import { PLANNER_SYSTEM_PREFIX } from '../planner.ts';
+import { REVIEWER_SYSTEM_PREFIX } from '../reviewer.ts';
+import { WORKER_SYSTEM_PREFIX } from '../worker.ts';
 import { EXPLORE_SYSTEM_PROMPT } from './role-guidance.ts';
 import { render } from './templates.ts';
 
@@ -62,7 +62,6 @@ const EXPLORE_SNAPSHOT =
 test('render(role-prompt) for the Planner matches its pinned snapshot', () => {
   const out = render('role-prompt', {
     roleGuidance: PLANNER_SYSTEM_PREFIX,
-    maxSteps: PLANNER_MAX_STEPS,
     style: FIXTURE_STYLE,
     env: FIXTURE_ENV,
     modelId: FIXTURE_MODEL_ID,
@@ -93,7 +92,6 @@ test('planner prose: tasks are behaviour slices, not files — the retired sizin
 test('render(role-prompt) for the Worker (Coordinator) matches its pinned snapshot', () => {
   const out = render('role-prompt', {
     roleGuidance: WORKER_SYSTEM_PREFIX,
-    maxSteps: WORKER_MAX_STEPS,
     style: FIXTURE_STYLE,
     env: FIXTURE_ENV,
     modelId: FIXTURE_MODEL_ID,
@@ -104,7 +102,6 @@ test('render(role-prompt) for the Worker (Coordinator) matches its pinned snapsh
 test('render(role-prompt) for the Reviewer matches its pinned snapshot', () => {
   const out = render('role-prompt', {
     roleGuidance: REVIEWER_SYSTEM_PREFIX,
-    maxSteps: REVIEWER_MAX_STEPS,
     style: FIXTURE_STYLE,
     env: FIXTURE_ENV,
     modelId: FIXTURE_MODEL_ID,

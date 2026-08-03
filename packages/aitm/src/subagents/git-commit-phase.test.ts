@@ -41,7 +41,12 @@ function makeBashFake(verifyExitCodes: number[], committedNameStatus = 'A\tsrc/a
   let vi = 0;
   const bash = tool<BashInput, BashOutput>({
     description: 'run a bash command',
-    inputSchema: z.object({ command: z.string(), timeoutMs: z.number().optional() }),
+    inputSchema: z.object({
+      command: z.string(),
+      description: z.string(),
+      timeoutMs: z.number().optional(),
+      run_in_background: z.boolean().optional(),
+    }),
     execute: async (input) => {
       if (input.command.includes('diff-tree')) {
         return { stdout: committedNameStatus, stderr: '', exitCode: 0 };

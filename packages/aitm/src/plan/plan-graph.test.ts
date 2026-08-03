@@ -12,6 +12,7 @@ const group = (id: string, status: PrGroupStatus, dependsOn: string[] = []): PrG
   pr: null,
   status,
   stage: 'pending',
+  reviewGraceApplied: false,
 });
 
 test('PlanGraph is constructible with empty groups', () => {

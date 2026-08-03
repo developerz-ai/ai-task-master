@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
+import { runTool } from '../testing/tool-harness.ts';
 import {
   DEFAULT_STEALTH_HEADERS,
   type LookupFn,
@@ -68,7 +69,7 @@ test('webFetchTool merges DEFAULT_STEALTH_HEADERS with init.headers (override wi
     lookup: publicLookup,
   });
   assert.ok(t.execute);
-  await t.execute({ url: 'https://example.com/' });
+  await runTool(t, { url: 'https://example.com/' });
   const headers = calls[0]?.init.headers as Record<string, string>;
   assert.equal(headers['User-Agent'], 'override-ua');
   assert.equal(headers['X-Custom'], '1');
@@ -81,7 +82,7 @@ test('webFetchTool truncates body to maxChars and flags truncated', async () => 
   stubFetch(() => new Response(long, { status: 200 }));
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://example.com/', maxChars: 100 });
+  const result = await runTool(t, { url: 'https://example.com/', maxChars: 100 });
   assert.equal(result.body.length, 100);
   assert.equal(result.truncated, true);
   assert.equal(result.body, 'a'.repeat(100));
@@ -91,7 +92,7 @@ test('webFetchTool returns full body when shorter than maxChars', async () => {
   stubFetch(() => new Response('short', { status: 200 }));
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://example.com/' });
+  const result = await runTool(t, { url: 'https://example.com/' });
   assert.equal(result.body, 'short');
   assert.equal(result.truncated, false);
 });
@@ -106,7 +107,7 @@ test('webFetchTool tracks finalUrl via Response.url and surfaces status + conten
   );
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://example.com/start' });
+  const result = await runTool(t, { url: 'https://example.com/start' });
   // Response.url is empty when constructed manually; we fall back to input url.
   assert.equal(result.finalUrl, 'https://example.com/start');
   assert.equal(result.status, 201);
@@ -119,7 +120,7 @@ test('webFetchTool passes AbortSignal with timeout through to fetch', async () =
   const { calls } = stubFetch(() => new Response('x', { status: 200 }));
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  await t.execute({ url: 'https://example.com/', timeoutMs: 250 });
+  await runTool(t, { url: 'https://example.com/', timeoutMs: 250 });
   const signal = calls[0]?.init.signal;
   assert.ok(signal instanceof AbortSignal);
   assert.equal(signal.aborted, false);
@@ -144,14 +145,14 @@ test('webFetchTool propagates an aborted signal as a thrown error', async () => 
   );
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  await assert.rejects(() => t.execute({ url: 'https://example.com/', timeoutMs: 10 }));
+  await assert.rejects(() => runTool(t, { url: 'https://example.com/', timeoutMs: 10 }));
 });
 
 test('webFetchTool sets Referer when referrer input provided', async () => {
   const { calls } = stubFetch(() => new Response('x', { status: 200 }));
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  await t.execute({ url: 'https://example.com/', referrer: 'https://ref.example/' });
+  await runTool(t, { url: 'https://example.com/', referrer: 'https://ref.example/' });
   const headers = calls[0]?.init.headers as Record<string, string>;
   assert.equal(headers.Referer, 'https://ref.example/');
 });
@@ -164,7 +165,7 @@ test('webFetchTool with init.local=false returns stub redirecting to server tool
   });
   const t = webFetchTool({ local: false });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://example.com/' });
+  const result = await runTool(t, { url: 'https://example.com/' });
   assert.equal(called, false);
   assert.match(result.body, /openrouter:web_fetch/);
   assert.equal(result.status, 0);
@@ -180,7 +181,7 @@ test('webFetchTool rejects non-http(s) URLs (SSRF guard)', async () => {
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   await assert.rejects(
-    () => t.execute({ url: 'file:///etc/passwd' }),
+    () => runTool(t, { url: 'file:///etc/passwd' }),
     /Only http\/https URLs are allowed/,
   );
   assert.equal(called, false);
@@ -224,7 +225,7 @@ test('webFetchTool rejects loopback and private hosts (SSRF guard)', async () =>
     'http://[64:ff9b::a9fe:a9fe]/',
     'http://[2002:7f00:1::]/',
   ]) {
-    await assert.rejects(() => t.execute({ url }), /private\/loopback/);
+    await assert.rejects(() => runTool(t, { url }), /private\/loopback/);
   }
   assert.equal(called, false);
 });
@@ -239,7 +240,7 @@ test('webFetchTool rejects hostname that resolves to a private IP (SSRF guard)',
   const t = webFetchTool({ lookup: privateLookup });
   assert.ok(t.execute);
   await assert.rejects(
-    () => t.execute({ url: 'https://attacker.example/' }),
+    () => runTool(t, { url: 'https://attacker.example/' }),
     /resolving to private\/loopback/,
   );
   assert.equal(called, false);
@@ -259,7 +260,7 @@ test('webFetchTool rejects hostname when any resolved IP is private (SSRF guard)
   const t = webFetchTool({ lookup: mixedLookup });
   assert.ok(t.execute);
   await assert.rejects(
-    () => t.execute({ url: 'https://attacker.example/' }),
+    () => runTool(t, { url: 'https://attacker.example/' }),
     /resolving to private\/loopback/,
   );
   assert.equal(called, false);
@@ -276,7 +277,7 @@ test('webFetchTool rejects hostname that fails DNS resolution (SSRF guard fails 
   };
   const t = webFetchTool({ lookup: failingLookup });
   assert.ok(t.execute);
-  await assert.rejects(() => t.execute({ url: 'https://nx.example/' }), /DNS lookup failed/);
+  await assert.rejects(() => runTool(t, { url: 'https://nx.example/' }), /DNS lookup failed/);
   assert.equal(called, false);
 });
 
@@ -286,7 +287,7 @@ test('webFetchTool does NOT block public domain that happens to start with "fc"'
   stubFetch(() => new Response('ok', { status: 200 }));
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://fc-example.com/' });
+  const result = await runTool(t, { url: 'https://fc-example.com/' });
   assert.equal(result.status, 200);
 });
 
@@ -294,7 +295,7 @@ test('webFetchTool does NOT block public domain that happens to start with "fe8"
   stubFetch(() => new Response('ok', { status: 200 }));
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://feb-public.example/' });
+  const result = await runTool(t, { url: 'https://feb-public.example/' });
   assert.equal(result.status, 200);
 });
 
@@ -309,7 +310,7 @@ test('webFetchTool skips DNS lookup for IP-literal hosts', async () => {
   stubFetch(() => new Response('ok', { status: 200 }));
   const t = webFetchTool({ lookup: trackingLookup });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://93.184.216.34/' });
+  const result = await runTool(t, { url: 'https://93.184.216.34/' });
   assert.equal(result.status, 200);
   assert.equal(lookupCalled, false);
 });
@@ -335,7 +336,7 @@ test('webFetchTool stops reading once maxChars reached', async () => {
   );
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://example.com/', maxChars: 500 });
+  const result = await runTool(t, { url: 'https://example.com/', maxChars: 500 });
   assert.equal(result.truncated, true);
   assert.equal(result.body.length, 500);
   // We must have stopped early — not pulled all 100+ chunks.
@@ -350,7 +351,7 @@ test('webFetchTool follows a safe redirect and returns the final hop, tracking f
   );
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://example.com/start' });
+  const result = await runTool(t, { url: 'https://example.com/start' });
   assert.equal(result.body, 'final-body');
   assert.equal(result.status, 200);
   assert.equal(result.finalUrl, 'https://example.com/final');
@@ -370,7 +371,7 @@ test('webFetchTool re-validates each redirect hop: blocks a redirect to a privat
   );
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  await assert.rejects(() => t.execute({ url: 'https://example.com/start' }), /private\/loopback/);
+  await assert.rejects(() => runTool(t, { url: 'https://example.com/start' }), /private\/loopback/);
   // The redirect target was rejected before it was ever fetched.
   assert.equal(calls.length, 1);
 });
@@ -386,7 +387,7 @@ test('webFetchTool re-validates redirect hostname via DNS (blocks rebind to a pr
   const t = webFetchTool({ lookup });
   assert.ok(t.execute);
   await assert.rejects(
-    () => t.execute({ url: 'https://good.example/' }),
+    () => runTool(t, { url: 'https://good.example/' }),
     /resolving to private\/loopback/,
   );
   assert.equal(calls.length, 1);
@@ -400,7 +401,7 @@ test('webFetchTool resolves a relative redirect Location against the current URL
   );
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://example.com/a/b' });
+  const result = await runTool(t, { url: 'https://example.com/a/b' });
   assert.equal(result.finalUrl, 'https://example.com/c/d');
   assert.equal(calls[1]?.url, 'https://example.com/c/d');
 });
@@ -416,7 +417,7 @@ test('webFetchTool rejects a redirect chain that exceeds the hop cap', async () 
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
   await assert.rejects(
-    () => t.execute({ url: 'https://example.com/?n=0' }),
+    () => runTool(t, { url: 'https://example.com/?n=0' }),
     /[Tt]oo many redirects/,
   );
 });
@@ -425,7 +426,7 @@ test('webFetchTool treats a non-redirect 3xx (304) as the final response', async
   stubFetch(() => new Response(null, { status: 304 }));
   const t = webFetchTool({ lookup: publicLookup });
   assert.ok(t.execute);
-  const result = await t.execute({ url: 'https://example.com/' });
+  const result = await runTool(t, { url: 'https://example.com/' });
   assert.equal(result.status, 304);
 });
 

@@ -123,6 +123,7 @@ test('run-lock: two runs declaring the same holder dead → exactly one takes ov
     }
     // release() only unlinks its own token, so a lock that disappears is proof the file on disk
     // belongs to the winner rather than to a loser that clobbered it.
+    assert.ok(won[0], 'exactly one contender won');
     await won[0].value.release();
     await assert.rejects(() => readLock(tmp.path), /ENOENT/);
   } finally {

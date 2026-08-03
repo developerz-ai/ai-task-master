@@ -15,7 +15,12 @@ function makeBash(handler: (command: string) => Partial<BashOutput> = () => ({})
   const cmds: string[] = [];
   const bash = tool<BashInput, BashOutput>({
     description: 'run a bash command in the checkout',
-    inputSchema: z.object({ command: z.string() }),
+    inputSchema: z.object({
+      command: z.string(),
+      description: z.string(),
+      timeoutMs: z.number().optional(),
+      run_in_background: z.boolean().optional(),
+    }),
     execute: async (input) => {
       cmds.push(input.command);
       return { stdout: '', stderr: '', exitCode: 0, ...handler(input.command) };

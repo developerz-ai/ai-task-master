@@ -43,6 +43,7 @@ function group(title: string, tasks: Task[]): PrGroup {
     pr: null,
     status: 'pending',
     stage: 'pending',
+    reviewGraceApplied: false,
   };
 }
 

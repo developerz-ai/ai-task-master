@@ -8,6 +8,8 @@ import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
 import { MANIFEST_FIELD_MAX } from '../subagents/worker.ts';
+import { agentConfig } from '../testing/domain-fixtures.ts';
+import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';
 import {
@@ -24,14 +26,6 @@ import { assertPrBodySections, COMPOSE_PR_MAX_RETRIES } from './pr-body.ts';
 // A PR body that satisfies the section contract (assertPrBodySections), reused by openPr tests.
 const COMPLIANT_BODY =
   '## Summary\nDid the thing.\n\n## Changes\n- a.ts: added\n\n## Testing\n- ran tests\n\n## Evidence\n- `bun test` exited 0';
-
-function emptyUsage() {
-  return {
-    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: 1, text: 1, reasoning: undefined },
-    totalTokens: 2,
-  };
-}
 
 function modelEmitting(text: string | (() => string)): MockLanguageModelV3 {
   const fn = typeof text === 'function' ? text : (): string => text;
@@ -123,6 +117,8 @@ function baseGroup(): PrGroup {
     branch: null,
     pr: null,
     status: 'pending',
+    stage: 'pending',
+    reviewGraceApplied: false,
   };
 }
 
@@ -151,7 +147,7 @@ function basePr(headRefName = 'aitm/core'): PullRequest {
 test('Orchestrator is constructible', () => {
   const o = new Orchestrator({
     credentials: {} as never,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {} as never,
   });
@@ -161,7 +157,7 @@ test('Orchestrator is constructible', () => {
 test('buildSystemPrompt = agentConfig.contents + COMPOSER_ROLE_PREFIX + rollingContext', () => {
   const o = new Orchestrator({
     credentials: {} as never,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# repo style' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '# repo style' }),
     rollingContext: 'prior PRs: 1, 2',
     github: {} as never,
   });
@@ -177,7 +173,7 @@ test('buildSystemPrompt = agentConfig.contents + COMPOSER_ROLE_PREFIX + rollingC
 test('buildSystemPrompt: styleDigest replaces agentConfig.contents as the style prefix', () => {
   const o = new Orchestrator({
     credentials: {} as never,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# raw style' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '# raw style' }),
     styleDigest: '# distilled digest',
     rollingContext: 'prior PRs: 1',
     github: {} as never,
@@ -205,7 +201,7 @@ test('finalizeCommit sends buildSystemPrompt() via the system field, not duplica
   const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# repo style' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '# repo style' }),
     rollingContext: 'prior PRs: 1',
     github: {} as never,
     runCmd: async (file, args) =>
@@ -249,7 +245,7 @@ test('openPr sends buildSystemPrompt() via the system field, not duplicated into
   const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '# repo style' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '# repo style' }),
     rollingContext: 'prior PRs: 1',
     github: { createPr: async (input) => basePr(input.head) },
   });
@@ -285,7 +281,7 @@ test('finalizeCommit: interpolated title/draft/summary are capped at MANIFEST_FI
   const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {} as never,
     runCmd: async (file, args) =>
@@ -336,7 +332,7 @@ test('openPr: interpolated title/acceptance/draft/summary are capped at MANIFEST
   const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: { createPr: async (input) => basePr(input.head) },
   });
@@ -378,7 +374,7 @@ test('finalizeCommit rewrites commit message and amends via runCmd, returning th
 
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {} as never,
     runCmd,
@@ -410,7 +406,7 @@ test('finalizeCommit: an empty refine response amends with the Worker draft, not
   };
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {} as never,
     runCmd,
@@ -429,7 +425,7 @@ test('finalizeCommit: a code-fenced refine response amends with the fence stripp
   };
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {} as never,
     runCmd,
@@ -453,7 +449,7 @@ test('finalizeCommit stamps a task-id trailer onto the amended message when task
 
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {} as never,
     runCmd,
@@ -477,7 +473,7 @@ test('finalizeCommit throws when git amend fails', async () => {
   });
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {} as never,
     runCmd,
@@ -492,7 +488,7 @@ test('finalizeCommit arms the per-step deadline — a stalled refine call surfac
   const { provider } = recordingProvider(stallingModel());
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {} as never,
     runCmd: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
@@ -511,7 +507,7 @@ test('openPr arms the per-step deadline — a stalled compose call surfaces a St
   const { provider } = recordingProvider(stallingModel());
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {
       createPr: async () => {
@@ -543,7 +539,7 @@ test('openPr composes title + body via the orchestrator model and calls github.c
 
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: 'prior: nothing yet',
     github,
   });
@@ -589,7 +585,7 @@ test('composePr requests submit via toolChoice "auto" (thinking-model compat)', 
   const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: 'prior: nothing yet',
     github: { createPr: async (input) => basePr(input.head) },
   });
@@ -620,7 +616,7 @@ test('openPr prompt instructs the standard PR body template', async () => {
   const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: { createPr: async (input) => basePr(input.head) },
   });
@@ -654,7 +650,7 @@ test('openPr prompt carries the group acceptance check for the Evidence section'
   const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: { createPr: async (input) => basePr(input.head) },
   });
@@ -690,7 +686,7 @@ test('openPr prompt omits the acceptance line for a group without a check (legac
   const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: { createPr: async (input) => basePr(input.head) },
   });
@@ -722,7 +718,7 @@ test('composePr falls back to a deterministic composition when every submission 
   const createCalls: CreatePrInput[] = [];
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {
       createPr: async (input) => {
@@ -761,7 +757,7 @@ test('composePr falls back when the model never submits a composition (#101)', a
   const createCalls: CreatePrInput[] = [];
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {
       createPr: async (input) => {
@@ -786,7 +782,7 @@ test('composePr retries over an over-long title, then accepts the corrected resu
   const createCalls: CreatePrInput[] = [];
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {
       createPr: async (input) => {
@@ -812,7 +808,7 @@ test('composePr retries over a body missing a required section, then accepts the
   const createCalls: CreatePrInput[] = [];
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {
       createPr: async (input) => {
@@ -854,7 +850,7 @@ test('composePr feeds the schema failure back as a corrective user turn, keeping
   const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: { createPr: async (input) => basePr(input.head) },
   });
@@ -873,7 +869,7 @@ test('composePr bounds correction to COMPOSE_PR_MAX_RETRIES generations, then fa
   const createCalls: CreatePrInput[] = [];
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {
       createPr: async (input) => {
@@ -899,7 +895,7 @@ test('composePr falls back when every retry omits a required section', async () 
   const createCalls: CreatePrInput[] = [];
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {
       createPr: async (input) => {
@@ -937,7 +933,7 @@ async function openPrWith(model: MockLanguageModelV3): Promise<{
   const progress: string[] = [];
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {
       createPr: async (input) => {
@@ -1044,7 +1040,7 @@ test('openPr prompt anchors the title on the group goal, not the worker draft me
   const { provider } = recordingProvider(model);
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: { createPr: async (input) => basePr(input.head) },
   });
@@ -1071,7 +1067,7 @@ test('openPr uses group.branch when set, otherwise aitm/<id>', async () => {
 
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github,
   });
@@ -1105,7 +1101,7 @@ test('finalizeCommit: the run signal reaches every git child', async () => {
 
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {} as never,
     runCmd,
@@ -1121,7 +1117,7 @@ test('finalizeCommit: the run signal also cancels the refine generateText call',
   const controller = new AbortController();
   const o = new Orchestrator({
     credentials: provider,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+    agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
     github: {} as never,
     runCmd: async () => ({ stdout: '', stderr: '', exitCode: 0 }),

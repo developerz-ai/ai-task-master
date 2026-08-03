@@ -3,13 +3,14 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import { textResult } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
 import { composeStyleGuide, isTestPath, StyleDistiller } from './coding-style.ts';
 
 function claudeConfig(path: string, contents: string): AgentConfig {
-  return { flavor: 'claude', path, contents };
+  return { flavor: 'claude', path, contents, sources: [] };
 }
 
 // MockLanguageModelV3 driving the one-shot generateText call. Captures the rendered user prompt
@@ -25,12 +26,7 @@ function modelReturning(text: string): { model: MockLanguageModelV3; prompt: () 
           if (part.type === 'text') seen.push(part.text);
         }
       }
-      return {
-        content: [{ type: 'text', text }],
-        finishReason: 'stop',
-        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-        warnings: [],
-      };
+      return textResult(text);
     },
   });
   return { model, prompt: () => seen.join('\n') };
@@ -305,6 +301,7 @@ test('composeStyleGuide: an AGENTS.md style file is labelled by its own filename
     flavor: 'agents',
     path: '/repo/AGENTS.md',
     contents: '# Agents\n',
+    sources: [],
   };
   assert.match(composeStyleGuide(config, ''), /^# AGENTS\.md \(project style file/);
 });

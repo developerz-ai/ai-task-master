@@ -12,7 +12,6 @@ import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
 import type { RunMergeFlowInput } from '../composition/run-input.ts';
 import type { ResolvedConfig } from '../config/schema.ts';
 import { Credentials } from '../credentials/credentials.ts';
-import { DEFAULT_MODELS } from '../domain/model.ts';
 import {
   GitHubClient,
   type RunCmd,
@@ -22,7 +21,10 @@ import {
 import { UsageTracker } from '../observability/usage-tracker.ts';
 import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import type { RunState } from '../state/schema.ts';
+import { CURRENT_SCHEMA_VERSION } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
+import { resolvedConfig } from '../testing/domain-fixtures.ts';
+import { modelUsage } from '../testing/model-fixtures.ts';
 import { type MergeFlowSeams, mergeFlowAdapter } from './merge-flow-adapter.ts';
 import type { TakeOverFlowInput, TakeOverResult } from './take-over-flow.ts';
 
@@ -86,33 +88,8 @@ function fakeRunCmd(scripted: { checksBucket: 'pass' | 'fail'; mergeExitCode?: n
 
 const noopSleep: Sleep = async () => {};
 
-const baseResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig => ({
-  openrouterApiKey: 'sk-or-test',
-  apiKeySource: 'env',
-  models: { ...DEFAULT_MODELS },
-  maxPrs: 5,
-  maxSessions: null,
-  maxCiFixAttempts: 3,
-  llmStepTimeoutMs: 60_000,
-  autoMerge: true,
-  prPerTask: false,
-  mergeMethod: 'squash',
-  adminMerge: false,
-  stylePath: null,
-  formatCommand: null,
-  verifyCommand: null,
-  selfReview: true,
-  resolveConflicts: false,
-  logLevel: 'info',
-  concurrency: 1,
-  allowForcePush: true,
-  bashRules: [],
-  mcpServers: {},
-  mcpDeferToolsOver: 8,
-  mcpServerSources: {},
-  reasoningEffort: {},
-  ...overrides,
-});
+const baseResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig =>
+  resolvedConfig({ openrouterApiKey: 'sk-or-test', ...overrides });
 
 const agentConfig: AgentConfig = {
   flavor: 'claude',
@@ -124,6 +101,7 @@ const agentConfig: AgentConfig = {
 function baseRunState(): RunState {
   return {
     status: 'awaiting-pr',
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     prGroups: [],
     currentGroupIndex: 0,
     currentTaskIndex: 0,
@@ -237,7 +215,7 @@ const noLimits: ModelLimitsLookup = {
 };
 
 function usageOf(input: number, output: number): LanguageModelUsage {
-  return { inputTokens: input, outputTokens: output, totalTokens: input + output };
+  return modelUsage({ inputTokens: input, outputTokens: output, totalTokens: input + output });
 }
 
 test('mergeFlowAdapter: worker tools carry bashRules, the ProcessManager, and operator hooks', async () => {

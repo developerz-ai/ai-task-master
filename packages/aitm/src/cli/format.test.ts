@@ -22,6 +22,7 @@ function prGroupFixture(over: Partial<PrGroup> = {}): PrGroup {
     pr: null,
     status: 'pending',
     stage: 'pending',
+    reviewGraceApplied: false,
     ...over,
   };
 }
@@ -76,6 +77,7 @@ test('usageSummaryLine: renders overall tokens + per-role breakdown + cost + cac
       latencyMsTotal: 18600,
       retries: 2,
     },
+    costEstimated: false,
   });
   assert.match(
     line,
@@ -105,6 +107,7 @@ test('usageSummaryLine: renders overall tokens + per-role breakdown + cost + cac
       latencyMsTotal: 0,
       retries: 0,
     },
+    costEstimated: false,
   });
   assert.match(unknown, /cost unknown/);
   assert.match(unknown, /0% cache hit/);
@@ -124,6 +127,7 @@ test('usageSummaryLine: renders provider-reported cache_discount savings when pr
       latencyMsTotal: 0,
       retries: 0,
     },
+    costEstimated: false,
   });
   assert.match(line, /80% cache hit/);
   assert.match(line, /\$0\.0025 cache discount/);
@@ -252,6 +256,6 @@ test('redactConfigKeys: masks the top-level key and every nested profile key', (
   const redacted = redactConfigKeys(file);
   assert.notEqual(redacted.openrouterApiKey, file.openrouterApiKey);
   assert.match(redacted.openrouterApiKey ?? '', /1234$/);
-  assert.notEqual(redacted.profiles?.a.openrouterApiKey, file.profiles?.a.openrouterApiKey);
+  assert.notEqual(redacted.profiles?.a?.openrouterApiKey, file.profiles?.a?.openrouterApiKey);
   assert.deepEqual(redacted.profiles?.b, {});
 });

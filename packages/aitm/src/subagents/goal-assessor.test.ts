@@ -5,20 +5,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
+import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
+import { plannerTools } from '../testing/subagent-tools.ts';
 import {
   createGoalAssessorAgent,
   GOAL_ASSESSOR_SYSTEM_PREFIX,
   runGoalAssessor,
 } from './goal-assessor.ts';
-
-function emptyUsage() {
-  return {
-    inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: 1, text: 1, reasoning: undefined },
-    totalTokens: 2,
-  };
-}
 
 let callId = 0;
 
@@ -46,7 +40,7 @@ function verdictModel(value: unknown, capture?: (prompt: string) => void): MockL
 function agentFor(model: MockLanguageModelV3) {
   return createGoalAssessorAgent({
     model,
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: GOAL_ASSESSOR_SYSTEM_PREFIX,
   });
 }
@@ -102,7 +96,7 @@ test('runGoalAssessor reports complete when the model call throws', async () => 
   // A stalled provider hits the step deadline, which surfaces as a throw out of the agent call.
   const agent = createGoalAssessorAgent({
     model: stallingModel(),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: GOAL_ASSESSOR_SYSTEM_PREFIX,
     timeout: { stepMs: 40 },
   });

@@ -41,6 +41,7 @@ function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {
     pr: null,
     status: 'in-progress',
     stage: 'pr-open',
+    reviewGraceApplied: false,
     ...overrides,
   };
 }
@@ -117,14 +118,14 @@ test('SELF_REVIEW_SYSTEM_PREFIX is the adversarial pre-PR self-reviewer prompt (
 });
 
 test('runSelfReviewSession: no verify command → adversarial-review task, Worker fixes → reviewed', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   const { runCmd, commands } = recordingRunCmd();
   const result = await runSelfReviewSession(
     baseInput({
       runCmd,
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
@@ -132,33 +133,33 @@ test('runSelfReviewSession: no verify command → adversarial-review task, Worke
   );
   assert.equal(result.kind, 'reviewed');
   assert.deepEqual(commands, [], 'no verifyCommand → no shell verify run');
-  assert.ok(captured, 'review Worker was invoked');
-  const task = (captured as WorkerInput).task;
+  assert.ok(captured[0], 'review Worker was invoked');
+  const task = (captured[0] as WorkerInput).task;
   assert.ok(task);
   assert.match(task.text, /adversarially self-review/i);
   assert.match(task.text, /git diff main\.\.\.HEAD/);
   // Verification is coordinator-owned — the Worker must NOT run its own verify gate.
-  assert.equal((captured as WorkerInput).verifyCommand, undefined);
+  assert.equal((captured[0] as WorkerInput).verifyCommand, undefined);
 });
 
 test('runSelfReviewSession: threads the run signal into the review Worker input', async () => {
   // Mirrors the CI-fix session: the agent's own signal never reaches the editor fanout, which is
   // wired only from WorkerInput.signal.
   const controller = new AbortController();
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   await runSelfReviewSession(
     baseInput({
       signal: controller.signal,
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
     }),
   );
-  assert.ok(captured, 'review Worker was invoked');
-  assert.equal((captured as WorkerInput).signal, controller.signal);
+  assert.ok(captured[0], 'review Worker was invoked');
+  assert.equal((captured[0] as WorkerInput).signal, controller.signal);
 });
 
 test('runSelfReviewSession: nothing to fix (empty manifest, verify clean) → clean', async () => {
@@ -181,7 +182,7 @@ test('runSelfReviewSession: runs the verify command once in the checkout via sh 
 });
 
 test('runSelfReviewSession: verify fails → fix task carries the tail, and a fixing Worker → reviewed', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   const { runCmd } = recordingRunCmd((args) =>
     args[0] === '-c' ? { exitCode: 1, stdout: 'error TS2532: Object is possibly undefined' } : {},
   );
@@ -191,14 +192,14 @@ test('runSelfReviewSession: verify fails → fix task carries the tail, and a fi
       verifyCommand: 'bun run typecheck',
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
     }),
   );
   assert.equal(result.kind, 'reviewed');
-  const task = (captured as WorkerInput | null)?.task;
+  const task = (captured[0] as WorkerInput | null)?.task;
   assert.ok(task);
   assert.match(task.text, /bun run typecheck/);
   assert.match(task.text, /error TS2532/);
@@ -265,7 +266,7 @@ test('runSelfReviewSession: review Worker errors while verify is red → error, 
 });
 
 test('runSelfReviewSession: verify command-not-found (exit 127) is inconclusive → clean, no fix task pressure', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   const { runCmd } = recordingRunCmd((args) =>
     args[0] === '-c' ? { exitCode: 127, stderr: 'sh: tsc: not found' } : {},
   );
@@ -275,7 +276,7 @@ test('runSelfReviewSession: verify command-not-found (exit 127) is inconclusive 
       verifyCommand: 'tsc --noEmit',
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'blocked', reason: 'empty manifest' };
         },
       }),
@@ -284,7 +285,7 @@ test('runSelfReviewSession: verify command-not-found (exit 127) is inconclusive 
   // 127 must NOT be treated as a real failure: a blocked Worker then reads as clean, and the task
   // never carries a verify-failure section.
   assert.equal(result.kind, 'clean');
-  const task = (captured as WorkerInput | null)?.task;
+  const task = (captured[0] as WorkerInput | null)?.task;
   assert.ok(task);
   assert.doesNotMatch(task.text, /FAILS on these changes/);
 });
@@ -316,7 +317,7 @@ test('runSelfReviewSession: builds the review Worker on the coding-capability mo
 test("runSelfReviewSession: the group's acceptance check lands in the review task", async () => {
   // SELF_REVIEW_SYSTEM_PREFIX step 3 asks whether the diff meets the task's acceptance check; this
   // is the only path that supplies it, so without it the pass judges a contract it never saw.
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   await runSelfReviewSession(
     baseInput({
       group: baseGroup({
@@ -324,13 +325,13 @@ test("runSelfReviewSession: the group's acceptance check lands in the review tas
       }),
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
     }),
   );
-  const task = (captured as WorkerInput | null)?.task;
+  const task = (captured[0] as WorkerInput | null)?.task;
   assert.ok(task);
   assert.match(task.text, /## Acceptance check for this PR group/);
   assert.match(task.text, /bun test src\/core passes/);
@@ -338,18 +339,18 @@ test("runSelfReviewSession: the group's acceptance check lands in the review tas
 });
 
 test('runSelfReviewSession: a group without an acceptance check leaves the task text unchanged', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   await runSelfReviewSession(
     baseInput({
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
     }),
   );
-  const task = (captured as WorkerInput | null)?.task;
+  const task = (captured[0] as WorkerInput | null)?.task;
   assert.ok(task);
   assert.doesNotMatch(task.text, /Acceptance check/);
 });
@@ -358,7 +359,7 @@ test("self-review checks the diff against the group's planned work (the missing-
   // A phantom edit once shipped a PR with its services and no routes: the coding pass narrated the
   // file instead of writing it, and self-review passed the diff because it only ever looked at the
   // diff. Reviewing against intent is what catches work that was planned and never landed.
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   await runSelfReviewSession(
     baseInput({
       group: baseGroup({
@@ -379,13 +380,13 @@ test("self-review checks the diff against the group's planned work (the missing-
       }),
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
     }),
   );
-  const text = captured?.task?.text ?? '';
+  const text = captured[0]?.task?.text ?? '';
   assert.match(text, /Planned for this group:/);
   assert.match(text, /- Add POST \/todos and DELETE \/todos\/:id routes/);
   assert.match(text, /planned\s+and is missing is a defect/);
@@ -394,17 +395,17 @@ test("self-review checks the diff against the group's planned work (the missing-
 });
 
 test('self-review: a group with no task text adds no planned-work block', async () => {
-  let captured: WorkerInput | null = null;
+  const captured: WorkerInput[] = [];
   await runSelfReviewSession(
     baseInput({
       group: baseGroup({ tasks: [] }),
       subagents: baseSubagents({
         runWorkerOverride: async (input) => {
-          captured = input;
+          captured.push(input);
           return okWorker();
         },
       }),
     }),
   );
-  assert.doesNotMatch(captured?.task?.text ?? '', /Planned for this group/);
+  assert.doesNotMatch(captured[0]?.task?.text ?? '', /Planned for this group/);
 });

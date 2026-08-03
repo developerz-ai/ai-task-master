@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { catalogModel } from '../testing/domain-fixtures.ts';
 import type { OpenRouterModel } from './client.ts';
 import {
   matchReferenceModel,
@@ -9,13 +10,13 @@ import {
 
 // Shaped like the real catalog: org-qualified ids, one `~` alias, one near-miss family member.
 const CATALOG: OpenRouterModel[] = [
-  { id: 'z-ai/glm-5.2' },
-  { id: 'z-ai/glm-5' },
-  { id: 'z-ai/glm-5-turbo' },
-  { id: 'z-ai/glm-5v-turbo' },
-  { id: 'moonshotai/kimi-k3' },
-  { id: '~moonshotai/kimi-latest' },
-  { id: 'openai/gpt-5' },
+  catalogModel({ id: 'z-ai/glm-5.2' }),
+  catalogModel({ id: 'z-ai/glm-5' }),
+  catalogModel({ id: 'z-ai/glm-5-turbo' }),
+  catalogModel({ id: 'z-ai/glm-5v-turbo' }),
+  catalogModel({ id: 'moonshotai/kimi-k3' }),
+  catalogModel({ id: '~moonshotai/kimi-latest' }),
+  catalogModel({ id: 'openai/gpt-5' }),
 ];
 
 test('matchReferenceModel: an org-stripped id finds its org-qualified entry', () => {
@@ -54,7 +55,10 @@ test('matchReferenceModel: an unknown id and a blank id both yield nothing', () 
 
 test('matchReferenceModel: an ambiguous tier gives up rather than guessing', () => {
   // Two orgs publishing the same local name: mispricing a run is worse than not pricing it.
-  const ambiguous: OpenRouterModel[] = [{ id: 'a/shared-model' }, { id: 'b/shared-model' }];
+  const ambiguous: OpenRouterModel[] = [
+    catalogModel({ id: 'a/shared-model' }),
+    catalogModel({ id: 'b/shared-model' }),
+  ];
   assert.equal(matchReferenceModel('shared-model', ambiguous), undefined);
 });
 

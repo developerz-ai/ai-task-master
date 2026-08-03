@@ -137,10 +137,8 @@ test('guardDeferred: after activation the real executor runs and its result rend
       ran += 1;
       return { rows: 3 };
     },
-    toModelOutput: ({ output }: { output: { rows: number } }) => ({
-      type: 'text',
-      value: `rows=${output.rows}`,
-    }),
+    toModelOutput: ({ output }: { output: { rows: number } }) =>
+      ({ type: 'text', value: `rows=${output.rows}` }) as const,
   });
   const guarded = guardDeferred('mcp__db__query', base, activated);
   const exec = guarded.execute as (i: unknown, o: unknown) => Promise<unknown>;

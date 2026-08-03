@@ -37,7 +37,7 @@ function basicPlan(groupCount: number): Plan {
   const groups = Array.from({ length: groupCount }, (_, i) => ({
     id: `g${i + 1}`,
     title: `Group ${i + 1}`,
-    tasks: [{ description: `task ${i + 1}` }],
+    tasks: [{ description: `task ${i + 1}`, complexity: 'normal' as const }],
     acceptance: `group ${i + 1} check: bun test passes`,
     dependsOn: i === 0 ? [] : [`g${i}`],
   }));

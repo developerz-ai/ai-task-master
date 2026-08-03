@@ -15,6 +15,7 @@ import {
   DEFAULT_MCP_DEFER_TOOLS_OVER,
 } from '../config/defaults.ts';
 import type { ResolvedConfig } from '../config/schema.ts';
+import { DEFAULT_MODELS } from '../domain/model.ts';
 import type { OpenRouterModel } from '../openrouter/client.ts';
 
 export function agentConfig(over: Partial<AgentConfig> = {}): AgentConfig {
@@ -67,7 +68,7 @@ export function resolvedConfig(over: Partial<ResolvedConfig> = {}): ResolvedConf
   return {
     openrouterApiKey: 'k',
     apiKeySource: 'env',
-    models: { generic: 'g', smart: 's', coding: 'c', fast: 'f' },
+    models: { ...DEFAULT_MODELS },
     reasoningEffort: {},
     maxPrs: 5,
     maxSessions: null,

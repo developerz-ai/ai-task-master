@@ -3,22 +3,11 @@ import { test } from 'node:test';
 import type { LanguageModel } from 'ai';
 import type { ResolvedConfig } from '../config/schema.ts';
 import { DEFAULT_MODELS, OPENROUTER_API_BASE_URL } from '../domain/model.ts';
+import { resolvedConfig } from '../testing/domain-fixtures.ts';
 import { Credentials, chatSettings, providerSettings, ROLE_CAPABILITY } from './credentials.ts';
 
-const baseResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig => ({
-  openrouterApiKey: 'sk-or-test',
-  apiKeySource: 'env',
-  models: { ...DEFAULT_MODELS },
-  maxPrs: 5,
-  maxSessions: null,
-  autoMerge: true,
-  mergeMethod: 'squash',
-  stylePath: null,
-  logLevel: 'info',
-  concurrency: 1,
-  reasoningEffort: {},
-  ...overrides,
-});
+const baseResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig =>
+  resolvedConfig({ openrouterApiKey: 'sk-or-test', ...overrides });
 
 function modelIdOf(handle: LanguageModel): string {
   if (typeof handle === 'string') return handle;

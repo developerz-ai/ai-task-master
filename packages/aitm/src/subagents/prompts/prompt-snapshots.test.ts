@@ -18,9 +18,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { COMPOSER_ROLE_PREFIX } from '../../orchestrator/orchestrator.ts';
-import { PLANNER_MAX_STEPS, PLANNER_SYSTEM_PREFIX } from '../planner.ts';
-import { REVIEWER_MAX_STEPS, REVIEWER_SYSTEM_PREFIX } from '../reviewer.ts';
-import { WORKER_MAX_STEPS, WORKER_SYSTEM_PREFIX } from '../worker.ts';
+import { PLANNER_SYSTEM_PREFIX } from '../planner.ts';
+import { REVIEWER_SYSTEM_PREFIX } from '../reviewer.ts';
+import { WORKER_SYSTEM_PREFIX } from '../worker.ts';
 import { EXPLORE_SYSTEM_PROMPT } from './role-guidance.ts';
 import { render } from './templates.ts';
 

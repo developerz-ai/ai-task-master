@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createLlmFetch, detectRuntime, type UndiciAgentModule } from './llm-fetch.ts';
+import {
+  createLlmFetch,
+  detectRuntime,
+  isKeepAliveAgent,
+  type UndiciAgentModule,
+} from './llm-fetch.ts';
 
 type AgentOptions = { keepAliveTimeout?: number; connections?: number };
 
@@ -87,7 +92,13 @@ test("llm-fetch: a caller's own dispatcher survives — the keep-alive one is no
     baseFetch: spy.fetch,
   });
   assert(handle);
-  const callerDispatcher = new FakeAgent({});
+  // The same trivial fake the module's own doc-comment blesses, narrowed through the module's own
+  // predicate so it types as a dispatcher without restating the whole Dispatcher surface. A REAL
+  // undici Agent would be wrong here: under Bun it carries no `destroy`, so this would pass on Node
+  // and fail on Bun — and the repo's runtime stance is that code runs unchanged on both.
+  const fake: unknown = new FakeAgent({});
+  assert.ok(isKeepAliveAgent(fake), 'the fake carries destroy, so it is a keep-alive dispatcher');
+  const callerDispatcher = fake;
   await handle.fetch('https://openrouter.ai/api/v1/chat', {
     method: 'POST',
     dispatcher: callerDispatcher,

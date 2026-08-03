@@ -58,11 +58,11 @@ export function detectRuntime(): Runtime {
 
 // A dispatcher we can also tear down. `destroy` (not `close`) is what the release path calls, so a
 // value lacking it is not usable here — see `createLlmFetch`.
-type KeepAliveAgent = KeepAliveDispatcher & { destroy: () => unknown };
+export type KeepAliveAgent = KeepAliveDispatcher & { destroy: () => unknown };
 
 // A constructed undici Agent is a valid global-fetch dispatcher at runtime; the two undici type
 // versions differ only nominally, so trust the shape rather than casting.
-function isKeepAliveAgent(value: unknown): value is KeepAliveAgent {
+export function isKeepAliveAgent(value: unknown): value is KeepAliveAgent {
   return (
     typeof value === 'object' &&
     value !== null &&

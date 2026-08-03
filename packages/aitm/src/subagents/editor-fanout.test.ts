@@ -1,9 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type {
+  BashInput,
+  BashOutput,
+  ReadFileInput,
+  ReadFileOutput,
+  WriteFileInput,
+  WriteFileOutput,
+} from '@developerz.ai/ai-claude-compat';
 import { tool } from 'ai';
 import { z } from 'zod';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { Task } from '../domain/task.ts';
+import { workerTools } from '../testing/subagent-tools.ts';
 import { assignEditors } from './editor-assignment.ts';
 import {
   belowFanoutFloor,
@@ -17,23 +26,28 @@ import {
 import type { FileManifestEntry, WorkerInput, WorkerTools } from './worker.ts';
 
 function makeTools(): WorkerTools {
-  return {
-    readFile: tool({
+  return workerTools({
+    readFile: tool<ReadFileInput, ReadFileOutput>({
       description: 'read a file from the checkout',
       inputSchema: z.object({ path: z.string() }),
       execute: async () => ({ content: '' }),
     }),
-    writeFile: tool({
+    writeFile: tool<WriteFileInput, WriteFileOutput>({
       description: 'write a file in the checkout',
       inputSchema: z.object({ path: z.string(), content: z.string() }),
       execute: async () => ({ ok: true }),
     }),
-    bash: tool({
+    bash: tool<BashInput, BashOutput>({
       description: 'run a bash command in the checkout',
-      inputSchema: z.object({ command: z.string() }),
+      inputSchema: z.object({
+        command: z.string(),
+        description: z.string(),
+        timeoutMs: z.number().optional(),
+        run_in_background: z.boolean().optional(),
+      }),
       execute: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     }),
-  } as WorkerTools;
+  });
 }
 
 function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {

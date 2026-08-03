@@ -56,6 +56,9 @@ export async function mergeFlowAdapter(
     undefined,
     background,
   );
+  // No deferred MCP mount here (issue #333): `merge-pr` wires no MCP servers at all — the resolver
+  // above is handed `{}` — so there is no surplus to defer. Giving this flow an MCP surface is a
+  // real gap, but it is a lifecycle change (connect, role allowlist, teardown) rather than a mount.
   const workerTools = decorateTools(baseWorkerTools, input, checkoutPath);
   const github = githubThreadTool({ github: input.github });
   const reviewerTools = decorateTools({ ...baseWorkerTools, github }, input, checkoutPath);

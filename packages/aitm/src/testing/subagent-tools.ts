@@ -10,7 +10,7 @@
 // unless a test actually drives a tool call.
 
 import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
-import { localEditTools, localReadTools } from '../loop/tool-resolution.ts';
+import { localEditTools, localReadTools, type RoleTools } from '../loop/tool-resolution.ts';
 import type { PlannerTools } from '../subagents/planner.ts';
 import type { ReviewerTools } from '../subagents/reviewer.ts';
 import type { WorkerTools } from '../subagents/worker.ts';
@@ -67,4 +67,14 @@ export function reviewerTools(over: Partial<ReviewerTools> = {}): ReviewerTools 
 // agent is never touched on those paths, so it stands in as an opaque marker.
 export function workerHandle(marker = 'worker-handle'): SubagentHandle<WorkerTools> {
   return { agent: {} as never, messages: [{ role: 'user', content: marker }] };
+}
+
+// What a `ScoutAgentInit.tools` factory returns (issue #333): the agent's own record plus the mount
+// its activation step reads. `activated: null` is the nothing-deferred case, so a test that says
+// nothing about MCP gets the same prepareStep it had before deferred loading existed.
+export function roleTools(over: Partial<PlannerTools> = {}): RoleTools<PlannerTools> {
+  return {
+    tools: plannerTools(over),
+    mount: { extraTools: {}, indexBlock: '', deferredNames: new Set(), activated: null },
+  };
 }

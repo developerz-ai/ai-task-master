@@ -20,6 +20,7 @@ import { createSubagent, runPool, runWithSchemaRetry } from '@developerz.ai/ai-c
 import { tool } from 'ai';
 import { z } from 'zod';
 import { SUBAGENT_LIMIT_DEFAULT } from '../domain/subagent-limit.ts';
+import { deferredPrepareStep, type RoleTools } from '../loop/tool-resolution.ts';
 import { AGENT_STEP_BACKSTOP, forwardInit, type SubagentInit } from './factory.ts';
 import type { PlannerTools } from './planner.ts';
 
@@ -174,7 +175,11 @@ export type ScoutAgentInit = Pick<
   // tool record is where per-conversation state lives: the deferred MCP mount's activation set
   // (#119) and the nested-config announcement (#192) are both consumed by whichever member touched
   // first. Building the record per agent puts that state where the conversation is.
-  tools: () => PlannerTools;
+  //
+  // It hands back the mount alongside the record because the activation set belongs to the same
+  // conversation: each runner composes its own `activeTools` step from it, so an unactivated tool's
+  // schema stays out of that agent's prompt rather than only being gated at call time.
+  tools: () => RoleTools<PlannerTools>;
 };
 
 // A ScoutRunner backed by a real read-only agent: one fresh agent per assignment (so concurrent
@@ -182,10 +187,12 @@ export type ScoutAgentInit = Pick<
 // itself. Returns null on an exhausted-retry failure so surveyRepoInParallel drops just that scout.
 export function createScoutRunner(init: ScoutAgentInit): ScoutRunner {
   return async (assignment, ctx, siblings) => {
+    const { tools, mount } = init.tools();
     const agent = createSubagent<PlannerTools>(
       {
         model: init.model,
-        tools: init.tools(),
+        tools,
+        prepareStep: deferredPrepareStep<PlannerTools>(undefined, mount, tools),
         systemPrompt: init.systemPrompt,
         submit: tool({
           description: 'Submit this scout finding (the ScoutFinding schema).',

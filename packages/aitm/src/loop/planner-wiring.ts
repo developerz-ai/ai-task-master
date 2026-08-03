@@ -51,11 +51,11 @@ import { buildSubagentSession } from './subagent-session.ts';
 import {
   appendIndexBlock,
   buildExploreFor,
-  decorateTools,
+  deferredPrepareStep,
   mountDeferredTools,
+  mountRoleTools,
   resolvePlannerTools,
   type WithExplore,
-  withActiveTools,
 } from './tool-resolution.ts';
 
 export type PlanGroupsOutcome =
@@ -251,16 +251,16 @@ export async function surveyRepoForPlanner(params: {
   const base = {
     model: input.credentials.modelFor('planner'),
     tools: () =>
-      decorateTools(
-        {
-          ...resolvePlannerTools(
-            mcp.toolsForRole('planner'),
+      mountRoleTools<WithExplore<PlannerTools>>(
+        'planner',
+        mcp,
+        (set) =>
+          resolvePlannerTools(
+            set,
             input.cwd,
             fetchHtmlAvailable,
             buildExploreFor(input, input.cwd, plannerUsage),
           ),
-          ...mountDeferredTools(mcp.toolSurfaceForRole('planner')).extraTools,
-        } as WithExplore<PlannerTools>,
         input,
         input.cwd,
       ),
@@ -268,14 +268,20 @@ export async function surveyRepoForPlanner(params: {
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
   };
+  // The index block is the same for every member (the deferred SET is; only the ACTIVATION state is
+  // per agent, and that rides the factory above), so it is rendered once for the shared prompt.
+  const scoutIndexBlock = mountDeferredTools(mcp.toolSurfaceForRole('planner')).indexBlock;
   const scoutInit = (roleGuidance: string): ScoutAgentInit => ({
     ...base,
-    systemPrompt: reminderAgentSystemPrompt({
-      style,
-      roleGuidance,
-      cwd: input.cwd,
-      modelId: plannerModelId,
-    }),
+    systemPrompt: appendIndexBlock(
+      reminderAgentSystemPrompt({
+        style,
+        roleGuidance,
+        cwd: input.cwd,
+        modelId: plannerModelId,
+      }),
+      scoutIndexBlock,
+    ),
   });
   const ctx = {
     goal: input.goal,
@@ -370,17 +376,16 @@ export async function defaultPlanGroups(
   // plan, not discovered later by a Worker. Below the defer threshold the surplus mounts directly;
   // above it, name-only + `tool_search`. Nothing deferred → `activated` is null and this pass is
   // byte-identical to before, prompt included.
-  const plannerMount = mountDeferredTools(mcp.toolSurfaceForRole('planner'));
-  const plannerTools = decorateTools(
-    {
-      ...resolvePlannerTools(
-        mcp.toolsForRole('planner'),
+  const { tools: plannerTools, mount: plannerMount } = mountRoleTools<WithExplore<PlannerTools>>(
+    'planner',
+    mcp,
+    (set) =>
+      resolvePlannerTools(
+        set,
         input.cwd,
         fetchHtmlAvailable,
         buildExploreFor(input, input.cwd, plannerUsage),
       ),
-      ...plannerMount.extraTools,
-    } as WithExplore<PlannerTools>,
     input,
     input.cwd,
   );
@@ -400,14 +405,7 @@ export async function defaultPlanGroups(
     // No compaction step on this role, so activation is the whole prepareStep when it applies.
     ...(plannerMount.activated === null
       ? {}
-      : {
-          prepareStep: withActiveTools<PlannerTools>(
-            undefined,
-            plannerTools,
-            plannerMount.deferredNames,
-            plannerMount.activated,
-          ),
-        }),
+      : { prepareStep: deferredPrepareStep<PlannerTools>(undefined, plannerMount, plannerTools) }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
     onStepFinish: session.onStepFinish,
@@ -471,24 +469,40 @@ export async function defaultAssessGoal(
   const modelId = input.credentials.modelIdFor('planner');
   const usage = roleUsageSink(input.usage, 'planner', modelId);
   harnessProgress('checking the goal against the repo', { phase: 'planning' });
-  const agent = createGoalAssessorAgent({
-    model: input.credentials.modelFor('planner'),
-    tools: decorateTools(
+  // Deferred loading reaches the goal assessor too (issue #333). It decides whether the run plans
+  // another wave, and "is this actually done" is a question a domain server can answer better than
+  // the diff can — the verdict is short, but a wrong one either strands work or plans a wasted wave.
+  const { tools: assessorTools, mount: assessorMount } = mountRoleTools<WithExplore<PlannerTools>>(
+    'planner',
+    mcp,
+    (set) =>
       resolvePlannerTools(
-        mcp.toolsForRole('planner'),
+        set,
         input.cwd,
         fetchHtmlAvailable,
         buildExploreFor(input, input.cwd, usage),
       ),
-      input,
-      input.cwd,
+    input,
+    input.cwd,
+  );
+  const agent = createGoalAssessorAgent({
+    model: input.credentials.modelFor('planner'),
+    tools: assessorTools,
+    systemPrompt: appendIndexBlock(
+      reminderAgentSystemPrompt({
+        style,
+        roleGuidance: GOAL_ASSESSOR_SYSTEM_PREFIX,
+        cwd: input.cwd,
+        modelId,
+      }),
+      assessorMount.indexBlock,
     ),
-    systemPrompt: reminderAgentSystemPrompt({
-      style,
-      roleGuidance: GOAL_ASSESSOR_SYSTEM_PREFIX,
-      cwd: input.cwd,
-      modelId,
-    }),
+    // No compaction step on this role either, so activation is the whole prepareStep when it applies.
+    ...(assessorMount.activated === null
+      ? {}
+      : {
+          prepareStep: deferredPrepareStep<PlannerTools>(undefined, assessorMount, assessorTools),
+        }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(usage ? { onUsage: usage } : {}),
     ...(input.signal ? { signal: input.signal } : {}),

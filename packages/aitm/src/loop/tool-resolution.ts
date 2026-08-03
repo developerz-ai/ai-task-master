@@ -35,6 +35,7 @@ import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
 import { withNestedConfig } from '../agent-config/nested-reminders.ts';
 import type { RunLoopInput } from '../composition/run-input.ts';
 import type { ResolvedConfig } from '../config/schema.ts';
+import type { Role } from '../domain/role.ts';
 import type { ToolSurface } from '../mcp/mcp-client.ts';
 import { guardDeferred, TOOL_SEARCH_TOOL_NAME, toolSearch } from '../mcp/tool-search.ts';
 import { buildExploreTool } from '../subagents/explore.ts';
@@ -300,6 +301,63 @@ export type DeferredMount = {
   deferredNames: ReadonlySet<string>;
   activated: ReadonlySet<string> | null;
 };
+
+// What mountRoleTools reads off the MCP manager. Structural so a caller can pass a manager or a
+// double without either party importing the other's concrete type.
+export type RoleToolSource = {
+  toolsForRole(role: Role): ToolSet;
+  toolSurfaceForRole(role: Role): ToolSurface;
+};
+
+// One role's finished tool record, plus the mount its prepareStep needs (issue #333).
+export type RoleTools<T extends ToolSet> = { tools: T; mount: DeferredMount };
+
+// The full composition every role does: resolve the role's fixed slots from its MCP surface, mount
+// the surplus (direct below the defer threshold, name-only + `tool_search` above it), then decorate
+// with the repo's nested instructions and the operator's hooks.
+//
+// `resolve` is a callback rather than more parameters because the resolvers disagree on shape —
+// resolveWorkerTools takes eight arguments, resolvePlannerTools four, resolveReviewerTools a github
+// tool mid-list — so the one thing they share is "given this MCP set, produce my record".
+export function mountRoleTools<T extends ToolSet>(
+  role: Role,
+  mcp: RoleToolSource,
+  resolve: (set: ToolSet) => T,
+  source: { resolved: ResolvedConfig; agentConfig: AgentConfig },
+  cwd: string,
+): RoleTools<T> {
+  const mount = mountDeferredTools(mcp.toolSurfaceForRole(role));
+  // The spread widens T to ToolSet; the surplus only ever ADDS keys, so the record still satisfies T.
+  const tools = decorateTools(
+    { ...resolve(mcp.toolsForRole(role)), ...mount.extraTools } as T,
+    source,
+    cwd,
+  );
+  return { tools, mount };
+}
+
+// The role's prepareStep: activation composed onto whatever the caller already had. `base` is
+// optional because the CI-fix session and the Planner build one only when a Compactor is configured;
+// the overload pair keeps a caller that always has one from being handed `| undefined` back.
+export function deferredPrepareStep<TOOLS extends ToolSet>(
+  base: PrepareStep<TOOLS>,
+  mount: DeferredMount | undefined,
+  tools: ToolSet,
+): PrepareStep<TOOLS>;
+export function deferredPrepareStep<TOOLS extends ToolSet>(
+  base: PrepareStep<TOOLS> | undefined,
+  mount: DeferredMount | undefined,
+  tools: ToolSet,
+): PrepareStep<TOOLS> | undefined;
+export function deferredPrepareStep<TOOLS extends ToolSet>(
+  base: PrepareStep<TOOLS> | undefined,
+  mount: DeferredMount | undefined,
+  tools: ToolSet,
+): PrepareStep<TOOLS> | undefined {
+  return mount && mount.activated !== null
+    ? withActiveTools<TOOLS>(base, tools, mount.deferredNames, mount.activated)
+    : base;
+}
 
 export function mountDeferredTools(surface: ToolSurface): DeferredMount {
   const directSurplus = surplusMcpTools(surface.direct);

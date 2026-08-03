@@ -12,6 +12,7 @@
 import { createSubagent, runWithSchemaRetry } from '@developerz.ai/ai-claude-compat';
 import { tool } from 'ai';
 import { z } from 'zod';
+import { deferredPrepareStep } from '../loop/tool-resolution.ts';
 import { AGENT_STEP_BACKSTOP, forwardInit } from './factory.ts';
 import type { PlannerTools } from './planner.ts';
 import {
@@ -66,10 +67,12 @@ export type ScoutLeadRunner = (
 
 export function createScoutLeadRunner(init: ScoutLeadInit): ScoutLeadRunner {
   return async (ctx, prior) => {
+    const { tools, mount } = init.tools();
     const agent = createSubagent<PlannerTools>(
       {
         model: init.model,
-        tools: init.tools(),
+        tools,
+        prepareStep: deferredPrepareStep<PlannerTools>(undefined, mount, tools),
         systemPrompt: init.systemPrompt,
         submit: tool({
           description: 'Submit the scout wave to dispatch (the ScoutPlan schema).',

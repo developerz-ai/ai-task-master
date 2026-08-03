@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
-import { plannerTools } from '../testing/subagent-tools.ts';
+import { roleTools } from '../testing/subagent-tools.ts';
 import {
   SCOUT_MAX_ASSIGNMENTS,
   type ScoutAssignment,
@@ -101,7 +101,7 @@ test('createScoutLeadRunner: returns the dispatch wave the model submitted', asy
   });
   const lead = createScoutLeadRunner({
     model,
-    tools: () => plannerTools(),
+    tools: () => roleTools(),
     systemPrompt: SCOUT_LEAD_SYSTEM_PREFIX,
   });
   const wave = await lead({ goal: 'g', repoMap: 'Repo map — 5 tracked file(s)' }, []);
@@ -126,7 +126,7 @@ test('createScoutLeadRunner: a prior round switches it to the gap prompt', async
   const { model, prompt } = leadModel({ assignments: [], rationale: 'map is complete' });
   const lead = createScoutLeadRunner({
     model,
-    tools: () => plannerTools(),
+    tools: () => roleTools(),
     systemPrompt: SCOUT_LEAD_SYSTEM_PREFIX,
   });
   assert.deepEqual(await lead({ goal: 'g' }, [result('auth')]), []);
@@ -143,7 +143,7 @@ test('createScoutLeadRunner: duplicate or blank keys collapse to one usable wave
   });
   const lead = createScoutLeadRunner({
     model,
-    tools: () => plannerTools(),
+    tools: () => roleTools(),
     systemPrompt: SCOUT_LEAD_SYSTEM_PREFIX,
   });
   const wave = await lead({ goal: 'g' }, []);
@@ -170,7 +170,7 @@ test('createScoutLeadRunner: an unusable submission yields an empty wave, never 
   });
   const lead = createScoutLeadRunner({
     model,
-    tools: () => plannerTools(),
+    tools: () => roleTools(),
     systemPrompt: SCOUT_LEAD_SYSTEM_PREFIX,
   });
   assert.deepEqual(await lead({ goal: 'g' }, []), []);

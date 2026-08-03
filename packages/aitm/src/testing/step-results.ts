@@ -55,6 +55,12 @@ export function stepResult(over: Partial<Step> = {}): Step {
   };
 }
 
+// A step's `response` half. Overriding it on `stepResult` means restating the three envelope fields
+// nothing reads, so they are stated here instead — `messages` is what a caller actually varies.
+export function stepResponse(messages: Step['response']['messages']): Step['response'] {
+  return { id: 'res-0', modelId: 'test-model', timestamp: new Date(0), messages };
+}
+
 /**
  * The `prepareStep` argument, built around `steps` + `messages` — the only two fields aitm's
  * compaction step branches on. `model` is a mock handle because the type demands one.

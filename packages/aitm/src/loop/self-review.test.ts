@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { RunCmd, RunCmdResult } from '../github/github-client.ts';
-import type { FileManifest, WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
+import type { FileManifest, WorkerInput, WorkerResult } from '../subagents/worker.ts';
+import { workerHandle, workerTools } from '../testing/subagent-tools.ts';
 import {
   runSelfReviewSession,
   SELF_REVIEW_SYSTEM_PREFIX,
@@ -55,14 +56,14 @@ function okWorker(): WorkerResult {
       changes: [{ path: 'src/a.ts', kind: 'modify', summary: 'guarded null deref' }],
       progressEntries: ['- self-review'],
     },
-    handle: { agent: {} as never, messages: [] },
+    handle: workerHandle(),
   };
 }
 
 function baseSubagents(overrides: Partial<SelfReviewSubagents> = {}): SelfReviewSubagents {
   return {
     credentials: { modelForCapability: () => dummyModel, modelIdForCapability: () => 'test/model' },
-    workerTools: {} as WorkerTools,
+    workerTools: workerTools(),
     styleContents: '',
     runWorkerOverride: async () => okWorker(),
     ...overrides,
@@ -305,7 +306,7 @@ test('runSelfReviewSession: builds the review Worker on the coding-capability mo
         // Empty tool surface: the real worker path can't run git, so it returns `error`. That is now
         // an `error` outcome (not the old masked `clean`); we only assert the model was requested for
         // the 'coding' tier, with no hardcoded role mapping.
-        workerTools: {} as WorkerTools,
+        workerTools: workerTools(),
         styleContents: '',
       },
     }),

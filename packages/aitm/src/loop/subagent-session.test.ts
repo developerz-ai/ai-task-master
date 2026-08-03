@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { RetryInfo } from '@developerz.ai/ai-claude-compat';
-import type { ToolSet } from 'ai';
+import type { AssistantModelMessage, ToolSet } from 'ai';
 import { labelText } from '../observability/step-progress.ts';
 import type { TranscriptRecorder } from '../state/transcript-store.ts';
+import { stepResponse, stepResult } from '../testing/step-results.ts';
 import {
   buildSubagentSession,
   onRetryProgress,
@@ -24,6 +25,12 @@ function withCapturedStderr(fn: () => void): string[] {
     process.stderr.write = real;
   }
   return lines;
+}
+
+// The handler slices the cumulative list by COUNT, so these only have to be distinguishable — but
+// they still have to be messages, which is what the old `['a', 'b'] as never` opted out of saying.
+function messages(...texts: string[]): AssistantModelMessage[] {
+  return texts.map((text) => ({ role: 'assistant', content: text }));
 }
 
 // A minimal TranscriptRecorder double: only `step` is exercised by recordStepDeltas/buildSubagentSession.
@@ -64,24 +71,21 @@ test('onRetryProgress: writes the retry line through the given sink', () => {
 test('recordStepDeltas: records only the per-step delta across cumulative response.messages', async () => {
   const { recorder, calls } = stubRecorder();
   const handler = recordStepDeltas(recorder);
-  handler({ response: { messages: ['a', 'b'] as never } });
-  handler({ response: { messages: ['a', 'b', 'c', 'd'] as never } });
+  handler({ response: { messages: messages('a', 'b') } });
+  handler({ response: { messages: messages('a', 'b', 'c', 'd') } });
   // Give the fire-and-forget `void recorder.step(...)` calls a tick to land.
   await Promise.resolve();
   assert.deepEqual(
     calls.map((c) => c[0]),
-    [
-      ['a', 'b'],
-      ['c', 'd'],
-    ],
+    [messages('a', 'b'), messages('c', 'd')],
   );
 });
 
 test('recordStepDeltas: an empty delta (identical length) records nothing', async () => {
   const { recorder, calls } = stubRecorder();
   const handler = recordStepDeltas(recorder);
-  handler({ response: { messages: ['a'] as never } });
-  handler({ response: { messages: ['a'] as never } });
+  handler({ response: { messages: messages('a') } });
+  handler({ response: { messages: messages('a') } });
   await Promise.resolve();
   assert.equal(calls.length, 1);
 });
@@ -158,16 +162,12 @@ test('buildSubagentSession: onStepFinish folds the recorder delta in alongside t
     recorder,
   });
   withCapturedStderr(() => {
-    session.onStepFinish({
-      response: { messages: ['a', 'b'] },
-      text: '',
-      toolCalls: [],
-    } as never);
+    session.onStepFinish(stepResult({ response: stepResponse(messages('a', 'b')) }));
   });
   await Promise.resolve();
   assert.deepEqual(
     calls.map((c) => c[0]),
-    [['a', 'b']],
+    [messages('a', 'b')],
   );
 });
 
@@ -179,7 +179,7 @@ test('buildSubagentSession: no recorder → onStepFinish is still callable (prog
     streaming: false,
   });
   const lines = withCapturedStderr(() => {
-    session.onStepFinish({ response: { messages: [] }, text: 'hi', toolCalls: [] } as never);
+    session.onStepFinish(stepResult({ text: 'hi' }));
   });
   assert.ok(lines.length > 0, 'still renders the progress line with no recorder');
 });

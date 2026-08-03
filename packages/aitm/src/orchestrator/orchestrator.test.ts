@@ -89,6 +89,25 @@ function sequenceModel(values: readonly unknown[]): {
   return { model, count: () => calls };
 }
 
+// Both ports the Orchestrator takes are one-method structural types, so a test that does not
+// exercise one can still state it. `{} as never` said nothing and let a port grow a second method
+// without a single call site noticing (issue #330).
+
+// For the prompt-shape tests: an Orchestrator built only to be read never generates.
+function silentProvider(): ModelProvider {
+  return { modelFor: () => new MockLanguageModelV3() };
+}
+
+// For the finalizeCommit tests: they commit, they never open a PR. Throwing rather than returning a
+// fabricated PullRequest keeps a test that reaches GitHub by accident failing instead of passing.
+function unusedGithub(): GhClient {
+  return {
+    createPr: async () => {
+      throw new Error('createPr is not part of this test');
+    },
+  };
+}
+
 function recordingProvider(model: MockLanguageModelV3): {
   provider: ModelProvider;
   roles: Role[];
@@ -146,20 +165,20 @@ function basePr(headRefName = 'aitm/core'): PullRequest {
 
 test('Orchestrator is constructible', () => {
   const o = new Orchestrator({
-    credentials: {} as never,
+    credentials: silentProvider(),
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
-    github: {} as never,
+    github: unusedGithub(),
   });
   assert.ok(o instanceof Orchestrator);
 });
 
 test('buildSystemPrompt = agentConfig.contents + COMPOSER_ROLE_PREFIX + rollingContext', () => {
   const o = new Orchestrator({
-    credentials: {} as never,
+    credentials: silentProvider(),
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '# repo style' }),
     rollingContext: 'prior PRs: 1, 2',
-    github: {} as never,
+    github: unusedGithub(),
   });
   const sys = o.buildSystemPrompt();
   assert.ok(sys.includes('# repo style'), 'style payload must be present');
@@ -172,11 +191,11 @@ test('buildSystemPrompt = agentConfig.contents + COMPOSER_ROLE_PREFIX + rollingC
 
 test('buildSystemPrompt: styleDigest replaces agentConfig.contents as the style prefix', () => {
   const o = new Orchestrator({
-    credentials: {} as never,
+    credentials: silentProvider(),
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '# raw style' }),
     styleDigest: '# distilled digest',
     rollingContext: 'prior PRs: 1',
-    github: {} as never,
+    github: unusedGithub(),
   });
   const sys = o.buildSystemPrompt();
   assert.ok(sys.includes('# distilled digest'), 'digest must be used as the style prefix');
@@ -203,7 +222,7 @@ test('finalizeCommit sends buildSystemPrompt() via the system field, not duplica
     credentials: provider,
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '# repo style' }),
     rollingContext: 'prior PRs: 1',
-    github: {} as never,
+    github: unusedGithub(),
     runCmd: async (file, args) =>
       args[0] === 'rev-parse'
         ? { stdout: 'deadbeef\n', stderr: '', exitCode: 0 }
@@ -283,7 +302,7 @@ test('finalizeCommit: interpolated title/draft/summary are capped at MANIFEST_FI
     credentials: provider,
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
-    github: {} as never,
+    github: unusedGithub(),
     runCmd: async (file, args) =>
       args[0] === 'rev-parse'
         ? { stdout: 'deadbeef\n', stderr: '', exitCode: 0 }
@@ -376,7 +395,7 @@ test('finalizeCommit rewrites commit message and amends via runCmd, returning th
     credentials: provider,
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
-    github: {} as never,
+    github: unusedGithub(),
     runCmd,
   });
 
@@ -408,7 +427,7 @@ test('finalizeCommit: an empty refine response amends with the Worker draft, not
     credentials: provider,
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
-    github: {} as never,
+    github: unusedGithub(),
     runCmd,
   });
   await o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt');
@@ -427,7 +446,7 @@ test('finalizeCommit: a code-fenced refine response amends with the fence stripp
     credentials: provider,
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
-    github: {} as never,
+    github: unusedGithub(),
     runCmd,
   });
   await o.finalizeCommit(baseGroup(), baseDelivery(), '/tmp/wt');
@@ -451,7 +470,7 @@ test('finalizeCommit stamps a task-id trailer onto the amended message when task
     credentials: provider,
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
-    github: {} as never,
+    github: unusedGithub(),
     runCmd,
   });
 
@@ -475,7 +494,7 @@ test('finalizeCommit throws when git amend fails', async () => {
     credentials: provider,
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
-    github: {} as never,
+    github: unusedGithub(),
     runCmd,
   });
   await assert.rejects(
@@ -490,7 +509,7 @@ test('finalizeCommit arms the per-step deadline — a stalled refine call surfac
     credentials: provider,
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
-    github: {} as never,
+    github: unusedGithub(),
     runCmd: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     timeout: { stepMs: 40 },
   });
@@ -1103,7 +1122,7 @@ test('finalizeCommit: the run signal reaches every git child', async () => {
     credentials: provider,
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
-    github: {} as never,
+    github: unusedGithub(),
     runCmd,
     signal: controller.signal,
   });
@@ -1119,7 +1138,7 @@ test('finalizeCommit: the run signal also cancels the refine generateText call',
     credentials: provider,
     agentConfig: agentConfig({ path: '/tmp/CLAUDE.md', contents: '' }),
     rollingContext: '',
-    github: {} as never,
+    github: unusedGithub(),
     runCmd: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
     signal: controller.signal,
   });

@@ -12,10 +12,10 @@ import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
 import type { RunLoopInput } from '../composition/run-input.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
-import type { McpClientManager } from '../mcp/mcp-client.ts';
+import { McpClientManager } from '../mcp/mcp-client.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { Plan } from '../plan/schema.ts';
-import { StateStore } from '../state/state-store.ts';
+import { bridgeCredentials, bridgeInput } from '../testing/bridge-ctx.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import {
   branchFor,
@@ -333,33 +333,17 @@ function planSubmitModel(value: unknown): MockLanguageModelV3 {
 }
 
 function fakeInput(dir: string, model: MockLanguageModelV3): RunLoopInput {
-  const credentials = {
-    modelFor: () => model,
-    modelForCapability: () => model,
-    modelIdFor: () => 'openai/gpt-5',
-    modelIdForCapability: () => 'openai/gpt-5',
-  };
-  return {
+  return bridgeInput({
     cwd: dir,
     goal: 'add a todo list',
-    criteria: undefined,
-    branch: undefined,
-    resolved: {
-      openrouterApiKey: 'sk-or-test',
-      maxPrs: 5,
-      maxSessions: null,
-      llmStepTimeoutMs: 30_000,
-      streaming: false,
-    },
-    credentials,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-    state: new StateStore(dir),
-    github: {},
-  } as never as RunLoopInput;
+    credentials: bridgeCredentials({ modelFor: () => model, modelForCapability: () => model }),
+  });
 }
 
+// A manager with no servers configured: `toolsForRole` answers with the same empty set the literal
+// stub used to fake, and every other method the wiring might reach is the real one.
 function fakeMcp(): McpClientManager {
-  return { toolsForRole: () => ({}) } as never as McpClientManager;
+  return new McpClientManager({ servers: {} });
 }
 
 test('defaultPlanGroups: an accepted plan becomes ok PR groups with assigned branches', async () => {

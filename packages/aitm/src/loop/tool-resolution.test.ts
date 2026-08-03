@@ -12,10 +12,12 @@ import { backgroundProcessTools, SUBMIT_TOOL_NAME } from '@developerz.ai/ai-clau
 import type { ToolSet } from 'ai';
 import { jsonSchema, tool } from 'ai';
 import { z } from 'zod';
-import type { ResolvedConfig } from '../config/schema.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
 import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import { buildMemoryTool } from '../subagents/memory-tool.ts';
+import { resolvedConfig } from '../testing/domain-fixtures.ts';
+import { mcpClientDouble } from '../testing/mcp-client-double.ts';
+import { runTool } from '../testing/tool-harness.ts';
 import {
   activeToolNames,
   applyHooks,
@@ -28,31 +30,15 @@ import {
   resolveWorkerTools,
 } from './tool-resolution.ts';
 
-// Minimal resolved config carrying only what applyHooks reads. Mirrors the fixture literal
-// run-loop-adapter.test.ts builds via its own makeInput().
-function resolvedConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
-  return {
-    openrouterApiKey: 'k',
-    apiKeySource: 'env',
-    models: { generic: 'g', smart: 's', coding: 'c', fast: 'f' },
-    maxPrs: 5,
-    maxSessions: null,
-    autoMerge: true,
-    mergeMethod: 'squash',
-    stylePath: null,
-    logLevel: 'info',
-    concurrency: 2,
-    mcpServers: {},
-    mcpServerSources: {},
-    ...overrides,
-  } as ResolvedConfig;
-}
-
 test('mcpTool: partial-fill matches a namespaced MCP tool by canonical name, first in config order (issue #115)', () => {
-  const a = { description: 'a' } as never;
-  const b = { description: 'b' } as never;
+  const a = mcpFake('a');
+  const b = mcpFake('b');
   // Namespaced ToolSet as toolsForRole now produces it; insertion order = server/config order.
-  const set = { mcp__fs__readFile: a, mcp__other__readFile: b, mcp__git__status: {} as never };
+  const set = {
+    mcp__fs__readFile: a,
+    mcp__other__readFile: b,
+    mcp__git__status: mcpFake('status'),
+  };
   assert.strictEqual(mcpTool(set, 'readFile'), a, 'first server in config order wins');
   assert.strictEqual(mcpTool(set, 'status'), set.mcp__git__status);
   // A canonical name no server exports → undefined (caller falls back to the local tool).
@@ -74,20 +60,13 @@ test('localEditTools supplies checkout-scoped readFile/writeFile/bash (no-MCP fa
 
 test('localEditTools: threads bash deny/allow rules into the bash + multiBash tools (issue #113)', async () => {
   const tools = localEditTools('/tmp/wt', [{ pattern: 'git push --force*', action: 'deny' }]);
-  const opts = { toolCallId: 't', messages: [] as never[] };
-  const bashOut = (await tools.bash.execute?.(
-    { command: 'git push --force', description: 'force push' },
-    opts,
-  )) as {
-    exitCode: number;
-    denied?: boolean;
-  };
+  const bashOut = await runTool(tools.bash, {
+    command: 'git push --force',
+    description: 'force push',
+  });
   assert.equal(bashOut.exitCode, 126);
   assert.equal(bashOut.denied, true);
-  const multiOut = (await tools.multiBash.execute?.({ commands: ['git push --force'] }, opts)) as {
-    failedAt: number | null;
-    exitCode: number;
-  };
+  const multiOut = await runTool(tools.multiBash, { commands: ['git push --force'] });
   assert.equal(multiOut.failedAt, 0);
   assert.equal(multiOut.exitCode, 126);
 });
@@ -96,10 +75,11 @@ test('localEditTools: a wired ProcessManager routes bash({ run_in_background: tr
   const bg = backgroundProcessTools({ cwd: process.cwd() });
   try {
     const tools = localEditTools(process.cwd(), undefined, false, bg.manager);
-    const out = (await tools.bash.execute?.(
-      { command: 'sleep 30', description: 'start a long-lived process', run_in_background: true },
-      { toolCallId: 't', messages: [] as never[] },
-    )) as { stdout: string };
+    const out = await runTool(tools.bash, {
+      command: 'sleep 30',
+      description: 'start a long-lived process',
+      run_in_background: true,
+    });
     // The manager path returns the background id/hint, not the no-manager foreground-degradation notice.
     assert.match(out.stdout, /Started background process bg-1/);
     assert.equal(
@@ -129,18 +109,14 @@ test('localEditTools: a file changed on disk after its Read surfaces one file-ch
   try {
     await writeFile(join(dir, 'a.ts'), 'v1', 'utf8');
     const tools = localEditTools(dir);
-    const opts = { toolCallId: 't', messages: [] as never[] };
     // Model reads A (the tracker records its content hash).
-    await tools.readFile.execute?.({ path: 'a.ts' }, opts);
+    await runTool(tools.readFile, { path: 'a.ts' });
     // A is modified on disk out from under the model.
     await writeFile(join(dir, 'a.ts'), 'v2-changed-on-disk', 'utf8');
     // An edit against the since-changed file is rejected (read-before-edit staleness, #104) — the
     // rejection is what flags A stale in the tracker.
     await assert.rejects(
-      tools.editFile.execute?.(
-        { path: 'a.ts', oldString: 'v2-changed-on-disk', newString: 'x' },
-        opts,
-      ) as Promise<unknown>,
+      runTool(tools.editFile, { path: 'a.ts', oldString: 'v2-changed-on-disk', newString: 'x' }),
       /modified since you read it/,
     );
     // The next successful file-tool result now carries exactly one file-changed-externally envelope.
@@ -359,8 +335,7 @@ test('deferred loading end-to-end: an over-threshold MCP server surfaces name-on
   const mcp = new McpClientManager({
     servers: { gh: { command: 'gh-mcp' } },
     deferToolsOver: 1, // 2 surplus tools > 1 → deferred
-    createClient: (async () =>
-      ({ tools: async () => surplus, close: async () => {} }) as never) as never,
+    createClient: async () => mcpClientDouble({ tools: surplus }),
   });
   await mcp.connectAll();
   const mount = mountDeferredTools(mcp.toolSurfaceForRole('worker'));

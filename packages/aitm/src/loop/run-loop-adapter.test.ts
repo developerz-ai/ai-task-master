@@ -31,7 +31,15 @@ import { CURRENT_SCHEMA_VERSION } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import { type TranscriptRecorder, TranscriptStore } from '../state/transcript-store.ts';
 import type { WorkerResult } from '../subagents/worker.ts';
+import {
+  bridgeCredentials,
+  bridgeCtx,
+  bridgeInput,
+  bridgeState,
+  workerInvocation,
+} from '../testing/bridge-ctx.ts';
 import { resolvedConfig } from '../testing/domain-fixtures.ts';
+import { mcpClientDouble } from '../testing/mcp-client-double.ts';
 import { modelUsage } from '../testing/model-fixtures.ts';
 import { workerHandle } from '../testing/subagent-tools.ts';
 import {
@@ -594,48 +602,23 @@ function emptyManifestModel(): MockLanguageModelV3 {
 test('defaultMakeOrchestrator constructs the Compactor and wires it into the stage-machine worker (issue #102)', async () => {
   const model = emptyManifestModel();
   const rolesSeen: string[] = [];
-  const credentials = {
+  const credentials = bridgeCredentials({
     modelFor: () => model,
     modelForCapability: () => model,
-    modelIdFor: (role: string) => {
+    modelIdFor: (role) => {
       rolesSeen.push(role);
       return 'openai/gpt-5';
     },
-    modelIdForCapability: () => 'openai/gpt-5',
-  };
-  const mcp = {
-    toolsForRole: () => ({}),
-    toolSurfaceForRole: () => ({ direct: {}, deferred: {} }),
-  };
-  const input = {
-    cwd: '/tmp/adapter-compaction',
-    resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
-    credentials,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-    github: {},
-    goal: 'g',
-    criteria: undefined,
-    branch: undefined,
-    state: {},
-  };
+  });
 
   // Constructing the bridge builds OpenRouterClient + ModelLimitsRegistry + Compactor (lazily, no
   // network) — proving they are live in the production path, not dead exports.
-  const orch = defaultMakeOrchestrator({
-    input,
-    mcp,
-    rollingContext: '',
-    state: {},
-    stepCounter: () => undefined,
-    skills: [],
-  } as never);
+  const orch = defaultMakeOrchestrator(
+    bridgeCtx({ input: bridgeInput({ cwd: '/tmp/adapter-compaction', credentials }) }),
+  );
   assert.equal(typeof orch.runWorker, 'function');
 
-  const res = await orch.runWorker({
-    group: group('core'),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-  } as never);
+  const res = await orch.runWorker(workerInvocation(group('core')));
   assert.equal(res.kind, 'blocked'); // empty manifest → blocked, but the wiring already ran
   assert.ok(
     rolesSeen.includes('worker'),
@@ -670,35 +653,15 @@ test("defaultMakeOrchestrator.runWorker: the group's acceptance check reaches th
       };
     },
   });
-  const credentials = {
-    modelFor: () => model,
-    modelForCapability: () => model,
-    modelIdFor: () => 'openai/gpt-5',
-    modelIdForCapability: () => 'openai/gpt-5',
-  };
-  const orch = defaultMakeOrchestrator({
-    input: {
-      cwd: '/tmp/adapter-acceptance',
-      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
-      credentials,
-      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-      github: {},
-      goal: 'g',
-      criteria: undefined,
-      branch: undefined,
-      state: {},
-    },
-    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
-    rollingContext: '',
-    state: {},
-    stepCounter: () => undefined,
-    skills: [],
-  } as never);
-  await orch.runWorker({
-    group: group('core', { acceptance: 'bun test src/auth passes and POST /login sets a cookie' }),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-  } as never);
+  const credentials = bridgeCredentials({ modelFor: () => model, modelForCapability: () => model });
+  const orch = defaultMakeOrchestrator(
+    bridgeCtx({ input: bridgeInput({ cwd: '/tmp/adapter-acceptance', credentials }) }),
+  );
+  await orch.runWorker(
+    workerInvocation(
+      group('core', { acceptance: 'bun test src/auth passes and POST /login sets a cookie' }),
+    ),
+  );
   assert.match(sent, /Acceptance check for this PR group/);
   assert.match(sent, /bun test src\/auth passes and POST \/login sets a cookie/);
 });
@@ -727,35 +690,11 @@ test('defaultMakeOrchestrator.runWorker: a group with no acceptance check adds n
       };
     },
   });
-  const credentials = {
-    modelFor: () => model,
-    modelForCapability: () => model,
-    modelIdFor: () => 'openai/gpt-5',
-    modelIdForCapability: () => 'openai/gpt-5',
-  };
-  const orch = defaultMakeOrchestrator({
-    input: {
-      cwd: '/tmp/adapter-acceptance-legacy',
-      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
-      credentials,
-      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-      github: {},
-      goal: 'g',
-      criteria: undefined,
-      branch: undefined,
-      state: {},
-    },
-    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
-    rollingContext: '',
-    state: {},
-    stepCounter: () => undefined,
-    skills: [],
-  } as never);
-  await orch.runWorker({
-    group: group('core'),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-  } as never);
+  const credentials = bridgeCredentials({ modelFor: () => model, modelForCapability: () => model });
+  const orch = defaultMakeOrchestrator(
+    bridgeCtx({ input: bridgeInput({ cwd: '/tmp/adapter-acceptance-legacy', credentials }) }),
+  );
+  await orch.runWorker(workerInvocation(group('core')));
   assert.doesNotMatch(sent, /Acceptance check for this PR group/);
 });
 
@@ -766,16 +705,7 @@ test('defaultMakeOrchestrator.runWorker: threads resolved.subagentLimit into the
   // deterministically through the workerRunner seam — no fan-out, no timing. A non-default value (7)
   // so a hard-coded default could never satisfy the assertion.
   const model = emptyManifestModel();
-  const credentials = {
-    modelFor: () => model,
-    modelForCapability: () => model,
-    modelIdFor: () => 'openai/gpt-5',
-    modelIdForCapability: () => 'openai/gpt-5',
-  };
-  const mcp = {
-    toolsForRole: () => ({}),
-    toolSurfaceForRole: () => ({ direct: {}, deferred: {} }),
-  };
+  const credentials = bridgeCredentials({ modelFor: () => model, modelForCapability: () => model });
   let captured: number | undefined;
   const workerRunner = async (
     _agent: unknown,
@@ -784,31 +714,17 @@ test('defaultMakeOrchestrator.runWorker: threads resolved.subagentLimit into the
     captured = workerInput.subagentLimit;
     return { kind: 'blocked', reason: 'captured' };
   };
-  const input = {
-    cwd: '/tmp/adapter-editorcap',
-    resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null, subagentLimit: 7 },
-    credentials,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-    github: {},
-    goal: 'g',
-    criteria: undefined,
-    branch: undefined,
-    state: {},
-  };
-  const orch = defaultMakeOrchestrator({
-    skills: [],
-    input,
-    mcp,
-    rollingContext: '',
-    state: {},
-    stepCounter: () => undefined,
-    workerRunner,
-  } as never);
-  const res = await orch.runWorker({
-    group: group('core'),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-  } as never);
+  const orch = defaultMakeOrchestrator(
+    bridgeCtx({
+      input: bridgeInput({
+        cwd: '/tmp/adapter-editorcap',
+        credentials,
+        resolved: resolvedConfig({ subagentLimit: 7 }),
+      }),
+      workerRunner,
+    }),
+  );
+  const res = await orch.runWorker(workerInvocation(group('core')));
   assert.equal(res.kind, 'blocked');
   assert.equal(
     captured,
@@ -836,43 +752,17 @@ test('defaultMakeOrchestrator.runWorker: resuming a recordingFailed transcript s
   }) as typeof process.stderr.write;
 
   const model = emptyManifestModel();
-  const credentials = {
-    modelFor: () => model,
-    modelForCapability: () => model,
-    modelIdFor: () => 'openai/gpt-5',
-    modelIdForCapability: () => 'openai/gpt-5',
-  };
-  const mcp = {
-    toolsForRole: () => ({}),
-    toolSurfaceForRole: () => ({ direct: {}, deferred: {} }),
-  };
-  const input = {
-    cwd: '/tmp/adapter-compaction',
-    resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
-    credentials,
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-    github: {},
-    goal: 'g',
-    criteria: undefined,
-    branch: undefined,
-    state: {},
-  };
+  const credentials = bridgeCredentials({ modelFor: () => model, modelForCapability: () => model });
 
   try {
-    const orch = defaultMakeOrchestrator({
-      input,
-      mcp,
-      rollingContext: '',
-      state: { transcripts: () => store },
-      stepCounter: () => undefined,
-      skills: [],
-    } as never);
+    const orch = defaultMakeOrchestrator(
+      bridgeCtx({
+        input: bridgeInput({ cwd: '/tmp/adapter-compaction', credentials }),
+        state: bridgeState({ transcripts: () => store }),
+      }),
+    );
 
-    const res = await orch.runWorker({
-      group: group('core'),
-      checkout: { path: '/tmp/wt' },
-      baseBranch: 'main',
-    } as never);
+    const res = await orch.runWorker(workerInvocation(group('core')));
     assert.equal(res.kind, 'blocked'); // empty manifest → blocked, but resume already happened first
     assert.ok(
       warnings.some((w) => /recorder had persistent write failures/.test(w)),
@@ -889,50 +779,27 @@ test('defaultMakeOrchestrator.releaseGroup: drops the group carry-over so the ne
   // WorkLoop is done with the group nothing can reuse it, so releaseGroup must drop it — otherwise a
   // many-group run ends holding every group's full ModelMessage[].
   const model = emptyManifestModel();
-  const credentials = {
-    modelFor: () => model,
-    modelForCapability: () => model,
-    modelIdFor: () => 'openai/gpt-5',
-    modelIdForCapability: () => 'openai/gpt-5',
-  };
+  const credentials = bridgeCredentials({ modelFor: () => model, modelForCapability: () => model });
   const priorHandles: Array<{ messages: ModelMessage[] } | undefined> = [];
   const workerRunner = async (
-    agent: unknown,
+    _agent: unknown,
     workerInput: { priorHandle?: { messages: ModelMessage[] } },
   ): Promise<WorkerResult> => {
     priorHandles.push(workerInput.priorHandle);
     return {
       kind: 'ok',
       delivery: delivery(),
-      handle: { agent, messages: [{ role: 'assistant', content: 'carried' }] },
-    } as never;
+      handle: { ...workerHandle(), messages: [{ role: 'assistant', content: 'carried' }] },
+    };
   };
-  const orch = defaultMakeOrchestrator({
-    skills: [],
-    input: {
-      cwd: '/tmp/adapter-release-group',
-      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
-      credentials,
-      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-      github: {},
-      goal: 'g',
-      criteria: undefined,
-      branch: undefined,
-      state: {},
-    },
-    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
-    rollingContext: '',
-    state: {},
-    stepCounter: () => undefined,
-    workerRunner,
-  } as never);
+  const orch = defaultMakeOrchestrator(
+    bridgeCtx({
+      input: bridgeInput({ cwd: '/tmp/adapter-release-group', credentials }),
+      workerRunner,
+    }),
+  );
 
-  const invoke = () =>
-    orch.runWorker({
-      group: group('core'),
-      checkout: { path: '/tmp/wt' },
-      baseBranch: 'main',
-    } as never);
+  const invoke = () => orch.runWorker(workerInvocation(group('core')));
 
   await invoke();
   await invoke();
@@ -1262,13 +1129,12 @@ function countingMcp(): { mcp: McpClientManager; closes: () => number } {
   let clientClosed = 0;
   const mcp = new McpClientManager({
     servers: { local: { command: 'local-mcp' } },
-    createClient: (async () =>
-      ({
-        tools: async () => ({}),
-        close: async () => {
+    createClient: async () =>
+      mcpClientDouble({
+        onClose: () => {
           clientClosed += 1;
         },
-      }) as never) as never,
+      }),
   });
   return { mcp, closes: () => clientClosed };
 }
@@ -1445,12 +1311,7 @@ function carryOverHarness(results: Array<'ok' | 'blocked'>): {
   seen: Array<readonly unknown[] | undefined>;
 } {
   const model = emptyManifestModel();
-  const credentials = {
-    modelFor: () => model,
-    modelForCapability: () => model,
-    modelIdFor: () => 'openai/gpt-5',
-    modelIdForCapability: () => 'openai/gpt-5',
-  };
+  const credentials = bridgeCredentials({ modelFor: () => model, modelForCapability: () => model });
   const seen: Array<readonly unknown[] | undefined> = [];
   let call = 0;
   const workerRunner = async (
@@ -1464,28 +1325,15 @@ function carryOverHarness(results: Array<'ok' | 'blocked'>): {
       kind: 'ok',
       delivery: { branch: 'b', draftCommitMessage: 'm', changes: [], progressEntries: [] },
       // A distinct message array per call, so the assertions can tell which pass was carried.
-      handle: { agent: {}, messages: [{ role: 'assistant', content: `pass-${call}` }] },
-    } as unknown as WorkerResult;
+      handle: { ...workerHandle(), messages: [{ role: 'assistant', content: `pass-${call}` }] },
+    };
   };
-  const orch = defaultMakeOrchestrator({
-    skills: [],
-    input: {
-      cwd: '/tmp/adapter-carryover',
-      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
-      credentials,
-      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-      github: {},
-      goal: 'g',
-      criteria: undefined,
-      branch: undefined,
-      state: {},
-    },
-    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
-    rollingContext: '',
-    state: {},
-    stepCounter: () => undefined,
-    workerRunner,
-  } as never);
+  const orch = defaultMakeOrchestrator(
+    bridgeCtx({
+      input: bridgeInput({ cwd: '/tmp/adapter-carryover', credentials }),
+      workerRunner,
+    }),
+  );
   return { orch, seen };
 }
 
@@ -1493,9 +1341,9 @@ test("runWorker: a group's second task continues the first task's conversation",
   // Half the wall-clock of a real run went to re-orientation: every task cold-started a Coordinator
   // that re-read the same files. The second task must inherit the first's messages.
   const { orch, seen } = carryOverHarness(['ok', 'ok']);
-  const call = { group: group('core'), checkout: { path: '/tmp/wt' }, baseBranch: 'main' };
-  await orch.runWorker(call as never);
-  await orch.runWorker(call as never);
+  const call = workerInvocation(group('core'));
+  await orch.runWorker(call);
+  await orch.runWorker(call);
   assert.equal(seen[0], undefined, 'the first task of a group starts cold');
   assert.deepEqual(seen[1], [{ role: 'assistant', content: 'pass-1' }]);
 });
@@ -1504,26 +1352,18 @@ test('runWorker: a blocked task leaves the carry-over intact for the next one', 
   // A blocked pass has no handle. Dropping the group back to a cold start would make failure
   // doubly expensive — the retry would re-survey everything the successful pass already read.
   const { orch, seen } = carryOverHarness(['ok', 'blocked', 'ok']);
-  const call = { group: group('core'), checkout: { path: '/tmp/wt' }, baseBranch: 'main' };
-  await orch.runWorker(call as never);
-  await orch.runWorker(call as never);
-  await orch.runWorker(call as never);
+  const call = workerInvocation(group('core'));
+  await orch.runWorker(call);
+  await orch.runWorker(call);
+  await orch.runWorker(call);
   assert.deepEqual(seen[1], [{ role: 'assistant', content: 'pass-1' }]);
   assert.deepEqual(seen[2], [{ role: 'assistant', content: 'pass-1' }], 'still the last ok pass');
 });
 
 test('runWorker: carry-over never crosses group boundaries', async () => {
   const { orch, seen } = carryOverHarness(['ok', 'ok']);
-  await orch.runWorker({
-    group: group('core'),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-  } as never);
-  await orch.runWorker({
-    group: group('api'),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-  } as never);
+  await orch.runWorker(workerInvocation(group('core')));
+  await orch.runWorker(workerInvocation(group('api')));
   assert.equal(seen[1], undefined, 'a different group starts cold');
 });
 
@@ -1537,12 +1377,7 @@ function workerSignalHarness(runSignal?: AbortSignal): {
   seen: Array<AbortSignal | undefined>;
 } {
   const model = emptyManifestModel();
-  const credentials = {
-    modelFor: () => model,
-    modelForCapability: () => model,
-    modelIdFor: () => 'openai/gpt-5',
-    modelIdForCapability: () => 'openai/gpt-5',
-  };
+  const credentials = bridgeCredentials({ modelFor: () => model, modelForCapability: () => model });
   const seen: Array<AbortSignal | undefined> = [];
   const workerRunner = async (
     _agent: unknown,
@@ -1551,38 +1386,23 @@ function workerSignalHarness(runSignal?: AbortSignal): {
     seen.push(workerInput.signal);
     return { kind: 'blocked', reason: 'captured' };
   };
-  const orch = defaultMakeOrchestrator({
-    skills: [],
-    input: {
-      cwd: '/tmp/adapter-signal',
-      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
-      credentials,
-      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-      github: {},
-      goal: 'g',
-      criteria: undefined,
-      branch: undefined,
-      state: {},
-      ...(runSignal ? { signal: runSignal } : {}),
-    },
-    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
-    rollingContext: '',
-    state: {},
-    stepCounter: () => undefined,
-    workerRunner,
-  } as never);
+  const orch = defaultMakeOrchestrator(
+    bridgeCtx({
+      input: bridgeInput({
+        cwd: '/tmp/adapter-signal',
+        credentials,
+        ...(runSignal ? { signal: runSignal } : {}),
+      }),
+      workerRunner,
+    }),
+  );
   return { orch, seen };
 }
 
 test("runWorker: the invocation's signal reaches WorkerInput (the editor fanout's abort)", async () => {
   const controller = new AbortController();
   const { orch, seen } = workerSignalHarness();
-  await orch.runWorker({
-    group: group('core'),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-    signal: controller.signal,
-  } as never);
+  await orch.runWorker(workerInvocation(group('core'), { signal: controller.signal }));
   assert.equal(seen[0], controller.signal);
 });
 
@@ -1591,21 +1411,13 @@ test("runWorker: no invocation signal → falls back to the run's own signal", a
   // input.signal is the same run-scoped handle the WorkLoop would have passed.
   const controller = new AbortController();
   const { orch, seen } = workerSignalHarness(controller.signal);
-  await orch.runWorker({
-    group: group('core'),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-  } as never);
+  await orch.runWorker(workerInvocation(group('core')));
   assert.equal(seen[0], controller.signal);
 });
 
 test('runWorker: no signal anywhere → WorkerInput omits it', async () => {
   const { orch, seen } = workerSignalHarness();
-  await orch.runWorker({
-    group: group('core'),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-  } as never);
+  await orch.runWorker(workerInvocation(group('core')));
   assert.equal(seen[0], undefined);
 });
 
@@ -1621,39 +1433,21 @@ function discoveryFailureHarness(): {
   seen: unknown[];
 } {
   const model = emptyManifestModel();
-  const credentials = {
-    modelFor: () => model,
-    modelForCapability: () => model,
-    modelIdFor: () => 'openai/gpt-5',
-    modelIdForCapability: () => 'openai/gpt-5',
-  };
+  const credentials = bridgeCredentials({ modelFor: () => model, modelForCapability: () => model });
   const seen: unknown[] = [];
   const workerRunner = async (agent: unknown): Promise<WorkerResult> => {
     seen.push(agent);
     return { kind: 'blocked', reason: 'captured' };
   };
-  const orch = defaultMakeOrchestrator({
-    skills: [],
-    input: {
-      cwd: '/tmp/adapter-discovery-fail',
-      resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
-      credentials,
-      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-      github: {},
-      goal: 'g',
-      criteria: undefined,
-      branch: undefined,
-      state: {},
-    },
-    mcp: { toolsForRole: () => ({}), toolSurfaceForRole: () => ({ direct: {}, deferred: {} }) },
-    rollingContext: '',
-    state: {},
-    stepCounter: () => undefined,
-    workerRunner,
-    discoverSpecialists: async () => {
-      throw new Error('boom: cannot read .claude/agents');
-    },
-  } as never);
+  const orch = defaultMakeOrchestrator(
+    bridgeCtx({
+      input: bridgeInput({ cwd: '/tmp/adapter-discovery-fail', credentials }),
+      workerRunner,
+      discoverSpecialists: async () => {
+        throw new Error('boom: cannot read .claude/agents');
+      },
+    }),
+  );
   return { orch, seen };
 }
 
@@ -1661,16 +1455,8 @@ test('runWorker: a discoverSpecialists failure degrades to an empty roster, not 
   const { orch, seen } = discoveryFailureHarness();
   // Each call awaits the memoized roster before routing. A rejected roster would throw here — and for
   // every later group — never reaching the Worker.
-  await orch.runWorker({
-    group: group('core'),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-  } as never);
-  await orch.runWorker({
-    group: group('api'),
-    checkout: { path: '/tmp/wt' },
-    baseBranch: 'main',
-  } as never);
+  await orch.runWorker(workerInvocation(group('core')));
+  await orch.runWorker(workerInvocation(group('api')));
   assert.equal(seen.length, 2, 'both groups reached the Worker despite the discovery failure');
 });
 
@@ -1684,13 +1470,7 @@ test('defaultMakeOrchestrator: a discoverSpecialists failure never leaks an unha
     // Construction fires the fire-and-forget announce (`specialistRoster().then(...)`); the runWorker
     // exercises the awaited consumer. Neither may surface the discovery failure as a rejection.
     const { orch } = discoveryFailureHarness();
-    await orch
-      .runWorker({
-        group: group('core'),
-        checkout: { path: '/tmp/wt' },
-        baseBranch: 'main',
-      } as never)
-      .catch(() => {});
+    await orch.runWorker(workerInvocation(group('core'))).catch(() => {});
     // Let any floating rejection settle before asserting.
     await new Promise((resolve) => setTimeout(resolve, 0));
   } finally {

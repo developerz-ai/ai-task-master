@@ -12,8 +12,9 @@ import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { RunLoopInput } from '../composition/run-input.ts';
 import type { ReviewThread } from '../github/schema.ts';
-import type { McpClientManager } from '../mcp/mcp-client.ts';
-import { StateStore } from '../state/state-store.ts';
+import { McpClientManager } from '../mcp/mcp-client.ts';
+import { bridgeCredentials, bridgeInput } from '../testing/bridge-ctx.ts';
+import { resolvedConfig } from '../testing/domain-fixtures.ts';
 import { investigateReviewThreads } from './review-team-wiring.ts';
 
 const thread = (id: string, path: string, body: string): ReviewThread => ({
@@ -67,32 +68,16 @@ function teamModel(wave: Array<{ key: string; threadIds: string[]; question: str
 }
 
 function fakeInput(dir: string, model: MockLanguageModelV3): RunLoopInput {
-  return {
+  return bridgeInput({
     cwd: dir,
-    goal: 'g',
-    criteria: undefined,
-    branch: undefined,
-    resolved: {
-      openrouterApiKey: 'sk-or-test',
-      maxPrs: 5,
-      maxSessions: null,
-      llmStepTimeoutMs: 30_000,
-      subagentLimit: 10,
-      streaming: false,
-    },
-    credentials: {
-      modelFor: () => model,
-      modelForCapability: () => model,
-      modelIdFor: () => 'openai/gpt-5',
-      modelIdForCapability: () => 'openai/gpt-5',
-    },
-    agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
-    state: new StateStore(dir),
-    github: {},
-  } as never as RunLoopInput;
+    resolved: resolvedConfig({ subagentLimit: 10 }),
+    credentials: bridgeCredentials({ modelFor: () => model, modelForCapability: () => model }),
+  });
 }
 
-const fakeMcp = (): McpClientManager => ({ toolsForRole: () => ({}) }) as never as McpClientManager;
+// A manager with no servers configured: `toolsForRole` answers with the same empty set the literal
+// stub used to fake, and every other method the wiring might reach is the real one.
+const fakeMcp = (): McpClientManager => new McpClientManager({ servers: {} });
 
 async function withDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'aitm-review-team-'));

@@ -8,8 +8,13 @@
 // touched. This builds the same behaviour on the #106 system-reminder channel: the file tools carry
 // a provider that, on each call, announces any nested file governing the path just touched.
 //
-// Announced ONCE per file per tool set. A tool set is one subagent invocation, so a later Worker on
-// the same subtree is told again — correct, since it has its own context and never saw the first.
+// Announced ONCE per file per DECORATED RECORD — not per subagent invocation, which is what this
+// comment claimed until #192's review disproved it. Several agents can share one record: the Worker's
+// editor leaves are built from their Coordinator's (`editorToolSet(init.tools)`), and the scout
+// survey and review team share one across every member. So the leaves re-decorate from
+// `WorkerInput.nested` to get their own state, and those two teams stay undecorated until their
+// runners build a record per agent (#333). An agent with its own record is told again — correct,
+// since it has its own context and never saw the first announcement.
 
 import { relative, resolve, sep } from 'node:path';
 import { type ReminderProvider, withReminders } from '@developerz.ai/ai-claude-compat';

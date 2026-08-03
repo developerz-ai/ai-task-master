@@ -78,19 +78,29 @@ export type WithExplore<T> = T & { explore?: Tool<AgentToolInput, string> };
 // #112 TypedToolCall union. Present on the Worker set only when the state port hands out a memory dir.
 export type WithMemory<T> = T & { memory?: Tool<MemoryToolInput, string> };
 
-// `bashOutput`/`killBash` (issue #103 background bash) are runtime-only extras for the same #112
-// reason — static optional tool fields would inject `undefined` into the TypedToolCall union. They
-// page and stop the background processes `bash({ run_in_background: true })` starts, mounted only when
-// the run wired a ProcessManager.
+// `bashOutput`/`killBash`/`listBackground` (issue #103 background bash) are runtime-only extras for
+// the same #112 reason — static optional tool fields would inject `undefined` into the TypedToolCall
+// union. They page, stop, and enumerate the background processes `bash({ run_in_background: true })`
+// starts, mounted only when the run wired a ProcessManager.
+//
+// `listBackground` is not redundant with the other two: an id lives only in the tool result that
+// minted it, so once compaction drops that turn the agent can no longer name a process it started —
+// it can poll an id it still remembers, but cannot discover one it forgot. Enumeration is the only
+// way back. `backgroundBash` is deliberately NOT mounted: it duplicates
+// `bash({ run_in_background: true })`, and two tools for one act is a worse surface than one.
 export type WithBackground<T> = T & {
   bashOutput?: BackgroundProcessTools['bashOutput'];
   killBash?: BackgroundProcessTools['killBash'];
+  listBackground?: BackgroundProcessTools['listBackground'];
 };
 
 // The run-scoped background-process handle threaded into the tool resolvers: the manager (routed into
-// bashInit so `run_in_background` actually backgrounds) plus the two tools mounted for polling/stopping.
-// One per run; runLoopAdapter kills leftovers at run end.
-export type BackgroundTools = Pick<BackgroundProcessTools, 'manager' | 'bashOutput' | 'killBash'>;
+// bashInit so `run_in_background` actually backgrounds) plus the three tools mounted for
+// polling/stopping/enumerating. One per run; runLoopAdapter kills leftovers at run end.
+export type BackgroundTools = Pick<
+  BackgroundProcessTools,
+  'manager' | 'bashOutput' | 'killBash' | 'listBackground'
+>;
 
 // The checkout-confined read-only trio the explore child surveys with — picked from localReadTools
 // so it inherits the same resolveInside confinement, minus the web/datetime tools (the child's
@@ -350,7 +360,13 @@ export function resolveWorkerTools(
     // the caller wired them. bashOutput/killBash (#103) are the same: run-scoped background handles.
     ...(explore ? { explore } : {}),
     ...(memory ? { memory } : {}),
-    ...(background ? { bashOutput: background.bashOutput, killBash: background.killBash } : {}),
+    ...(background
+      ? {
+          bashOutput: background.bashOutput,
+          killBash: background.killBash,
+          listBackground: background.listBackground,
+        }
+      : {}),
   } as WithExplore<WorkerTools> & WithMemory<WorkerTools> & WithBackground<WorkerTools>;
 }
 

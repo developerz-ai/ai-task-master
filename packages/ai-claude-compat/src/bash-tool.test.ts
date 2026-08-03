@@ -5,7 +5,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { ExecaError, type execa } from 'execa';
 import { ProcessManager, type SpawnFn } from './background-process.ts';
-import { type BashOutput, bashTool, MAX_BASH_OUTPUT_CHARS, multiBashTool } from './bash-tool.ts';
+import {
+  type BashOutput,
+  bashDescription,
+  bashTool,
+  MAX_BASH_OUTPUT_CHARS,
+  multiBashTool,
+} from './bash-tool.ts';
 import { ToolOutputStore } from './tool-output-store.ts';
 
 function textOf(t: { toModelOutput?: unknown }, input: unknown, output: unknown): string {
@@ -368,7 +374,10 @@ test('bashTool: input schema requires description; run_in_background never fails
 });
 
 test('bashTool: description text carries the contract + file-tool steering (issue #103)', () => {
-  const desc = bashTool({ cwd: '/w' }).description ?? '';
+  // Wired with a manager: the background sentence is part of the contract only when the capability
+  // is actually mounted (issue #182), and this test is about the contract being stated in full.
+  const desc =
+    bashTool({ cwd: '/w', processManager: new ProcessManager({ cwd: '/w' }) }).description ?? '';
   assert.match(desc, /working directory PERSISTS/i);
   assert.match(desc, /variables, functions.*does NOT|does NOT/i);
   assert.match(desc, /cat.*head.*tail.*sed.*awk.*echo/i);
@@ -636,4 +645,35 @@ test('multiBashTool: a denied command sets failedAt and skips the remaining comm
   assert.equal(out.results.length, 2, 'ran cmd 0, denied cmd 1, skipped cmd 2');
   assert.equal(out.results[1]?.denied, true);
   assert.equal(rec.calls.length, 1, 'only the first command spawned');
+});
+
+// ---- issue #182: the description must match the mounted capability ----
+
+test('bashTool: the background sentence appears only when a ProcessManager is wired (issue #182)', () => {
+  const withManager = bashTool({ cwd: '/w', processManager: new ProcessManager({ cwd: '/w' }) });
+  const withoutManager = bashTool({ cwd: '/w' });
+
+  assert.match(String(withManager.description), /run_in_background/);
+  assert.match(String(withManager.description), /poll via bashOutput/);
+
+  // Without a manager the flag runs in the FOREGROUND and blocks the loop until the timeout, so a
+  // description that advertises it points the model at a capability that will hang it.
+  assert.doesNotMatch(String(withoutManager.description), /run_in_background/);
+  assert.doesNotMatch(String(withoutManager.description), /background id/);
+
+  // The tool wires the two variants rather than composing its own text, so the split cannot drift.
+  assert.equal(String(withManager.description), bashDescription(true));
+  assert.equal(String(withoutManager.description), bashDescription(false));
+});
+
+test('bashDescription: pure, and the two variants differ only by the background sentence (issue #182)', () => {
+  const on = bashDescription(true);
+  const off = bashDescription(false);
+  assert.ok(on.length > off.length, 'the wired variant says strictly more');
+  assert.ok(
+    off.split(' ').every((w) => on.includes(w)),
+    'the unwired variant adds nothing new',
+  );
+  assert.match(on, /background id you poll via bashOutput/);
+  assert.doesNotMatch(off, /background/i);
 });

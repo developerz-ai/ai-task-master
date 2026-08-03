@@ -259,14 +259,21 @@ test('resolveWorkerTools mounts memory only when the caller wires it (never MCP-
   assert.equal('memory' in withoutMemory, false, 'absent when not wired');
 });
 
-test('resolveWorkerTools mounts bashOutput/killBash only when a background manager is wired (issue #103)', () => {
+test('resolveWorkerTools mounts the background trio only when a manager is wired (issues #103, #182)', () => {
   const bg = backgroundProcessTools({ cwd: '/tmp/wt' });
   const withBg = resolveWorkerTools({}, '/tmp/wt', undefined, false, undefined, undefined, bg);
   assert.equal('bashOutput' in withBg, true, 'bashOutput present when wired');
   assert.equal('killBash' in withBg, true, 'killBash present when wired');
+  // An id lives only in the tool result that minted it, so after compaction drops that turn the
+  // agent can poll an id it still remembers but cannot discover one it forgot (issue #182).
+  assert.equal('listBackground' in withBg, true, 'listBackground present when wired');
+  // Deliberately absent: backgroundBash duplicates bash({ run_in_background: true }), and two tools
+  // for one act is a worse surface than one.
+  assert.equal('backgroundBash' in withBg, false, 'backgroundBash is not mounted');
   const withoutBg = resolveWorkerTools({}, '/tmp/wt');
   assert.equal('bashOutput' in withoutBg, false, 'absent when not wired');
   assert.equal('killBash' in withoutBg, false, 'absent when not wired');
+  assert.equal('listBackground' in withoutBg, false, 'absent when not wired');
 });
 
 test('resolvePlannerTools mounts explore only when the caller wires it', () => {

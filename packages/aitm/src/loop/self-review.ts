@@ -22,6 +22,7 @@
 
 import type { MemoryIndexEntry } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, TimeoutConfiguration } from 'ai';
+import type { NestedConfig } from '../agent-config/agent-config-detector.ts';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../domain/model.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
@@ -74,6 +75,9 @@ export type SelfReviewSubagents = {
   workerTools: WorkerTools;
   // Style payload (CLAUDE.md / AGENTS.md digest). Prepended to the Worker system prompt.
   styleContents: string;
+  // Nested per-directory style files, forwarded to the Worker so each editor leaf re-decorates its
+  // own on-touch announcement (issue #192). Unset/empty → the leaves are undecorated.
+  nested?: readonly NestedConfig[];
   // Optional formatter run before staging so the committed fix matches the project's formatter.
   formatCommand?: string;
   // Optional Compactor: the review Worker gets a summarize-and-continue prepareStep when its context
@@ -216,6 +220,7 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     baseBranch,
     styleContents: subagents.styleContents,
     rollingContext: subagents.rollingContext ?? '',
+    ...(subagents.nested?.length ? { nested: subagents.nested } : {}),
     ...(subagents.contextBlock ? { contextBlock: subagents.contextBlock } : {}),
     ...(subagents.progressBlock ? { progressBlock: subagents.progressBlock } : {}),
     ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),

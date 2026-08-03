@@ -22,6 +22,7 @@ import type {
   SubagentHandle,
 } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, ModelMessage, TimeoutConfiguration } from 'ai';
+import type { NestedConfig } from '../agent-config/agent-config-detector.ts';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../domain/model.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
@@ -79,6 +80,9 @@ export type FixSessionSubagents = {
   workerTools: WorkerTools;
   // Style payload (CLAUDE.md / AGENTS.md digest). Prepended to the Worker system prompt.
   styleContents: string;
+  // Nested per-directory style files, forwarded to the Worker so each editor leaf re-decorates its
+  // own on-touch announcement (issue #192). Unset/empty → the leaves are undecorated.
+  nested?: readonly NestedConfig[];
   // Optional formatter command the Worker runs before committing, so the diff matches the
   // project's formatter (issue #48).
   formatCommand?: string;
@@ -279,6 +283,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     baseBranch,
     styleContents: subagents.styleContents,
     rollingContext: subagents.rollingContext ?? '',
+    ...(subagents.nested?.length ? { nested: subagents.nested } : {}),
     // The advisory date context block the main-loop Worker gets (issue #106) — mirrors the #141
     // system-prompt change so the fix Worker's first message opens with the same cacheable prefix.
     contextBlock: harnessContextBlock(),

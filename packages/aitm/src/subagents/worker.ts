@@ -58,6 +58,7 @@ import {
 import type { Tool, ToolLoopAgent, ToolLoopAgentSettings } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
+import type { NestedConfig } from '../agent-config/agent-config-detector.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { Task } from '../domain/task.ts';
 import type { FileChange, WorkerDelivery } from '../domain/worker-delivery.ts';
@@ -167,6 +168,12 @@ export type WorkerInput = {
   baseBranch: string;
   styleContents: string;
   rollingContext: string;
+  // Nested per-directory style files the run discovered (issue #192). Threaded here so each parallel
+  // EDITOR LEAF gets its own on-touch announcement: the leaves are built from the Coordinator's tool
+  // record, so without this the first agent to enter a subtree consumes the announcement and the
+  // leaf that actually writes the code there never sees its conventions. Unset/empty → the leaves
+  // are undecorated, byte-identical to a repo with no nested files.
+  nested?: readonly NestedConfig[];
   // Optional shell command run in the checkout before staging, so the committed diff matches
   // the project's formatter (LLM output rarely is byte-identical to biome/prettier/gofmt). When
   // unset, no format step runs. See issue #48.

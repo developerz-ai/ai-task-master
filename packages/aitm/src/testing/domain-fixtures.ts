@@ -24,6 +24,7 @@ export function agentConfig(over: Partial<AgentConfig> = {}): AgentConfig {
     path: 'CLAUDE.md',
     contents: '# Style\n',
     sources: [],
+    nested: [],
     ...over,
   };
 }

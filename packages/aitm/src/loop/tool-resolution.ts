@@ -31,6 +31,8 @@ import {
   writeFileTool,
 } from '@developerz.ai/ai-claude-compat';
 import type { Tool, ToolLoopAgentSettings, ToolSet } from 'ai';
+import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
+import { withNestedConfig } from '../agent-config/nested-reminders.ts';
 import type { RunLoopInput } from '../composition/run-input.ts';
 import type { ResolvedConfig } from '../config/schema.ts';
 import type { ToolSurface } from '../mcp/mcp-client.ts';
@@ -197,6 +199,22 @@ export function localReadTools(
     glob: globTool({ cwd }),
     ...webFunctionTools(fetchHtmlAvailable),
   };
+}
+
+// Everything a resolved tool record picks up before it reaches an agent: the repo's nested
+// instructions (#192) and then the operator's hooks (#121). Both are all-or-nothing and return the
+// record untouched when unconfigured, so a run with neither is byte-identical to no decoration at
+// all. One composition root rather than two wraps repeated at each of the ten resolver call sites.
+//
+// `cwd` is the agent's root — the group checkout for a Worker, the repo for the Planner. They are
+// the same directory: aitm checks out in place (CLAUDE.md bans worktrees), so a nested file's
+// absolute directory matches the paths the file tools resolve.
+export function decorateTools<T extends ToolSet>(
+  tools: T,
+  source: { resolved: ResolvedConfig; agentConfig: AgentConfig },
+  cwd: string,
+): T {
+  return applyHooks(withNestedConfig(tools, source.agentConfig.nested, cwd), source, cwd);
 }
 
 // Apply operator-configured PreToolUse/PostToolUse hooks over a resolved tool record (issue #121),

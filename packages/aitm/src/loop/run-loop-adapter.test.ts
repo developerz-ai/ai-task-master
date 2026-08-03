@@ -40,7 +40,7 @@ import {
   bridgeState,
   workerInvocation,
 } from '../testing/bridge-ctx.ts';
-import { resolvedConfig } from '../testing/domain-fixtures.ts';
+import { agentConfig, resolvedConfig } from '../testing/domain-fixtures.ts';
 import { mcpClientDouble } from '../testing/mcp-client-double.ts';
 import { modelUsage } from '../testing/model-fixtures.ts';
 import { workerHandle } from '../testing/subagent-tools.ts';
@@ -191,7 +191,7 @@ function makeInput(
     criteria: undefined,
     resolved,
     credentials: new Credentials(resolved),
-    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: '# style', sources: [] },
+    agentConfig: agentConfig({ path: 'CLAUDE.md', contents: '# style' }),
     state: new StateStore('/tmp/aitm-adapter-test-unused'),
     github: new GitHubClient('/tmp/repo'),
   };
@@ -521,7 +521,7 @@ test('resolveStyleContents: distilled digest wins and is left uncapped (already 
   const digest = 'd'.repeat(RAW_STYLE_MAX_CHARS + 500);
   const style = resolveStyleContents({
     styleDigest: digest,
-    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: 'ignored raw file', sources: [] },
+    agentConfig: agentConfig({ path: 'CLAUDE.md', contents: 'ignored raw file' }),
   });
   assert.equal(style, digest, 'the digest is trusted as bounded — not re-capped');
 });
@@ -529,7 +529,7 @@ test('resolveStyleContents: distilled digest wins and is left uncapped (already 
 test('resolveStyleContents: unbounded raw fallback is capped with a signposted marker', () => {
   const raw = 'r'.repeat(RAW_STYLE_MAX_CHARS + 2000);
   const style = resolveStyleContents({
-    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: raw, sources: [] },
+    agentConfig: agentConfig({ path: 'CLAUDE.md', contents: raw }),
   });
   assert.ok(style.length <= RAW_STYLE_MAX_CHARS, 'never exceeds the cap');
   assert.ok(style.endsWith('[style truncated]'), 'truncation is signposted to the model');
@@ -539,7 +539,7 @@ test('resolveStyleContents: unbounded raw fallback is capped with a signposted m
 test('resolveStyleContents: raw fallback under the cap is returned verbatim', () => {
   const raw = '# Coding Style\n- single quotes only';
   const style = resolveStyleContents({
-    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: raw, sources: [] },
+    agentConfig: agentConfig({ path: 'CLAUDE.md', contents: raw }),
   });
   assert.equal(style, raw, 'short style files are untouched');
 });

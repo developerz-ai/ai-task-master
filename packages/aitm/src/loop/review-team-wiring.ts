@@ -53,6 +53,8 @@ export async function investigateReviewThreads(
   // Read-only by construction: the planner tool set (readFile/grep/glob/web/explore), never the
   // Reviewer's edit/bash/github surface. An investigator that could write would be a second writer
   // in the shared checkout, which is the one thing this design exists to avoid.
+  // Hooks only, NOT decorateTools: the lead and every investigator share this record, so an
+  // on-touch nested announcement (#192) would reach one of them at random. See #333.
   const readTools = applyHooks(
     resolvePlannerTools(
       mcp.toolsForRole('reviewer'),

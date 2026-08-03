@@ -52,6 +52,7 @@ import {
   appendIndexBlock,
   applyHooks,
   buildExploreFor,
+  decorateTools,
   mountDeferredTools,
   resolvePlannerTools,
   type WithExplore,
@@ -244,6 +245,9 @@ export async function surveyRepoForPlanner(params: {
     return mapOnly === '' ? undefined : mapOnly;
   }
   // Lead and scouts differ only in role prose — same model, same read-only tools, same cancellation.
+  // Hooks only, NOT decorateTools: one record is shared by the lead and every scout, so an on-touch
+  // nested announcement (#192) would go to whichever member won the race rather than to each of
+  // them. Scoping it per agent needs the runner to build its own record — tracked in #333.
   const base = {
     model: input.credentials.modelFor('planner'),
     tools: applyHooks(
@@ -363,7 +367,7 @@ export async function defaultPlanGroups(
   // above it, name-only + `tool_search`. Nothing deferred → `activated` is null and this pass is
   // byte-identical to before, prompt included.
   const plannerMount = mountDeferredTools(mcp.toolSurfaceForRole('planner'));
-  const plannerTools = applyHooks(
+  const plannerTools = decorateTools(
     {
       ...resolvePlannerTools(
         mcp.toolsForRole('planner'),
@@ -465,7 +469,7 @@ export async function defaultAssessGoal(
   harnessProgress('checking the goal against the repo', { phase: 'planning' });
   const agent = createGoalAssessorAgent({
     model: input.credentials.modelFor('planner'),
-    tools: applyHooks(
+    tools: decorateTools(
       resolvePlannerTools(
         mcp.toolsForRole('planner'),
         input.cwd,

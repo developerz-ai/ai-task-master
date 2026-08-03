@@ -189,7 +189,7 @@ test('detect: --style takes precedence over CLAUDE.md/AGENTS.md', async () => {
 
 // ---- layered discovery (issue #117) ----
 
-test('detect: user-global + root + nested → labeled blocks general→specific + sources scopes', async () => {
+test('detect: user-global + root → labeled blocks general→specific; nested is held back (#192)', async () => {
   const repo = await makeTempRepo();
   const user = await tempUserDir();
   try {
@@ -203,19 +203,28 @@ test('detect: user-global + root + nested → labeled blocks general→specific 
     // flavor/path describe the PROJECT pick, unchanged.
     assert.equal(cfg.flavor, 'claude');
     assert.equal(cfg.path, join(repo.path, 'CLAUDE.md'));
-    // Order: user → project → nested; each block labeled; deepest last (wins on conflict).
+    // Order: user → project, each block labeled. The nested file is discovered but NOT concatenated
+    // (issue #192) — it is delivered when a file under packages/core is first touched.
     assert.equal(
       cfg.contents,
       [
         `Contents of ${join(user.path, 'CLAUDE.md')}:\nUSER-GLOBAL\n`,
         'Contents of CLAUDE.md:\nPROJECT-ROOT\n',
-        'Contents of packages/core/CLAUDE.md:\nNESTED-CORE\n',
       ].join('\n\n'),
     );
+    assert.doesNotMatch(cfg.contents, /NESTED-CORE/, 'nested content is not paid for up front');
+    // `sources` still records every layer discovery found, nested included.
     assert.deepEqual(cfg.sources, [
       { path: join(user.path, 'CLAUDE.md'), scope: 'user' },
       { path: join(repo.path, 'CLAUDE.md'), scope: 'project' },
       { path: join(repo.path, 'packages', 'core', 'CLAUDE.md'), scope: 'nested' },
+    ]);
+    assert.deepEqual(cfg.nested, [
+      {
+        dir: join(repo.path, 'packages', 'core'),
+        path: join(repo.path, 'packages', 'core', 'CLAUDE.md'),
+        contents: 'NESTED-CORE\n',
+      },
     ]);
   } finally {
     await repo.cleanup();
@@ -339,7 +348,9 @@ test('discoverNested: budget counts EXPANDED size — a tiny file with a large @
     // expanded, not raw (a's raw is ~8 bytes). If it counted raw, z would have fit.
     const nested = cfg.sources.filter((s) => s.scope === 'nested').map((s) => s.path);
     assert.deepEqual(nested, [join(repo.path, 'a', 'CLAUDE.md')]);
-    assert.match(cfg.contents, /x{1000}/, 'the @-import was expanded inline');
+    // The expansion is asserted on the held-back layer now, not on `contents` (issue #192).
+    assert.match(cfg.nested[0]?.contents ?? '', /x{1000}/, 'the @-import was expanded inline');
+    assert.doesNotMatch(cfg.contents, /x{1000}/, 'and it never reaches the up-front digest');
     assert.equal(warnings.length, 1);
     assert.match(warnings[0] ?? '', /skipping z\/CLAUDE\.md/);
   } finally {

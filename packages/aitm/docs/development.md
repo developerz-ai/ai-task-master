@@ -132,4 +132,5 @@ Prerequisites for a green run:
 - `gh` authenticated with the **`delete_repo`** scope (cleanup deletes the repo).
 - The `start` half's Worker needs file-edit tools (`readFile`/`writeFile`/`bash`) from an MCP
   filesystem+shell server (see `./mcp.md`); without them `aitm start` blocks before opening a
-  PR. The `merge-pr` half uses aitm's own local fs-tools and needs no MCP.
+  PR. The `merge-pr` half runs on aitm's own local fs-tools, so it needs no MCP — but it now
+  *uses* configured servers when there are any (issue #339), on the same footing as `start`.

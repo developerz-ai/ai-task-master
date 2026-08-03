@@ -10,20 +10,29 @@ import { resolve as resolvePath } from 'node:path';
 import { backgroundProcessTools } from '@developerz.ai/ai-claude-compat';
 // Type-only import — no runtime cycle with commands.ts, which imports this module's value.
 import type { RunMergeFlowInput } from '../composition/run-input.ts';
+import { McpClientManager } from '../mcp/mcp-client.ts';
 import { agentStepProgress, shortModelName } from '../observability/step-progress.ts';
 import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
+import type { ReviewerTools } from '../subagents/reviewer.ts';
+import type { WorkerTools } from '../subagents/worker.ts';
 import { isFetchHtmlAvailable } from '../tools/fetch-html.ts';
 import { githubThreadTool } from '../tools/github-thread-tool.ts';
 import { buildConflictResolver } from './conflict-resolution.ts';
-import { decorateTools, makeBudgetCheck, resolveWorkerTools } from './run-loop-adapter.ts';
+import { Disposer, disposeQuietly } from './disposer.ts';
+import { makeBudgetCheck, resolveWorkerTools } from './run-loop-adapter.ts';
 import { runTakeOverFlow } from './take-over-flow.ts';
+import { mountRoleTools, resolveReviewerTools } from './tool-resolution.ts';
 import type { WorkLoopResult } from './work-loop.ts';
 
 export type MergeFlowSeams = {
   // Injection seam so a unit test can capture the built TakeOverFlowInput (chiefly the subagents
   // wiring) without driving the real take-over loop. Omitted in production → the real flow.
   runTakeOver?: typeof runTakeOverFlow;
+  // MCP manager seam, mirroring RunLoopAdapterSeams.makeMcp (issue #339). A test that supplies one
+  // is handed it already connected — the adapter never calls connectAll on an injected manager, so
+  // no transport is spawned. Omitted → the real manager over `resolved.mcpServers`.
+  makeMcp?: (input: RunMergeFlowInput) => McpClientManager;
 };
 
 export async function mergeFlowAdapter(
@@ -47,21 +56,71 @@ export async function mergeFlowAdapter(
   // full read/write/edit/search/bash set; the Reviewer adds the `github` thread tool.
   const fetchHtmlAvailable = await isFetchHtmlAvailable();
   const background = backgroundProcessTools({ cwd: checkoutPath });
-  const baseWorkerTools = resolveWorkerTools(
-    {},
-    checkoutPath,
-    input.resolved.bashRules,
-    fetchHtmlAvailable,
-    undefined,
-    undefined,
-    background,
-  );
-  // No deferred MCP mount here (issue #333): `merge-pr` wires no MCP servers at all — the resolver
-  // above is handed `{}` — so there is no surplus to defer. Giving this flow an MCP surface is a
-  // real gap, but it is a lifecycle change (connect, role allowlist, teardown) rather than a mount.
-  const workerTools = decorateTools(baseWorkerTools, input, checkoutPath);
   const github = githubThreadTool({ github: input.github });
-  const reviewerTools = decorateTools({ ...baseWorkerTools, github }, input, checkoutPath);
+
+  // MCP (issue #339). Until now this flow was handed `{}` and ran on local tools alone, while the
+  // main loop's CI-fix session — doing the same job on the same kind of PR — had the operator's
+  // servers. Constructed HERE rather than at the CLI boundary because the sibling adapter owns its
+  // manager the same way, seam included, and one shape for both flows beats two.
+  const mcp =
+    seams.makeMcp?.(input) ??
+    new McpClientManager({
+      servers: input.resolved.mcpServers,
+      ...(input.resolved.mcpRoleAllowlist !== undefined
+        ? { roleAllowlist: input.resolved.mcpRoleAllowlist }
+        : {}),
+      ...(input.logger ? { logger: input.logger } : {}),
+    });
+
+  // One release stack for the whole flow, mirroring runLoopAdapter. Registered BEFORE connectAll:
+  // connectAll spawns each server's stdio child as it goes, so a run aborted mid-connect can already
+  // have live children. This also closes a pre-existing gap — `background` was reaped only by the
+  // `finally`, which a second Ctrl-C skips, orphaning whatever a fix Worker left running.
+  const disposer = new Disposer();
+  disposer.add(() => mcp.close());
+  disposer.add(() => background.manager.killAll());
+  const reapOnAbort = (): void => {
+    void disposeQuietly(disposer);
+  };
+  input.signal?.addEventListener('abort', reapOnAbort, { once: true });
+  // Registered last → released first, so teardown detaches the listener before the reaping it would
+  // otherwise re-trigger.
+  disposer.add(() => {
+    input.signal?.removeEventListener('abort', reapOnAbort);
+  });
+  if (!seams.makeMcp) await mcp.connectAll();
+
+  const { tools: workerTools, mount: workerMount } = mountRoleTools<WorkerTools>(
+    'worker',
+    mcp,
+    (set) =>
+      resolveWorkerTools(
+        set,
+        checkoutPath,
+        input.resolved.bashRules,
+        fetchHtmlAvailable,
+        undefined,
+        undefined,
+        background,
+      ),
+    input,
+    checkoutPath,
+  );
+  const { tools: reviewerTools, mount: reviewerMount } = mountRoleTools<ReviewerTools>(
+    'reviewer',
+    mcp,
+    (set) =>
+      resolveReviewerTools(
+        set,
+        checkoutPath,
+        github,
+        input.resolved.bashRules,
+        fetchHtmlAvailable,
+        background,
+      ),
+    input,
+    checkoutPath,
+  );
 
   // Role-scoped usage sinks off the run's tracker (issue #114/#190) — undefined when no tracker, so
   // each seam is omitted. The shared CI-fix Worker + the conflict resolver run on the coding tier
@@ -108,6 +167,8 @@ export async function mergeFlowAdapter(
         // The shared CI-fix session selects the coding tier itself (modelForCapability('coding')).
         credentials: input.credentials,
         workerTools,
+        deferredMount: workerMount,
+        reviewerDeferredMount: reviewerMount,
         styleContents,
         timeout: { stepMs: input.resolved.llmStepTimeoutMs },
         // Live agent-activity stream (silent-run fix), labeled by the model doing the work.
@@ -161,8 +222,9 @@ export async function mergeFlowAdapter(
       outcomes: [{ groupId: `takeover-${input.pr}`, status: 'blocked', reason: result.reason }],
     };
   } finally {
-    // The adapter owns the ProcessManager it wired: reap any background process a fix Worker left
-    // running (killAll is a synchronous no-op when none were started).
-    background.manager.killAll();
+    // Drains everything the flow acquired — the MCP stdio children and any background process a fix
+    // Worker left running. Draining twice is safe: an abort-time drain leaves an emptied stack, and
+    // a drain started while another is in flight queues behind it.
+    await disposeQuietly(disposer);
   }
 }

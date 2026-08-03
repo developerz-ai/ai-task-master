@@ -96,6 +96,7 @@ const agentConfig: AgentConfig = {
   path: 'CLAUDE.md',
   contents: '# style',
   sources: [],
+  nested: [],
 };
 
 function baseRunState(): RunState {

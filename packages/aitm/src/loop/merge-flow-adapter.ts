@@ -16,7 +16,7 @@ import { PrContextStore } from '../state/pr-context-store.ts';
 import { isFetchHtmlAvailable } from '../tools/fetch-html.ts';
 import { githubThreadTool } from '../tools/github-thread-tool.ts';
 import { buildConflictResolver } from './conflict-resolution.ts';
-import { applyHooks, makeBudgetCheck, resolveWorkerTools } from './run-loop-adapter.ts';
+import { decorateTools, makeBudgetCheck, resolveWorkerTools } from './run-loop-adapter.ts';
 import { runTakeOverFlow } from './take-over-flow.ts';
 import type { WorkLoopResult } from './work-loop.ts';
 
@@ -56,9 +56,9 @@ export async function mergeFlowAdapter(
     undefined,
     background,
   );
-  const workerTools = applyHooks(baseWorkerTools, input, checkoutPath);
+  const workerTools = decorateTools(baseWorkerTools, input, checkoutPath);
   const github = githubThreadTool({ github: input.github });
-  const reviewerTools = applyHooks({ ...baseWorkerTools, github }, input, checkoutPath);
+  const reviewerTools = decorateTools({ ...baseWorkerTools, github }, input, checkoutPath);
 
   // Role-scoped usage sinks off the run's tracker (issue #114/#190) — undefined when no tracker, so
   // each seam is omitted. The shared CI-fix Worker + the conflict resolver run on the coding tier

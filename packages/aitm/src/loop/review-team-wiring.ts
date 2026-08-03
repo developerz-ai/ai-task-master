@@ -21,7 +21,7 @@ import {
   renderThreadBrief,
 } from '../subagents/review-team.ts';
 import { reminderAgentSystemPrompt } from '../subagents/role-prompt.ts';
-import { applyHooks, buildExploreFor, resolvePlannerTools } from './tool-resolution.ts';
+import { buildExploreFor, decorateTools, resolvePlannerTools } from './tool-resolution.ts';
 
 export type InvestigateReviewThreadsParams = {
   input: RunLoopInput;
@@ -53,7 +53,7 @@ export async function investigateReviewThreads(
   // Read-only by construction: the planner tool set (readFile/grep/glob/web/explore), never the
   // Reviewer's edit/bash/github surface. An investigator that could write would be a second writer
   // in the shared checkout, which is the one thing this design exists to avoid.
-  const readTools = applyHooks(
+  const readTools = decorateTools(
     resolvePlannerTools(
       mcp.toolsForRole('reviewer'),
       checkoutPath,

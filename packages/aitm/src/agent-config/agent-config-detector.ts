@@ -15,14 +15,25 @@ export type AgentConfigFlavor = 'claude' | 'agents' | 'custom';
 
 export type ConfigScope = 'user' | 'project' | 'nested';
 
+// A nested per-directory style file, held back for on-touch delivery (issue #192). `dir` is the
+// directory it governs — the subtree whose files trigger it.
+export type NestedConfig = { dir: string; path: string; contents: string };
+
 export type AgentConfig = {
   // flavor + path describe the PROJECT-level pick, so the state.json agentConfigFile derivation is
   // unchanged; the layered detail lives in `sources`.
   flavor: AgentConfigFlavor;
   path: string;
   contents: string;
-  // Every layer that contributed, general → specific (user → project → nested).
+  // Every layer that contributed, general → specific (user → project → nested). Nested entries are
+  // listed here even though they are absent from `contents`: this is the record of what discovery
+  // FOUND, which is what the CLI reports and what `nested` is delivered from.
   sources: Array<{ path: string; scope: ConfigScope }>;
+  // Nested files, deepest last, deliberately NOT folded into `contents` (issue #192). #117 shipped
+  // them eagerly: every nested file in the repo was concatenated into the digest up front, so a
+  // monorepo spent its budget on subtrees the run never touches and dropped the ones it does. These
+  // are delivered on touch instead — see nested-reminders.ts.
+  nested: NestedConfig[];
 };
 
 // A generic style baseline for a repo that ships no CLAUDE.md/AGENTS.md and passed no --style. aitm
@@ -43,7 +54,7 @@ export const DEFAULT_STYLE_CONTENTS = [
 // state file's `agentConfigFile: 'custom'`; `path` is empty (there is no file — it is only used for a
 // display label downstream, never re-read).
 export function defaultAgentConfig(): AgentConfig {
-  return { flavor: 'custom', path: '', contents: DEFAULT_STYLE_CONTENTS, sources: [] };
+  return { flavor: 'custom', path: '', contents: DEFAULT_STYLE_CONTENTS, sources: [], nested: [] };
 }
 
 export type DetectOptions = {
@@ -84,16 +95,17 @@ export class AgentConfigDetector {
     }
     // Layer 2 — the project pick.
     layers.push(project);
-    // Layer 3 — nested subtree files, deepest last.
-    for (const nested of await this.discoverNested(options, project.path)) {
-      layers.push(nested);
-    }
+    // Layer 3 — nested subtree files, deepest last. Discovered here (so the budget, the walk and the
+    // `sources` record are unchanged) but kept OUT of the rendered contents: a nested file is
+    // delivered when a file in its subtree is first touched, not paid for up front (issue #192).
+    const nested = await this.discoverNested(options, project.path);
 
     return {
       flavor: project.flavor,
       path: project.path,
       contents: renderLayers(layers, this.repoRoot),
-      sources: layers.map((l) => ({ path: l.path, scope: l.scope })),
+      sources: [...layers, ...nested].map((l) => ({ path: l.path, scope: l.scope })),
+      nested: nested.map((l) => ({ dir: dirname(l.path), path: l.path, contents: l.contents })),
     };
   }
 

@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -30,6 +30,7 @@ import {
   resolvePlannerTools,
   resolveWorkerTools,
   withActiveTools,
+  withNestedConfig,
 } from './tool-resolution.ts';
 
 test('mcpTool: partial-fill matches a namespaced MCP tool by canonical name, first in config order (issue #115)', () => {
@@ -461,4 +462,77 @@ test('withActiveTools: a base step keeps its own result alongside activeTools (i
   )(prepareStepArg([], []));
   assert.deepEqual(out?.messages, [], "the base step's override survives");
   assert.ok(out?.activeTools?.includes('readFile'));
+});
+
+// ---- nested CLAUDE.md, delivered on touch (issue #192) ----------------------
+
+test('withNestedConfig: no nested files → the record is returned untouched', () => {
+  // The byte-identical guarantee: a repo without nested files must not even be decorated.
+  const tools = localEditTools('/tmp/wt');
+  assert.strictEqual(withNestedConfig(tools, [], '/tmp/wt'), tools);
+});
+
+test('withNestedConfig: a nested CLAUDE.md arrives on the first touch under it, once (issue #192)', async () => {
+  // #117 concatenated this into the style digest up front, spending the budget on subtrees a run may
+  // never open. It now arrives with the result of the call that entered the subtree.
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-nested-'));
+  try {
+    const coreDir = join(dir, 'packages', 'core');
+    await mkdir(coreDir, { recursive: true });
+    await writeFile(join(coreDir, 'a.ts'), 'export const A = 1;\n');
+    await writeFile(join(dir, 'README.md'), 'hi\n');
+    const nested = [
+      {
+        dir: coreDir,
+        path: join(coreDir, 'CLAUDE.md'),
+        contents: '# core rules\n- no default exports\n',
+      },
+    ];
+    const tools = withNestedConfig(localEditTools(dir), nested, dir);
+    const render = async (path: string): Promise<string> =>
+      renderedText(
+        await tools.readFile.toModelOutput?.({
+          toolCallId: 'call',
+          input: { path },
+          output: { content: '1\tfile body' },
+        }),
+      );
+
+    assert.doesNotMatch(
+      await render('README.md'),
+      /no default exports/,
+      'a file outside the subtree does not load its instructions',
+    );
+    assert.match(
+      await render('packages/core/a.ts'),
+      /no default exports/,
+      'entering the subtree loads them',
+    );
+    assert.match(
+      await render('packages/core/a.ts'),
+      /file body/,
+      'the tool result itself still renders',
+    );
+    assert.doesNotMatch(
+      await render('packages/core/b.ts'),
+      /no default exports/,
+      'and they are not repeated on every later touch',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('withNestedConfig: grep and glob do not count as entering a subtree (issue #192)', () => {
+  // They surface paths without reading them. A directory listing is not a visit, and treating it as
+  // one would load every nested file in the repo on the Planner's first survey.
+  const tools = localEditTools('/tmp/wt');
+  const decorated = withNestedConfig(
+    tools,
+    [{ dir: '/tmp/wt/pkg', path: '/tmp/wt/pkg/CLAUDE.md', contents: 'x' }],
+    '/tmp/wt',
+  );
+  assert.strictEqual(decorated.grep, tools.grep, 'grep is not decorated');
+  assert.strictEqual(decorated.glob, tools.glob, 'glob is not decorated');
+  assert.notStrictEqual(decorated.readFile, tools.readFile, 'readFile is');
 });

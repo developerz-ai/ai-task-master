@@ -117,6 +117,7 @@ import {
   applyHooks,
   type BackgroundTools,
   buildExploreFor,
+  decorateTools,
   mountDeferredTools,
   resolveReviewerTools,
   resolveWorkerTools,
@@ -167,6 +168,7 @@ export {
   type AdapterStatePort,
   applyHooks,
   createRollingContextAccumulator,
+  decorateTools,
   describeError,
   harnessContextBlock,
   makeBudgetCheck,
@@ -701,7 +703,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     // (issue #119). The Reviewer's local `github` glue is a fixed slot, never deferred.
     const reviewerSurface = mcp.toolSurfaceForRole('reviewer');
     const reviewerMount = mountDeferredTools(reviewerSurface);
-    const tools = applyHooks(
+    const tools = decorateTools(
       {
         ...resolveReviewerTools(
           mcp.toolsForRole('reviewer'),
@@ -841,7 +843,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // defer threshold, else name-only + `tool_search`.
       const workerSurface = mcp.toolSurfaceForRole('worker');
       const workerMount = mountDeferredTools(workerSurface);
-      const tools = applyHooks(
+      const tools = decorateTools(
         {
           ...resolveWorkerTools(
             mcp.toolsForRole('worker'),
@@ -1064,7 +1066,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         return await runSelfReviewSession({
           subagents: {
             credentials: input.credentials,
-            workerTools: applyHooks(
+            workerTools: decorateTools(
               resolveWorkerTools(
                 mcp.toolsForRole('worker'),
                 checkout.path,
@@ -1158,7 +1160,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // the role that most needs a domain server — reading logs, querying the service that broke.
       const ciFixSurface = mcp.toolSurfaceForRole('worker');
       const ciFixMount = mountDeferredTools(ciFixSurface);
-      const ciFixWorkerTools = applyHooks(
+      const ciFixWorkerTools = decorateTools(
         {
           ...resolveWorkerTools(
             mcp.toolsForRole('worker'),

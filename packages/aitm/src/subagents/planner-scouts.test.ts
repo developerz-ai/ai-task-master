@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { stallingModel } from '../testing/stalling-model.ts';
+import { plannerTools } from '../testing/subagent-tools.ts';
 import {
   buildScoutPrompt,
   createScoutRunner,
@@ -183,7 +184,7 @@ test('createScoutRunner: forwards the run signal → an abort cancels an in-flig
   const controller = new AbortController();
   const runScout = createScoutRunner({
     model: stalling,
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: SCOUT_SYSTEM_PREFIX,
     signal: controller.signal,
     // Safety net: an unwired signal must fail the test rather than hang it forever.

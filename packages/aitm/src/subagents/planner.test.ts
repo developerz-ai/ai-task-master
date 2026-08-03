@@ -4,6 +4,7 @@ import { MockLanguageModelV3 } from 'ai/test';
 import type { Plan } from '../plan/schema.ts';
 import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
+import { plannerTools } from '../testing/subagent-tools.ts';
 import { createPlannerAgent, PLANNER_SYSTEM_PREFIX, runPlanner } from './planner.ts';
 
 let submitCallId = 0;
@@ -46,7 +47,7 @@ function basicPlan(groupCount: number): Plan {
 async function capPlan(plan: Plan, maxPrs: number): Promise<Plan> {
   const agent = createPlannerAgent({
     model: planJsonModel(plan),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, { goal: plan.goal, styleContents: '', maxPrs });
@@ -75,17 +76,25 @@ test('PLANNER_SYSTEM_PREFIX is non-empty and mentions maxPrs + the PR-group DAG'
 
 test('createPlannerAgent builds an agent with the injected tools plus a submit tool', () => {
   const model = new MockLanguageModelV3();
-  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: 'style' });
+  const agent = createPlannerAgent({ model, tools: plannerTools(), systemPrompt: 'style' });
   assert.ok(agent);
-  // The factory adds the terminal `submit` tool the agent calls to deliver its Plan.
-  assert.deepEqual(Object.keys(agent.tools), ['submit']);
+  // Every injected tool is mounted, plus the terminal `submit` the agent calls to deliver its Plan.
+  assert.deepEqual(Object.keys(agent.tools), [
+    'readFile',
+    'grep',
+    'glob',
+    'webFetch',
+    'webSearch',
+    'datetime',
+    'submit',
+  ]);
 });
 
 test('runPlanner returns ok with a valid Plan when the model produces one', async () => {
   const plan = basicPlan(3);
   const agent = createPlannerAgent({
     model: planJsonModel(plan),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, {
@@ -122,7 +131,11 @@ test('runPlanner asks the planner to regroup when it exceeds the cap, then error
       };
     },
   });
-  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const agent = createPlannerAgent({
+    model,
+    tools: plannerTools(),
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 3 });
   assert.ok(
     attempts > 1,
@@ -156,7 +169,11 @@ test('runPlanner accepts a regrouped plan on retry', async () => {
       };
     },
   });
-  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const agent = createPlannerAgent({
+    model,
+    tools: plannerTools(),
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 3 });
   if (result.kind !== 'ok') throw new Error(`expected ok, got ${result.kind}`);
   assert.equal(result.plan.groups.length, 3);
@@ -173,7 +190,7 @@ test('runPlanner leaves a large plan intact when maxPrs is null (unbounded)', as
   const plan = basicPlan(14);
   const agent = createPlannerAgent({
     model: planJsonModel(plan),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, { goal: plan.goal, styleContents: '', maxPrs: null });
@@ -209,7 +226,11 @@ test('runPlanner omits the maxPrs line from the prompt when unbounded, and inclu
         };
       },
     });
-    const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+    const agent = createPlannerAgent({
+      model,
+      tools: plannerTools(),
+      systemPrompt: PLANNER_SYSTEM_PREFIX,
+    });
     await runPlanner(agent, { goal: 'ship it', styleContents: '', maxPrs });
     return sent;
   };
@@ -223,7 +244,7 @@ test('runPlanner returns error when the model emits an empty plan (schema valida
   const empty: Plan = { goal: 'x', groups: [] };
   const agent = createPlannerAgent({
     model: planJsonModel(empty),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
@@ -251,7 +272,11 @@ test('runPlanner: prepends the contextBlock to the first user message, ahead of 
       };
     },
   });
-  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const agent = createPlannerAgent({
+    model,
+    tools: plannerTools(),
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
   const result = await runPlanner(agent, {
     goal: 'ship it',
     styleContents: '',
@@ -286,7 +311,11 @@ test('runPlanner: injects the survey brief as a starting map, ahead of "confirm 
       };
     },
   });
-  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const agent = createPlannerAgent({
+    model,
+    tools: plannerTools(),
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
   const result = await runPlanner(agent, {
     goal: 'ship it',
     styleContents: '',
@@ -318,7 +347,7 @@ test('runPlanner: injects the survey brief as a starting map, ahead of "confirm 
   });
   const agent2 = createPlannerAgent({
     model: model2,
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   await runPlanner(agent2, { goal: 'ship it', styleContents: '', maxPrs: 5 });
@@ -346,7 +375,11 @@ test('runPlanner: appends the progressBlock to the END of the first user message
       };
     },
   });
-  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const agent = createPlannerAgent({
+    model,
+    tools: plannerTools(),
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
   const result = await runPlanner(agent, {
     goal: 'ship it',
     styleContents: '',
@@ -371,7 +404,7 @@ test('createPlannerAgent forwards timeout → a stalled step surfaces as a deadl
   const stalling = stallingModel();
   const agent = createPlannerAgent({
     model: stalling,
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
     timeout: { stepMs: 40 },
   });
@@ -391,7 +424,11 @@ test('runPlanner: never-submits → blocked after retries, with a no-submission 
       warnings: [],
     }),
   });
-  const agent = createPlannerAgent({ model, tools: {}, systemPrompt: PLANNER_SYSTEM_PREFIX });
+  const agent = createPlannerAgent({
+    model,
+    tools: plannerTools(),
+    systemPrompt: PLANNER_SYSTEM_PREFIX,
+  });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
   assert.equal(result.kind, 'blocked');
   if (result.kind === 'blocked')
@@ -403,7 +440,7 @@ test('runPlanner: persistently schema-invalid submit → error after retries, na
   // retry kernel exhausts → error, distinguished from the no-submission case.
   const agent = createPlannerAgent({
     model: planSubmitModel({ goal: 'x' }),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
@@ -419,7 +456,7 @@ test('runPlanner: a plan whose group omits the acceptance check is rejected afte
       goal: 'x',
       groups: [{ id: 'g1', title: 'Group g1', tasks: [{ description: 'task g1' }], dependsOn: [] }],
     }),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
@@ -430,7 +467,7 @@ test('runPlanner: a plan whose group omits the acceptance check is rejected afte
 test('runPlanner: the accepted plan keeps every group acceptance check', async () => {
   const agent = createPlannerAgent({
     model: planJsonModel(basicPlan(2)),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 5 });
@@ -446,7 +483,7 @@ test('runPlanner: the accepted plan keeps every group acceptance check', async (
 test('runPlanner rejects maxPrs < 1 up front', async () => {
   const agent = createPlannerAgent({
     model: new MockLanguageModelV3(),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 0 });
@@ -456,7 +493,7 @@ test('runPlanner rejects maxPrs < 1 up front', async () => {
 test('runPlanner rejects non-integer maxPrs', async () => {
   const agent = createPlannerAgent({
     model: new MockLanguageModelV3(),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: 2.5 });
@@ -469,7 +506,7 @@ test('runPlanner rejects non-integer maxPrs', async () => {
 test('runPlanner rejects NaN maxPrs', async () => {
   const agent = createPlannerAgent({
     model: new MockLanguageModelV3(),
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
   });
   const result = await runPlanner(agent, { goal: 'x', styleContents: '', maxPrs: Number.NaN });
@@ -483,7 +520,7 @@ test('createPlannerAgent forwards the run signal → an abort cancels the in-fli
   const controller = new AbortController();
   const agent = createPlannerAgent({
     model: stalling,
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
     signal: controller.signal,
     // Safety net: an unwired signal must fail the test rather than hang it forever.

@@ -1105,6 +1105,7 @@ function midPlanSeed(): SeedPatch {
         pr: 70,
         status: 'merged',
         stage: 'merged',
+        reviewGraceApplied: false,
       },
       {
         id: 'g2',
@@ -1115,6 +1116,7 @@ function midPlanSeed(): SeedPatch {
         pr: 73,
         status: 'awaiting-pr',
         stage: 'waiting-ci',
+        reviewGraceApplied: false,
       },
     ],
   };

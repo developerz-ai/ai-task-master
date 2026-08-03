@@ -2,18 +2,23 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULT_MAX_CI_FIX_ATTEMPTS } from '../config/defaults.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
+import type { Task } from '../domain/task.ts';
 import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import { CiFailed } from '../github/errors.ts';
+import type { ReviewThread } from '../github/schema.ts';
 import type { RunState } from '../state/schema.ts';
+import type { WorkerResult } from '../subagents/worker.ts';
 import { DirtyWorkingTree } from '../workspace/dirty-tree.ts';
 import {
   alreadyCommittedDelivery,
   type BudgetStatus,
+  type CheckoutHome,
   mergeDeliveries,
   noChangesDelivery,
   recoveredDelivery,
   WorkLoop,
   type WorkLoopGithub,
+  type WorkLoopGraph,
   type WorkLoopOrchestrator,
   type WorkLoopState,
 } from './work-loop.ts';

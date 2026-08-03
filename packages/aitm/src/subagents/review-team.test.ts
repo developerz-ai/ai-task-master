@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { ReviewThread } from '../github/schema.ts';
+import { plannerTools } from '../testing/subagent-tools.ts';
 import {
   buildInvestigatorPrompt,
   buildReviewLeadPrompt,
@@ -119,7 +120,7 @@ test('createReviewLeadRunner: returns the wave, dropping ids not in this pass', 
   });
   const lead = createReviewLeadRunner({
     model,
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: REVIEW_LEAD_SYSTEM_PREFIX,
   });
   const wave = await lead([thread('T1', 'src/auth.ts', 'leaks')]);
@@ -146,7 +147,7 @@ test('createReviewLeadRunner: an unusable submission yields no wave, never a thr
   });
   const lead = createReviewLeadRunner({
     model,
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: REVIEW_LEAD_SYSTEM_PREFIX,
   });
   assert.deepEqual(await lead([thread('T1', 'a.ts', 'x')]), []);
@@ -158,7 +159,7 @@ test('createReviewInvestigatorRunner: keeps only briefs for the threads it was a
   });
   const investigate = createReviewInvestigatorRunner({
     model,
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: REVIEW_INVESTIGATOR_SYSTEM_PREFIX,
   });
   const out = await investigate(assignment('auth', ['T1', 'T2']), [

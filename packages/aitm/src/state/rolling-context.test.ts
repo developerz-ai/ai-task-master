@@ -6,7 +6,17 @@ import type { PullRequest } from '../github/schema.ts';
 import { appendGroupDigest, ROLLING_CONTEXT_MAX_BYTES } from './rolling-context.ts';
 
 function group(id: string, title: string): PrGroup {
-  return { id, title, tasks: [], dependsOn: [], branch: `aitm/${id}`, pr: null, status: 'pending' };
+  return {
+    id,
+    title,
+    tasks: [],
+    dependsOn: [],
+    branch: `aitm/${id}`,
+    pr: null,
+    status: 'pending',
+    stage: 'pending',
+    reviewGraceApplied: false,
+  };
 }
 
 function pr(number: number): PullRequest {

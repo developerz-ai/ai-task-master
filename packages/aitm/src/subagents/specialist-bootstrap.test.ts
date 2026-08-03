@@ -38,8 +38,9 @@ function groups(): PrGroup[] {
       pr: null,
       status: 'pending',
       stage: 'pending',
+      reviewGraceApplied: false,
     },
-  ] as unknown as PrGroup[];
+  ];
 }
 
 async function tempStateDir(): Promise<{ dir: string; cleanup: () => Promise<void> }> {

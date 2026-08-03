@@ -12,6 +12,7 @@ import type { ReviewThread } from '../github/schema.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
 import type { FileManifest, WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
+import { workerHandle, workerTools } from '../testing/subagent-tools.ts';
 import {
   type FixSessionGithub,
   type FixSessionInput,
@@ -66,18 +67,14 @@ function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {
 function baseSubagents(overrides: Partial<FixSessionSubagents> = {}): FixSessionSubagents {
   return {
     credentials: { modelForCapability: () => dummyModel, modelIdForCapability: () => 'test/model' },
-    workerTools: {} as WorkerTools,
+    workerTools: workerTools(),
     styleContents: '',
     runWorkerOverride: async () => okWorker(),
     ...overrides,
   };
 }
 
-function stubHandle(marker: string): SubagentHandle<WorkerTools> {
-  return { agent: {} as never, messages: [{ role: 'user', content: marker }] };
-}
-
-function okWorker(handle: SubagentHandle<WorkerTools> = stubHandle('worker-handle')): WorkerResult {
+function okWorker(handle: SubagentHandle<WorkerTools> = workerHandle()): WorkerResult {
   return {
     kind: 'ok',
     delivery: {
@@ -297,7 +294,7 @@ test('runFixSession: threads compaction into the real CI-fix worker when a compa
             return 'openai/gpt-5';
           },
         },
-        workerTools: {} as WorkerTools,
+        workerTools: workerTools(),
         styleContents: '',
         compactor: stubCompactor,
       },
@@ -321,7 +318,7 @@ test('runFixSession: threads timeout into the real CI-fix Worker → a stalled s
           modelForCapability: () => stalling,
           modelIdForCapability: () => 'test/model',
         },
-        workerTools: {} as WorkerTools,
+        workerTools: workerTools(),
         styleContents: '',
         timeout: { stepMs: 40 },
       },
@@ -415,8 +412,8 @@ test('runFixSession: an unset rolling context falls back to empty (prior behavio
 
 test('runFixSession: threads a prior handle into the fix Worker and returns the updated handle (issue #107)', async () => {
   const captured: WorkerInput[] = [];
-  const priorHandle = stubHandle('PRIOR-CONVERSATION');
-  const nextHandle = stubHandle('AFTER-THIS-PASS');
+  const priorHandle = workerHandle('PRIOR-CONVERSATION');
+  const nextHandle = workerHandle('AFTER-THIS-PASS');
   const result = await runFixSession(
     baseInput({
       runCmd: recordingRunCmd().runCmd,
@@ -935,7 +932,7 @@ test('runFixSession: builds the Worker on the coding-capability model (no hardco
           },
           modelIdForCapability: () => 'test/model',
         },
-        workerTools: {} as WorkerTools,
+        workerTools: workerTools(),
         styleContents: '',
       },
     }),

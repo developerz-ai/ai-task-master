@@ -955,6 +955,8 @@ test('runWorker returns error when bash fails during commit', async () => {
 });
 
 test('runWorker rejects an agent not built by createWorkerAgent', async () => {
+  // The cast IS the test: an object that is not a worker agent is exactly the input whose rejection
+  // is under assertion, so there is no honest type for it to have.
   const result = await runWorker({} as never, baseInput());
   assert.equal(result.kind, 'error');
   if (result.kind === 'error') {

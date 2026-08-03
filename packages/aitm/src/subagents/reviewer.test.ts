@@ -514,6 +514,8 @@ test('runReviewer returns error when bash fails during the fixed-thread commit',
 });
 
 test('runReviewer rejects an agent not built by createReviewerAgent', async () => {
+  // The cast IS the test: an object that is not a reviewer agent is exactly the input whose
+  // rejection is under assertion, so there is no honest type for it to have.
   const result = await runReviewer({} as never, baseInput([thread('T1', 'fix this')]));
   assert.equal(result.kind, 'error');
   if (result.kind === 'error') {

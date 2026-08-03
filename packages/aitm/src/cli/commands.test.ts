@@ -2458,6 +2458,7 @@ test('runResume: a directory that never started says so, and does not run the lo
 
 function stateWith(over: Partial<RunState>): RunState {
   return {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     status: 'working',
     prGroups: [],
     currentGroupIndex: 0,
@@ -2477,12 +2478,13 @@ function stateWith(over: Partial<RunState>): RunState {
       mergeMethod: 'squash',
       stylePath: null,
       concurrency: 1,
+      prPerTask: false,
     },
     ...over,
-  } as RunState;
+  };
 }
 
-function mergedGroup(id: string): unknown {
+function mergedGroup(id: string): PrGroup {
   return {
     id,
     title: `group ${id}`,
@@ -2492,13 +2494,14 @@ function mergedGroup(id: string): unknown {
     pr: 1,
     status: 'merged',
     stage: 'merged',
+    reviewGraceApplied: false,
   };
 }
 
 test('isRunComplete: success status, or every group merged, is complete — nothing else', () => {
   assert.equal(isRunComplete(stateWith({ status: 'success' })), true);
   assert.equal(
-    isRunComplete(stateWith({ prGroups: [mergedGroup('g1'), mergedGroup('g2')] as never })),
+    isRunComplete(stateWith({ prGroups: [mergedGroup('g1'), mergedGroup('g2')] })),
     true,
   );
   // A partly-merged run is NOT complete.
@@ -2507,8 +2510,8 @@ test('isRunComplete: success status, or every group merged, is complete — noth
       stateWith({
         prGroups: [
           mergedGroup('g1'),
-          { ...(mergedGroup('g2') as object), status: 'pending', stage: 'pending' },
-        ] as never,
+          { ...mergedGroup('g2'), status: 'pending', stage: 'pending' },
+        ],
       }),
     ),
     false,

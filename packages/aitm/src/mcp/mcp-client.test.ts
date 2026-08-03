@@ -14,6 +14,11 @@ type FakeClient = MCPClient & {
 
 type Recorded = { config: MCPClientConfig; name: string };
 
+// Like testing/mcp-client-double.ts, but counting its own close() calls — which is the whole point
+// of the tests below. `tools` is cast at the VALUE: the SDK method's declared return is
+// McpToolSet<T> for a caller-chosen T, which a concrete ToolSet cannot be, and Promise<never>
+// satisfies every T. The partial is deliberate — this manager reaches `tools` and `close`, nothing
+// else on the protocol.
 function fakeClient(tools: ToolSet): FakeClient {
   const client: Partial<FakeClient> = {
     closeCalls: 0,
@@ -706,6 +711,7 @@ test('connectAll: connectTimeoutMs <= 0 disables the deadline — a slow but suc
     const c = fakeClient({});
     c.tools = async () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
+      // Same generic-return narrowing as fakeClient's, restated because this listing is replaced.
       return { slow: fakeTool() } as never;
     };
     return c;

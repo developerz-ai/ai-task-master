@@ -69,14 +69,14 @@ export function createScoutLeadRunner(init: ScoutLeadInit): ScoutLeadRunner {
     const agent = createSubagent<PlannerTools>(
       {
         model: init.model,
-        tools: init.tools,
+        tools: init.tools(),
         systemPrompt: init.systemPrompt,
         submit: tool({
           description: 'Submit the scout wave to dispatch (the ScoutPlan schema).',
           inputSchema: ScoutPlanSchema,
           execute: async (plan: ScoutPlan) => plan,
         }),
-        ...forwardInit(init),
+        ...forwardInit<PlannerTools>(init),
       },
       SCOUT_LEAD_MAX_STEPS,
     );

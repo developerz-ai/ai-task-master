@@ -273,7 +273,7 @@ export function createWorkerAgent(init: WorkerSubagentInit<WorkerTools>): Worker
         inputSchema: FileManifestSchema,
         execute: async (manifest) => manifest,
       }),
-      ...forwardInit(init),
+      ...forwardInit<WorkerTools>(init),
       // The survey budget composes ONTO the caller's prepareStep (compaction, deferred-tool
       // activation) rather than replacing it — one prepareStep slot, several policies. Set after the
       // forwarded init so it wins over the plain passthrough.

@@ -11,6 +11,7 @@ import type { McpClientManager } from '../mcp/mcp-client.ts';
 import type { StepCounter } from '../observability/run-step.ts';
 import { harnessProgress } from '../observability/step-progress.ts';
 import type { OnUsage } from '../subagents/factory.ts';
+import type { PlannerTools } from '../subagents/planner.ts';
 import type { ScoutAgentInit } from '../subagents/planner-scouts.ts';
 import {
   createReviewInvestigatorRunner,
@@ -21,7 +22,13 @@ import {
   renderThreadBrief,
 } from '../subagents/review-team.ts';
 import { reminderAgentSystemPrompt } from '../subagents/role-prompt.ts';
-import { applyHooks, buildExploreFor, resolvePlannerTools } from './tool-resolution.ts';
+import {
+  buildExploreFor,
+  decorateTools,
+  mountDeferredTools,
+  resolvePlannerTools,
+  type WithExplore,
+} from './tool-resolution.ts';
 
 export type InvestigateReviewThreadsParams = {
   input: RunLoopInput;
@@ -53,18 +60,23 @@ export async function investigateReviewThreads(
   // Read-only by construction: the planner tool set (readFile/grep/glob/web/explore), never the
   // Reviewer's edit/bash/github surface. An investigator that could write would be a second writer
   // in the shared checkout, which is the one thing this design exists to avoid.
-  // Hooks only, NOT decorateTools: the lead and every investigator share this record, so an
-  // on-touch nested announcement (#192) would reach one of them at random. See #333.
-  const readTools = applyHooks(
-    resolvePlannerTools(
-      mcp.toolsForRole('reviewer'),
+  // A FACTORY, not a record (issue #333): the lead and every investigator build their own, so the
+  // deferred-MCP activation set (#119) and the nested announcement (#192) are scoped to one
+  // conversation rather than claimed by whichever concurrent investigator touched first.
+  const readTools = (): PlannerTools =>
+    decorateTools(
+      {
+        ...resolvePlannerTools(
+          mcp.toolsForRole('reviewer'),
+          checkoutPath,
+          fetchHtmlAvailable,
+          buildExploreFor(input, checkoutPath, usage),
+        ),
+        ...mountDeferredTools(mcp.toolSurfaceForRole('reviewer')).extraTools,
+      } as WithExplore<PlannerTools>,
+      input,
       checkoutPath,
-      fetchHtmlAvailable,
-      buildExploreFor(input, checkoutPath, usage),
-    ),
-    input,
-    checkoutPath,
-  );
+    );
   const teamInit = (roleGuidance: string): ScoutAgentInit => ({
     model: input.credentials.modelFor('reviewer'),
     tools: readTools,

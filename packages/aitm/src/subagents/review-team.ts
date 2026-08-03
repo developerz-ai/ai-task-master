@@ -219,14 +219,14 @@ function buildTeamAgent(
   return createSubagent<PlannerTools>(
     {
       model: init.model,
-      tools: init.tools,
+      tools: init.tools(),
       systemPrompt: init.systemPrompt,
       submit: tool({
         description,
         inputSchema: schema,
         execute: async (value: unknown) => value,
       }),
-      ...forwardInit(init),
+      ...forwardInit<PlannerTools>(init),
     },
     REVIEW_TEAM_MAX_STEPS,
   );

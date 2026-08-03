@@ -55,10 +55,9 @@ test('forwardInit: forwards every createSubagent-shaped field, including the run
   const onStepFinish = () => {};
   const onRetry = () => {};
   const onStream = () => {};
+  // model/tools/systemPrompt are placed by the caller, not forwarded, so they are not part of what
+  // this takes (issue #333) — passing them would say the helper reads them.
   const forwarded = forwardInit({
-    model: 'test/model',
-    tools: {},
-    systemPrompt: 'sys',
     maxSteps: 7,
     prepareStep,
     timeout: { stepMs: 40 },

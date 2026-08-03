@@ -50,7 +50,6 @@ import {
 import { buildSubagentSession } from './subagent-session.ts';
 import {
   appendIndexBlock,
-  applyHooks,
   buildExploreFor,
   decorateTools,
   mountDeferredTools,
@@ -245,21 +244,26 @@ export async function surveyRepoForPlanner(params: {
     return mapOnly === '' ? undefined : mapOnly;
   }
   // Lead and scouts differ only in role prose — same model, same read-only tools, same cancellation.
-  // Hooks only, NOT decorateTools: one record is shared by the lead and every scout, so an on-touch
-  // nested announcement (#192) would go to whichever member won the race rather than to each of
-  // them. Scoping it per agent needs the runner to build its own record — tracked in #333.
+  // `tools` is a FACTORY (issue #333): the runners build one agent per assignment and every member
+  // now builds its own record with it, so the deferred-MCP activation set (#119) and the nested
+  // announcement (#192) belong to one conversation instead of going to whichever concurrent scout
+  // touched first.
   const base = {
     model: input.credentials.modelFor('planner'),
-    tools: applyHooks(
-      resolvePlannerTools(
-        mcp.toolsForRole('planner'),
+    tools: () =>
+      decorateTools(
+        {
+          ...resolvePlannerTools(
+            mcp.toolsForRole('planner'),
+            input.cwd,
+            fetchHtmlAvailable,
+            buildExploreFor(input, input.cwd, plannerUsage),
+          ),
+          ...mountDeferredTools(mcp.toolSurfaceForRole('planner')).extraTools,
+        } as WithExplore<PlannerTools>,
+        input,
         input.cwd,
-        fetchHtmlAvailable,
-        buildExploreFor(input, input.cwd, plannerUsage),
       ),
-      input,
-      input.cwd,
-    ),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
     ...(input.signal ? { signal: input.signal } : {}),

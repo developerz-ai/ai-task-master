@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { MockLanguageModelV3 } from 'ai/test';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { plannerTools } from '../testing/subagent-tools.ts';
 import {
@@ -184,7 +185,7 @@ test('createScoutRunner: forwards the run signal → an abort cancels an in-flig
   const controller = new AbortController();
   const runScout = createScoutRunner({
     model: stalling,
-    tools: plannerTools(),
+    tools: () => plannerTools(),
     systemPrompt: SCOUT_SYSTEM_PREFIX,
     signal: controller.signal,
     // Safety net: an unwired signal must fail the test rather than hang it forever.
@@ -196,4 +197,45 @@ test('createScoutRunner: forwards the run signal → an abort cancels an in-flig
     assert.doesNotMatch((err as Error).message, /deadline/, 'a cancel is not a deadline breach');
     return true;
   });
+});
+
+test('createScoutRunner: every scout builds its own tool record (issue #333)', async () => {
+  // The runner already builds one agent per assignment so concurrent scouts never share a
+  // conversation — but they all read one `tools` object, and the record is where per-conversation
+  // state lives: the deferred-MCP activation set (#119) and the nested-config announcement (#192)
+  // are both consumed by whichever scout touched first. A factory puts that state with the agent.
+  const records: object[] = [];
+  const runScout = createScoutRunner({
+    model: new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify({ key: 'k', summary: 's', facts: [], relevantPaths: [] }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls' as const, raw: undefined },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+          outputTokens: { total: 1, text: 1, reasoning: undefined },
+          totalTokens: 2,
+        },
+        warnings: [],
+      }),
+    }),
+    tools: () => {
+      const built = plannerTools();
+      records.push(built);
+      return built;
+    },
+    systemPrompt: SCOUT_SYSTEM_PREFIX,
+  });
+
+  await runScout(assignment('architecture'), { goal: 'x' }, []);
+  await runScout(assignment('testing'), { goal: 'x' }, []);
+
+  assert.equal(records.length, 2, 'the factory ran once per scout');
+  assert.notStrictEqual(records[0], records[1], 'and returned a distinct record each time');
 });

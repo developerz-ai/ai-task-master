@@ -627,6 +627,7 @@ test('defaultMakeOrchestrator constructs the Compactor and wires it into the sta
     rollingContext: '',
     state: {},
     stepCounter: () => undefined,
+    skills: [],
   } as never);
   assert.equal(typeof orch.runWorker, 'function');
 
@@ -691,6 +692,7 @@ test("defaultMakeOrchestrator.runWorker: the group's acceptance check reaches th
     rollingContext: '',
     state: {},
     stepCounter: () => undefined,
+    skills: [],
   } as never);
   await orch.runWorker({
     group: group('core', { acceptance: 'bun test src/auth passes and POST /login sets a cookie' }),
@@ -747,6 +749,7 @@ test('defaultMakeOrchestrator.runWorker: a group with no acceptance check adds n
     rollingContext: '',
     state: {},
     stepCounter: () => undefined,
+    skills: [],
   } as never);
   await orch.runWorker({
     group: group('core'),
@@ -793,6 +796,7 @@ test('defaultMakeOrchestrator.runWorker: threads resolved.subagentLimit into the
     state: {},
   };
   const orch = defaultMakeOrchestrator({
+    skills: [],
     input,
     mcp,
     rollingContext: '',
@@ -861,6 +865,7 @@ test('defaultMakeOrchestrator.runWorker: resuming a recordingFailed transcript s
       rollingContext: '',
       state: { transcripts: () => store },
       stepCounter: () => undefined,
+      skills: [],
     } as never);
 
     const res = await orch.runWorker({
@@ -903,6 +908,7 @@ test('defaultMakeOrchestrator.releaseGroup: drops the group carry-over so the ne
     } as never;
   };
   const orch = defaultMakeOrchestrator({
+    skills: [],
     input: {
       cwd: '/tmp/adapter-release-group',
       resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
@@ -1462,6 +1468,7 @@ function carryOverHarness(results: Array<'ok' | 'blocked'>): {
     } as unknown as WorkerResult;
   };
   const orch = defaultMakeOrchestrator({
+    skills: [],
     input: {
       cwd: '/tmp/adapter-carryover',
       resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
@@ -1545,6 +1552,7 @@ function workerSignalHarness(runSignal?: AbortSignal): {
     return { kind: 'blocked', reason: 'captured' };
   };
   const orch = defaultMakeOrchestrator({
+    skills: [],
     input: {
       cwd: '/tmp/adapter-signal',
       resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },
@@ -1625,6 +1633,7 @@ function discoveryFailureHarness(): {
     return { kind: 'blocked', reason: 'captured' };
   };
   const orch = defaultMakeOrchestrator({
+    skills: [],
     input: {
       cwd: '/tmp/adapter-discovery-fail',
       resolved: { openrouterApiKey: 'sk-or-test', maxSessions: null },

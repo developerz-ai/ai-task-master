@@ -19,6 +19,7 @@ const makeResolved = (overrides: Partial<ResolvedConfig> = {}): ResolvedConfig =
   formatCommand: null,
   verifyCommand: null,
   selfReview: true,
+  skills: false,
   resolveConflicts: true,
   generateSpecialists: true,
   logLevel: 'info',

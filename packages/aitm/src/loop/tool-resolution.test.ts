@@ -388,3 +388,57 @@ test('deferred loading end-to-end: an over-threshold MCP server surfaces name-on
   );
   await mcp.close();
 });
+
+test('resolveWorkerTools mounts Skill only when a skill is model-invocable (issue #181)', () => {
+  const invocable = {
+    name: 'usable',
+    description: 'a procedure the model may call',
+    body: 'do it',
+    path: '',
+    extra: {},
+  };
+  // `disable-model-invocation: true` skills are excluded by skillTool itself, so a set made only of
+  // them resolves to zero names — mounting on `skills.length` would advertise a tool whose every
+  // call fails.
+  const disabled = {
+    ...invocable,
+    name: 'opted-out',
+    extra: { 'disable-model-invocation': 'true' },
+  };
+
+  const withSkill = resolveWorkerTools(
+    {},
+    '/tmp/wt',
+    undefined,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    [invocable],
+  );
+  assert.equal('Skill' in withSkill, true, 'mounted when something is invocable');
+
+  const allDisabled = resolveWorkerTools(
+    {},
+    '/tmp/wt',
+    undefined,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    [disabled],
+  );
+  assert.equal('Skill' in allDisabled, false, 'not mounted when every skill opted out');
+
+  const none = resolveWorkerTools(
+    {},
+    '/tmp/wt',
+    undefined,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    [],
+  );
+  assert.equal('Skill' in none, false, 'not mounted with no skills at all');
+});

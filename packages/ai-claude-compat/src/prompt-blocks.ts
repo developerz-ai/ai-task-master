@@ -20,6 +20,9 @@ export type PromptBlockKind =
   | 'style'
   | 'env'
   | 'memoryIndex'
+  // The skills index tier (issue #120's mechanism, mounted by aitm in #181): name + description per
+  // skill plus the blocking invocation contract, never a body.
+  | 'skillIndex'
   | 'contextManagement'
   | 'autonomy';
 
@@ -37,6 +40,9 @@ export const PROMPT_BLOCK_ORDER: readonly PromptBlockKind[] = [
   'style',
   'env',
   'memoryIndex',
+  // Beside memoryIndex — both are "what you can pull in on demand" — and after it, because a skill
+  // is the more specific of the two and reads better closest to the task.
+  'skillIndex',
   'contextManagement',
   'autonomy',
 ];

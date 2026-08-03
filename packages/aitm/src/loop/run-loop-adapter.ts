@@ -27,6 +27,7 @@ import { resolve as resolvePath } from 'node:path';
 import {
   type BackgroundProcessTools,
   backgroundProcessTools,
+  type SkillDefinition,
   type SubagentHandle,
 } from '@developerz.ai/ai-claude-compat';
 import type { ModelMessage } from 'ai';
@@ -66,6 +67,7 @@ import {
   runReviewer as runReviewerSubagent,
 } from '../subagents/reviewer.ts';
 import { harnessContextBlock, reminderAgentSystemPrompt } from '../subagents/role-prompt.ts';
+import { discoverSkills } from '../subagents/skills.ts';
 import { bootstrapSpecialists } from '../subagents/specialist-bootstrap.ts';
 import {
   buildSpecialistSignal,
@@ -191,6 +193,9 @@ export type OrchestratorBridgeCtx = {
   // The run's single background-process handle (issue #103). Threaded into the worker/reviewer tool
   // resolvers so `bash({ run_in_background: true })` backgrounds and bashOutput/killBash are mounted.
   background: BackgroundTools;
+  // Skills discovered once per run (issue #181). Threaded rather than re-discovered here because
+  // discovery is async and this builder is sync — same reason as `fetchHtmlAvailable`.
+  skills: readonly SkillDefinition[];
   // Test seam (issue #189): override the Worker subagent runner so a test can deterministically
   // capture the worker input the bridge builds — chiefly that the resolved `subagentLimit` cap
   // is threaded through. Omitted in production, where it defaults to the real runWorkerSubagent.
@@ -251,6 +256,15 @@ export async function runLoopAdapter(
   // degrading to the foreground (issue #103). The adapter OWNS its lifecycle: killAll() reaps every
   // process a worker/reviewer left running.
   const background = seams.makeBackground?.(input) ?? backgroundProcessTools({ cwd: input.cwd });
+
+  // Skills, discovered once per run (issue #181): built-in + the operator's `~/.claude/skills`,
+  // plus the checkout's own only when `skills: true` — those are third-party text. Read-only, so
+  // unlike `background` there is nothing to release.
+  const skills = await discoverSkills({
+    cwd: input.cwd,
+    ...(process.env.HOME ? { homeDir: process.env.HOME } : {}),
+    repoSkillsEnabled: input.resolved.skills,
+  });
 
   // One release stack for the whole run: the `finally` below and the abort reaper both drain THIS
   // disposer, so every run-scoped acquisition has exactly one registered release and neither exit
@@ -425,6 +439,7 @@ export async function runLoopAdapter(
         state,
         stepCounter,
         background,
+        skills,
       });
 
       const loop = new WorkLoop({
@@ -836,6 +851,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             buildExploreFor(input, checkout.path, workerUsage),
             memoryToolFor(state),
             background,
+            ctx.skills,
           ),
           ...workerMount.extraTools,
         } as WithExplore<WorkerTools> & WithMemory<WorkerTools>,
@@ -909,6 +925,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             cwd: checkout.path,
             modelId: input.credentials.modelIdFor('worker'),
             memoryIndex,
+            ...(ctx.skills.length > 0 ? { skills: ctx.skills } : {}),
           }),
           workerMount.indexBlock,
         ),
@@ -1145,6 +1162,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           buildExploreFor(input, checkout.path, ciFixUsage),
           memoryToolFor(state),
           background,
+          // The CI-fix Worker gets skills too (issue #181): reading a failed check is exactly the
+          // procedure the built-in ci-log-triage skill describes.
+          ctx.skills,
         ),
         input,
         checkout.path,
@@ -1182,6 +1202,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             timeout: stepTimeout,
             // Memory index for the fix session's Worker (issue #118); it also records CI facts it learns.
             ...(ciFixMemoryIndex.length > 0 ? { memoryIndex: ciFixMemoryIndex } : {}),
+            ...(ctx.skills.length > 0 ? { skills: ctx.skills } : {}),
             // Live rolling context (issue #123): the fix session's Worker sees what its group shipped
             // instead of the old hardcoded ''. Omitted when empty so the render guard stays a no-op.
             ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),

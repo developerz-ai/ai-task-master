@@ -188,6 +188,13 @@ export const ConfigFileSchema = z
     // verified itself — external CI / CodeRabbit are backstops, not the only gate. Set false to open
     // the PR straight after the Worker commits (pre-selfReview behavior). See src/loop/self-review.ts.
     selfReview: z.boolean().optional(),
+    // Mount the target repo's `.claude/skills/*/SKILL.md` for subagents to invoke (default FALSE).
+    // Off by default because a repo SKILL.md body lands verbatim in a subagent's context once
+    // invoked, and aitm runs against repos the operator chose but did not necessarily write — the
+    // same third-party posture as any other file in the checkout. The operator's own
+    // `~/.claude/skills` and aitm's built-in skills are unaffected by this key; they are always on.
+    // See src/subagents/skills.ts.
+    skills: z.boolean().optional(),
     // When the target repo ships no `.claude/agents/*.md`, generate a specialist team on the fly
     // from the goal + accepted plan (default true) and persist it under `.ai-task-master/agents/`.
     // Repo-shipped agents always win. Set false to run with the generic Worker only.
@@ -333,6 +340,7 @@ export type ResolvedConfig = {
   // Whether the pre-PR self-review pass runs (default true). Adversarially reviews + verifies + fixes
   // the just-committed diff before every openPr. See src/loop/self-review.ts and src/loop/work-loop.ts.
   selfReview: boolean;
+  skills: boolean;
   // Whether a rebase/merge conflict is handed to an AI subagent to resolve before blocking (default
   // true). Bounded retries; an unresolvable conflict still blocks. See src/loop/ci-fix.ts.
   resolveConflicts: boolean;

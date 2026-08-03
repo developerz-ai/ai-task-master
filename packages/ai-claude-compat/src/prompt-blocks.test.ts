@@ -63,7 +63,7 @@ test('renderPromptBlocks trims each block so the blank-line separator is the sol
   assert.equal(renderPromptBlocks(blocks), 'id\n\naut');
 });
 
-test('PROMPT_BLOCK_ORDER is the closed, canonical kind list (memoryIndex slots after env)', () => {
+test('PROMPT_BLOCK_ORDER is the closed, canonical kind list (skillIndex slots after memoryIndex)', () => {
   assert.deepEqual(
     [...PROMPT_BLOCK_ORDER],
     [
@@ -76,6 +76,7 @@ test('PROMPT_BLOCK_ORDER is the closed, canonical kind list (memoryIndex slots a
       'style',
       'env',
       'memoryIndex',
+      'skillIndex',
       'contextManagement',
       'autonomy',
     ],

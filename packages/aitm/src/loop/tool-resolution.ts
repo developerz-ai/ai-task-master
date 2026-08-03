@@ -14,12 +14,17 @@ import {
   FileStateTracker,
   globTool,
   grepTool,
+  isModelInvocable,
   multiBashTool,
   multiEditTool,
   type ProcessManager,
   type ReminderProvider,
   readFileTool,
+  type SkillDefinition,
+  type SkillToolInput,
+  type SkillToolOutput,
   SUBMIT_TOOL_NAME,
+  skillTool,
   type ToolHooks,
   withHooks,
   withReminders,
@@ -77,6 +82,13 @@ export type WithExplore<T> = T & { explore?: Tool<AgentToolInput, string> };
 // dir (state context compat's local builders don't have), and a static optional field would trip the
 // #112 TypedToolCall union. Present on the Worker set only when the state port hands out a memory dir.
 export type WithMemory<T> = T & { memory?: Tool<MemoryToolInput, string> };
+
+// The `Skill` tool (issue #181): a runtime-only extra for the same #112 reason. Present only when
+// the run discovered at least one MODEL-INVOCABLE skill. A set that is non-empty but entirely
+// `disable-model-invocation: true` still resolves to nothing, so counting the array would mount a
+// tool whose every call fails — the check has to be the same predicate the tool populates itself
+// with, which is why compat exports it.
+export type WithSkills<T> = T & { Skill?: Tool<SkillToolInput, SkillToolOutput> };
 
 // `bashOutput`/`killBash`/`listBackground` (issue #103 background bash) are runtime-only extras for
 // the same #112 reason — static optional tool fields would inject `undefined` into the TypedToolCall
@@ -340,7 +352,11 @@ export function resolveWorkerTools(
   explore?: Tool<AgentToolInput, string>,
   memory?: Tool<MemoryToolInput, string>,
   background?: BackgroundTools,
-): WithExplore<WorkerTools> & WithMemory<WorkerTools> & WithBackground<WorkerTools> {
+  skills?: readonly SkillDefinition[],
+): WithExplore<WorkerTools> &
+  WithMemory<WorkerTools> &
+  WithBackground<WorkerTools> &
+  WithSkills<WorkerTools> {
   const local = localEditTools(cwd, rules, fetchHtmlAvailable, background?.manager);
   // fetchHtml is optional: keep the key only when MCP supplies one or the local binary is available.
   const fetchHtml = mcpTool(set, 'fetchHtml') ?? local.fetchHtml;
@@ -360,6 +376,7 @@ export function resolveWorkerTools(
     // the caller wired them. bashOutput/killBash (#103) are the same: run-scoped background handles.
     ...(explore ? { explore } : {}),
     ...(memory ? { memory } : {}),
+    ...(skills?.some(isModelInvocable) ? { Skill: skillTool(skills) } : {}),
     ...(background
       ? {
           bashOutput: background.bashOutput,
@@ -367,7 +384,10 @@ export function resolveWorkerTools(
           listBackground: background.listBackground,
         }
       : {}),
-  } as WithExplore<WorkerTools> & WithMemory<WorkerTools> & WithBackground<WorkerTools>;
+  } as WithExplore<WorkerTools> &
+    WithMemory<WorkerTools> &
+    WithBackground<WorkerTools> &
+    WithSkills<WorkerTools>;
 }
 
 export function resolveReviewerTools(
@@ -379,6 +399,8 @@ export function resolveReviewerTools(
   background?: BackgroundTools,
 ): ReviewerTools {
   return {
+    // No skills: the Reviewer stays skill-free in this slice (issue #181) — repo-provided
+    // procedures steer the code that gets written, not the judgement passed on it.
     ...resolveWorkerTools(set, cwd, rules, fetchHtmlAvailable, undefined, undefined, background),
     github,
   };

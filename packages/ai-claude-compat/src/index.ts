@@ -139,6 +139,7 @@ export {
   type SearchToolInit,
 } from './search-tools.ts';
 export {
+  isModelInvocable,
   SKILL_INVOCATION_CONTRACT,
   type SkillToolInput,
   type SkillToolOutput,

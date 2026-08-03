@@ -51,7 +51,6 @@ import { buildSubagentSession } from './subagent-session.ts';
 import {
   appendIndexBlock,
   buildExploreFor,
-  decorateTools,
   deferredPrepareStep,
   mountDeferredTools,
   mountRoleTools,
@@ -377,17 +376,16 @@ export async function defaultPlanGroups(
   // plan, not discovered later by a Worker. Below the defer threshold the surplus mounts directly;
   // above it, name-only + `tool_search`. Nothing deferred → `activated` is null and this pass is
   // byte-identical to before, prompt included.
-  const plannerMount = mountDeferredTools(mcp.toolSurfaceForRole('planner'));
-  const plannerTools = decorateTools(
-    {
-      ...resolvePlannerTools(
-        mcp.toolsForRole('planner'),
+  const { tools: plannerTools, mount: plannerMount } = mountRoleTools<WithExplore<PlannerTools>>(
+    'planner',
+    mcp,
+    (set) =>
+      resolvePlannerTools(
+        set,
         input.cwd,
         fetchHtmlAvailable,
         buildExploreFor(input, input.cwd, plannerUsage),
       ),
-      ...plannerMount.extraTools,
-    } as WithExplore<PlannerTools>,
     input,
     input.cwd,
   );

@@ -114,15 +114,25 @@ const MAX_BASH_TIMEOUT_MS = 600_000;
 const CWD_SENTINEL = '\x00__AITM_CWD__';
 const CWD_EPILOGUE = `\n__aitm_ec=$?; printf '\\000__AITM_CWD__%s' "$PWD"; exit "$__aitm_ec"`;
 
-const BASH_DESCRIPTION = [
+const BASH_DESCRIPTION_HEAD = [
   'Run a shell command inside the current worktree. Returns stdout, stderr, and exit code; a',
   'non-zero exit is returned (not thrown) so you can read the error.',
   'The working directory PERSISTS between calls — a `cd` in one call carries to the next — but',
   'other shell state (variables, functions) does NOT; the shell is re-initialized each call.',
   'Interactive flags (e.g. `git rebase -i`, `git add -i`) are not supported.',
   '`timeoutMs` is in milliseconds (default 120000, ceiling 600000).',
+];
+
+// Only true when a ProcessManager is wired. Without one, `run_in_background: true` runs in the
+// FOREGROUND and blocks the loop until the timeout — so advertising it unconditionally tells the
+// model to reach for a capability that will hang it. The runtime note on the result explains the
+// degradation after the fact; this keeps the model from choosing the path in the first place.
+const BASH_DESCRIPTION_BACKGROUND = [
   'Set `run_in_background: true` for a long-lived process (e.g. a dev server): it returns',
   'immediately with a background id you poll via bashOutput.',
+];
+
+const BASH_DESCRIPTION_TAIL = [
   'Avoid using this tool to run `cat`/`head`/`tail`/`sed`/`awk`/`echo` for file access — use the',
   'dedicated read/edit/grep tools instead.',
   'Use the `gh` CLI for GitHub operations (PRs, issues, API).',
@@ -130,7 +140,15 @@ const BASH_DESCRIPTION = [
   'returned with exit code 126 — if a command is blocked, revise your approach rather than retrying',
   'or working around it.',
   '`description` is a short human-readable summary of what the command does.',
-].join(' ');
+];
+
+export function bashDescription(hasProcessManager: boolean): string {
+  return [
+    ...BASH_DESCRIPTION_HEAD,
+    ...(hasProcessManager ? BASH_DESCRIPTION_BACKGROUND : []),
+    ...BASH_DESCRIPTION_TAIL,
+  ].join(' ');
+}
 
 // Headroom reserved for the spill notice when sizing the head/tail budget in capStream, so the
 // in-context view plus notice stays within MAX_BASH_OUTPUT_CHARS. Generous vs a realistic spill path.
@@ -258,7 +276,7 @@ export function bashTool(init: BashToolInit): Tool<BashInput, BashOutput> {
   // Tracked across calls (per tool instance): each subagent invocation constructs a fresh tool.
   let cwd = init.cwd;
   return tool({
-    description: BASH_DESCRIPTION,
+    description: bashDescription(manager !== undefined),
     inputSchema: bashInputSchema,
     execute: async (input): Promise<BashOutput> => {
       // Governance runs before any spawn — including the background path — so a denied command never

@@ -964,6 +964,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           checkoutPath: checkout.path,
           baseBranch,
           styleContents: style,
+          // Each editor leaf re-decorates from these so it gets its own on-touch announcement
+          // rather than the Coordinator's already-spent one (issue #192).
+          ...(input.agentConfig.nested.length > 0 ? { nested: input.agentConfig.nested } : {}),
           // Live read (issue #123): the second group's manifest prompt carries the first group's digest.
           rollingContext: rollingCtx.current(),
           contextBlock: harnessContextBlock(),
@@ -1080,6 +1083,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
               checkout.path,
             ),
             styleContents: style,
+            ...(input.agentConfig.nested.length > 0 ? { nested: input.agentConfig.nested } : {}),
             compactor,
             timeout: stepTimeout,
             contextBlock: harnessContextBlock(),
@@ -1209,6 +1213,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             workerTools: ciFixWorkerTools,
             deferredMount: ciFixMount,
             styleContents: style,
+            ...(input.agentConfig.nested.length > 0 ? { nested: input.agentConfig.nested } : {}),
             compactor,
             timeout: stepTimeout,
             // Memory index for the fix session's Worker (issue #118); it also records CI facts it learns.

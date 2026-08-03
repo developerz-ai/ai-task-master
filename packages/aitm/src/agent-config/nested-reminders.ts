@@ -12,7 +12,8 @@
 // the same subtree is told again — correct, since it has its own context and never saw the first.
 
 import { relative, resolve, sep } from 'node:path';
-import type { ReminderProvider } from '@developerz.ai/ai-claude-compat';
+import { type ReminderProvider, withReminders } from '@developerz.ai/ai-claude-compat';
+import type { Tool, ToolSet } from 'ai';
 import type { NestedConfig } from './agent-config-detector.ts';
 
 // The file tools all take a `path`. That path IS the touch — reading it out of the completed call is
@@ -59,4 +60,29 @@ export function nestedConfigBlock(nested: NestedConfig, cwd: string): string {
     '',
     nested.contents,
   ].join('\n');
+}
+
+// The tools whose call names a file the model is touching. `grep`/`glob` are excluded on purpose:
+// they surface paths without reading them, and a directory listing is not a visit to that subtree.
+const TOUCH_TOOL_NAMES = ['readFile', 'writeFile', 'editFile', 'multiEdit'] as const;
+
+// Decorate the file tools so a nested CLAUDE.md is announced the first time the run touches a file
+// under it (issue #192). Applied after resolution, alongside applyHooks, so no resolver has to grow
+// another parameter to carry the nested set. No nested files → the record is returned untouched,
+// which is what keeps a repo without them byte-identical.
+export function withNestedConfig<T extends ToolSet>(
+  tools: T,
+  nested: readonly NestedConfig[],
+  cwd: string,
+): T {
+  if (nested.length === 0) return tools;
+  const provider = nestedConfigReminders(nested, cwd);
+  const touch = new Set<string>(TOUCH_TOOL_NAMES);
+  // Same narrowing withHooks uses: a ToolSet's value type is a union the invariant `Tool` parameter
+  // will not accept, and the entries are exactly that type at runtime.
+  const out: Record<string, Tool> = {};
+  for (const [name, tool] of Object.entries(tools) as [string, Tool][]) {
+    out[name] = touch.has(name) ? withReminders(tool, provider) : tool;
+  }
+  return out as T;
 }

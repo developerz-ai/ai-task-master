@@ -9,6 +9,7 @@ import { basename } from 'node:path';
 import type { BashInput, BashOutput } from '@developerz.ai/ai-claude-compat';
 import { callWithStepTimeout, runPool } from '@developerz.ai/ai-claude-compat';
 import { generateText, stepCountIs, type Tool } from 'ai';
+import { withNestedConfig } from '../agent-config/nested-reminders.ts';
 import { SUBAGENT_LIMIT_DEFAULT } from '../domain/subagent-limit.ts';
 import type { FileChange } from '../domain/worker-delivery.ts';
 import { harnessProgress } from '../observability/step-progress.ts';
@@ -350,7 +351,9 @@ async function runEditorPass(
     () =>
       generateText({
         model: init.model,
-        tools: editorToolSet(init.tools),
+        // Re-decorated per leaf (issue #192): a leaf is its own conversation, so it needs its own
+        // announcement state rather than the Coordinator's already-spent one.
+        tools: withNestedConfig(editorToolSet(init.tools), input.nested ?? [], input.checkoutPath),
         system: buildEditorRolePrompt({
           style: capText(input.styleContents, EDITOR_STYLE_MAX),
           roleGuidance: EDITOR_SYSTEM_PREFIX,

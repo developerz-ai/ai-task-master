@@ -14,6 +14,7 @@ import {
   FileStateTracker,
   globTool,
   grepTool,
+  isModelInvocable,
   multiBashTool,
   multiEditTool,
   type ProcessManager,
@@ -83,8 +84,10 @@ export type WithExplore<T> = T & { explore?: Tool<AgentToolInput, string> };
 export type WithMemory<T> = T & { memory?: Tool<MemoryToolInput, string> };
 
 // The `Skill` tool (issue #181): a runtime-only extra for the same #112 reason. Present only when
-// the run discovered at least one model-invocable skill — an empty index means the tool would have
-// nothing to resolve, and advertising it would invite calls that can only fail.
+// the run discovered at least one MODEL-INVOCABLE skill. A set that is non-empty but entirely
+// `disable-model-invocation: true` still resolves to nothing, so counting the array would mount a
+// tool whose every call fails — the check has to be the same predicate the tool populates itself
+// with, which is why compat exports it.
 export type WithSkills<T> = T & { Skill?: Tool<SkillToolInput, SkillToolOutput> };
 
 // `bashOutput`/`killBash`/`listBackground` (issue #103 background bash) are runtime-only extras for
@@ -373,7 +376,7 @@ export function resolveWorkerTools(
     // the caller wired them. bashOutput/killBash (#103) are the same: run-scoped background handles.
     ...(explore ? { explore } : {}),
     ...(memory ? { memory } : {}),
-    ...(skills?.length ? { Skill: skillTool(skills) } : {}),
+    ...(skills?.some(isModelInvocable) ? { Skill: skillTool(skills) } : {}),
     ...(background
       ? {
           bashOutput: background.bashOutput,

@@ -32,7 +32,9 @@ export type SkillToolOutput =
   | { ok: false; error: string };
 
 // A skill is model-invocable unless it opts out with `disable-model-invocation: true`.
-function isModelInvocable(skill: SkillDefinition): boolean {
+// Exported because a caller deciding whether to MOUNT the tool needs the same answer the tool uses
+// to populate itself — a second copy of the rule is a rule that can disagree with itself.
+export function isModelInvocable(skill: SkillDefinition): boolean {
   return asString(skill.extra['disable-model-invocation']).trim() !== 'true';
 }
 

@@ -16,7 +16,11 @@
 // SRP: this is one fix pass — no polling, no iteration cap, no merge. Callers own the wait/re-poll
 // loop and decide what to do with the result (advance to waiting-ci, or block).
 
-import type { MemoryIndexEntry, SubagentHandle } from '@developerz.ai/ai-claude-compat';
+import type {
+  MemoryIndexEntry,
+  SkillDefinition,
+  SubagentHandle,
+} from '@developerz.ai/ai-claude-compat';
 import type { LanguageModel, ModelMessage, TimeoutConfiguration } from 'ai';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../domain/model.ts';
@@ -95,6 +99,10 @@ export type FixSessionSubagents = {
   rollingContext?: string;
   // Per-repo memory index injected into the fix Worker's prompt (issue #118). Unset → no memory block.
   memoryIndex?: readonly MemoryIndexEntry[];
+  // Skills index for the fix Worker's prompt (issue #181). Unset/empty → no skills block. Reading a
+  // failed check is the procedure the built-in ci-log-triage skill describes, so this pass is where
+  // the surface earns its place.
+  skills?: readonly SkillDefinition[];
   // Per-step transcript recorder callback (issue #108), forwarded to the fix Worker agent. Unset →
   // nothing recorded.
   onStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
@@ -301,6 +309,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
       cwd: checkoutPath,
       modelId: subagents.credentials.modelIdForCapability('coding'),
       ...(subagents.memoryIndex ? { memoryIndex: subagents.memoryIndex } : {}),
+      ...(subagents.skills?.length ? { skills: subagents.skills } : {}),
     }),
     ...(prepareStep ? { prepareStep } : {}),
     ...(subagents.timeout !== undefined ? { timeout: subagents.timeout } : {}),

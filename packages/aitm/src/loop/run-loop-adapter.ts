@@ -1162,6 +1162,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           buildExploreFor(input, checkout.path, ciFixUsage),
           memoryToolFor(state),
           background,
+          // The CI-fix Worker gets skills too (issue #181): reading a failed check is exactly the
+          // procedure the built-in ci-log-triage skill describes.
+          ctx.skills,
         ),
         input,
         checkout.path,
@@ -1199,6 +1202,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             timeout: stepTimeout,
             // Memory index for the fix session's Worker (issue #118); it also records CI facts it learns.
             ...(ciFixMemoryIndex.length > 0 ? { memoryIndex: ciFixMemoryIndex } : {}),
+            ...(ctx.skills.length > 0 ? { skills: ctx.skills } : {}),
             // Live rolling context (issue #123): the fix session's Worker sees what its group shipped
             // instead of the old hardcoded ''. Omitted when empty so the render guard stays a no-op.
             ...(rollingCtx.current().trim() !== '' ? { rollingContext: rollingCtx.current() } : {}),

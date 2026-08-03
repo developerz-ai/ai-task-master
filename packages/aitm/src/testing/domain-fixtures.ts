@@ -81,6 +81,7 @@ export function resolvedConfig(over: Partial<ResolvedConfig> = {}): ResolvedConf
     formatCommand: null,
     verifyCommand: null,
     selfReview: false,
+    skills: false,
     resolveConflicts: false,
     generateSpecialists: false,
     logLevel: 'info',

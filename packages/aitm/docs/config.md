@@ -142,6 +142,7 @@ code-execution surfaces). Keys absent from a file fall through per the
 | `formatCommand` | string | unset | project + global | Formatter run before `git add`. See [formatCommand](#formatcommand). |
 | `verifyCommand` | string | unset | project + global | Test/lint gate run before commit. See [verifyCommand](#verifycommand). |
 | `selfReview` | boolean | `true` | project + global, env `AITM_SELF_REVIEW` | Pre-PR adversarial self-review + verify + fix pass. See [selfReview](#selfreview). |
+| `skills` | boolean | `false` | project + global | Mount the target repo's `.claude/skills` for subagents. See [skills](#skills). |
 | `webSearch` | boolean \| object | unset (CI-fix only) | project + global | OpenRouter `web_search` on Worker calls (tri-state) + optional domain filters. See [webSearch](#websearch). |
 | `generateSpecialists` | boolean | `true` | project + global | Generate a specialist team when the repo ships no `.claude/agents`. See [generateSpecialists](#generatespecialists). |
 | `prBodySections` | string[] | Summary / Changes / Testing | project + global | PR body headings. See [prBodySections](#prbodysections). |
@@ -401,3 +402,22 @@ Provider-shaped, so it can live in a named profile (`aitm profile set <name> rea
 - `./state.md`
 - `./commands/start.md`
 - `./architecture.md`
+
+## skills
+
+Whether subagents may invoke skills the **target repository** ships in `.claude/skills/<name>/SKILL.md`.
+
+Default **`false`**, and deliberately not env-overridable. A skill's body lands verbatim in a subagent's context the moment it is invoked, and aitm runs against repositories the operator chose but did not necessarily write — the same third-party posture as any other file in a checkout. Turning this on is a decision about a specific repo, not something a CI wrapper's environment should be able to flip.
+
+Two sources are **not** gated by this key and are always available:
+
+- **Built-in skills** ship with aitm (`ci-log-triage`, `repo-recon`). Their text is part of the package, so a checkout cannot alter it.
+- **Your own skills** in `~/.claude/skills` are yours, at the same trust level as your `CLAUDE.md`.
+
+When repo skills are enabled, their index entries are labelled `[repo-provided, untrusted]` so an instruction-shaped description cannot read as first-party guidance. A repo also cannot shadow a built-in or one of your own skills by reusing its name — the more-trusted definition wins.
+
+```json
+{ "skills": true }
+```
+
+Skills are mounted on the Worker (including the CI-fix pass). The Planner and Reviewer stay skill-free: repo-provided procedures steer the code that gets written, not the judgement passed on it.

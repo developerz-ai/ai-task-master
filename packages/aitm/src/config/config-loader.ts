@@ -177,6 +177,9 @@ const DEFAULTS = {
   verifyCommand: null as string | null,
   // Self-review is default-ON: every PR is adversarially reviewed + verified before it opens.
   selfReview: true,
+  // Repo-provided skills are default-OFF: their bodies are third-party text that reaches a
+  // subagent's context verbatim. Built-in and user-global skills do not go through this key.
+  skills: false,
   // AI conflict resolution is default-ON: a rebase/merge conflict is handed to a subagent before
   // the group blocks for a human.
   resolveConflicts: true,
@@ -448,6 +451,17 @@ export class ConfigLoader {
         project?.selfReview,
         global?.selfReview,
         DEFAULTS.selfReview,
+      ),
+      // skills defaults OFF and is deliberately NOT env-overridable: enabling it lets a repo under
+      // work put text into a subagent's context, so it is a per-operator config decision, never
+      // something a CI wrapper's environment can flip.
+      skills: track(
+        'skills',
+        undefined,
+        undefined,
+        project?.skills,
+        global?.skills,
+        DEFAULTS.skills,
       ),
       // resolveConflicts defaults ON (project > global). No CLI flag, no env override — a per-repo
       // capability toggle, not a per-run one.

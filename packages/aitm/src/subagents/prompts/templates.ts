@@ -15,8 +15,10 @@ import {
   memoryIndexBlock,
   type PromptBlock,
   renderPromptBlocks,
+  type SkillDefinition,
   safetyPreambleBlock,
   selfIdBlock,
+  skillIndexBlock,
   toolResultTrustBlock,
 } from '@developerz.ai/ai-claude-compat';
 import { data, instruction, renderSlot } from './slots.ts';
@@ -78,10 +80,16 @@ export type RolePromptSlots = {
   readonly knowledgeCutoff?: string;
   // Per-repo memory index (issue #118). Empty/absent → no memory block.
   readonly memoryIndex?: readonly MemoryIndexEntry[];
+  // Discovered skills (issue #181). The block renders the index tier only — one name/description
+  // line each plus the blocking invocation contract — never a body. Empty/absent → no block.
+  readonly skills?: readonly SkillDefinition[];
 };
 
 function rolePrompt(slots: RolePromptSlots): string {
   const memory = slots.memoryIndex ? memoryIndexBlock(slots.memoryIndex) : null;
+  // After memory, per issue #181: both are "here is what you can pull in on demand" indexes, and
+  // skills are the more specific of the two, so they read better closest to the task.
+  const skillsText = slots.skills?.length ? skillIndexBlock(slots.skills) : '';
   const blocks: PromptBlock[] = [
     ...defaultContractBlocks(),
     ...(slots.modelId ? [selfIdBlock(slots.modelId, slots.knowledgeCutoff)] : []),
@@ -92,6 +100,7 @@ function rolePrompt(slots: RolePromptSlots): string {
     { kind: 'style', text: slots.style },
     { kind: 'env', text: slots.env },
     ...(memory ? [memory] : []),
+    ...(skillsText ? [{ kind: 'skillIndex' as const, text: skillsText }] : []),
   ];
   return renderPromptBlocks(blocks);
 }

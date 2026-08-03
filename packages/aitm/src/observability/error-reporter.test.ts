@@ -383,7 +383,7 @@ test('scrubEvent: redacts a registered literal key under innocuous field names',
 });
 
 test('scrubEvent: returns the same event object (Sentry beforeSend contract)', () => {
-  const event = { message: 'plain' };
+  const event = errorEvent({ message: 'plain' });
   assert.equal(scrubEvent(event), event);
   assert.equal(event.message, 'plain');
 });

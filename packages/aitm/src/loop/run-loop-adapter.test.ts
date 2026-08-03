@@ -27,10 +27,13 @@ import { McpClientManager } from '../mcp/mcp-client.ts';
 import { UsageTracker } from '../observability/usage-tracker.ts';
 import { type ModelLimitsLookup, ModelNotFound } from '../openrouter/model-limits.ts';
 import type { RunState } from '../state/schema.ts';
+import { CURRENT_SCHEMA_VERSION } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import { type TranscriptRecorder, TranscriptStore } from '../state/transcript-store.ts';
 import type { WorkerResult } from '../subagents/worker.ts';
+import { resolvedConfig } from '../testing/domain-fixtures.ts';
 import { modelUsage } from '../testing/model-fixtures.ts';
+import { workerHandle } from '../testing/subagent-tools.ts';
 import {
   type AdapterStatePort,
   createRollingContextAccumulator,
@@ -74,6 +77,7 @@ function group(id: string, overrides: Partial<PrGroup> = {}): PrGroup {
 function baseState(prGroups: PrGroup[] = []): RunState {
   return {
     status: 'planning',
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     prGroups,
     currentGroupIndex: 0,
     currentTaskIndex: 0,
@@ -90,6 +94,7 @@ function baseState(prGroups: PrGroup[] = []): RunState {
       maxPrs: 5,
       maxSessions: null,
       mergeMethod: 'squash',
+      prPerTask: false,
       stylePath: null,
       concurrency: 2,
     },
@@ -134,7 +139,8 @@ function makeOrchestrator(
   config: { worker?: WorkerResult; prNumber?: number } = {},
 ): WorkLoopOrchestrator {
   return {
-    runWorker: async () => config.worker ?? { kind: 'ok', delivery: delivery() },
+    runWorker: async () =>
+      config.worker ?? { kind: 'ok', delivery: delivery(), handle: workerHandle() },
     finalizeCommit: async () => 'sha',
     openPr: async () => pr(config.prNumber ?? 1),
     runCiFix: async () => ({ kind: 'ok' }),
@@ -161,25 +167,17 @@ function makeCheckout(): CheckoutHome {
 function makeInput(
   overrides: { autoMerge?: boolean; maxSessions?: number | null; concurrency?: number } = {},
 ): RunLoopInput {
-  const resolved: RunLoopInput['resolved'] = {
-    openrouterApiKey: 'k',
-    apiKeySource: 'env',
-    models: { generic: 'g', smart: 's', coding: 'c', fast: 'f' },
-    maxPrs: 5,
+  const resolved: RunLoopInput['resolved'] = resolvedConfig({
     maxSessions: overrides.maxSessions ?? null,
     autoMerge: overrides.autoMerge ?? true,
-    mergeMethod: 'squash',
-    stylePath: null,
-    logLevel: 'info',
     concurrency: overrides.concurrency ?? 2,
-    mcpServers: {},
-    mcpServerSources: {},
-  };
+  });
   // Real instances with side-effect-free constructors. The injected seams stand in for these
   // during the loop, so their methods (network/git/fs) are never actually exercised here.
   return {
     cwd: '/tmp/repo',
     goal: 'noop goal',
+    branch: undefined,
     criteria: undefined,
     resolved,
     credentials: new Credentials(resolved),
@@ -190,10 +188,16 @@ function makeInput(
 }
 
 // Seams that fully isolate the loop from the outside world. Override per test.
-function seams(over: Partial<RunLoopAdapterSeams> = {}): RunLoopAdapterSeams {
+// `undefined` for a seam means UNSET, not "pass undefined": the adapter branches on a seam's
+// ABSENCE (`!seams.planGroups`) to decide whether to run the real planner, and
+// `exactOptionalPropertyTypes` draws the same distinction. So an explicitly-undefined override
+// deletes the key rather than writing it.
+type SeamOverrides = { [K in keyof RunLoopAdapterSeams]?: RunLoopAdapterSeams[K] | undefined };
+
+function seams(over: SeamOverrides = {}): RunLoopAdapterSeams {
   // Empty state by default so the planner path runs; override `state` to test resume.
   const { state } = makeState();
-  return {
+  const base: RunLoopAdapterSeams = {
     planGroups: async (): Promise<PlanGroupsOutcome> => ({ kind: 'ok', groups: [group('only')] }),
     // The goal assessor is outside-world too: stub it complete so a test that says nothing about
     // waves runs exactly one, and only the wave tests below opt into a second.
@@ -202,8 +206,13 @@ function seams(over: Partial<RunLoopAdapterSeams> = {}): RunLoopAdapterSeams {
     makeCheckout: () => makeCheckout(),
     makeGithub: () => makeGithub(),
     state,
-    ...over,
   };
+  const out: RunLoopAdapterSeams = { ...base };
+  for (const [key, value] of Object.entries(over)) {
+    if (value === undefined) delete (out as Record<string, unknown>)[key];
+    else Object.assign(out, { [key]: value });
+  }
+  return out;
 }
 
 // ---- Branch: blocked (planner) ---------------------------------------------
@@ -368,7 +377,7 @@ test('resume: an interrupted waiting-ci group is rescheduled through the real ad
   const orchestrator: WorkLoopOrchestrator = {
     runWorker: async () => {
       workerCalls++;
-      return { kind: 'ok', delivery: delivery() };
+      return { kind: 'ok', delivery: delivery(), handle: workerHandle() };
     },
     finalizeCommit: async () => 'sha',
     openPr: async () => {

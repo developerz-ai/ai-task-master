@@ -9,6 +9,12 @@
 // state the rest once so a call site says only what it is testing.
 
 import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
+import {
+  DEFAULT_LLM_STEP_TIMEOUT_MS,
+  DEFAULT_MAX_CI_FIX_ATTEMPTS,
+  DEFAULT_MCP_DEFER_TOOLS_OVER,
+} from '../config/defaults.ts';
+import type { ResolvedConfig } from '../config/schema.ts';
 import type { OpenRouterModel } from '../openrouter/client.ts';
 
 export function agentConfig(over: Partial<AgentConfig> = {}): AgentConfig {
@@ -50,6 +56,41 @@ export function catalogPricing(over: Partial<CatalogPricing> = {}): CatalogPrici
     completion: undefined,
     input_cache_read: undefined,
     input_cache_write: undefined,
+    ...over,
+  };
+}
+
+// `ResolvedConfig` is the fully-merged run config — every layer collapsed, so almost nothing on it
+// is optional. Tests care about two or three knobs each; this states the rest once, reusing the
+// real defaults where they exist so a fixture cannot quietly disagree with production.
+export function resolvedConfig(over: Partial<ResolvedConfig> = {}): ResolvedConfig {
+  return {
+    openrouterApiKey: 'k',
+    apiKeySource: 'env',
+    models: { generic: 'g', smart: 's', coding: 'c', fast: 'f' },
+    reasoningEffort: {},
+    maxPrs: 5,
+    maxSessions: null,
+    maxCiFixAttempts: DEFAULT_MAX_CI_FIX_ATTEMPTS,
+    llmStepTimeoutMs: DEFAULT_LLM_STEP_TIMEOUT_MS,
+    autoMerge: true,
+    prPerTask: false,
+    mergeMethod: 'squash',
+    stylePath: null,
+    formatCommand: null,
+    verifyCommand: null,
+    selfReview: false,
+    resolveConflicts: false,
+    generateSpecialists: false,
+    logLevel: 'info',
+    concurrency: 1,
+    subagentLimit: 4,
+    allowForcePush: false,
+    bashRules: [],
+    mcpServers: {},
+    mcpDeferToolsOver: DEFAULT_MCP_DEFER_TOOLS_OVER,
+    streaming: false,
+    mcpServerSources: {},
     ...over,
   };
 }

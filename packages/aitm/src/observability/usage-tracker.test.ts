@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { LanguageModelUsage, ProviderMetadata } from 'ai';
+import type { JSONValue, LanguageModelUsage, ProviderMetadata } from 'ai';
 import {
   type ModelLimits,
   type ModelLimitsLookup,
@@ -168,7 +168,7 @@ test('roleUsageSink binds a role and falls back to the configured model id when 
 
 // --- cache-write tokens + provider-reported cache_discount (issue #114 amendment, slice 04b) ---
 
-function openrouterMetadata(usageFields: Record<string, unknown>): ProviderMetadata {
+function openrouterMetadata(usageFields: Record<string, JSONValue>): ProviderMetadata {
   return { openrouter: { usage: usageFields } };
 }
 
@@ -215,7 +215,7 @@ test('record ignores a malformed providerMetadata (non-numeric/missing discount)
   const t = new UsageTracker(noLimits);
   assert.doesNotThrow(() => {
     t.record('worker', 'm', usage(10, 5), {});
-    t.record('worker', 'm', usage(10, 5), { openrouter: 'not-an-object' } as ProviderMetadata);
+    t.record('worker', 'm', usage(10, 5), { openrouter: { usage: 'not-an-object' } });
     t.record('worker', 'm', usage(10, 5), openrouterMetadata({ cacheDiscount: 'oops' }));
     t.record('worker', 'm', usage(10, 5), undefined);
   });

@@ -223,7 +223,6 @@ test('main: merge-pr threads ctx.signal into the merge flow', async () => {
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
-      resolveStyle: async () => 'style',
       signal: controller.signal,
       runMergeFlow: async (input) => {
         received = input.signal;
@@ -251,7 +250,6 @@ test('main: merge-pr with an aborted signal → flow cancels → exit 2', async 
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
-      resolveStyle: async () => 'style',
       signal: controller.signal,
       // Mirrors the real take-over loop: an already-aborted signal short-circuits to cancelled.
       runMergeFlow: async (input) =>

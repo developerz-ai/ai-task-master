@@ -4,6 +4,7 @@ import type { PrGroup } from '../domain/pr-group.ts';
 import { CiFailed } from '../github/errors.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { RunState } from '../state/schema.ts';
+import { CURRENT_SCHEMA_VERSION } from '../state/schema.ts';
 import { REVIEW_COMMENTS_GRACE } from './constants.ts';
 import {
   type AddressedThreadsStore,
@@ -60,6 +61,7 @@ function repliedThread(id: string, botLogin: string): ReviewThread {
 function baseState(groups: PrGroup[]): RunState {
   return {
     status: 'working',
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     prGroups: groups,
     currentGroupIndex: 0,
     currentTaskIndex: 0,
@@ -76,6 +78,7 @@ function baseState(groups: PrGroup[]): RunState {
       maxPrs: 5,
       maxSessions: null,
       mergeMethod: 'squash',
+      prPerTask: false,
       stylePath: null,
       concurrency: 1,
     },
@@ -440,11 +443,13 @@ test('handleWaitingCi: grace sleep sets reviewGraceApplied flag', async () => {
       slept.push(ms);
     },
   });
-  await handleWaitingCi(deps, snapshot().prGroups[0]);
+  const firstGroup = snapshot().prGroups[0];
+  assert.ok(firstGroup, 'seeded group present');
+  await handleWaitingCi(deps, firstGroup);
   assert.deepEqual(slept, [REVIEW_COMMENTS_GRACE], 'grace sleep should happen on first pass');
   const afterState = snapshot();
   assert.equal(
-    afterState.prGroups[0].reviewGraceApplied,
+    afterState.prGroups[0]?.reviewGraceApplied,
     true,
     'reviewGraceApplied flag should be set after sleep',
   );

@@ -301,6 +301,7 @@ test('composeStyleGuide: an AGENTS.md style file is labelled by its own filename
     flavor: 'agents',
     path: '/repo/AGENTS.md',
     contents: '# Agents\n',
+    sources: [],
   };
   assert.match(composeStyleGuide(config, ''), /^# AGENTS\.md \(project style file/);
 });

@@ -22,6 +22,7 @@ import {
 import { UsageTracker } from '../observability/usage-tracker.ts';
 import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import type { RunState } from '../state/schema.ts';
+import { CURRENT_SCHEMA_VERSION } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import { modelUsage } from '../testing/model-fixtures.ts';
 import { type MergeFlowSeams, mergeFlowAdapter } from './merge-flow-adapter.ts';
@@ -125,6 +126,7 @@ const agentConfig: AgentConfig = {
 function baseRunState(): RunState {
   return {
     status: 'awaiting-pr',
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     prGroups: [],
     currentGroupIndex: 0,
     currentTaskIndex: 0,

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { MCPClient, MCPClientConfig } from '@ai-sdk/mcp';
 import type { ToolSet } from 'ai';
+import { jsonSchema } from 'ai';
 import type { LoggerLike } from '../logger/logger.ts';
 import { type CreateMcpClient, McpClientManager } from './mcp-client.ts';
 import { StdioProcessRegistry } from './stdio-process-registry.ts';
@@ -26,7 +27,7 @@ function fakeClient(tools: ToolSet): FakeClient {
 }
 
 function fakeTool(): ToolSet[string] {
-  return { description: 't', inputSchema: { type: 'object' } } as ToolSet[string];
+  return { description: 't', inputSchema: jsonSchema({ type: 'object' }) };
 }
 
 // A promise that never settles — stands in for an SDK call wedged mid-handshake or a no-op close.

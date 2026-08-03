@@ -4,7 +4,7 @@ import type { MCPClient, MCPClientConfig } from '@ai-sdk/mcp';
 import type { ToolSet } from 'ai';
 import { jsonSchema } from 'ai';
 import type { LoggerLike } from '../logger/logger.ts';
-import { type CreateMcpClient, McpClientManager } from './mcp-client.ts';
+import { type CreateMcpClient, McpClientManager, mcpInitFrom } from './mcp-client.ts';
 import { StdioProcessRegistry } from './stdio-process-registry.ts';
 
 type FakeClient = MCPClient & {
@@ -787,4 +787,40 @@ test('connectAll: no collision warning when server names sanitize uniquely (issu
   assert.equal(collisionWarning, undefined);
 
   await m.close();
+});
+
+test('mcpInitFrom: forwards the configured defer threshold, allowlist and logger (issue #339)', () => {
+  // `mcpDeferToolsOver` is schema-defined, layer-merged with source tracking, and documented in
+  // config.md and mcp.md with a default of 20 — and reached no manager at all, so setting it did
+  // nothing. Both adapters hand-copied the field list; this is the one place that list now lives.
+  const { logger } = recordingLogger();
+  const init = mcpInitFrom(
+    {
+      mcpServers: { gh: { command: 'gh-mcp' } },
+      mcpDeferToolsOver: 3,
+      mcpRoleAllowlist: { worker: ['gh'] },
+    },
+    logger,
+  );
+  assert.equal(init.deferToolsOver, 3, 'the configured threshold reaches the manager');
+  assert.deepEqual(init.servers, { gh: { command: 'gh-mcp' } });
+  assert.deepEqual(init.roleAllowlist, { worker: ['gh'] });
+  assert.equal(init.logger, logger);
+});
+
+test('mcpInitFrom: the threshold it forwards is the one toolSurfaceForRole honors (issue #339)', async () => {
+  // Not just "the field is set": drive the manager built from it and prove the surface splits at the
+  // configured number rather than the built-in default.
+  const m = new McpClientManager({
+    ...mcpInitFrom({ mcpServers: { gh: { command: 'gh-mcp' } }, mcpDeferToolsOver: 1 }),
+    createClient: async () => fakeClient({ a: fakeTool(), b: fakeTool() }),
+  });
+  await m.connectAll();
+  try {
+    const surface = m.toolSurfaceForRole('worker');
+    assert.deepEqual(Object.keys(surface.direct), [], '2 tools > threshold 1 → nothing direct');
+    assert.equal(Object.keys(surface.deferred).length, 2, 'both defer');
+  } finally {
+    await m.close();
+  }
 });

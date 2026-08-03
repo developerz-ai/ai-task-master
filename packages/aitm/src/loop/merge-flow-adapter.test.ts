@@ -377,6 +377,10 @@ test('mergeFlowAdapter: an over-threshold surface arrives name-only + tool_searc
     const { subagents } = flow.captured();
 
     assert.ok(TOOL_SEARCH_TOOL_NAME in subagents.workerTools, 'tool_search is mounted');
+    assert.ok(
+      TOOL_SEARCH_TOOL_NAME in subagents.reviewerTools,
+      'the Reviewer can activate deferred tools too, not just carry mount metadata',
+    );
     assert.ok(subagents.deferredMount, 'the Worker gets its mount');
     assert.notEqual(subagents.deferredMount?.activated, null, 'with a live activation set');
     assert.match(subagents.deferredMount?.indexBlock ?? '', /mcp__gh__create_issue/);

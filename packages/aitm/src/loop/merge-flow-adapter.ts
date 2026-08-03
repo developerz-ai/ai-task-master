@@ -10,7 +10,7 @@ import { resolve as resolvePath } from 'node:path';
 import { backgroundProcessTools } from '@developerz.ai/ai-claude-compat';
 // Type-only import — no runtime cycle with commands.ts, which imports this module's value.
 import type { RunMergeFlowInput } from '../composition/run-input.ts';
-import { McpClientManager } from '../mcp/mcp-client.ts';
+import { McpClientManager, mcpInitFrom } from '../mcp/mcp-client.ts';
 import { agentStepProgress, shortModelName } from '../observability/step-progress.ts';
 import { roleUsageSink } from '../observability/usage-tracker.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
@@ -63,14 +63,7 @@ export async function mergeFlowAdapter(
   // servers. Constructed HERE rather than at the CLI boundary because the sibling adapter owns its
   // manager the same way, seam included, and one shape for both flows beats two.
   const mcp =
-    seams.makeMcp?.(input) ??
-    new McpClientManager({
-      servers: input.resolved.mcpServers,
-      ...(input.resolved.mcpRoleAllowlist !== undefined
-        ? { roleAllowlist: input.resolved.mcpRoleAllowlist }
-        : {}),
-      ...(input.logger ? { logger: input.logger } : {}),
-    });
+    seams.makeMcp?.(input) ?? new McpClientManager(mcpInitFrom(input.resolved, input.logger));
 
   // One release stack for the whole flow, mirroring runLoopAdapter. Registered BEFORE connectAll:
   // connectAll spawns each server's stdio child as it goes, so a run aborted mid-connect can already

@@ -7,7 +7,7 @@ import { mkdtempSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { backgroundProcessTools, SUBMIT_TOOL_NAME } from '@developerz.ai/ai-claude-compat';
 import type { ToolSet } from 'ai';
 import { jsonSchema, tool } from 'ai';
@@ -219,7 +219,18 @@ test('resolveWorkerTools mounts explore only when the caller wires it (never MCP
   assert.equal('explore' in withoutExplore, false, 'absent when not wired');
 });
 
-const stubMemory = () => buildMemoryTool(mkdtempSync(join(tmpdir(), 'aitm-mem-')));
+// One directory for the whole file, removed in teardown: `buildMemoryTool` does not own the
+// directory's lifetime, so a per-call mkdtemp would leave one behind on every test.
+const memoryDirs: string[] = [];
+const stubMemory = () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aitm-mem-'));
+  memoryDirs.push(dir);
+  return buildMemoryTool(dir);
+};
+
+after(async () => {
+  await Promise.all(memoryDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+});
 
 test('applyHooks wraps the tool record when hooks are configured, no-op otherwise (issue #121)', () => {
   const base = resolveWorkerTools({}, '/tmp/wt');

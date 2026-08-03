@@ -8,14 +8,17 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { jsonSchema } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
 import type { RunLoopInput } from '../composition/run-input.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
+import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import { PlanGraph } from '../plan/plan-graph.ts';
 import type { Plan } from '../plan/schema.ts';
 import { bridgeCredentials, bridgeInput } from '../testing/bridge-ctx.ts';
+import { mcpClientDouble } from '../testing/mcp-client-double.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import {
   branchFor,
@@ -312,23 +315,7 @@ test('remoteBranchNames: a non-git directory degrades to an empty set (never thr
 // the `submit` tool, input is a JSON string per the provider spec.
 function planSubmitModel(value: unknown): MockLanguageModelV3 {
   return new MockLanguageModelV3({
-    doGenerate: async () => ({
-      content: [
-        {
-          type: 'tool-call',
-          toolCallId: 'submit-0',
-          toolName: 'submit',
-          input: JSON.stringify(value),
-        },
-      ],
-      finishReason: { unified: 'tool-calls', raw: undefined },
-      usage: {
-        inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-        outputTokens: { total: 1, text: 1, reasoning: undefined },
-        totalTokens: 2,
-      },
-      warnings: [],
-    }),
+    doGenerate: async () => submitCall('submit-0', 'submit', value),
   });
 }
 
@@ -649,4 +636,194 @@ test('namespaceWaveGroups: a third wave does not collide with the second', () =>
   const w3 = namespaceWaveGroups([waveGroup('g1')], [...w1, ...w2], 3);
   const ids = [...w1, ...w2, ...w3].map((g) => g.id);
   assert.equal(new Set(ids).size, ids.length, 'every id across three waves is unique');
+});
+
+// ---- deferred MCP tool loading on the Planner (issue #193) ------------------
+
+// Records the system prompt and the tool names offered on the first step, then submits `plan` so
+// defaultPlanGroups still returns ok and the assertions can be about the wiring alone.
+function recordingPlanModel(plan: Plan): {
+  model: MockLanguageModelV3;
+  systemPrompt: () => string;
+  offered: () => string[];
+} {
+  // The same model answers the pre-planning scout survey first, so the Planner's own call has to be
+  // picked out by its role prefix rather than taken as the first or last one.
+  let systemPrompt = '';
+  let offered: string[] = [];
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      const prompt = JSON.stringify(opts.prompt);
+      if (prompt.includes('You are the Planner.')) {
+        systemPrompt = prompt;
+        offered = (opts.tools ?? []).map((t) => t.name);
+      }
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify(plan),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+          outputTokens: { total: 1, text: 1, reasoning: undefined },
+          totalTokens: 2,
+        },
+        warnings: [],
+      };
+    },
+  });
+  return { model, systemPrompt: () => systemPrompt, offered: () => offered };
+}
+
+// One tool-call response, the only shape any model in this file returns.
+function submitCall(toolCallId: string, toolName: string, input: unknown) {
+  return {
+    content: [{ type: 'tool-call' as const, toolCallId, toolName, input: JSON.stringify(input) }],
+    finishReason: { unified: 'tool-calls' as const, raw: undefined },
+    usage: {
+      inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+      outputTokens: { total: 1, text: 1, reasoning: undefined },
+      totalTokens: 2,
+    },
+    warnings: [],
+  };
+}
+
+function surplusMcp(deferToolsOver: number): McpClientManager {
+  return new McpClientManager({
+    servers: { gh: { command: 'gh-mcp' } },
+    deferToolsOver,
+    createClient: async () =>
+      mcpClientDouble({
+        tools: {
+          create_issue: {
+            description: 'Create a GitHub issue.',
+            inputSchema: jsonSchema({ type: 'object' }),
+          },
+          list_prs: { description: 'List open PRs.', inputSchema: jsonSchema({ type: 'object' }) },
+        },
+      }),
+  });
+}
+
+const ONE_GROUP_PLAN: Plan = {
+  goal: 'add a todo list',
+  groups: [
+    {
+      id: 'core',
+      title: 'Core CRUD',
+      acceptance: 'bun test passes',
+      tasks: [{ description: 'add the model', complexity: 'normal' }],
+      dependsOn: [],
+    },
+  ],
+};
+
+test('defaultPlanGroups: an over-threshold MCP surface reaches the Planner name-only + tool_search (issue #193)', async () => {
+  // Planning is the read-heavy recon pass: what a domain server knows belongs in the plan, not in a
+  // Worker's later discovery. Before this, resolvePlannerTools dropped every surplus tool.
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-planner-deferred-'));
+  const mcp = surplusMcp(1); // 2 surplus tools > 1 → deferred
+  await mcp.connectAll();
+  try {
+    const { model, systemPrompt, offered } = recordingPlanModel(ONE_GROUP_PLAN);
+    const outcome = await defaultPlanGroups(fakeInput(dir, model), mcp, false);
+
+    assert.equal(outcome.kind, 'ok');
+    assert.match(systemPrompt(), /<deferred-tools>/, 'the name-only index reaches the prompt');
+    assert.match(systemPrompt(), /mcp__gh__create_issue/, 'the deferred tool is listed by name');
+    assert.ok(offered().includes(TOOL_SEARCH_TOOL_NAME), 'tool_search is callable');
+    assert.equal(
+      offered().includes('mcp__gh__create_issue'),
+      false,
+      'a deferred tool stays inactive until tool_search fetches its schema',
+    );
+    assert.ok(offered().includes('readFile'), 'the read-only fixed slots are untouched');
+  } finally {
+    await mcp.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultPlanGroups: a below-threshold MCP surface mounts on the Planner directly (issue #193)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-planner-direct-'));
+  const mcp = surplusMcp(5); // 2 surplus tools <= 5 → nothing deferred
+  await mcp.connectAll();
+  try {
+    const { model, systemPrompt, offered } = recordingPlanModel(ONE_GROUP_PLAN);
+    const outcome = await defaultPlanGroups(fakeInput(dir, model), mcp, false);
+
+    assert.equal(outcome.kind, 'ok');
+    assert.doesNotMatch(systemPrompt(), /<deferred-tools>/, 'no index block when nothing deferred');
+    assert.ok(offered().includes('mcp__gh__create_issue'), 'the surplus mounts with full schema');
+    assert.equal(offered().includes(TOOL_SEARCH_TOOL_NAME), false, 'no tool_search either');
+  } finally {
+    await mcp.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultPlanGroups: no MCP servers → the Planner prompt and tools are unchanged (issue #193)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-planner-nomcp-'));
+  try {
+    const { model, systemPrompt, offered } = recordingPlanModel(ONE_GROUP_PLAN);
+    const outcome = await defaultPlanGroups(fakeInput(dir, model), fakeMcp(), false);
+
+    assert.equal(outcome.kind, 'ok');
+    assert.doesNotMatch(systemPrompt(), /<deferred-tools>/);
+    assert.equal(offered().includes(TOOL_SEARCH_TOOL_NAME), false);
+    assert.ok(offered().includes('readFile'), 'the fixed slots still reach the model');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultPlanGroups: tool_search activates a deferred tool for the Planner’s next step (issue #193)', async () => {
+  // The withheld-until-searched half is asserted above; this is the other half, and it is the one
+  // that catches a broken activation link — a `mount.activated` that is a COPY of the set
+  // `tool_search` mutates would satisfy every other assertion here and never activate anything.
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-planner-activate-'));
+  const mcp = surplusMcp(1);
+  await mcp.connectAll();
+  try {
+    const offeredPerStep: string[][] = [];
+    let plannerSteps = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async (opts) => {
+        if (!JSON.stringify(opts.prompt).includes('You are the Planner.')) {
+          // The scout survey shares this handle; answer it and stay out of the way.
+          return submitCall('survey-0', 'submit', { assignments: [], rationale: 'none' });
+        }
+        offeredPerStep.push((opts.tools ?? []).map((t) => t.name));
+        plannerSteps += 1;
+        return plannerSteps === 1
+          ? submitCall('search-0', TOOL_SEARCH_TOOL_NAME, {
+              query: 'select:mcp__gh__create_issue',
+            })
+          : submitCall('submit-0', 'submit', ONE_GROUP_PLAN);
+      },
+    });
+
+    const outcome = await defaultPlanGroups(fakeInput(dir, model), mcp, false);
+
+    assert.equal(outcome.kind, 'ok');
+    assert.equal(plannerSteps, 2, 'the Planner took a search step and then submitted');
+    assert.equal(
+      offeredPerStep[0]?.includes('mcp__gh__create_issue'),
+      false,
+      'step one: deferred, schema withheld',
+    );
+    assert.ok(
+      offeredPerStep[1]?.includes('mcp__gh__create_issue'),
+      'step two: the searched tool is callable',
+    );
+  } finally {
+    await mcp.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

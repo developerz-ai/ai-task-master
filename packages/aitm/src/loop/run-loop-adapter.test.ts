@@ -16,6 +16,7 @@ import {
   SYSTEM_REMINDER_CONTRACT,
 } from '@developerz.ai/ai-claude-compat';
 import type { LanguageModelUsage, ModelMessage } from 'ai';
+import { jsonSchema } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { RunLoopInput } from '../composition/run-input.ts';
 import { Credentials } from '../credentials/credentials.ts';
@@ -24,6 +25,7 @@ import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import { GitHubClient } from '../github/github-client.ts';
 import type { PullRequest, ReviewThread } from '../github/schema.ts';
 import { McpClientManager } from '../mcp/mcp-client.ts';
+import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import { UsageTracker } from '../observability/usage-tracker.ts';
 import { type ModelLimitsLookup, ModelNotFound } from '../openrouter/model-limits.ts';
 import type { RunState } from '../state/schema.ts';
@@ -1673,4 +1675,106 @@ test('each wave reads the rolling context fresh, so later PRs know about earlier
   assert.equal(seen.length, 2, 'two waves each built an orchestrator');
   assert.equal(seen[0], '', 'wave 1 starts from the empty run-start context');
   assert.match(seen[1] ?? '', /the first wave/, 'wave 2 inherits what wave 1 persisted');
+});
+
+// ---- deferred MCP tool loading reaches the CI-fix Worker (issue #193) -------
+
+test('defaultMakeOrchestrator.runCiFix: the fix Worker gets the deferred MCP surface (issue #193)', async () => {
+  // The bridge is where the mount is built for this role. ci-fix.test.ts proves the session honours
+  // a mount it is handed; this proves the adapter hands it one at all — the wiring #119 left out.
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-cifix-deferred-'));
+  const mcp = new McpClientManager({
+    servers: { gh: { command: 'gh-mcp' } },
+    deferToolsOver: 1, // 2 surplus tools > 1 → deferred
+    createClient: async () =>
+      mcpClientDouble({
+        tools: {
+          create_issue: {
+            description: 'Create a GitHub issue.',
+            inputSchema: jsonSchema({ type: 'object' }),
+          },
+          list_prs: { description: 'List open PRs.', inputSchema: jsonSchema({ type: 'object' }) },
+        },
+      }),
+  });
+  await mcp.connectAll();
+  try {
+    let systemPrompt = '';
+    let offered: string[] = [];
+    const model = new MockLanguageModelV3({
+      doGenerate: async (opts) => {
+        if (systemPrompt === '') systemPrompt = JSON.stringify(opts.prompt);
+        offered = (opts.tools ?? []).map((t) => t.name);
+        return {
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: 'submit-0',
+              toolName: 'submit',
+              input: JSON.stringify({ files: [], draftCommitMessage: 'noop' }),
+            },
+          ],
+          finishReason: { unified: 'tool-calls', raw: undefined },
+          usage: {
+            inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+            outputTokens: { total: 1, text: 1, reasoning: undefined },
+            totalTokens: 2,
+          },
+          warnings: [],
+        };
+      },
+    });
+    const credentials = bridgeCredentials({
+      modelFor: () => model,
+      modelForCapability: () => model,
+    });
+    // The fix session opens by asking GitHub for failed logs and unresolved threads. Empty stdout is
+    // not a valid answer to either (`gh repo view --json` has to parse), so this double answers both
+    // with a well-formed nothing: no failing checks, no threads.
+    const github = new GitHubClient(dir, async (_file, args) => {
+      if (args[0] === 'repo' && args[1] === 'view') {
+        return {
+          stdout: JSON.stringify({ owner: { login: 'o' }, name: 'r' }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'api') {
+        const page = { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
+        return {
+          stdout: JSON.stringify({
+            data: { repository: { pullRequest: { reviewThreads: page } } },
+          }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    const orch = defaultMakeOrchestrator(
+      bridgeCtx({ input: bridgeInput({ cwd: dir, credentials, github }), mcp }),
+    );
+
+    // Empty manifest → the fix session blocks before any rebase or push, but the agent it blocked
+    // in was already built with the mounted surface.
+    const res = await orch.runCiFix({
+      group: group('core'),
+      pr: 7,
+      checkout: { groupId: 'core', branch: 'aitm/core', path: dir },
+      baseBranch: 'main',
+    });
+
+    assert.equal(res.kind, 'blocked');
+    assert.match(systemPrompt, /<deferred-tools>/, 'the name-only index reaches the fix prompt');
+    assert.match(systemPrompt, /mcp__gh__create_issue/, 'the deferred tool is listed by name');
+    assert.ok(offered.includes(TOOL_SEARCH_TOOL_NAME), 'tool_search is callable');
+    assert.equal(
+      offered.includes('mcp__gh__create_issue'),
+      false,
+      'a deferred tool stays inactive until tool_search fetches its schema',
+    );
+  } finally {
+    await mcp.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

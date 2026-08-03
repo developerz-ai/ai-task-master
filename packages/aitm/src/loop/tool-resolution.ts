@@ -323,14 +323,17 @@ export function activeToolNames(
 // Compose activeTools onto the #102 compaction prepareStep: one function returns `activeTools` every
 // step and the compaction `messages` override when it triggers (issue #119 §"Activation plumbing").
 // activeTools is recomputed per step so newly activated deferred tools become callable.
+// `base` is optional because the CI-fix session builds its prepareStep only when a Compactor is
+// configured (issue #193); with none, activation is still the whole job and there is nothing to
+// compose onto.
 export function withActiveTools<TOOLS extends ToolSet>(
-  base: PrepareStep<TOOLS>,
+  base: PrepareStep<TOOLS> | undefined,
   tools: ToolSet,
   deferredNames: ReadonlySet<string>,
   activated: ReadonlySet<string>,
 ): PrepareStep<TOOLS> {
   return async (options) => {
-    const result = await base(options);
+    const result = await base?.(options);
     return {
       ...(result ?? {}),
       activeTools: activeToolNames(tools, deferredNames, activated) as Array<keyof TOOLS>,

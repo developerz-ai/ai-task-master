@@ -1153,19 +1153,27 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         streaming: input.resolved.streaming,
         recorder: ciRecorder,
       });
+      // Surplus MCP tools beyond the fixed slots reach the fix Worker too (issue #193, closing the
+      // #119 follow-up): directly below the defer threshold, else name-only + `tool_search`. This is
+      // the role that most needs a domain server — reading logs, querying the service that broke.
+      const ciFixSurface = mcp.toolSurfaceForRole('worker');
+      const ciFixMount = mountDeferredTools(ciFixSurface);
       const ciFixWorkerTools = applyHooks(
-        resolveWorkerTools(
-          mcp.toolsForRole('worker'),
-          checkout.path,
-          input.resolved.bashRules,
-          fetchHtmlAvailable,
-          buildExploreFor(input, checkout.path, ciFixUsage),
-          memoryToolFor(state),
-          background,
-          // The CI-fix Worker gets skills too (issue #181): reading a failed check is exactly the
-          // procedure the built-in ci-log-triage skill describes.
-          ctx.skills,
-        ),
+        {
+          ...resolveWorkerTools(
+            mcp.toolsForRole('worker'),
+            checkout.path,
+            input.resolved.bashRules,
+            fetchHtmlAvailable,
+            buildExploreFor(input, checkout.path, ciFixUsage),
+            memoryToolFor(state),
+            background,
+            // The CI-fix Worker gets skills too (issue #181): reading a failed check is exactly the
+            // procedure the built-in ci-log-triage skill describes.
+            ctx.skills,
+          ),
+          ...ciFixMount.extraTools,
+        } as WithExplore<WorkerTools> & WithMemory<WorkerTools>,
         input,
         checkout.path,
       );
@@ -1197,6 +1205,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           subagents: {
             credentials: input.credentials,
             workerTools: ciFixWorkerTools,
+            deferredMount: ciFixMount,
             styleContents: style,
             compactor,
             timeout: stepTimeout,

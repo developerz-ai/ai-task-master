@@ -4,13 +4,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
+import type { ToolSet } from 'ai';
+import { jsonSchema } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { CompactorLike } from '../compaction/compaction-step.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { RunCmd, RunCmdResult } from '../github/github-client.ts';
 import type { ReviewThread } from '../github/schema.ts';
+import { McpClientManager } from '../mcp/mcp-client.ts';
+import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import { PrContextStore } from '../state/pr-context-store.ts';
 import type { FileManifest, WorkerInput, WorkerResult, WorkerTools } from '../subagents/worker.ts';
+import { mcpClientDouble } from '../testing/mcp-client-double.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { workerHandle, workerTools } from '../testing/subagent-tools.ts';
 import {
@@ -22,6 +27,7 @@ import {
   rebaseAndForcePush,
   runFixSession,
 } from './ci-fix.ts';
+import { type DeferredMount, mountDeferredTools } from './tool-resolution.ts';
 
 const dummyModel = new MockLanguageModelV3();
 
@@ -940,4 +946,140 @@ test('runFixSession: builds the Worker on the coding-capability model (no hardco
   assert.deepEqual(caps, ['coding']);
   assert.equal(result.kind, 'blocked'); // empty manifest
   assert.deepEqual(commands, [], 'a blocked Worker never reaches the git push');
+});
+
+// ---- deferred MCP tool loading on the fix Worker (issue #193) ---------------
+
+// A model that records the system prompt and the tool names it was offered on the first step, then
+// submits an empty manifest so the session blocks before any editor or git runs.
+function offeredToolsModel(): {
+  model: MockLanguageModelV3;
+  systemPrompt: () => string;
+  offered: () => string[];
+} {
+  let systemPrompt = '';
+  let offered: string[] = [];
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      if (systemPrompt === '') systemPrompt = JSON.stringify(opts.prompt);
+      offered = (opts.tools ?? []).map((t) => t.name);
+      return {
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'submit-0',
+            toolName: 'submit',
+            input: JSON.stringify({ files: [], draftCommitMessage: '' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls', raw: undefined },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+          outputTokens: { total: 1, text: 1, reasoning: undefined },
+          totalTokens: 2,
+        },
+        warnings: [],
+      };
+    },
+  });
+  return { model, systemPrompt: () => systemPrompt, offered: () => offered };
+}
+
+function fakeMcpTool(desc: string): ToolSet[string] {
+  return { description: desc, inputSchema: jsonSchema({ type: 'object' }) };
+}
+
+// An MCP manager whose single server exports two surplus tools, over a defer threshold of 1.
+async function surplusMcp(): Promise<McpClientManager> {
+  const mcp = new McpClientManager({
+    servers: { gh: { command: 'gh-mcp' } },
+    deferToolsOver: 1,
+    createClient: async () =>
+      mcpClientDouble({
+        tools: {
+          create_issue: fakeMcpTool('Create a GitHub issue.'),
+          list_prs: fakeMcpTool('List open PRs.'),
+        },
+      }),
+  });
+  await mcp.connectAll();
+  return mcp;
+}
+
+function deferredSubagents(mount: DeferredMount, model: MockLanguageModelV3): FixSessionSubagents {
+  return {
+    credentials: { modelForCapability: () => model, modelIdForCapability: () => 'test/model' },
+    workerTools: { ...workerTools(), ...mount.extraTools } as WorkerTools,
+    deferredMount: mount,
+    styleContents: '',
+  };
+}
+
+test('runFixSession: an over-threshold MCP surface reaches the fix Worker name-only + tool_search (issue #193)', async () => {
+  // Before this, the fix Worker resolved only the fixed slots: every surplus tool a domain server
+  // exported was dropped for the one role whose whole job is reading a failure it cannot see.
+  const mcp = await surplusMcp();
+  try {
+    const mount = mountDeferredTools(mcp.toolSurfaceForRole('worker'));
+    const { model, systemPrompt, offered } = offeredToolsModel();
+    const result = await runFixSession(baseInput({ subagents: deferredSubagents(mount, model) }));
+
+    assert.equal(result.kind, 'blocked'); // empty manifest — the wiring already ran
+    assert.match(systemPrompt(), /<deferred-tools>/, 'the name-only index reaches the prompt');
+    assert.match(systemPrompt(), /mcp__gh__create_issue/, 'the deferred tool is listed by name');
+    assert.ok(offered().includes(TOOL_SEARCH_TOOL_NAME), 'tool_search is callable');
+    assert.equal(
+      offered().includes('mcp__gh__create_issue'),
+      false,
+      'a deferred tool stays inactive until tool_search fetches its schema',
+    );
+    assert.ok(offered().includes('readFile'), 'the fixed slots are untouched');
+  } finally {
+    await mcp.close();
+  }
+});
+
+test('runFixSession: a below-threshold MCP surface mounts directly, with no index block (issue #193)', async () => {
+  const mcp = new McpClientManager({
+    servers: { gh: { command: 'gh-mcp' } },
+    deferToolsOver: 5, // 2 surplus tools <= 5 → nothing deferred
+    createClient: async () =>
+      mcpClientDouble({
+        tools: {
+          create_issue: fakeMcpTool('Create a GitHub issue.'),
+          list_prs: fakeMcpTool('List open PRs.'),
+        },
+      }),
+  });
+  await mcp.connectAll();
+  try {
+    const mount = mountDeferredTools(mcp.toolSurfaceForRole('worker'));
+    assert.equal(mount.activated, null, 'nothing deferred below the threshold');
+    const { model, systemPrompt, offered } = offeredToolsModel();
+    const result = await runFixSession(baseInput({ subagents: deferredSubagents(mount, model) }));
+
+    assert.equal(result.kind, 'blocked');
+    assert.doesNotMatch(systemPrompt(), /<deferred-tools>/, 'no index block when nothing deferred');
+    assert.ok(offered().includes('mcp__gh__create_issue'), 'the surplus mounts with full schema');
+    assert.equal(offered().includes(TOOL_SEARCH_TOOL_NAME), false, 'no tool_search either');
+  } finally {
+    await mcp.close();
+  }
+});
+
+test('runFixSession: no deferredMount → the fix Worker prompt and tools are unchanged (issue #193)', async () => {
+  const { model, systemPrompt, offered } = offeredToolsModel();
+  const result = await runFixSession(
+    baseInput({
+      subagents: {
+        credentials: { modelForCapability: () => model, modelIdForCapability: () => 'test/model' },
+        workerTools: workerTools(),
+        styleContents: '',
+      },
+    }),
+  );
+  assert.equal(result.kind, 'blocked');
+  assert.doesNotMatch(systemPrompt(), /<deferred-tools>/);
+  assert.equal(offered().includes(TOOL_SEARCH_TOOL_NAME), false);
+  assert.ok(offered().includes('readFile'), 'the fixed slots still reach the model');
 });

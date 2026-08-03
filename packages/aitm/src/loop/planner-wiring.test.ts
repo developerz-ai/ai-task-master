@@ -696,6 +696,20 @@ function recordingPlanModel(plan: Plan): {
   return { model, systemPrompt: () => systemPrompt, offered: () => offered };
 }
 
+// One tool-call response, the only shape any model in this file returns.
+function submitCall(toolCallId: string, toolName: string, input: unknown) {
+  return {
+    content: [{ type: 'tool-call' as const, toolCallId, toolName, input: JSON.stringify(input) }],
+    finishReason: { unified: 'tool-calls' as const, raw: undefined },
+    usage: {
+      inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+      outputTokens: { total: 1, text: 1, reasoning: undefined },
+      totalTokens: 2,
+    },
+    warnings: [],
+  };
+}
+
 function surplusMcp(deferToolsOver: number): McpClientManager {
   return new McpClientManager({
     servers: { gh: { command: 'gh-mcp' } },
@@ -781,6 +795,51 @@ test('defaultPlanGroups: no MCP servers → the Planner prompt and tools are unc
     assert.equal(offered().includes(TOOL_SEARCH_TOOL_NAME), false);
     assert.ok(offered().includes('readFile'), 'the fixed slots still reach the model');
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultPlanGroups: tool_search activates a deferred tool for the Planner’s next step (issue #193)', async () => {
+  // The withheld-until-searched half is asserted above; this is the other half, and it is the one
+  // that catches a broken activation link — a `mount.activated` that is a COPY of the set
+  // `tool_search` mutates would satisfy every other assertion here and never activate anything.
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-planner-activate-'));
+  const mcp = surplusMcp(1);
+  await mcp.connectAll();
+  try {
+    const offeredPerStep: string[][] = [];
+    let plannerSteps = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async (opts) => {
+        if (!JSON.stringify(opts.prompt).includes('You are the Planner.')) {
+          // The scout survey shares this handle; answer it and stay out of the way.
+          return submitCall('survey-0', 'submit', { assignments: [], rationale: 'none' });
+        }
+        offeredPerStep.push((opts.tools ?? []).map((t) => t.name));
+        plannerSteps += 1;
+        return plannerSteps === 1
+          ? submitCall('search-0', TOOL_SEARCH_TOOL_NAME, {
+              query: 'select:mcp__gh__create_issue',
+            })
+          : submitCall('submit-0', 'submit', ONE_GROUP_PLAN);
+      },
+    });
+
+    const outcome = await defaultPlanGroups(fakeInput(dir, model), mcp, false);
+
+    assert.equal(outcome.kind, 'ok');
+    assert.equal(plannerSteps, 2, 'the Planner took a search step and then submitted');
+    assert.equal(
+      offeredPerStep[0]?.includes('mcp__gh__create_issue'),
+      false,
+      'step one: deferred, schema withheld',
+    );
+    assert.ok(
+      offeredPerStep[1]?.includes('mcp__gh__create_issue'),
+      'step two: the searched tool is callable',
+    );
+  } finally {
+    await mcp.close();
     await rm(dir, { recursive: true, force: true });
   }
 });

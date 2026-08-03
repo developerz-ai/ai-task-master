@@ -315,23 +315,7 @@ test('remoteBranchNames: a non-git directory degrades to an empty set (never thr
 // the `submit` tool, input is a JSON string per the provider spec.
 function planSubmitModel(value: unknown): MockLanguageModelV3 {
   return new MockLanguageModelV3({
-    doGenerate: async () => ({
-      content: [
-        {
-          type: 'tool-call',
-          toolCallId: 'submit-0',
-          toolName: 'submit',
-          input: JSON.stringify(value),
-        },
-      ],
-      finishReason: { unified: 'tool-calls', raw: undefined },
-      usage: {
-        inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-        outputTokens: { total: 1, text: 1, reasoning: undefined },
-        totalTokens: 2,
-      },
-      warnings: [],
-    }),
+    doGenerate: async () => submitCall('submit-0', 'submit', value),
   });
 }
 

@@ -58,6 +58,7 @@ function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {
     pr: 7,
     status: 'in-progress',
     stage: 'ci-failed',
+    reviewGraceApplied: false,
     ...overrides,
   };
 }

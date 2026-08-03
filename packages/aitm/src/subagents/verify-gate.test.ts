@@ -101,7 +101,12 @@ test('runVerify: runs the command in the checkout with the hard-ceiling timeout,
   let seen: BashInput | undefined;
   const bash = tool<BashInput, BashOutput>({
     description: 'run a bash command in the checkout',
-    inputSchema: z.object({ command: z.string(), timeoutMs: z.number().optional() }),
+    inputSchema: z.object({
+      command: z.string(),
+      description: z.string(),
+      timeoutMs: z.number().optional(),
+      run_in_background: z.boolean().optional(),
+    }),
     execute: async (input) => {
       seen = input;
       return out({ exitCode: 1, stderr: 'nope' });

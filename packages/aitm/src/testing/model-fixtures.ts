@@ -9,6 +9,7 @@
 // keeps these correct by construction when the result shape moves again — it already did once, from
 // a bare `finishReason: 'stop'` string to `{ unified, raw }`.
 
+import type { LanguageModelUsage } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 
 export type GenerateResult = Awaited<ReturnType<MockLanguageModelV3['doGenerate']>>;
@@ -58,4 +59,21 @@ export function submittingModel(input: unknown): MockLanguageModelV3 {
 // The "agent narrated but produced no edits" path driven by the blocked-delivery and CI-fix tests.
 export function emptyManifestModel(): MockLanguageModelV3 {
   return submittingModel({ files: [] });
+}
+
+// The `ai`-level usage type (distinct from the provider-level `LanguageModelV3Usage` above): it
+// carries required per-token-kind detail objects that call sites summing whole-run totals never set.
+export function modelUsage(over: Partial<LanguageModelUsage> = {}): LanguageModelUsage {
+  return {
+    inputTokens: undefined,
+    outputTokens: undefined,
+    totalTokens: undefined,
+    inputTokenDetails: {
+      noCacheTokens: undefined,
+      cacheReadTokens: undefined,
+      cacheWriteTokens: undefined,
+    },
+    outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
+    ...over,
+  };
 }

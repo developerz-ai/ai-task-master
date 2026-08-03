@@ -9,6 +9,7 @@
 // that drifts silently; the real factories cannot drift from themselves. Nothing here executes
 // unless a test actually drives a tool call.
 
+import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
 import { localEditTools, localReadTools } from '../loop/tool-resolution.ts';
 import type { PlannerTools } from '../subagents/planner.ts';
 import type { ReviewerTools } from '../subagents/reviewer.ts';
@@ -59,4 +60,11 @@ export function reviewerTools(over: Partial<ReviewerTools> = {}): ReviewerTools 
     }),
     ...over,
   };
+}
+
+// A `WorkerResult` of kind 'ok' carries the manifest-planning conversation so a later CI-fix pass
+// can continue it (#107). Tests that only assert on the delivery still have to supply one; the
+// agent is never touched on those paths, so it stands in as an opaque marker.
+export function workerHandle(marker = 'worker-handle'): SubagentHandle<WorkerTools> {
+  return { agent: {} as never, messages: [{ role: 'user', content: marker }] };
 }

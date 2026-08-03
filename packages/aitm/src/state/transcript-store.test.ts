@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { ModelMessage } from 'ai';
+import { modelUsage } from '../testing/model-fixtures.ts';
 import { reconstructTranscript, TranscriptStore } from './transcript-store.ts';
 
 async function tmp(): Promise<string> {
@@ -144,7 +145,10 @@ test('append/replay round-trip: a recorded run reconstructs to the message array
   try {
     const store = new TranscriptStore(dir);
     const rec = await store.begin({ group: 'core', stage: 'working' });
-    await rec.step([msg('user', 'goal')], { inputTokens: 5, outputTokens: 3, totalTokens: 8 });
+    await rec.step(
+      [msg('user', 'goal')],
+      modelUsage({ inputTokens: 5, outputTokens: 3, totalTokens: 8 }),
+    );
     await rec.step([msg('assistant', 'manifest')]);
     const resumable = await store.findResumable('core', 'working');
     assert.deepEqual(resumable?.messages, [msg('user', 'goal'), msg('assistant', 'manifest')]);

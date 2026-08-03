@@ -4,6 +4,7 @@ import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import { CiFailed } from '../github/errors.ts';
 import type { ReviewThread } from '../github/schema.ts';
 import type { RunState } from '../state/schema.ts';
+import { workerHandle } from '../testing/subagent-tools.ts';
 import { ciFixFailedError, reviewFailedError } from './pr-per-task-mode.ts';
 import type { StageWorkResult } from './stage-handlers.ts';
 import { WorkLoop, type WorkLoopGithub, type WorkLoopOrchestrator } from './work-loop.ts';
@@ -135,8 +136,8 @@ test('prPerTask + autoMerge: each task branches off the merged base; its PR carr
     prNumber: 7,
     events,
     workerResults: [
-      { kind: 'ok', delivery: da },
-      { kind: 'ok', delivery: db },
+      { kind: 'ok', delivery: da, handle: workerHandle() },
+      { kind: 'ok', delivery: db, handle: workerHandle() },
     ],
   });
   const { github } = makeGithub({ checks: [ciSuccess, ciSuccess], threads: [], events });

@@ -30,6 +30,7 @@ import type { RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import { type TranscriptRecorder, TranscriptStore } from '../state/transcript-store.ts';
 import type { WorkerResult } from '../subagents/worker.ts';
+import { modelUsage } from '../testing/model-fixtures.ts';
 import {
   type AdapterStatePort,
   createRollingContextAccumulator,
@@ -64,6 +65,8 @@ function group(id: string, overrides: Partial<PrGroup> = {}): PrGroup {
     branch: `aitm/${id}`,
     pr: null,
     status: 'pending',
+    stage: 'pending',
+    reviewGraceApplied: false,
     ...overrides,
   };
 }
@@ -1039,11 +1042,8 @@ test('makeBudgetCheck: no check without a ceiling or tracker; enforces token + c
       completionUsdPerToken: 0.002,
     }),
   };
-  const usage = (input: number, output: number): LanguageModelUsage => ({
-    inputTokens: input,
-    outputTokens: output,
-    totalTokens: input + output,
-  });
+  const usage = (input: number, output: number): LanguageModelUsage =>
+    modelUsage({ inputTokens: input, outputTokens: output, totalTokens: input + output });
   const run = async (
     tracker: UsageTracker | undefined,
     cost: number | undefined,
@@ -1390,7 +1390,7 @@ test('recordStepDeltas: records only the per-step delta from cumulative onStepFi
   const onStep = recordStepDeltas(recorder);
   const m = (i: number) => ({ role: 'assistant' as const, content: `m${i}` });
   // ai@6 hands the callback the CUMULATIVE response list each step: [m0,m1], [m0..m3], [m0..m5].
-  onStep({ response: { messages: [m(0), m(1)] }, usage: { totalTokens: 7 } });
+  onStep({ response: { messages: [m(0), m(1)] }, usage: modelUsage({ totalTokens: 7 }) });
   onStep({ response: { messages: [m(0), m(1), m(2), m(3)] } });
   onStep({ response: { messages: [m(0), m(1), m(2), m(3), m(4), m(5)] } });
   assert.deepEqual(

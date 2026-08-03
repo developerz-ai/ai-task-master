@@ -23,6 +23,7 @@ import { UsageTracker } from '../observability/usage-tracker.ts';
 import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import type { RunState } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
+import { modelUsage } from '../testing/model-fixtures.ts';
 import { type MergeFlowSeams, mergeFlowAdapter } from './merge-flow-adapter.ts';
 import type { TakeOverFlowInput, TakeOverResult } from './take-over-flow.ts';
 
@@ -237,7 +238,7 @@ const noLimits: ModelLimitsLookup = {
 };
 
 function usageOf(input: number, output: number): LanguageModelUsage {
-  return { inputTokens: input, outputTokens: output, totalTokens: input + output };
+  return modelUsage({ inputTokens: input, outputTokens: output, totalTokens: input + output });
 }
 
 test('mergeFlowAdapter: worker tools carry bashRules, the ProcessManager, and operator hooks', async () => {

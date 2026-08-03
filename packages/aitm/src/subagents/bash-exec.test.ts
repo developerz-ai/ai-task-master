@@ -20,7 +20,12 @@ test('isAsyncIterable: true for an async iterable, false for a plain object or p
 test('requireExec: returns the execute function when present', () => {
   const bash = tool<BashInput, BashOutput>({
     description: 'run a bash command',
-    inputSchema: z.object({ command: z.string() }),
+    inputSchema: z.object({
+      command: z.string(),
+      description: z.string(),
+      timeoutMs: z.number().optional(),
+      run_in_background: z.boolean().optional(),
+    }),
     execute: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
   });
   assert.equal(typeof requireExec(bash), 'function');
@@ -29,7 +34,12 @@ test('requireExec: returns the execute function when present', () => {
 test('requireExec: throws when the bash tool has no execute function', () => {
   const bash = tool<BashInput, BashOutput>({
     description: 'a client-side tool with no execute',
-    inputSchema: z.object({ command: z.string() }),
+    inputSchema: z.object({
+      command: z.string(),
+      description: z.string(),
+      timeoutMs: z.number().optional(),
+      run_in_background: z.boolean().optional(),
+    }),
   });
   assert.throws(() => requireExec(bash), /missing an execute function/);
 });
@@ -37,7 +47,12 @@ test('requireExec: throws when the bash tool has no execute function', () => {
 test('runBash: resolves silently on a zero exit', async () => {
   const bash = tool<BashInput, BashOutput>({
     description: 'run a bash command',
-    inputSchema: z.object({ command: z.string() }),
+    inputSchema: z.object({
+      command: z.string(),
+      description: z.string(),
+      timeoutMs: z.number().optional(),
+      run_in_background: z.boolean().optional(),
+    }),
     execute: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
   });
   const exec = requireExec(bash);
@@ -47,7 +62,12 @@ test('runBash: resolves silently on a zero exit', async () => {
 test('runBash: throws with the exit code and stderr on a non-zero exit', async () => {
   const bash = tool<BashInput, BashOutput>({
     description: 'run a bash command',
-    inputSchema: z.object({ command: z.string() }),
+    inputSchema: z.object({
+      command: z.string(),
+      description: z.string(),
+      timeoutMs: z.number().optional(),
+      run_in_background: z.boolean().optional(),
+    }),
     execute: async () => ({ stdout: '', stderr: 'boom', exitCode: 7 }),
   });
   const exec = requireExec(bash);

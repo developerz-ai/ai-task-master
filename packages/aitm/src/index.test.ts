@@ -45,11 +45,31 @@ test('public surface exports exact documented classes (presence and absence)', (
   assert.equal(api.ROLE_CAPABILITY.worker, 'coding', 'ROLE_CAPABILITY.worker must equal coding');
 
   // Absence: internal utilities that must not leak
-  assert.equal(api.makeTempRepo, undefined, 'makeTempRepo (test utility) must not be exported');
-  assert.equal(api.execa, undefined, 'execa (internal) must not be exported');
-  assert.equal(api.runGit, undefined, 'runGit (internal) must not be exported');
-  assert.equal(api.parseJson, undefined, 'parseJson (internal) must not be exported');
-  assert.equal(api.formatJson, undefined, 'formatJson (internal) must not be exported');
+  assert.equal(
+    (api as Record<string, unknown>).makeTempRepo,
+    undefined,
+    'makeTempRepo (test utility) must not be exported',
+  );
+  assert.equal(
+    (api as Record<string, unknown>).execa,
+    undefined,
+    'execa (internal) must not be exported',
+  );
+  assert.equal(
+    (api as Record<string, unknown>).runGit,
+    undefined,
+    'runGit (internal) must not be exported',
+  );
+  assert.equal(
+    (api as Record<string, unknown>).parseJson,
+    undefined,
+    'parseJson (internal) must not be exported',
+  );
+  assert.equal(
+    (api as Record<string, unknown>).formatJson,
+    undefined,
+    'formatJson (internal) must not be exported',
+  );
   assert.equal(
     (api as Record<string, unknown>).readJsonFile,
     undefined,

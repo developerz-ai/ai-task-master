@@ -1,4 +1,3 @@
-import { agentConfig } from '../testing/domain-fixtures.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { StepTimeoutError } from '@developerz.ai/ai-claude-compat';
@@ -9,6 +8,7 @@ import type { WorkerDelivery } from '../domain/worker-delivery.ts';
 import type { CreatePrInput } from '../github/github-client.ts';
 import type { PullRequest } from '../github/schema.ts';
 import { MANIFEST_FIELD_MAX } from '../subagents/worker.ts';
+import { agentConfig } from '../testing/domain-fixtures.ts';
 import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { taskCommitTrailer } from '../workspace/task-commit-marker.ts';

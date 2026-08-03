@@ -157,7 +157,6 @@ test("the Reviewer's rendered prompt carries the compaction continuation contrac
   // cross-cutting. Assert on what the Reviewer actually receives, not on where the sentence lives.
   const rendered = render('role-prompt', {
     roleGuidance: REVIEWER_SYSTEM_PREFIX,
-    maxSteps: 20,
     style: '',
     env: '<env>\n</env>',
   });

@@ -167,8 +167,15 @@ export type ScoutRunner = (
 // without it an abort would leave a whole wave of in-flight surveys running.
 export type ScoutAgentInit = Pick<
   SubagentInit<PlannerTools>,
-  'model' | 'tools' | 'systemPrompt' | 'timeout' | 'onUsage' | 'signal'
->;
+  'model' | 'systemPrompt' | 'timeout' | 'onUsage' | 'signal'
+> & {
+  // A FACTORY, not a record (issue #333). Every runner below builds a fresh agent per assignment so
+  // concurrent members never share a conversation — but they all read one `tools` object, and the
+  // tool record is where per-conversation state lives: the deferred MCP mount's activation set
+  // (#119) and the nested-config announcement (#192) are both consumed by whichever member touched
+  // first. Building the record per agent puts that state where the conversation is.
+  tools: () => PlannerTools;
+};
 
 // A ScoutRunner backed by a real read-only agent: one fresh agent per assignment (so concurrent
 // scouts do not share a conversation), driven through the schema-retry kernel like the Planner
@@ -178,14 +185,14 @@ export function createScoutRunner(init: ScoutAgentInit): ScoutRunner {
     const agent = createSubagent<PlannerTools>(
       {
         model: init.model,
-        tools: init.tools,
+        tools: init.tools(),
         systemPrompt: init.systemPrompt,
         submit: tool({
           description: 'Submit this scout finding (the ScoutFinding schema).',
           inputSchema: ScoutFindingSchema,
           execute: async (finding: ScoutFinding) => finding,
         }),
-        ...forwardInit(init),
+        ...forwardInit<PlannerTools>(init),
       },
       SCOUT_MAX_STEPS,
     );

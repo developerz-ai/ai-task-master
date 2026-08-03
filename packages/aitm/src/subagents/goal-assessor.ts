@@ -56,7 +56,7 @@ export function createGoalAssessorAgent(init: SubagentInit<PlannerTools>): GoalA
         inputSchema: GoalAssessmentSchema,
         execute: async (assessment) => assessment,
       }),
-      ...forwardInit(init),
+      ...forwardInit<PlannerTools>(init),
     },
     GOAL_ASSESSOR_MAX_STEPS,
   );

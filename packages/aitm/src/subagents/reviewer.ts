@@ -126,7 +126,7 @@ export function createReviewerAgent(init: SubagentInit<ReviewerTools>): Reviewer
         inputSchema: ThreadResolutionOutputSchema,
         execute: async (resolution) => resolution,
       }),
-      ...forwardInit(init),
+      ...forwardInit<ReviewerTools>(init),
     },
     REVIEWER_MAX_STEPS,
   );

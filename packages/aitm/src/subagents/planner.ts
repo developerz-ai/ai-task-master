@@ -93,7 +93,7 @@ export function createPlannerAgent(init: SubagentInit<PlannerTools>): PlannerAge
         inputSchema: PlanSchema,
         execute: async (plan) => plan,
       }),
-      ...forwardInit(init),
+      ...forwardInit<PlannerTools>(init),
     },
     PLANNER_MAX_STEPS,
   );

@@ -94,8 +94,11 @@ export type WorkerSubagentInit<TTools extends ToolSet = ToolSet> = SubagentInit<
 // others forwarded (planner: prepareStep + providerOptions; reviewer: providerOptions), so a caller
 // setting one got silence rather than an error. Conditional spreads preserve key-absence under
 // exactOptionalPropertyTypes — an unset field must never override a createSubagent default.
+// Takes what it READS, not the whole init: `model`/`tools`/`systemPrompt` are placed by the caller,
+// and omitting them lets an init whose `tools` is a per-agent factory (ScoutAgentInit, issue #333)
+// forward the rest through the same helper instead of hand-rolling the nine optional spreads.
 export function forwardInit<TTools extends ToolSet>(
-  init: SubagentInit<TTools>,
+  init: Omit<SubagentInit<TTools>, 'model' | 'tools' | 'systemPrompt'>,
 ): Omit<SubagentConfig<TTools>, 'model' | 'tools' | 'systemPrompt' | 'submit'> {
   return {
     ...(init.maxSteps !== undefined ? { maxSteps: init.maxSteps } : {}),

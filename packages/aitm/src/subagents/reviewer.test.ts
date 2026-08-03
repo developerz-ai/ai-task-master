@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type {
+  BashInput,
+  BashOutput,
+  ReadFileInput,
+  ReadFileOutput,
+  WriteFileInput,
+  WriteFileOutput,
+} from '@developerz.ai/ai-claude-compat';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
 import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
+import { reviewerTools } from '../testing/subagent-tools.ts';
 import type { GithubToolInput, GithubToolOutput } from '../tools/github-thread-tool.ts';
 import { render } from './prompts/templates.ts';
 import {
@@ -15,14 +24,6 @@ import {
   runReviewer,
   type ThreadResolutionOutput,
 } from './reviewer.ts';
-import type {
-  BashInput,
-  BashOutput,
-  ReadFileInput,
-  ReadFileOutput,
-  WriteFileInput,
-  WriteFileOutput,
-} from './worker.ts';
 
 // One agent.generate per thread; the agent delivers each resolution via the submit tool-call.
 function makeReviewerModel(outputs: ThreadResolutionOutput[]): MockLanguageModelV3 {
@@ -73,7 +74,7 @@ function makeTools(
   } = {},
 ): { tools: ReviewerTools; calls: ToolCalls } {
   const calls: ToolCalls = { reads: [], writes: [], bashes: [], githubs: [] };
-  const tools: ReviewerTools = {
+  const tools: ReviewerTools = reviewerTools({
     readFile: tool<ReadFileInput, ReadFileOutput>({
       description: 'read a file from the checkout',
       inputSchema: z.object({ path: z.string() }),
@@ -92,7 +93,12 @@ function makeTools(
     }),
     bash: tool<BashInput, BashOutput>({
       description: 'run a bash command in the checkout',
-      inputSchema: z.object({ command: z.string() }),
+      inputSchema: z.object({
+        command: z.string(),
+        description: z.string(),
+        timeoutMs: z.number().optional(),
+        run_in_background: z.boolean().optional(),
+      }),
       execute: async (input) => {
         calls.bashes.push(input);
         const stdout = opts.bashStdout?.(input.command) ?? '';
@@ -118,7 +124,7 @@ function makeTools(
         return { ok: true };
       },
     }),
-  };
+  });
   return { tools, calls };
 }
 

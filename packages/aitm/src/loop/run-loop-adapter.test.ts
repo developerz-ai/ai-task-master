@@ -180,7 +180,7 @@ function makeInput(
     criteria: undefined,
     resolved,
     credentials: new Credentials(resolved),
-    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: '# style' },
+    agentConfig: { flavor: 'claude', path: 'CLAUDE.md', contents: '# style', sources: [] },
     state: new StateStore('/tmp/aitm-adapter-test-unused'),
     github: new GitHubClient('/tmp/repo'),
   };

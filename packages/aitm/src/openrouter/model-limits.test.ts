@@ -1,26 +1,28 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { type CatalogRow, catalogModel } from '../testing/domain-fixtures.ts';
 import type { OpenRouterClient, OpenRouterModel } from './client.ts';
 import { ModelLimitsRegistry, ModelNotFound } from './model-limits.ts';
 
 type StubClient = Pick<OpenRouterClient, 'listModels'> & { calls: number };
 
-function makeStub(models: OpenRouterModel[]): StubClient {
+function makeStub(models: CatalogRow[]): StubClient {
+  const rows = models.map(catalogModel);
   const stub: StubClient = {
     calls: 0,
     listModels: async () => {
       stub.calls += 1;
-      return models;
+      return rows;
     },
   };
   return stub;
 }
 
-const opus: OpenRouterModel = {
+const opus: CatalogRow = {
   id: 'anthropic/claude-opus-4.7',
   context_length: 200_000,
 };
-const gpt5: OpenRouterModel = { id: 'openai/gpt-5', context_length: 128_000 };
+const gpt5: CatalogRow = { id: 'openai/gpt-5', context_length: 128_000 };
 
 test('ModelLimitsRegistry is constructible', () => {
   const r = new ModelLimitsRegistry(makeStub([]));
@@ -56,7 +58,7 @@ test('preload populates cache and is idempotent', async () => {
 });
 
 test('preload parses per-token pricing incl. cache read/write; blank/missing → undefined (issue #114)', async () => {
-  const priced: OpenRouterModel = {
+  const priced: CatalogRow = {
     id: 'anthropic/opus',
     context_length: 200_000,
     pricing: {
@@ -66,7 +68,7 @@ test('preload parses per-token pricing incl. cache read/write; blank/missing →
       input_cache_write: '0.00000625',
     },
   };
-  const noPricing: OpenRouterModel = { id: 'x/y', context_length: 1000 };
+  const noPricing: CatalogRow = { id: 'x/y', context_length: 1000 };
   const r = new ModelLimitsRegistry(makeStub([priced, noPricing]));
   const p = await r.forModel('anthropic/opus');
   assert.equal(p.promptUsdPerToken, 5e-6);
@@ -81,7 +83,7 @@ test('preload parses per-token pricing incl. cache read/write; blank/missing →
 
 test('preload treats blank/whitespace pricing strings as missing, not $0 (issue #114)', async () => {
   // `Number('')` is 0 in JS — a blank catalog field must degrade to undefined (unknown), not $0/token.
-  const blank: OpenRouterModel = {
+  const blank: CatalogRow = {
     id: 'blank/price',
     context_length: 1000,
     pricing: { prompt: '', completion: '   ' },
@@ -138,7 +140,7 @@ test('a failed load is not cached — a later preload() retries and succeeds', a
     listModels: async () => {
       calls += 1;
       if (calls === 1) throw new Error('catalog fetch failed');
-      return [opus];
+      return [catalogModel(opus)];
     },
   };
   const r = new ModelLimitsRegistry(flaky);
@@ -152,8 +154,9 @@ test('a failed load is not cached — a later preload() retries and succeeds', a
 
 // ---- reference-catalog fill (provider → OpenRouter list → unknown) --------
 
-function stubCatalog(models: OpenRouterModel[]): { listModels: () => Promise<OpenRouterModel[]> } {
-  return { listModels: async () => models };
+function stubCatalog(models: CatalogRow[]): { listModels: () => Promise<OpenRouterModel[]> } {
+  const rows = models.map(catalogModel);
+  return { listModels: async () => rows };
 }
 
 test('ModelLimitsRegistry: a provider publishing nothing gets both window and price from the reference', () => {

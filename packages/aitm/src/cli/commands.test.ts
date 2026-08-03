@@ -112,7 +112,7 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
   const home = await tempHome();
   try {
     let loopCalls = 0;
-    let captured: RunLoopInput | null = null;
+    const captured: RunLoopInput[] = [];
     const result = await runStart(
       { kind: 'start', goal: 'add jwt auth', criteria: 'tests pass' },
       {
@@ -123,15 +123,15 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
         resolveStyle: okStyle(),
         runLoop: async (input) => {
           loopCalls++;
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
     assert.equal(result.code, 0, result.message);
     assert.equal(loopCalls, 1);
-    assert.ok(captured, 'runLoop received input');
-    assert.equal(captured?.styleDigest, STUB_DIGEST, 'resolved digest threaded to runLoop');
+    assert.ok(captured[0], 'runLoop received input');
+    assert.equal(captured[0]?.styleDigest, STUB_DIGEST, 'resolved digest threaded to runLoop');
     const stateRaw = await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8');
     const persisted = JSON.parse(stateRaw) as { status: string; options: { autoMerge: boolean } };
     assert.equal(persisted.status, 'planning');
@@ -154,7 +154,7 @@ test('runStart: constructs a Logger and threads it into the loop input (finding 
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();
   try {
-    let captured: RunLoopInput | null = null;
+    const captured: RunLoopInput[] = [];
     const result = await runStart(
       { kind: 'start', goal: 'add jwt auth' },
       {
@@ -164,7 +164,7 @@ test('runStart: constructs a Logger and threads it into the loop input (finding 
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         runLoop: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
@@ -172,7 +172,7 @@ test('runStart: constructs a Logger and threads it into the loop input (finding 
     assert.equal(result.code, 0, result.message);
     // Before this wiring every `logger?.warn(...)` in the loop was a runtime no-op — the loop never
     // received a Logger. Assert a real one now reaches the adapter so those diagnostics can fire.
-    assert.ok(captured?.logger instanceof Logger, 'a live Logger is threaded to the loop');
+    assert.ok(captured[0]?.logger instanceof Logger, 'a live Logger is threaded to the loop');
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -765,8 +765,8 @@ test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups +
   const home = await tempHome();
   try {
     const seq: string[] = [];
-    let plannerInput: RunPlannerInput | null = null;
-    const groups = [
+    const plannerInput: RunPlannerInput[] = [];
+    const groups: PrGroup[] = [
       {
         id: 'hello',
         title: 'add hello.txt',
@@ -782,6 +782,8 @@ test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups +
         branch: 'aitm/hello',
         pr: null,
         status: 'pending' as const,
+        stage: 'pending' as const,
+        reviewGraceApplied: false,
       },
     ];
     const result = await runStart(
@@ -794,7 +796,7 @@ test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups +
         resolveStyle: okStyle(),
         runPlanner: async (input) => {
           seq.push('plan');
-          plannerInput = input;
+          plannerInput.push(input);
           return { kind: 'ok', groups };
         },
         runLoop: async () => {
@@ -806,8 +808,8 @@ test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups +
     assert.equal(result.code, 0, result.message);
     // Planning is a one-shot phase that runs once, before the loop.
     assert.deepEqual(seq, ['plan', 'loop']);
-    assert.equal(plannerInput?.goal, 'add a hello.txt with the word hi');
-    assert.equal(plannerInput?.criteria, 'file exists');
+    assert.equal(plannerInput[0]?.goal, 'add a hello.txt with the word hi');
+    assert.equal(plannerInput[0]?.criteria, 'file exists');
     // Plan persisted: prGroups populated, status flipped planning → working.
     const persisted = JSON.parse(
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
@@ -937,7 +939,7 @@ test('runStart: resume with empty prGroups (prior planning blocked) re-runs runP
     // A prior run initialised state.json but its planning blocked before persisting any plan.
     await seedStartState(repo.path, { prGroups: [] });
     let plannerCalls = 0;
-    const groups = [
+    const groups: PrGroup[] = [
       {
         id: 'replanned',
         title: 'replanned group',
@@ -946,6 +948,8 @@ test('runStart: resume with empty prGroups (prior planning blocked) re-runs runP
         branch: 'aitm/replanned',
         pr: null,
         status: 'pending' as const,
+        stage: 'pending' as const,
+        reviewGraceApplied: false,
       },
     ];
     const result = await runStart(
@@ -1011,7 +1015,7 @@ test('runStart: default resolveStyle reuses cached coding-style.md (no LLM call)
     await seedStartState(repo.path);
     const cached = '# Coding Style\n\ncached digest\n';
     await writeFile(join(repo.path, '.ai-task-master', 'coding-style.md'), cached);
-    let captured: RunLoopInput | null = null;
+    const captured: RunLoopInput[] = [];
     const result = await runStart(
       { kind: 'start', goal: 'g' },
       {
@@ -1021,13 +1025,13 @@ test('runStart: default resolveStyle reuses cached coding-style.md (no LLM call)
         authStatus: okAuth(),
         // No resolveStyle stub → exercises defaultResolveStyle; the cache hit avoids any LLM call.
         runLoop: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
     assert.equal(result.code, 0, result.message);
-    const style = captured?.styleDigest ?? '';
+    const style = captured[0]?.styleDigest ?? '';
     assert.match(style, /cached digest/, 'cached digest reused, no LLM call');
     // The verbatim half is re-composed every run, so a CLAUDE.md edit is never pinned by the cache.
     const claudeMd = await readFile(join(repo.path, 'CLAUDE.md'), 'utf8');
@@ -1043,7 +1047,7 @@ test('runStart: resolveStyle failure never blocks → falls back to raw agent-co
   const home = await tempHome();
   try {
     const claudeMd = await readFile(join(repo.path, 'CLAUDE.md'), 'utf8');
-    let captured: RunLoopInput | null = null;
+    const captured: RunLoopInput[] = [];
     const result = await runStart(
       { kind: 'start', goal: 'g' },
       {
@@ -1055,13 +1059,13 @@ test('runStart: resolveStyle failure never blocks → falls back to raw agent-co
           throw new Error('distiller exploded');
         },
         runLoop: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
     assert.equal(result.code, 0, result.message);
-    assert.equal(captured?.styleDigest, claudeMd, 'falls back to raw contents, run not blocked');
+    assert.equal(captured[0]?.styleDigest, claudeMd, 'falls back to raw contents, run not blocked');
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -1156,7 +1160,7 @@ test('runMergePr: happy path with --pr override', async () => {
   const home = await tempHome();
   try {
     await seedState(repo.path);
-    let captured: RunMergeFlowInput | null = null;
+    const captured: RunMergeFlowInput[] = [];
     const result = await runMergePr(
       { kind: 'merge-pr', resume: true, pr: 99 },
       {
@@ -1166,16 +1170,16 @@ test('runMergePr: happy path with --pr override', async () => {
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
     assert.equal(result.code, 0, result.message);
-    assert.ok(captured, 'flow was called');
-    assert.equal(captured?.pr, 99);
-    assert.equal(captured?.resume, true);
-    assert.equal(captured?.styleDigest, STUB_DIGEST, 'resolved digest threaded to merge flow');
+    assert.ok(captured[0], 'flow was called');
+    assert.equal(captured[0]?.pr, 99);
+    assert.equal(captured[0]?.resume, true);
+    assert.equal(captured[0]?.styleDigest, STUB_DIGEST, 'resolved digest threaded to merge flow');
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -1218,7 +1222,7 @@ test('runMergePr: constructs a Logger and threads it into the merge flow (findin
   const home = await tempHome();
   try {
     await seedState(repo.path);
-    let captured: RunMergeFlowInput | null = null;
+    const captured: RunMergeFlowInput[] = [];
     const result = await runMergePr(
       { kind: 'merge-pr', resume: true, pr: 99 },
       {
@@ -1228,14 +1232,14 @@ test('runMergePr: constructs a Logger and threads it into the merge flow (findin
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
     assert.equal(result.code, 0, result.message);
     assert.ok(
-      captured?.logger instanceof Logger,
+      captured[0]?.logger instanceof Logger,
       'a live Logger is threaded to the take-over flow',
     );
   } finally {
@@ -1250,7 +1254,7 @@ test('runMergePr: builds a usage tracker, threads it to the flow, and flushes to
   try {
     await seedState(repo.path);
     let out = '';
-    let captured: RunMergeFlowInput | null = null;
+    const captured: RunMergeFlowInput[] = [];
     const result = await runMergePr(
       { kind: 'merge-pr', resume: true, pr: 99 },
       {
@@ -1263,13 +1267,13 @@ test('runMergePr: builds a usage tracker, threads it to the flow, and flushes to
           out += chunk;
         },
         runMergeFlow: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
     assert.equal(result.code, 0, result.message);
-    assert.ok(captured?.usage, 'usage tracker threaded to the merge flow');
+    assert.ok(captured[0]?.usage, 'usage tracker threaded to the merge flow');
     assert.match(out, /^Usage: /m, 'end-of-run usage summary printed');
     const persisted = JSON.parse(
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
@@ -1342,7 +1346,7 @@ test('runMergePr: threads --max-iterations through to the flow', async () => {
   const home = await tempHome();
   try {
     await seedState(repo.path);
-    let captured: RunMergeFlowInput | null = null;
+    const captured: RunMergeFlowInput[] = [];
     const result = await runMergePr(
       { kind: 'merge-pr', resume: true, pr: 12, maxIterations: 7 },
       {
@@ -1352,13 +1356,13 @@ test('runMergePr: threads --max-iterations through to the flow', async () => {
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
     assert.equal(result.code, 0, result.message);
-    assert.equal(captured?.maxIterations, 7);
+    assert.equal(captured[0]?.maxIterations, 7);
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -1517,7 +1521,7 @@ test('runMergePr: resume false on a mid-plan run → re-points currentPr, keeps 
   const home = await tempHome();
   try {
     await seedState(repo.path, midPlanSeed());
-    let captured: RunMergeFlowInput | null = null;
+    const captured: RunMergeFlowInput[] = [];
     const result = await runMergePr(
       { kind: 'merge-pr', resume: false, pr: 88 },
       {
@@ -1527,13 +1531,13 @@ test('runMergePr: resume false on a mid-plan run → re-points currentPr, keeps 
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
     assert.equal(result.code, 0, result.message);
-    assert.equal(captured?.pr, 88, 'take-over PR wins over the persisted currentPr');
+    assert.equal(captured[0]?.pr, 88, 'take-over PR wins over the persisted currentPr');
     const persisted = JSON.parse(
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
     ) as RunState;
@@ -1547,7 +1551,7 @@ test('runMergePr: resume false on a mid-plan run → re-points currentPr, keeps 
     assert.equal(persisted.status, 'working');
     assert.equal(persisted.currentGroupIndex, 1);
     assert.equal(persisted.sessionCount, 3);
-    assert.equal(captured?.runState.runId, 'run-midplan', 'flow sees the preserved run');
+    assert.equal(captured[0]?.runState.runId, 'run-midplan', 'flow sees the preserved run');
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -1627,7 +1631,7 @@ test('runMergePr: no state file + --pr synthesizes state and runs the flow', asy
   const repo = await makeTempRepo({ withClaudeMd: true });
   const home = await tempHome();
   try {
-    let flowPr: number | null = null;
+    const flowPr: number[] = [];
     const result = await runMergePr(
       { kind: 'merge-pr', resume: true, pr: 42 },
       {
@@ -1637,13 +1641,13 @@ test('runMergePr: no state file + --pr synthesizes state and runs the flow', asy
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
-          flowPr = input.pr;
+          flowPr.push(input.pr);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
     assert.equal(result.code, 0, result.message);
-    assert.equal(flowPr, 42);
+    assert.equal(flowPr[0], 42);
     // Persisted so the next call resumes without --pr.
     const persisted = JSON.parse(
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
@@ -2369,7 +2373,7 @@ test('runResume: reuses the persisted goal and criteria instead of retyping them
     await seedStartState(repo.path);
     await writeFile(join(repo.path, '.ai-task-master', 'goal.txt'), 'add jwt auth\n');
     await writeFile(join(repo.path, '.ai-task-master', 'criteria.txt'), 'tests pass\n');
-    let captured: RunLoopInput | null = null;
+    const captured: RunLoopInput[] = [];
     const result = await runResume(
       { kind: 'resume' },
       {
@@ -2379,14 +2383,14 @@ test('runResume: reuses the persisted goal and criteria instead of retyping them
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         runLoop: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
     assert.equal(result.code, 0, result.message);
-    assert.equal(captured?.goal, 'add jwt auth');
-    assert.equal(captured?.criteria, 'tests pass');
+    assert.equal(captured[0]?.goal, 'add jwt auth');
+    assert.equal(captured[0]?.criteria, 'tests pass');
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -2399,7 +2403,7 @@ test('runResume: start flags still apply to the resumed run', async () => {
   try {
     await seedStartState(repo.path);
     await writeFile(join(repo.path, '.ai-task-master', 'goal.txt'), 'add jwt auth\n');
-    let captured: RunLoopInput | null = null;
+    const captured: RunLoopInput[] = [];
     await runResume(
       { kind: 'resume', maxPrs: 2 },
       {
@@ -2409,12 +2413,12 @@ test('runResume: start flags still apply to the resumed run', async () => {
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         runLoop: async (input) => {
-          captured = input;
+          captured.push(input);
           return { kind: 'success', outcomes: [] };
         },
       },
     );
-    assert.equal(captured?.resolved.maxPrs, 2);
+    assert.equal(captured[0]?.resolved.maxPrs, 2);
   } finally {
     await repo.cleanup();
     await home.cleanup();

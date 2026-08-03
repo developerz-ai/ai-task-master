@@ -10,7 +10,7 @@ import type { AgentConfig } from './agent-config-detector.ts';
 import { composeStyleGuide, isTestPath, StyleDistiller } from './coding-style.ts';
 
 function claudeConfig(path: string, contents: string): AgentConfig {
-  return { flavor: 'claude', path, contents };
+  return { flavor: 'claude', path, contents, sources: [] };
 }
 
 // MockLanguageModelV3 driving the one-shot generateText call. Captures the rendered user prompt

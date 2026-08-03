@@ -48,7 +48,15 @@ import {
   runProgressReminder,
 } from './adapter-support.ts';
 import { buildSubagentSession } from './subagent-session.ts';
-import { applyHooks, buildExploreFor, resolvePlannerTools } from './tool-resolution.ts';
+import {
+  appendIndexBlock,
+  applyHooks,
+  buildExploreFor,
+  mountDeferredTools,
+  resolvePlannerTools,
+  type WithExplore,
+  withActiveTools,
+} from './tool-resolution.ts';
 
 export type PlanGroupsOutcome =
   | { kind: 'ok'; groups: PrGroup[] }
@@ -349,25 +357,49 @@ export async function defaultPlanGroups(
     streaming: input.resolved.streaming,
     recorder: plannerRecorder,
   });
-  const agent = createPlannerAgent({
-    model: input.credentials.modelFor('planner'),
-    tools: applyHooks(
-      resolvePlannerTools(
+  // Deferred loading reaches the Planner too (issue #193, extending #119). Planning is the
+  // read-heavy recon pass — what a domain server knows about the system being changed belongs in the
+  // plan, not discovered later by a Worker. Below the defer threshold the surplus mounts directly;
+  // above it, name-only + `tool_search`. Nothing deferred → `activated` is null and this pass is
+  // byte-identical to before, prompt included.
+  const plannerMount = mountDeferredTools(mcp.toolSurfaceForRole('planner'));
+  const plannerTools = applyHooks(
+    {
+      ...resolvePlannerTools(
         mcp.toolsForRole('planner'),
         input.cwd,
         fetchHtmlAvailable,
         buildExploreFor(input, input.cwd, plannerUsage),
       ),
-      input,
-      input.cwd,
+      ...plannerMount.extraTools,
+    } as WithExplore<PlannerTools>,
+    input,
+    input.cwd,
+  );
+  const agent = createPlannerAgent({
+    model: input.credentials.modelFor('planner'),
+    tools: plannerTools,
+    systemPrompt: appendIndexBlock(
+      reminderAgentSystemPrompt({
+        style,
+        roleGuidance: PLANNER_SYSTEM_PREFIX,
+        cwd: input.cwd,
+        modelId: input.credentials.modelIdFor('planner'),
+        memoryIndex,
+      }),
+      plannerMount.indexBlock,
     ),
-    systemPrompt: reminderAgentSystemPrompt({
-      style,
-      roleGuidance: PLANNER_SYSTEM_PREFIX,
-      cwd: input.cwd,
-      modelId: input.credentials.modelIdFor('planner'),
-      memoryIndex,
-    }),
+    // No compaction step on this role, so activation is the whole prepareStep when it applies.
+    ...(plannerMount.activated === null
+      ? {}
+      : {
+          prepareStep: withActiveTools<PlannerTools>(
+            undefined,
+            plannerTools,
+            plannerMount.deferredNames,
+            plannerMount.activated,
+          ),
+        }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
     onStepFinish: session.onStepFinish,

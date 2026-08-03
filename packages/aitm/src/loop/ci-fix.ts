@@ -44,6 +44,7 @@ import {
   type WorkerResult,
   type WorkerTools,
 } from '../subagents/worker.ts';
+import { appendIndexBlock, type DeferredMount, withActiveTools } from './tool-resolution.ts';
 
 // Narrow structural slice of GitHubClient the session reads. Structural so tests stub it without
 // the full client. Both methods exist on the real GitHubClient.
@@ -103,6 +104,11 @@ export type FixSessionSubagents = {
   // failed check is the procedure the built-in ci-log-triage skill describes, so this pass is where
   // the surface earns its place.
   skills?: readonly SkillDefinition[];
+  // Deferred MCP tool loading for the fix Worker (issue #193, extending #119). The caller mounts the
+  // surface — `extraTools` are already merged into `workerTools` — and hands the rest over so the
+  // prompt carries the name-only index and each step recomputes the active set as `tool_search`
+  // activates names. Unset, or set with `activated: null`, leaves this pass exactly as it was.
+  deferredMount?: DeferredMount;
   // Per-step transcript recorder callback (issue #108), forwarded to the fix Worker agent. Unset →
   // nothing recorded.
   onStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
@@ -289,13 +295,26 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     });
   }
   // Summarize-and-continue when the coding-tier context window fills (issue #102).
-  const prepareStep = subagents.compactor
+  const compaction = subagents.compactor
     ? buildCompactionStep<WorkerTools>({
         compactor: subagents.compactor,
         modelId: subagents.credentials.modelIdForCapability('coding'),
         ...(input.logger ? { logger: input.logger } : {}),
       })
     : undefined;
+  // Deferred loading (issue #193): recompute the active tool set each step so a name activated by
+  // `tool_search` becomes callable. `activated: null` means nothing was deferred for this role, so
+  // the compaction step (or no step at all) stands unchanged.
+  const mount = subagents.deferredMount;
+  const prepareStep =
+    mount && mount.activated !== null
+      ? withActiveTools<WorkerTools>(
+          compaction,
+          subagents.workerTools,
+          mount.deferredNames,
+          mount.activated,
+        )
+      : compaction;
   const agent = createWorkerAgent({
     model: subagents.credentials.modelForCapability('coding'),
     tools: subagents.workerTools,
@@ -303,14 +322,17 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
     // reminder-decorated set the main loop uses, so its prompt must carry the #106 provenance
     // contract too — otherwise a stale-read <system-reminder> fires on a role never told the
     // reminders are advisory harness context (issue #141).
-    systemPrompt: reminderAgentSystemPrompt({
-      style: subagents.styleContents,
-      roleGuidance: WORKER_SYSTEM_PREFIX,
-      cwd: checkoutPath,
-      modelId: subagents.credentials.modelIdForCapability('coding'),
-      ...(subagents.memoryIndex ? { memoryIndex: subagents.memoryIndex } : {}),
-      ...(subagents.skills?.length ? { skills: subagents.skills } : {}),
-    }),
+    systemPrompt: appendIndexBlock(
+      reminderAgentSystemPrompt({
+        style: subagents.styleContents,
+        roleGuidance: WORKER_SYSTEM_PREFIX,
+        cwd: checkoutPath,
+        modelId: subagents.credentials.modelIdForCapability('coding'),
+        ...(subagents.memoryIndex ? { memoryIndex: subagents.memoryIndex } : {}),
+        ...(subagents.skills?.length ? { skills: subagents.skills } : {}),
+      }),
+      mount?.indexBlock ?? '',
+    ),
     ...(prepareStep ? { prepareStep } : {}),
     ...(subagents.timeout !== undefined ? { timeout: subagents.timeout } : {}),
     ...(subagents.providerOptions !== undefined

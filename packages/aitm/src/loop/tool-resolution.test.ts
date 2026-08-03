@@ -17,6 +17,7 @@ import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import { buildMemoryTool } from '../subagents/memory-tool.ts';
 import { resolvedConfig } from '../testing/domain-fixtures.ts';
 import { mcpClientDouble } from '../testing/mcp-client-double.ts';
+import { prepareStepArg } from '../testing/step-results.ts';
 import { runTool } from '../testing/tool-harness.ts';
 import {
   activeToolNames,
@@ -28,6 +29,7 @@ import {
   mountDeferredTools,
   resolvePlannerTools,
   resolveWorkerTools,
+  withActiveTools,
 } from './tool-resolution.ts';
 
 test('mcpTool: partial-fill matches a namespaced MCP tool by canonical name, first in config order (issue #115)', () => {
@@ -416,4 +418,47 @@ test('resolveWorkerTools mounts Skill only when a skill is model-invocable (issu
     [],
   );
   assert.equal('Skill' in none, false, 'not mounted with no skills at all');
+});
+
+test('withActiveTools: with no base step, activation alone is the whole prepareStep (issue #193)', async () => {
+  // The CI-fix session and the Planner build a prepareStep only when a Compactor is configured, so
+  // the deferred-loading wrapper has to work with nothing underneath it.
+  const tools: ToolSet = { readFile: mcpFake('Read a file.'), mcp__gh__x: mcpFake('Do a thing.') };
+  const deferred = new Set(['mcp__gh__x']);
+
+  const beforeSearch = await withActiveTools<ToolSet>(
+    undefined,
+    tools,
+    deferred,
+    new Set(),
+  )(prepareStepArg([], []));
+  assert.deepEqual(
+    beforeSearch?.activeTools,
+    ['readFile', SUBMIT_TOOL_NAME],
+    'the deferred tool is withheld and nothing else is dropped',
+  );
+
+  const afterSearch = await withActiveTools<ToolSet>(
+    undefined,
+    tools,
+    deferred,
+    new Set(['mcp__gh__x']),
+  )(prepareStepArg([], []));
+  assert.ok(
+    afterSearch?.activeTools?.includes('mcp__gh__x'),
+    'an activated tool becomes callable on the next step',
+  );
+});
+
+test('withActiveTools: a base step keeps its own result alongside activeTools (issue #119)', async () => {
+  const tools: ToolSet = { readFile: mcpFake('Read a file.') };
+  const base = async (): Promise<{ messages: [] }> => ({ messages: [] });
+  const out = await withActiveTools<ToolSet>(
+    base,
+    tools,
+    new Set(),
+    new Set(),
+  )(prepareStepArg([], []));
+  assert.deepEqual(out?.messages, [], "the base step's override survives");
+  assert.ok(out?.activeTools?.includes('readFile'));
 });

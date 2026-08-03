@@ -20,6 +20,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { SUBAGENT_LIMIT_DEFAULT } from '../domain/subagent-limit.ts';
 import type { ReviewThread } from '../github/schema.ts';
+import { deferredPrepareStep } from '../loop/tool-resolution.ts';
 import { AGENT_STEP_BACKSTOP, forwardInit } from './factory.ts';
 import type { PlannerTools } from './planner.ts';
 import type { ScoutAgentInit } from './planner-scouts.ts';
@@ -216,10 +217,12 @@ function buildTeamAgent(
   description: string,
   { schema }: { schema: z.ZodType },
 ) {
+  const { tools, mount } = init.tools();
   return createSubagent<PlannerTools>(
     {
       model: init.model,
-      tools: init.tools(),
+      tools,
+      prepareStep: deferredPrepareStep<PlannerTools>(undefined, mount, tools),
       systemPrompt: init.systemPrompt,
       submit: tool({
         description,

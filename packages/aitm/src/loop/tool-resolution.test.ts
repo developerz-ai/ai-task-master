@@ -15,18 +15,20 @@ import { z } from 'zod';
 import { McpClientManager } from '../mcp/mcp-client.ts';
 import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import { buildMemoryTool } from '../subagents/memory-tool.ts';
-import { resolvedConfig } from '../testing/domain-fixtures.ts';
+import { agentConfig, resolvedConfig } from '../testing/domain-fixtures.ts';
 import { mcpClientDouble } from '../testing/mcp-client-double.ts';
 import { prepareStepArg } from '../testing/step-results.ts';
 import { runTool } from '../testing/tool-harness.ts';
 import {
   activeToolNames,
   applyHooks,
+  deferredPrepareStep,
   exploreReadTools,
   localEditTools,
   localReadTools,
   mcpTool,
   mountDeferredTools,
+  mountRoleTools,
   resolvePlannerTools,
   resolveWorkerTools,
   withActiveTools,
@@ -461,4 +463,86 @@ test('withActiveTools: a base step keeps its own result alongside activeTools (i
   )(prepareStepArg([], []));
   assert.deepEqual(out?.messages, [], "the base step's override survives");
   assert.ok(out?.activeTools?.includes('readFile'));
+});
+
+// ---- the role-mount composition (issue #333) --------------------------------
+
+// A RoleToolSource over one fake server, so a test can vary only the defer threshold.
+function roleSource(deferToolsOver: number): McpClientManager {
+  const mcp = new McpClientManager({
+    servers: { gh: { command: 'gh-mcp' } },
+    deferToolsOver,
+    createClient: async () =>
+      mcpClientDouble({
+        tools: { create_issue: mcpFake('Create an issue.'), list_prs: mcpFake('List PRs.') },
+      }),
+  });
+  return mcp;
+}
+
+const NO_DECORATION = { resolved: resolvedConfig(), agentConfig: agentConfig() };
+
+test('mountRoleTools: resolves the fixed slots, mounts the surplus, and returns the mount (issue #333)', async () => {
+  const mcp = roleSource(1); // 2 surplus > 1 → deferred
+  await mcp.connectAll();
+  try {
+    const { tools, mount } = mountRoleTools(
+      'worker',
+      mcp,
+      (set) => resolveWorkerTools(set, '/tmp/wt'),
+      NO_DECORATION,
+      '/tmp/wt',
+    );
+    assert.ok('readFile' in tools, 'the role keeps its fixed slots');
+    assert.ok(TOOL_SEARCH_TOOL_NAME in tools, 'and gains tool_search above the threshold');
+    assert.ok('mcp__gh__create_issue' in tools, 'the surplus is mounted name-only');
+    assert.notEqual(mount.activated, null, 'the mount it returns is the deferred one');
+  } finally {
+    await mcp.close();
+  }
+});
+
+test('mountRoleTools: below the threshold the surplus mounts direct, with nothing deferred', async () => {
+  const mcp = roleSource(5);
+  await mcp.connectAll();
+  try {
+    const { tools, mount } = mountRoleTools(
+      'worker',
+      mcp,
+      (set) => resolveWorkerTools(set, '/tmp/wt'),
+      NO_DECORATION,
+      '/tmp/wt',
+    );
+    assert.equal(mount.activated, null);
+    assert.equal(TOOL_SEARCH_TOOL_NAME in tools, false, 'no tool_search when nothing is deferred');
+    assert.ok('mcp__gh__create_issue' in tools, 'the surplus is still mounted, with full schema');
+  } finally {
+    await mcp.close();
+  }
+});
+
+test('deferredPrepareStep: no mount → the base step is returned unchanged (issue #333)', async () => {
+  const base = async (): Promise<{ messages: [] }> => ({ messages: [] });
+  assert.strictEqual(deferredPrepareStep(base, undefined, {}), base);
+  const nothingDeferred = {
+    extraTools: {},
+    indexBlock: '',
+    deferredNames: new Set<string>(),
+    activated: null,
+  };
+  assert.strictEqual(deferredPrepareStep(base, nothingDeferred, {}), base);
+});
+
+test('deferredPrepareStep: a mount wraps the base so each step recomputes the active set', async () => {
+  const tools: ToolSet = { readFile: mcpFake('Read.'), mcp__gh__x: mcpFake('Do.') };
+  const mount = {
+    extraTools: {},
+    indexBlock: 'idx',
+    deferredNames: new Set(['mcp__gh__x']),
+    activated: new Set<string>(),
+  };
+  const step = deferredPrepareStep(undefined, mount, tools);
+  assert.ok(step, 'a mount with an activation set always yields a step');
+  const out = await step(prepareStepArg([], []));
+  assert.deepEqual(out?.activeTools, ['readFile', SUBMIT_TOOL_NAME]);
 });

@@ -23,9 +23,11 @@ import {
 } from '../subagents/review-team.ts';
 import { reminderAgentSystemPrompt } from '../subagents/role-prompt.ts';
 import {
+  appendIndexBlock,
   buildExploreFor,
-  decorateTools,
   mountDeferredTools,
+  mountRoleTools,
+  type RoleTools,
   resolvePlannerTools,
   type WithExplore,
 } from './tool-resolution.ts';
@@ -63,29 +65,34 @@ export async function investigateReviewThreads(
   // A FACTORY, not a record (issue #333): the lead and every investigator build their own, so the
   // deferred-MCP activation set (#119) and the nested announcement (#192) are scoped to one
   // conversation rather than claimed by whichever concurrent investigator touched first.
-  const readTools = (): PlannerTools =>
-    decorateTools(
-      {
-        ...resolvePlannerTools(
-          mcp.toolsForRole('reviewer'),
+  const readTools = (): RoleTools<WithExplore<PlannerTools>> =>
+    mountRoleTools<WithExplore<PlannerTools>>(
+      'reviewer',
+      mcp,
+      (set) =>
+        resolvePlannerTools(
+          set,
           checkoutPath,
           fetchHtmlAvailable,
           buildExploreFor(input, checkoutPath, usage),
         ),
-        ...mountDeferredTools(mcp.toolSurfaceForRole('reviewer')).extraTools,
-      } as WithExplore<PlannerTools>,
       input,
       checkoutPath,
     );
+  // Same for every investigator; only the activation state is per agent (see readTools).
+  const teamIndexBlock = mountDeferredTools(mcp.toolSurfaceForRole('reviewer')).indexBlock;
   const teamInit = (roleGuidance: string): ScoutAgentInit => ({
     model: input.credentials.modelFor('reviewer'),
     tools: readTools,
-    systemPrompt: reminderAgentSystemPrompt({
-      style,
-      roleGuidance,
-      cwd: checkoutPath,
-      modelId: reviewerModelId,
-    }),
+    systemPrompt: appendIndexBlock(
+      reminderAgentSystemPrompt({
+        style,
+        roleGuidance,
+        cwd: checkoutPath,
+        modelId: reviewerModelId,
+      }),
+      teamIndexBlock,
+    ),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(usage ? { onUsage: usage } : {}),
     ...(input.signal ? { signal: input.signal } : {}),

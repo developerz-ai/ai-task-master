@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { stallingModel } from '../testing/stalling-model.ts';
-import { plannerTools } from '../testing/subagent-tools.ts';
+import { roleTools } from '../testing/subagent-tools.ts';
 import {
   buildScoutPrompt,
   createScoutRunner,
@@ -185,7 +185,7 @@ test('createScoutRunner: forwards the run signal → an abort cancels an in-flig
   const controller = new AbortController();
   const runScout = createScoutRunner({
     model: stalling,
-    tools: () => plannerTools(),
+    tools: () => roleTools(),
     systemPrompt: SCOUT_SYSTEM_PREFIX,
     signal: controller.signal,
     // Safety net: an unwired signal must fail the test rather than hang it forever.
@@ -226,8 +226,8 @@ test('createScoutRunner: every scout builds its own tool record (issue #333)', a
       }),
     }),
     tools: () => {
-      const built = plannerTools();
-      records.push(built);
+      const built = roleTools();
+      records.push(built.tools);
       return built;
     },
     systemPrompt: SCOUT_SYSTEM_PREFIX,

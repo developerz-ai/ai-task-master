@@ -118,12 +118,13 @@ import {
   type BackgroundTools,
   buildExploreFor,
   decorateTools,
+  deferredPrepareStep,
   mountDeferredTools,
+  mountRoleTools,
   resolveReviewerTools,
   resolveWorkerTools,
   type WithExplore,
   type WithMemory,
-  withActiveTools,
 } from './tool-resolution.ts';
 import {
   type GroupOutcome,
@@ -701,20 +702,18 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
     const github = githubThreadTool({ github: input.github });
     // Surplus MCP tools beyond the fixed slots reach the Reviewer too, deferred above the threshold
     // (issue #119). The Reviewer's local `github` glue is a fixed slot, never deferred.
-    const reviewerSurface = mcp.toolSurfaceForRole('reviewer');
-    const reviewerMount = mountDeferredTools(reviewerSurface);
-    const tools = decorateTools(
-      {
-        ...resolveReviewerTools(
-          mcp.toolsForRole('reviewer'),
+    const { tools, mount: reviewerMount } = mountRoleTools<ReviewerTools>(
+      'reviewer',
+      mcp,
+      (set) =>
+        resolveReviewerTools(
+          set,
           checkout.path,
           github,
           input.resolved.bashRules,
           fetchHtmlAvailable,
           background,
         ),
-        ...reviewerMount.extraTools,
-      } as ReviewerTools,
       input,
       checkout.path,
     );
@@ -754,15 +753,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         }),
         reviewerMount.indexBlock,
       ),
-      prepareStep:
-        reviewerMount.activated === null
-          ? reviewerCompaction
-          : withActiveTools<ReviewerTools>(
-              reviewerCompaction,
-              tools,
-              reviewerMount.deferredNames,
-              reviewerMount.activated,
-            ),
+      prepareStep: deferredPrepareStep<ReviewerTools>(reviewerCompaction, reviewerMount, tools),
       timeout: stepTimeout,
       ...(reviewerUsage ? { onUsage: reviewerUsage } : {}),
       onStepFinish: session.onStepFinish,
@@ -841,12 +832,14 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // memory (#118) is mounted on the manifest Worker so it can record durable repo facts.
       // Surplus MCP tools beyond the fixed slots are mounted too (issue #119): directly below the
       // defer threshold, else name-only + `tool_search`.
-      const workerSurface = mcp.toolSurfaceForRole('worker');
-      const workerMount = mountDeferredTools(workerSurface);
-      const tools = decorateTools(
-        {
-          ...resolveWorkerTools(
-            mcp.toolsForRole('worker'),
+      const { tools, mount: workerMount } = mountRoleTools<
+        WithExplore<WorkerTools> & WithMemory<WorkerTools>
+      >(
+        'worker',
+        mcp,
+        (set) =>
+          resolveWorkerTools(
+            set,
             checkout.path,
             input.resolved.bashRules,
             fetchHtmlAvailable,
@@ -855,8 +848,6 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             background,
             ctx.skills,
           ),
-          ...workerMount.extraTools,
-        } as WithExplore<WorkerTools> & WithMemory<WorkerTools>,
         input,
         checkout.path,
       );
@@ -931,15 +922,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           }),
           workerMount.indexBlock,
         ),
-        prepareStep:
-          workerMount.activated === null
-            ? workerCompaction
-            : withActiveTools<WorkerTools>(
-                workerCompaction,
-                tools,
-                workerMount.deferredNames,
-                workerMount.activated,
-              ),
+        prepareStep: deferredPrepareStep<WorkerTools>(workerCompaction, workerMount, tools),
         timeout: stepTimeout,
         ...(providerOptions !== undefined ? { providerOptions } : {}),
         ...(workerUsage ? { onUsage: workerUsage } : {}),
@@ -1047,6 +1030,24 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         'worker',
         input.credentials.modelIdForCapability('coding'),
       );
+      const { tools: selfReviewTools, mount: selfReviewMount } = mountRoleTools<
+        WithExplore<WorkerTools> & WithMemory<WorkerTools>
+      >(
+        'worker',
+        mcp,
+        (set) =>
+          resolveWorkerTools(
+            set,
+            checkout.path,
+            input.resolved.bashRules,
+            fetchHtmlAvailable,
+            buildExploreFor(input, checkout.path, selfReviewUsage),
+            memoryToolFor(state),
+            background,
+          ),
+        input,
+        checkout.path,
+      );
       const selfReviewMemoryIndex = await memoryIndexFor(state);
       const selfReviewModelId = input.credentials.modelIdForCapability('coding');
       const selfReviewModel = shortModelName(selfReviewModelId);
@@ -1069,19 +1070,11 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         return await runSelfReviewSession({
           subagents: {
             credentials: input.credentials,
-            workerTools: decorateTools(
-              resolveWorkerTools(
-                mcp.toolsForRole('worker'),
-                checkout.path,
-                input.resolved.bashRules,
-                fetchHtmlAvailable,
-                buildExploreFor(input, checkout.path, selfReviewUsage),
-                memoryToolFor(state),
-                background,
-              ),
-              input,
-              checkout.path,
-            ),
+            // Deferred loading reaches self-review too (issue #333): it adversarially reviews the
+            // just-committed diff and commits the fixes, so it is a writer on the same footing as
+            // the Worker — the role a domain server exists for.
+            workerTools: selfReviewTools,
+            deferredMount: selfReviewMount,
             styleContents: style,
             ...(input.agentConfig.nested.length > 0 ? { nested: input.agentConfig.nested } : {}),
             compactor,
@@ -1162,12 +1155,14 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       // Surplus MCP tools beyond the fixed slots reach the fix Worker too (issue #193, closing the
       // #119 follow-up): directly below the defer threshold, else name-only + `tool_search`. This is
       // the role that most needs a domain server — reading logs, querying the service that broke.
-      const ciFixSurface = mcp.toolSurfaceForRole('worker');
-      const ciFixMount = mountDeferredTools(ciFixSurface);
-      const ciFixWorkerTools = decorateTools(
-        {
-          ...resolveWorkerTools(
-            mcp.toolsForRole('worker'),
+      const { tools: ciFixWorkerTools, mount: ciFixMount } = mountRoleTools<
+        WithExplore<WorkerTools> & WithMemory<WorkerTools>
+      >(
+        'worker',
+        mcp,
+        (set) =>
+          resolveWorkerTools(
+            set,
             checkout.path,
             input.resolved.bashRules,
             fetchHtmlAvailable,
@@ -1178,8 +1173,6 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             // procedure the built-in ci-log-triage skill describes.
             ctx.skills,
           ),
-          ...ciFixMount.extraTools,
-        } as WithExplore<WorkerTools> & WithMemory<WorkerTools>,
         input,
         checkout.path,
       );

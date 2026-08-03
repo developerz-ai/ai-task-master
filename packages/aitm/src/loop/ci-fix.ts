@@ -45,7 +45,7 @@ import {
   type WorkerResult,
   type WorkerTools,
 } from '../subagents/worker.ts';
-import { appendIndexBlock, type DeferredMount, withActiveTools } from './tool-resolution.ts';
+import { appendIndexBlock, type DeferredMount, deferredPrepareStep } from './tool-resolution.ts';
 
 // Narrow structural slice of GitHubClient the session reads. Structural so tests stub it without
 // the full client. Both methods exist on the real GitHubClient.
@@ -311,15 +311,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
   // `tool_search` becomes callable. `activated: null` means nothing was deferred for this role, so
   // the compaction step (or no step at all) stands unchanged.
   const mount = subagents.deferredMount;
-  const prepareStep =
-    mount && mount.activated !== null
-      ? withActiveTools<WorkerTools>(
-          compaction,
-          subagents.workerTools,
-          mount.deferredNames,
-          mount.activated,
-        )
-      : compaction;
+  const prepareStep = deferredPrepareStep<WorkerTools>(compaction, mount, subagents.workerTools);
   const agent = createWorkerAgent({
     model: subagents.credentials.modelForCapability('coding'),
     tools: subagents.workerTools,

@@ -39,6 +39,7 @@ import {
   type WorkerResult,
   type WorkerTools,
 } from '../subagents/worker.ts';
+import { appendIndexBlock, type DeferredMount, deferredPrepareStep } from './tool-resolution.ts';
 
 // The self-review session's own role prefix (docs/prompt-design.md §2e). The review Worker is a
 // Coordinator run adversarially over its own diff, so it gets this hostile-reviewer prompt instead of
@@ -75,6 +76,11 @@ export type SelfReviewSubagents = {
   workerTools: WorkerTools;
   // Style payload (CLAUDE.md / AGENTS.md digest). Prepended to the Worker system prompt.
   styleContents: string;
+  // Deferred MCP tool loading for the review Worker (issue #333, extending #119). The caller mounts
+  // the surface — `extraTools` are already merged into `workerTools` — and hands the rest over so the
+  // prompt carries the name-only index and each step recomputes the active set. Unset, or set with
+  // `activated: null`, leaves this pass exactly as it was.
+  deferredMount?: DeferredMount;
   // Nested per-directory style files, forwarded to the Worker so each editor leaf re-decorates its
   // own on-touch announcement (issue #192). Unset/empty → the leaves are undecorated.
   nested?: readonly NestedConfig[];
@@ -235,23 +241,33 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
   };
   if (subagents.runWorkerOverride) return subagents.runWorkerOverride(baseInput);
 
-  const prepareStep = subagents.compactor
+  const compaction = subagents.compactor
     ? buildCompactionStep<WorkerTools>({
         compactor: subagents.compactor,
         modelId: subagents.credentials.modelIdForCapability('coding'),
         ...(input.logger ? { logger: input.logger } : {}),
       })
     : undefined;
+  // Deferred loading (issue #333): recompute the active tool set each step so a name activated by
+  // `tool_search` becomes callable. Nothing deferred → the compaction step (or none) stands.
+  const prepareStep = deferredPrepareStep<WorkerTools>(
+    compaction,
+    subagents.deferredMount,
+    subagents.workerTools,
+  );
   const agent = createWorkerAgent({
     model: subagents.credentials.modelForCapability('coding'),
     tools: subagents.workerTools,
-    systemPrompt: buildRolePrompt({
-      style: subagents.styleContents,
-      roleGuidance: SELF_REVIEW_SYSTEM_PREFIX,
-      cwd: checkoutPath,
-      modelId: subagents.credentials.modelIdForCapability('coding'),
-      ...(subagents.memoryIndex ? { memoryIndex: subagents.memoryIndex } : {}),
-    }),
+    systemPrompt: appendIndexBlock(
+      buildRolePrompt({
+        style: subagents.styleContents,
+        roleGuidance: SELF_REVIEW_SYSTEM_PREFIX,
+        cwd: checkoutPath,
+        modelId: subagents.credentials.modelIdForCapability('coding'),
+        ...(subagents.memoryIndex ? { memoryIndex: subagents.memoryIndex } : {}),
+      }),
+      subagents.deferredMount?.indexBlock ?? '',
+    ),
     ...(prepareStep ? { prepareStep } : {}),
     ...(subagents.timeout !== undefined ? { timeout: subagents.timeout } : {}),
     ...(subagents.providerOptions !== undefined

@@ -115,9 +115,17 @@ export class McpClientManager {
     // connects would add up to N × that latency. allSettled because connectOne owns its own failure —
     // it logs, closes, and registers the child pid, then resolves to undefined — so one broken server
     // can never reject the batch.
+    // Each connection is checked the moment IT settles, not after the batch: `allSettled` waits for
+    // every sibling, and a sibling can be unbounded (connectTimeoutMs <= 0 disables the deadline), so
+    // deferring the check would leave a connection that landed after shutdown open for as long as the
+    // slowest one hangs — with its stdio child running (issue #341).
     const outcomes = await Promise.allSettled(
       Object.entries(this.init.servers).map(([name, server]) =>
-        this.connectOne(name, server, connectTimeoutMs, closeTimeoutMs),
+        this.connectOne(name, server, connectTimeoutMs, closeTimeoutMs).then(async (connected) => {
+          if (connected === undefined || !this.closing) return connected;
+          await this.reapLate([connected], closeTimeoutMs);
+          return undefined;
+        }),
       ),
     );
     // Push fulfilled connections in input order (allSettled preserves the input order) so
@@ -125,6 +133,8 @@ export class McpClientManager {
     // Anything that finished after shutdown began is reaped here instead of being adopted: `servers`
     // was already snapshotted and cleared by close(), so pushing would hide a live client from every
     // teardown path (issue #341).
+    // Second net for the narrow window where shutdown begins after a connection settled but before
+    // this loop runs — the per-completion check above cannot see that one.
     const late: ConnectedServer[] = [];
     for (const outcome of outcomes) {
       if (outcome.status !== 'fulfilled' || !outcome.value) continue;
@@ -254,16 +264,21 @@ export class McpClientManager {
   // each child's pid in its own `finally`, which runs before this point, so close()'s terminate() may
   // have already passed those pids by. Terminating once more is a no-op for anything already gone.
   private async reapLate(late: readonly ConnectedServer[], closeTimeoutMs: number): Promise<void> {
-    for (const server of late) {
-      try {
-        await withDeadline(server.client.close(), closeTimeoutMs, 'close');
-      } catch (err) {
-        this.init.logger?.warn('mcp late connection close failed', {
-          name: server.name,
-          error: errorMessage(err),
-        });
-      }
-    }
+    // Concurrently, and each on its own deadline: closing them one at a time would let N hanging
+    // clients delay terminate() by N × closeTimeoutMs, which is the sweep that actually guarantees
+    // the children die. Mirrors close()'s own batch.
+    await Promise.all(
+      late.map(async (server) => {
+        try {
+          await withDeadline(server.client.close(), closeTimeoutMs, 'close');
+        } catch (err) {
+          this.init.logger?.warn('mcp late connection close failed', {
+            name: server.name,
+            error: errorMessage(err),
+          });
+        }
+      }),
+    );
     await this.processes.terminate();
   }
 

@@ -907,3 +907,50 @@ test('connectAll: a late connection also gets a second terminate() for its child
   assert.equal(terminateCalls, 2, 'and the late arrival triggered another sweep');
   assert.equal(client.closeCalls, 1);
 });
+
+test('connectAll: a late connection is reaped without waiting for a blocked sibling (issue #341)', async () => {
+  // The window the first fix left open: `allSettled` waits for EVERY server, and a sibling can be
+  // unbounded — connectTimeoutMs <= 0 disables the deadline — so a connection that landed after
+  // shutdown would stay open, child running, for as long as the slowest one hangs. Reaping has to
+  // happen when that connection settles, not when the batch does.
+  const registry = new StdioProcessRegistry();
+  let terminateCalls = 0;
+  const realTerminate = registry.terminate.bind(registry);
+  registry.terminate = async () => {
+    terminateCalls += 1;
+    await realTerminate();
+  };
+  let releaseLate!: () => void;
+  const lateGate = new Promise<void>((resolve) => {
+    releaseLate = resolve;
+  });
+  const lateClient = fakeClient({ late_tool: fakeTool() });
+  const m = new McpClientManager({
+    servers: { late: { command: 'x' }, blocked: { command: 'y' } },
+    connectTimeoutMs: 0, // deadline disabled → the blocked sibling never settles on its own
+    createClient: async (config) => {
+      if (config.clientName === 'aitm-blocked') return pending<MCPClient>();
+      await lateGate;
+      return lateClient;
+    },
+    processes: registry,
+  });
+
+  const connecting = m.connectAll();
+  await m.close();
+  const afterClose = terminateCalls;
+  releaseLate();
+
+  // The batch cannot settle — `blocked` never resolves — so this must NOT be awaited. Give the late
+  // connection a turn instead: if reaping waited for the batch, nothing below would have happened.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  void connecting;
+
+  assert.equal(
+    lateClient.closeCalls,
+    1,
+    'the late client was closed while the sibling still hangs',
+  );
+  assert.ok(terminateCalls > afterClose, 'and its child pid got a sweep of its own');
+  assert.deepEqual(m.connected(), [], 'it was never adopted');
+});

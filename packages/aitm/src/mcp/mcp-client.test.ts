@@ -824,3 +824,86 @@ test('mcpInitFrom: the threshold it forwards is the one toolSurfaceForRole honor
     await m.close();
   }
 });
+
+test('connectAll: a connection completing after close() is reaped, not adopted (issue #341)', async () => {
+  // The race: close() snapshots and clears `servers` while connectAll appends AFTER its await. An
+  // abort landing mid-connect therefore closed nothing, and the late arrival went where the caller's
+  // already-drained disposer could no longer reach it — a live stdio child outliving the run.
+  let released!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    released = resolve;
+  });
+  const client = fakeClient({ late_tool: fakeTool() });
+  const m = new McpClientManager({
+    servers: { slow: { command: 'x' } },
+    createClient: async () => {
+      await gate;
+      return client;
+    },
+  });
+
+  const connecting = m.connectAll();
+  // Shutdown starts while the handshake is still in flight — the abort path.
+  await m.close();
+  released();
+  await connecting;
+
+  assert.equal(client.closeCalls, 1, 'the late connection was closed');
+  assert.deepEqual(m.connected(), [], 'and never adopted into the manager');
+  assert.deepEqual(m.toolsForRole('worker'), {}, 'so its tools reach no subagent');
+});
+
+test('connectAll: a normal connect → close cycle is unchanged (issue #341)', async () => {
+  const { createClient, clientsByName } = recordingFactory({ a: { a_tool: fakeTool() } });
+  const m = new McpClientManager({ servers: { a: { command: 'a' } }, createClient });
+  await m.connectAll();
+  assert.equal(m.connected().length, 1, 'connected normally');
+  assert.ok('mcp__a__a_tool' in m.toolsForRole('worker'));
+  await m.close();
+  assert.equal(clientsByName.get('a')?.closeCalls, 1);
+  assert.deepEqual(m.connected(), []);
+});
+
+test('close() stays idempotent with the shutdown flag set (issue #341)', async () => {
+  const { createClient, clientsByName } = recordingFactory({ a: { a_tool: fakeTool() } });
+  const m = new McpClientManager({ servers: { a: { command: 'a' } }, createClient });
+  await m.connectAll();
+  await m.close();
+  await m.close();
+  assert.equal(clientsByName.get('a')?.closeCalls, 1, 'the second close finds an emptied stack');
+});
+
+test('connectAll: a late connection also gets a second terminate() for its child pid (issue #341)', async () => {
+  // connectOne registers each child's pid in its own `finally`, which runs BEFORE connectAll's append
+  // loop — so close()'s terminate() can already have passed that pid by. Reaping a late arrival has
+  // to terminate again or the process outlives the run even though its client was closed.
+  const registry = new StdioProcessRegistry();
+  let terminateCalls = 0;
+  const realTerminate = registry.terminate.bind(registry);
+  registry.terminate = async () => {
+    terminateCalls += 1;
+    await realTerminate();
+  };
+  let released!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    released = resolve;
+  });
+  const client = fakeClient({ t: fakeTool() });
+  const m = new McpClientManager({
+    servers: { slow: { command: 'x' } },
+    createClient: async () => {
+      await gate;
+      return client;
+    },
+    processes: registry,
+  });
+
+  const connecting = m.connectAll();
+  await m.close();
+  assert.equal(terminateCalls, 1, 'close() terminated what it knew about');
+  released();
+  await connecting;
+
+  assert.equal(terminateCalls, 2, 'and the late arrival triggered another sweep');
+  assert.equal(client.closeCalls, 1);
+});

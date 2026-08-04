@@ -1177,6 +1177,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             model: input.credentials.modelForCapability('coding'),
             tools: ciFixWorkerTools,
             styleContents: style,
+            // Same record the fix Worker uses, deferred surface included (#193) — so the resolver
+            // needs the same activation step or it carries every unactivated schema (issue #339).
+            prepareStep: deferredPrepareStep<WorkerTools>(undefined, ciFixMount, ciFixWorkerTools),
             timeout: stepTimeout,
             ...(ciFixProviderOptions !== undefined
               ? { providerOptions: ciFixProviderOptions }

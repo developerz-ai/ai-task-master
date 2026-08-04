@@ -22,7 +22,7 @@ import { buildConflictResolver } from './conflict-resolution.ts';
 import { Disposer, disposeQuietly } from './disposer.ts';
 import { makeBudgetCheck, resolveWorkerTools } from './run-loop-adapter.ts';
 import { runTakeOverFlow } from './take-over-flow.ts';
-import { mountRoleTools, resolveReviewerTools } from './tool-resolution.ts';
+import { deferredPrepareStep, mountRoleTools, resolveReviewerTools } from './tool-resolution.ts';
 import type { WorkLoopResult } from './work-loop.ts';
 
 export type MergeFlowSeams = {
@@ -188,6 +188,8 @@ export async function mergeFlowAdapter(
                 model: input.credentials.modelFor('worker'),
                 tools: workerTools,
                 styleContents,
+                // The resolver runs on the Worker's record, deferred surface included (issue #339).
+                prepareStep: deferredPrepareStep<WorkerTools>(undefined, workerMount, workerTools),
                 timeout: { stepMs: input.resolved.llmStepTimeoutMs },
                 ...(workerUsage ? { onUsage: workerUsage } : {}),
                 onStepFinish: agentStepProgress(

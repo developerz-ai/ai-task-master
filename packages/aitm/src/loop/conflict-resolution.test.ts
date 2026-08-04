@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { jsonSchema } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { AGENT_STEP_BACKSTOP } from '../subagents/factory.ts';
 import type { WorkerTools } from '../subagents/worker.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
+import { workerTools } from '../testing/subagent-tools.ts';
 import { buildConflictResolver, CONFLICT_RESOLVER_MAX_STEPS } from './conflict-resolution.ts';
+import { deferredPrepareStep } from './tool-resolution.ts';
 
 type Captured = { prompt: string; system: string };
 
@@ -118,4 +121,56 @@ test('CONFLICT_RESOLVER_MAX_STEPS is the shared runaway backstop, not a low work
   // The resolver terminates when it submits; the cap only guards a non-terminating loop, so it sits
   // far above any real resolution (see AGENT_STEP_BACKSTOP) rather than at a low 20-30.
   assert.equal(CONFLICT_RESOLVER_MAX_STEPS, AGENT_STEP_BACKSTOP);
+});
+
+test('buildConflictResolver: an activation step filters the deferred surface per step (issue #339)', async () => {
+  // The resolver runs on the Worker's record, so once that record carries a deferred MCP surface,
+  // every unactivated tool's full schema rides along in each conflict request unless the caller
+  // hands over the same activation step the Worker itself uses.
+  const offered: string[][] = [];
+  const model = new MockLanguageModelV3({
+    doGenerate: async (opts) => {
+      offered.push((opts.tools ?? []).map((t) => t.name).sort());
+      return {
+        content: [{ type: 'text' as const, text: 'resolved' }],
+        finishReason: { unified: 'stop' as const, raw: undefined },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
+          outputTokens: { total: 1, text: 1, reasoning: undefined },
+          totalTokens: 2,
+        },
+        warnings: [],
+      };
+    },
+  });
+  const tools = {
+    ...workerTools(),
+    mcp__gh__x: { description: 'a deferred tool', inputSchema: jsonSchema({ type: 'object' }) },
+  } as WorkerTools;
+  const mount = {
+    extraTools: {},
+    indexBlock: 'idx',
+    deferredNames: new Set(['mcp__gh__x']),
+    activated: new Set<string>(),
+  };
+  const resolve = buildConflictResolver({
+    model,
+    tools,
+    styleContents: '',
+    prepareStep: deferredPrepareStep<WorkerTools>(undefined, mount, tools),
+  });
+  await resolve({
+    checkoutPath: '/tmp/wt',
+    baseBranch: 'main',
+    conflictedFiles: ['a.ts'],
+    attempt: 1,
+  });
+
+  assert.ok(offered.length > 0, 'the resolver generated');
+  assert.equal(
+    offered[0]?.includes('mcp__gh__x'),
+    false,
+    'the unactivated deferred tool is withheld from the conflict request',
+  );
+  assert.ok(offered[0]?.includes('readFile'), 'the fixed slots still reach it');
 });

@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { LanguageModelUsage } from 'ai';
+import { jsonSchema } from 'ai';
 import type { AgentConfig } from '../agent-config/agent-config-detector.ts';
 import type { RunMergeFlowInput } from '../composition/run-input.ts';
 import type { ResolvedConfig } from '../config/schema.ts';
@@ -18,12 +19,15 @@ import {
   type RunCmdResult,
   type Sleep,
 } from '../github/github-client.ts';
+import { McpClientManager } from '../mcp/mcp-client.ts';
+import { TOOL_SEARCH_TOOL_NAME } from '../mcp/tool-search.ts';
 import { UsageTracker } from '../observability/usage-tracker.ts';
 import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import type { RunState } from '../state/schema.ts';
 import { CURRENT_SCHEMA_VERSION } from '../state/schema.ts';
 import { StateStore } from '../state/state-store.ts';
 import { resolvedConfig } from '../testing/domain-fixtures.ts';
+import { mcpClientDouble } from '../testing/mcp-client-double.ts';
 import { modelUsage } from '../testing/model-fixtures.ts';
 import { type MergeFlowSeams, mergeFlowAdapter } from './merge-flow-adapter.ts';
 import type { TakeOverFlowInput, TakeOverResult } from './take-over-flow.ts';
@@ -318,4 +322,156 @@ test('mergeFlowAdapter: a ceiling but no tracker → budget seam omitted (nothin
   const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
   await mergeFlowAdapter(baseInput({ github, resolved }), flow.seams);
   assert.equal(flow.captured().budget, undefined);
+});
+
+// ---- MCP reaches the take-over flow (issue #339) -----------------------------
+
+// A connected manager over one fake server, injected through the makeMcp seam so the adapter never
+// spawns a transport. `deferToolsOver` decides whether its two surplus tools defer.
+async function surplusMcp(deferToolsOver: number): Promise<McpClientManager> {
+  const mcp = new McpClientManager({
+    servers: { gh: { command: 'gh-mcp' } },
+    deferToolsOver,
+    createClient: async () =>
+      mcpClientDouble({
+        tools: {
+          create_issue: {
+            description: 'Create an issue.',
+            inputSchema: jsonSchema({ type: 'object' }),
+          },
+          list_prs: { description: 'List PRs.', inputSchema: jsonSchema({ type: 'object' }) },
+        },
+      }),
+  });
+  await mcp.connectAll();
+  return mcp;
+}
+
+test('mergeFlowAdapter: MCP tools reach the take-over Worker and Reviewer (issue #339)', async () => {
+  // Before this the flow was handed `{}` and ran on local tools alone, while the main loop's CI-fix
+  // session — the same job on the same kind of PR — had the operator's servers.
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const mcp = await surplusMcp(5); // 2 surplus <= 5 → mounted direct, full schema
+  try {
+    const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+    await mergeFlowAdapter(baseInput({ github }), { ...flow.seams, makeMcp: () => mcp });
+    const { subagents } = flow.captured();
+
+    assert.ok('mcp__gh__create_issue' in subagents.workerTools, 'the Worker sees the MCP surplus');
+    assert.ok('mcp__gh__create_issue' in subagents.reviewerTools, 'so does the Reviewer');
+    assert.ok('readFile' in subagents.workerTools, 'the local fixed slots are untouched');
+    assert.ok('github' in subagents.reviewerTools, 'and the Reviewer keeps its threads tool');
+  } finally {
+    await mcp.close();
+  }
+});
+
+test('mergeFlowAdapter: an over-threshold surface arrives name-only + tool_search (issue #339)', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const mcp = await surplusMcp(1); // 2 surplus > 1 → deferred
+  try {
+    const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+    await mergeFlowAdapter(baseInput({ github }), { ...flow.seams, makeMcp: () => mcp });
+    const { subagents } = flow.captured();
+
+    assert.ok(TOOL_SEARCH_TOOL_NAME in subagents.workerTools, 'tool_search is mounted');
+    assert.ok(
+      TOOL_SEARCH_TOOL_NAME in subagents.reviewerTools,
+      'the Reviewer can activate deferred tools too, not just carry mount metadata',
+    );
+    assert.ok(subagents.deferredMount, 'the Worker gets its mount');
+    assert.notEqual(subagents.deferredMount?.activated, null, 'with a live activation set');
+    assert.match(subagents.deferredMount?.indexBlock ?? '', /mcp__gh__create_issue/);
+    assert.ok(subagents.reviewerDeferredMount, 'and so does the Reviewer');
+    assert.notEqual(subagents.reviewerDeferredMount?.activated, null);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test('mergeFlowAdapter: no mcpServers configured → no mount, byte-identical to before (issue #339)', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  await mergeFlowAdapter(baseInput({ github }), flow.seams);
+  const { subagents } = flow.captured();
+  assert.equal(subagents.deferredMount?.activated ?? null, null);
+  assert.equal(TOOL_SEARCH_TOOL_NAME in subagents.workerTools, false);
+  assert.ok('readFile' in subagents.workerTools, 'the local set still reaches the Worker');
+});
+
+test('mergeFlowAdapter: the MCP manager is closed on the success path (issue #339)', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  let closed = 0;
+  const mcp = new McpClientManager({
+    servers: { gh: { command: 'gh-mcp' } },
+    createClient: async () =>
+      mcpClientDouble({
+        onClose: () => {
+          closed += 1;
+        },
+      }),
+  });
+  await mcp.connectAll();
+  const flow = captureFlow({ kind: 'merged', pr: 42, iterations: 0 });
+  await mergeFlowAdapter(baseInput({ github }), { ...flow.seams, makeMcp: () => mcp });
+  assert.equal(closed, 1, 'the stdio child is reaped when the flow completes');
+});
+
+test('mergeFlowAdapter: the MCP manager is closed on the blocked path (issue #339)', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'fail' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  let closed = 0;
+  const mcp = new McpClientManager({
+    servers: { gh: { command: 'gh-mcp' } },
+    createClient: async () =>
+      mcpClientDouble({
+        onClose: () => {
+          closed += 1;
+        },
+      }),
+  });
+  await mcp.connectAll();
+  const flow = captureFlow({ kind: 'blocked', reason: 'ci still red', iterations: 1 });
+  const result = await mergeFlowAdapter(baseInput({ github }), {
+    ...flow.seams,
+    makeMcp: () => mcp,
+  });
+  assert.equal(result.kind, 'blocked');
+  assert.equal(closed, 1, 'a blocked flow reaps too');
+});
+
+test('mergeFlowAdapter: an abort reaps the MCP manager eagerly, not only via the finally (issue #339)', async () => {
+  // This is the path that orphans children: a second Ctrl-C force-exits the process and Node's
+  // default signal termination skips the `finally`, so the reap has to happen on the abort event.
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  let closed = 0;
+  const mcp = new McpClientManager({
+    servers: { gh: { command: 'gh-mcp' } },
+    createClient: async () =>
+      mcpClientDouble({
+        onClose: () => {
+          closed += 1;
+        },
+      }),
+  });
+  await mcp.connectAll();
+  const controller = new AbortController();
+  // Abort while the take-over is in flight — before the finally could ever run.
+  const seams: MergeFlowSeams = {
+    makeMcp: () => mcp,
+    runTakeOver: async () => {
+      controller.abort();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(closed, 1, 'reaped at abort time, while the flow is still running');
+      return { kind: 'cancelled', iterations: 0 };
+    },
+  };
+  const result = await mergeFlowAdapter(baseInput({ github, signal: controller.signal }), seams);
+  assert.equal(result.kind, 'cancelled');
+  assert.equal(closed, 1, 'and the finally does not double-close');
 });

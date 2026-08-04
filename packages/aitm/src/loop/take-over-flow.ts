@@ -53,6 +53,7 @@ import {
   runFixSession,
 } from './ci-fix.ts';
 import { DEFAULT_MAX_ITERATIONS, REVIEW_COMMENTS_GRACE } from './constants.ts';
+import { appendIndexBlock, type DeferredMount, deferredPrepareStep } from './tool-resolution.ts';
 import type { BudgetStatus } from './work-loop.ts';
 
 // Minimal slice of GitHubClient used by the flow. Structural so tests can stub it.
@@ -101,6 +102,11 @@ export type TakeOverSubagents = {
   // fix a red PR through the same pipeline instead of a weaker hand-rolled one.
   credentials: FixSessionModelSelector;
   workerTools: WorkerTools;
+  // Deferred MCP mounts for the two take-over agents (issue #339). `extraTools` are already merged
+  // into the records above; these carry the index block and the per-step activation set. Unset, or
+  // set with `activated: null`, leaves both agents exactly as they were.
+  deferredMount?: DeferredMount;
+  reviewerDeferredMount?: DeferredMount;
   // Style payload (CLAUDE.md / AGENTS.md). Prepended to subagent system prompts.
   styleContents: string;
   // Optional formatter command the CI-fix Worker runs before committing (issue #48).
@@ -457,17 +463,31 @@ async function runReviewerThreads(
       contextBlock,
     });
   }
+  const reviewerMount = input.subagents.reviewerDeferredMount;
   const agent = createReviewerAgent({
     model: input.subagents.reviewerModel,
     tools: input.subagents.reviewerTools,
     // reminderAgentSystemPrompt (not bare buildRolePrompt): the take-over Reviewer runs on the same
-    // reminder-decorated worker tool set (merge-flow-adapter → resolveWorkerTools), so its prompt
+    // reminder-decorated worker tool set (merge-flow-adapter → resolveReviewerTools), so its prompt
     // must carry the #106 provenance contract too (issue #141).
-    systemPrompt: reminderAgentSystemPrompt({
-      style: input.subagents.styleContents,
-      roleGuidance: REVIEWER_SYSTEM_PREFIX,
-      cwd: input.checkoutPath,
-    }),
+    systemPrompt: appendIndexBlock(
+      reminderAgentSystemPrompt({
+        style: input.subagents.styleContents,
+        roleGuidance: REVIEWER_SYSTEM_PREFIX,
+        cwd: input.checkoutPath,
+      }),
+      reviewerMount?.indexBlock ?? '',
+    ),
+    // No compaction step on this agent, so activation is the whole prepareStep when it applies.
+    ...(reviewerMount && reviewerMount.activated !== null
+      ? {
+          prepareStep: deferredPrepareStep<ReviewerTools>(
+            undefined,
+            reviewerMount,
+            input.subagents.reviewerTools,
+          ),
+        }
+      : {}),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
     ...(input.subagents.onReviewerStepFinish
       ? { onStepFinish: input.subagents.onReviewerStepFinish }
@@ -513,6 +533,7 @@ function runCiFixSession(
     subagents: {
       credentials: subagents.credentials,
       workerTools: subagents.workerTools,
+      ...(subagents.deferredMount ? { deferredMount: subagents.deferredMount } : {}),
       styleContents: subagents.styleContents,
       ...(subagents.formatCommand ? { formatCommand: subagents.formatCommand } : {}),
       ...(subagents.verifyCommand ? { verifyCommand: subagents.verifyCommand } : {}),

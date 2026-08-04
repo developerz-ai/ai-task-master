@@ -35,6 +35,11 @@ export type ConflictResolverInit = {
   onUsage?: OnUsage;
   // Per-step progress/transcript callback. Unset → silent.
   onStepFinish?: SubagentInit<WorkerTools>['onStepFinish'];
+  // Deferred-loading activation step (issue #339). The resolver runs on the Worker's record, so once
+  // that record carries a deferred MCP surface every unactivated tool's full schema rides along in
+  // each conflict request — the exact cost #119 exists to avoid. Callers build it with
+  // deferredPrepareStep(undefined, mount, tools). Unset → no filtering, as before.
+  prepareStep?: SubagentInit<WorkerTools>['prepareStep'];
   logger?: LoggerLike;
 };
 
@@ -90,6 +95,7 @@ export function buildConflictResolver(init: ConflictResolverInit): ConflictResol
               ? { providerOptions: init.providerOptions }
               : {}),
             ...(init.timeout !== undefined ? { timeout: init.timeout } : {}),
+            ...(init.prepareStep ? { prepareStep: init.prepareStep } : {}),
             ...(init.onStepFinish ? { onStepFinish: init.onStepFinish } : {}),
           }),
         init.timeout,

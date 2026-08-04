@@ -38,7 +38,7 @@ import type { RunLoopInput } from '../composition/run-input.ts';
 import type { WebSearchConfig } from '../config/schema.ts';
 import { isOpenRouterEndpoint } from '../domain/model.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
-import { McpClientManager } from '../mcp/mcp-client.ts';
+import { McpClientManager, mcpInitFrom } from '../mcp/mcp-client.ts';
 import { makeStepCounter } from '../observability/run-step.ts';
 import {
   agentLabel,
@@ -246,13 +246,7 @@ export async function runLoopAdapter(
   const usesMcp = !seams.planGroups || !seams.makeOrchestrator;
   const mcp = seams.makeMcp
     ? seams.makeMcp(input)
-    : new McpClientManager({
-        servers: input.resolved.mcpServers,
-        ...(input.resolved.mcpRoleAllowlist !== undefined
-          ? { roleAllowlist: input.resolved.mcpRoleAllowlist }
-          : {}),
-        ...(input.logger ? { logger: input.logger } : {}),
-      });
+    : new McpClientManager(mcpInitFrom(input.resolved, input.logger));
 
   // One ProcessManager per run, bound to the repo root the single in-place checkout also uses, so a
   // `bash({ run_in_background: true })` (dev server, log tailer) actually backgrounds instead of
@@ -1183,6 +1177,9 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             model: input.credentials.modelForCapability('coding'),
             tools: ciFixWorkerTools,
             styleContents: style,
+            // Same record the fix Worker uses, deferred surface included (#193) — so the resolver
+            // needs the same activation step or it carries every unactivated schema (issue #339).
+            prepareStep: deferredPrepareStep<WorkerTools>(undefined, ciFixMount, ciFixWorkerTools),
             timeout: stepTimeout,
             ...(ciFixProviderOptions !== undefined
               ? { providerOptions: ciFixProviderOptions }

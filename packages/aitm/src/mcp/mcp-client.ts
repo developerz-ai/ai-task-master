@@ -14,6 +14,7 @@ import { experimental_createMCPClient, type MCPClient, type MCPClientConfig } fr
 import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { ToolSet } from 'ai';
 import { DEFAULT_MCP_DEFER_TOOLS_OVER } from '../config/defaults.ts';
+import type { ResolvedConfig } from '../config/schema.ts';
 import type { Role } from '../domain/role.ts';
 import type { LoggerLike } from '../logger/logger.ts';
 import type { McpRoleAllowlist, McpRoleAllowlistValue, McpServer, McpServers } from './schema.ts';
@@ -70,6 +71,24 @@ type ConnectedServer = {
   client: MCPClient;
   tools: ToolSet;
 };
+
+// The manager init an adapter builds from resolved config. Extracted because both adapters need it
+// and hand-copying the field list is how `mcpDeferToolsOver` came to be dropped: the key is defined
+// in the schema, layer-merged with source tracking, and documented in config.md and mcp.md with a
+// default of 20 — yet it reached no manager at all, so setting it did nothing (issue #339).
+export function mcpInitFrom(
+  resolved: Pick<ResolvedConfig, 'mcpServers' | 'mcpDeferToolsOver' | 'mcpRoleAllowlist'>,
+  logger?: LoggerLike,
+): McpClientInit {
+  return {
+    servers: resolved.mcpServers,
+    deferToolsOver: resolved.mcpDeferToolsOver,
+    ...(resolved.mcpRoleAllowlist !== undefined
+      ? { roleAllowlist: resolved.mcpRoleAllowlist }
+      : {}),
+    ...(logger ? { logger } : {}),
+  };
+}
 
 export class McpClientManager {
   private readonly createClient: CreateMcpClient;

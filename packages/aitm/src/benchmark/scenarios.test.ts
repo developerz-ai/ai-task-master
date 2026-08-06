@@ -51,7 +51,7 @@ test('multi-file-feature verify: a well-formed module + test passes; a stub test
     "  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n" +
     '}\n';
   const goodTest =
-    "import assert from 'node:assert';\nimport { test } from 'node:test';\nimport { slugify } from './slugify.ts';\ntest('slugify', () => { assert.equal(slugify('A B'), 'a-b'); });\n";
+    "import assert from 'node:assert';\nimport { test } from 'node:test';\nimport { slugify } from './slugify.ts';\ntest('slugify', () => {\n  assert.equal(slugify('A B'), 'a-b');\n  assert.equal(slugify('--Hi There!--'), 'hi-there');\n});\n";
   assert.equal(
     (await s.verify(verifyCtx({ 'src/slugify.ts': goodMod, 'src/slugify.test.ts': goodTest }))).ok,
     true,
@@ -90,5 +90,67 @@ test('cross-file-refactor verify: passes only when both the definition and the c
     (await s.verify(verifyCtx({ 'src/greet.ts': renamedDef, 'src/main.ts': staleCall }))).ok,
     false,
     'a forgotten call site fails',
+  );
+});
+
+test('multi-file-feature verify: rejects the stubs the first version let through (#308)', async () => {
+  // The check cannot tell a right assertion from a wrong one — only running the test could, and that
+  // is what #308 is blocked on. It CAN reject a test that never exercises the function, which the
+  // original four regexes did not: `references` matched a bare mention and `hasAssert` matched the
+  // `import assert` line.
+  const s = scenarioById('multi-file-feature');
+  assert.ok(s);
+  const mod =
+    'export function slugify(input: string): string {\n' +
+    "  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n" +
+    '}\n';
+  const verdict = async (test: string): Promise<boolean> =>
+    (await s.verify(verifyCtx({ 'src/slugify.ts': mod, 'src/slugify.test.ts': test }))).ok;
+
+  // Names it and imports assert, but never calls it — the old check passed this.
+  assert.equal(
+    await verdict(
+      "import assert from 'node:assert';\nimport { test } from 'node:test';\n" +
+        "test('slugify', () => { assert.ok(true); });\n",
+    ),
+    false,
+    'a test that never calls slugify must fail',
+  );
+  // Calls it, but asserts on something else entirely.
+  assert.equal(
+    await verdict(
+      "import assert from 'node:assert';\nimport { test } from 'node:test';\n" +
+        "test('slugify', () => { slugify('A B'); assert.equal(1, 1); });\n",
+    ),
+    false,
+    'an assertion not applied to the call proves nothing about slugify',
+  );
+  // Asserts on the call, but with a single input — the goal asks for a couple.
+  assert.equal(
+    await verdict(
+      "import assert from 'node:assert';\nimport { test } from 'node:test';\n" +
+        "test('slugify', () => { assert.equal(slugify('A B'), 'a-b'); });\n",
+    ),
+    false,
+    'one input is not "a couple"',
+  );
+  // Two distinct inputs, each asserted on the call → passes.
+  assert.equal(
+    await verdict(
+      "import assert from 'node:assert';\nimport { test } from 'node:test';\n" +
+        "test('slugify', () => {\n  assert.equal(slugify('A B'), 'a-b');\n" +
+        "  assert.equal(slugify('--Hi--'), 'hi');\n});\n",
+    ),
+    true,
+  );
+  // Same input twice is one input, not two.
+  assert.equal(
+    await verdict(
+      "import assert from 'node:assert';\nimport { test } from 'node:test';\n" +
+        "test('slugify', () => {\n  assert.equal(slugify('A B'), 'a-b');\n" +
+        "  assert.equal(slugify('A B'), 'a-b');\n});\n",
+    ),
+    false,
+    'the same literal twice is still one case',
   );
 });

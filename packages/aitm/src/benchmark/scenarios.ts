@@ -62,21 +62,36 @@ const multiFileFeature: BenchScenario = {
     'slugify(input: string): string which lowercases the input and replaces runs of ' +
     'non-alphanumeric characters with single hyphens, trimming leading/trailing hyphens. ' +
     'Also add src/slugify.test.ts with a passing node:test case covering a couple of inputs.',
+  // Static, and honest about it: this cannot tell a RIGHT assertion from a wrong one — only running
+  // the test could, and running model-produced code unsandboxed is what #308 is blocked on. What it
+  // can do is reject the stubs that never exercise the function at all, which the first version let
+  // through: `references` matched the name in a comment or a bare import, and `hasAssert` matched the
+  // `import assert from 'node:assert'` line of a test body that never asserted anything.
   async verify({ readFile }) {
     const mod = await readFile('src/slugify.ts');
     const test = await readFile('src/slugify.test.ts');
     if (mod === null) return { ok: false, detail: 'src/slugify.ts missing' };
     if (test === null) return { ok: false, detail: 'src/slugify.test.ts missing' };
     const exported = /export\s+(?:function|const)\s+slugify\b/.test(mod);
-    const references = /slugify/.test(test);
     const hasTest = /\b(?:test|it|describe)\s*\(/.test(test);
-    const hasAssert = /\bassert\b|\bexpect\s*\(/.test(test);
-    const ok = exported && references && hasTest && hasAssert;
+    // CALLS it, rather than merely naming it: an import line alone is not exercising anything.
+    const calls = /\bslugify\s*\(/.test(test);
+    // Inputs counted ONLY from calls that sit inside an assertion — `assert.equal(slugify('A B'), …)`.
+    // Counting every call would let a bare `slugify('--Hi--')` next to one real assertion pass as
+    // "two inputs" while proving nothing about the second, which is what the first version did.
+    const asserted = new Set(
+      [...test.matchAll(/(?:\bassert\b[\w.]*|\bexpect)\s*\(\s*slugify\s*\(\s*(['"`])(.*?)\1/g)].map(
+        (m) => m[2],
+      ),
+    );
+    // "a couple of inputs", per the scenario's own goal text.
+    const coversTwo = asserted.size >= 2;
+    const ok = exported && hasTest && calls && coversTwo;
     return {
       ok,
       detail: ok
-        ? 'module exports slugify; test references it with a test construct + assertion'
-        : `exported=${exported} references=${references} hasTest=${hasTest} hasAssert=${hasAssert}`,
+        ? 'module exports slugify; test asserts on slugify(...) for 2+ distinct inputs'
+        : `exported=${exported} hasTest=${hasTest} calls=${calls} assertedInputs=${asserted.size}`,
     };
   },
 };

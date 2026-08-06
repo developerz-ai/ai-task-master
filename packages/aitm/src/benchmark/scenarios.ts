@@ -76,18 +76,22 @@ const multiFileFeature: BenchScenario = {
     const hasTest = /\b(?:test|it|describe)\s*\(/.test(test);
     // CALLS it, rather than merely naming it: an import line alone is not exercising anything.
     const calls = /\bslugify\s*\(/.test(test);
-    // An assertion whose subject IS the call — `assert.equal(slugify('A B'), 'a-b')`. A test that
-    // imports assert and never applies it to slugify's result proves nothing about slugify.
-    const assertsOnCall = /(?:\bassert\b[\w.]*|\bexpect)\s*\(\s*slugify\s*\(/.test(test);
-    // "a couple of inputs" per the goal: two distinct string literals passed to it.
-    const inputs = new Set([...test.matchAll(/\bslugify\s*\(\s*(['"`])(.*?)\1/g)].map((m) => m[2]));
-    const coversTwo = inputs.size >= 2;
-    const ok = exported && hasTest && calls && assertsOnCall && coversTwo;
+    // Inputs counted ONLY from calls that sit inside an assertion — `assert.equal(slugify('A B'), …)`.
+    // Counting every call would let a bare `slugify('--Hi--')` next to one real assertion pass as
+    // "two inputs" while proving nothing about the second, which is what the first version did.
+    const asserted = new Set(
+      [...test.matchAll(/(?:\bassert\b[\w.]*|\bexpect)\s*\(\s*slugify\s*\(\s*(['"`])(.*?)\1/g)].map(
+        (m) => m[2],
+      ),
+    );
+    // "a couple of inputs", per the scenario's own goal text.
+    const coversTwo = asserted.size >= 2;
+    const ok = exported && hasTest && calls && coversTwo;
     return {
       ok,
       detail: ok
-        ? 'module exports slugify; test calls it, asserts on the call, and covers 2+ inputs'
-        : `exported=${exported} hasTest=${hasTest} calls=${calls} assertsOnCall=${assertsOnCall} inputs=${inputs.size}`,
+        ? 'module exports slugify; test asserts on slugify(...) for 2+ distinct inputs'
+        : `exported=${exported} hasTest=${hasTest} calls=${calls} assertedInputs=${asserted.size}`,
     };
   },
 };

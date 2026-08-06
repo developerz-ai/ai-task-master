@@ -154,3 +154,25 @@ test('multi-file-feature verify: rejects the stubs the first version let through
     'the same literal twice is still one case',
   );
 });
+
+test('multi-file-feature verify: a second call that is never asserted is not a second case (#308)', async () => {
+  // Counting every `slugify('...')` let a bare call sit next to one real assertion and read as two
+  // inputs, while proving nothing about the second. Inputs come from ASSERTED calls only.
+  const s = scenarioById('multi-file-feature');
+  assert.ok(s);
+  const mod =
+    'export function slugify(input: string): string {\n' +
+    "  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n" +
+    '}\n';
+  const verdict = async (test: string): Promise<boolean> =>
+    (await s.verify(verifyCtx({ 'src/slugify.ts': mod, 'src/slugify.test.ts': test }))).ok;
+
+  assert.equal(
+    await verdict(
+      "import assert from 'node:assert';\nimport { test } from 'node:test';\n" +
+        "test('slugify', () => {\n  assert.equal(slugify('A B'), 'a-b');\n  slugify('--Hi--');\n});\n",
+    ),
+    false,
+    'one asserted call plus one bare call is one case, not two',
+  );
+});

@@ -824,3 +824,133 @@ test('mcpInitFrom: the threshold it forwards is the one toolSurfaceForRole honor
     await m.close();
   }
 });
+
+test('connectAll: a connection completing after close() is reaped, not adopted (issue #341)', async () => {
+  // The race: close() snapshots and clears `servers` while connectAll appends AFTER its await. An
+  // abort landing mid-connect therefore closed nothing, and the late arrival went where the caller's
+  // already-drained disposer could no longer reach it — a live stdio child outliving the run.
+  let released!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    released = resolve;
+  });
+  const client = fakeClient({ late_tool: fakeTool() });
+  const m = new McpClientManager({
+    servers: { slow: { command: 'x' } },
+    createClient: async () => {
+      await gate;
+      return client;
+    },
+  });
+
+  const connecting = m.connectAll();
+  // Shutdown starts while the handshake is still in flight — the abort path.
+  await m.close();
+  released();
+  await connecting;
+
+  assert.equal(client.closeCalls, 1, 'the late connection was closed');
+  assert.deepEqual(m.connected(), [], 'and never adopted into the manager');
+  assert.deepEqual(m.toolsForRole('worker'), {}, 'so its tools reach no subagent');
+});
+
+test('connectAll: a normal connect → close cycle is unchanged (issue #341)', async () => {
+  const { createClient, clientsByName } = recordingFactory({ a: { a_tool: fakeTool() } });
+  const m = new McpClientManager({ servers: { a: { command: 'a' } }, createClient });
+  await m.connectAll();
+  assert.equal(m.connected().length, 1, 'connected normally');
+  assert.ok('mcp__a__a_tool' in m.toolsForRole('worker'));
+  await m.close();
+  assert.equal(clientsByName.get('a')?.closeCalls, 1);
+  assert.deepEqual(m.connected(), []);
+});
+
+test('close() stays idempotent with the shutdown flag set (issue #341)', async () => {
+  const { createClient, clientsByName } = recordingFactory({ a: { a_tool: fakeTool() } });
+  const m = new McpClientManager({ servers: { a: { command: 'a' } }, createClient });
+  await m.connectAll();
+  await m.close();
+  await m.close();
+  assert.equal(clientsByName.get('a')?.closeCalls, 1, 'the second close finds an emptied stack');
+});
+
+test('connectAll: a late connection also gets a second terminate() for its child pid (issue #341)', async () => {
+  // connectOne registers each child's pid in its own `finally`, which runs BEFORE connectAll's append
+  // loop — so close()'s terminate() can already have passed that pid by. Reaping a late arrival has
+  // to terminate again or the process outlives the run even though its client was closed.
+  const registry = new StdioProcessRegistry();
+  let terminateCalls = 0;
+  const realTerminate = registry.terminate.bind(registry);
+  registry.terminate = async () => {
+    terminateCalls += 1;
+    await realTerminate();
+  };
+  let released!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    released = resolve;
+  });
+  const client = fakeClient({ t: fakeTool() });
+  const m = new McpClientManager({
+    servers: { slow: { command: 'x' } },
+    createClient: async () => {
+      await gate;
+      return client;
+    },
+    processes: registry,
+  });
+
+  const connecting = m.connectAll();
+  await m.close();
+  assert.equal(terminateCalls, 1, 'close() terminated what it knew about');
+  released();
+  await connecting;
+
+  assert.equal(terminateCalls, 2, 'and the late arrival triggered another sweep');
+  assert.equal(client.closeCalls, 1);
+});
+
+test('connectAll: a late connection is reaped without waiting for a blocked sibling (issue #341)', async () => {
+  // The window the first fix left open: `allSettled` waits for EVERY server, and a sibling can be
+  // unbounded — connectTimeoutMs <= 0 disables the deadline — so a connection that landed after
+  // shutdown would stay open, child running, for as long as the slowest one hangs. Reaping has to
+  // happen when that connection settles, not when the batch does.
+  const registry = new StdioProcessRegistry();
+  let terminateCalls = 0;
+  const realTerminate = registry.terminate.bind(registry);
+  registry.terminate = async () => {
+    terminateCalls += 1;
+    await realTerminate();
+  };
+  let releaseLate!: () => void;
+  const lateGate = new Promise<void>((resolve) => {
+    releaseLate = resolve;
+  });
+  const lateClient = fakeClient({ late_tool: fakeTool() });
+  const m = new McpClientManager({
+    servers: { late: { command: 'x' }, blocked: { command: 'y' } },
+    connectTimeoutMs: 0, // deadline disabled → the blocked sibling never settles on its own
+    createClient: async (config) => {
+      if (config.clientName === 'aitm-blocked') return pending<MCPClient>();
+      await lateGate;
+      return lateClient;
+    },
+    processes: registry,
+  });
+
+  const connecting = m.connectAll();
+  await m.close();
+  const afterClose = terminateCalls;
+  releaseLate();
+
+  // The batch cannot settle — `blocked` never resolves — so this must NOT be awaited. Give the late
+  // connection a turn instead: if reaping waited for the batch, nothing below would have happened.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  void connecting;
+
+  assert.equal(
+    lateClient.closeCalls,
+    1,
+    'the late client was closed while the sibling still hangs',
+  );
+  assert.ok(terminateCalls > afterClose, 'and its child pid got a sweep of its own');
+  assert.deepEqual(m.connected(), [], 'it was never adopted');
+});

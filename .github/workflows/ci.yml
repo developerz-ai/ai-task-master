@@ -13,7 +13,8 @@ jobs:
   bun:
     name: bun (test + lint)
     # Blacksmith 2 vCPU runner — fast on small CI matrices, plenty for our test suite.
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    # GitHub-hosted runner (org rule: private repos on Ubicloud, public on GitHub-hosted).
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -49,7 +50,7 @@ jobs:
 
   node:
     name: node (test + lint)
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -77,7 +78,7 @@ jobs:
 
   integration:
     name: integration (node, real git)
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    runs-on: ubuntu-22.04
     # Drives real git worktrees/pools end-to-end — slower than unit tests, so a
     # roomier budget than the 10-min unit jobs. e2e-smoke self-skips without secrets.
     timeout-minutes: 20

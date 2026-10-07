@@ -12,7 +12,6 @@ concurrency:
 jobs:
   bun:
     name: bun (test + lint)
-    # Blacksmith 2 vCPU runner — fast on small CI matrices, plenty for our test suite.
     # GitHub-hosted runner (org rule: private repos on Ubicloud, public on GitHub-hosted).
     runs-on: ubuntu-22.04
     timeout-minutes: 10
@@ -30,7 +29,11 @@ jobs:
         run: bun run lint
 
       - name: import cycles
-        run: bunx madge --circular packages/*/src
+        # madge runs from its own isolated install, never the workspace tree: its TS parser
+        # (typescript-estree) needs the TypeScript JS API, which typescript@7 no longer ships.
+        # As a workspace devDep the root `typescript` override forced it onto 7 and it crashed
+        # with "Cannot read properties of undefined (reading 'Cjs')".
+        run: bunx madge@8.0.0 --circular packages/*/src
 
       - name: typecheck
         run: bun run typecheck

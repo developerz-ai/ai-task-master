@@ -39,7 +39,7 @@ function baseInput(overrides: Partial<WorkerInput> = {}): WorkerInput {
 function makeBashFake(verifyExitCodes: number[], committedNameStatus = 'A\tsrc/a.ts\n') {
   const commands: string[] = [];
   let vi = 0;
-  const bash = tool<BashInput, BashOutput>({
+  const bash = tool<BashInput, BashOutput, Record<string, unknown>>({
     description: 'run a bash command',
     inputSchema: z.object({
       command: z.string(),

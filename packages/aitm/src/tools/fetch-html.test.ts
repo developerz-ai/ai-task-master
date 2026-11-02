@@ -197,7 +197,7 @@ test('fetch_html: forwards the tool abort signal to curl as cancelSignal', async
   if (typeof execute !== 'function') throw new Error('tool has no execute');
   await execute(
     { url: 'https://x.test/' },
-    { toolCallId: 'test', messages: [], abortSignal: controller.signal },
+    { toolCallId: 'test', messages: [], context: undefined, abortSignal: controller.signal },
   );
   assert.equal(seen[0]?.cancelSignal, controller.signal);
   assert.ok((seen[0]?.timeout ?? 0) > 0, 'the deadline is still armed alongside the signal');

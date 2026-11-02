@@ -40,20 +40,20 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
   // Optional per-step hook, passed through to createSubagent. aitm builds one from a Compactor to
   // summarize-and-continue when context fills (issue #102); unset → no compaction. Typed by
   // indexing the SDK's own settings (matches createSubagent's field; see the note there).
-  prepareStep?: ToolLoopAgentSettings<never, TTools>['prepareStep'];
+  prepareStep?: ToolLoopAgentSettings<never, ToolSet>['prepareStep'];
   // Per-step LLM request deadline, forwarded to createSubagent and armed at generate time (issue
   // #129). Unset → no deadline. aitm threads `{ stepMs: llmStepTimeoutMs }` from resolved config.
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
   // Provider-specific options forwarded to createSubagent's ToolLoopAgent construction (issue #112).
   // aitm rides OpenRouter server tools here (e.g. web_search: `{ openrouter: { tools: [...] } }`).
   // Unset → none. The Worker's editor fanout reads the same field to merge onto its generateText.
-  providerOptions?: ToolLoopAgentSettings<never, TTools>['providerOptions'];
+  providerOptions?: ToolLoopAgentSettings<never, ToolSet>['providerOptions'];
   // Per-call token-usage sink (issue #114). The runners read it from this init to record each
   // generate's totalUsage; unset → no accounting. Fire-and-forget, never breaks the run.
   onUsage?: OnUsage;
   // Agent-wide per-step callback forwarded to createSubagent (issue #108). aitm appends each step to
   // a persisted transcript here. Unset → not registered, behavior unchanged.
-  onStepFinish?: ToolLoopAgentSettings<never, TTools>['onStepFinish'];
+  onStepFinish?: ToolLoopAgentSettings<never, ToolSet>['onStepFinish'];
   // Forwarded to createSubagent (slice 01b) so a caller can surface each LLM-call retry (rate limit,
   // transient 5xx) instead of the run going silent through a whole backoff window. Unset → no sink.
   onRetry?: RetryOptions['onRetry'];
@@ -86,7 +86,7 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
 // silent. A WorkerSubagentInit is a superset of SubagentInit, so forwardInit (which drops this sink,
 // createSubagent never seeing it) accepts one unchanged.
 export type WorkerSubagentInit<TTools extends ToolSet = ToolSet> = SubagentInit<TTools> & {
-  onEditorStepFinish?: (editorTag: string) => ToolLoopAgentSettings<never, TTools>['onStepFinish'];
+  onEditorStepFinish?: (editorTag: string) => ToolLoopAgentSettings<never, ToolSet>['onStepFinish'];
 };
 
 // The optional half of a SubagentInit, shaped for createSubagent. One helper so planner/worker/

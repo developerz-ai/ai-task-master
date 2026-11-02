@@ -192,7 +192,7 @@ export function createScoutRunner(init: ScoutAgentInit): ScoutRunner {
       {
         model: init.model,
         tools,
-        prepareStep: deferredPrepareStep<PlannerTools>(undefined, mount, tools),
+        prepareStep: deferredPrepareStep(undefined, mount, tools),
         systemPrompt: init.systemPrompt,
         submit: tool({
           description: 'Submit this scout finding (the ScoutFinding schema).',

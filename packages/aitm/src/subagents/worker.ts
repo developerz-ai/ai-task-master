@@ -50,12 +50,13 @@ import {
   createSubagent,
   formatSubmitIssues,
   runSubagent,
+  type SubagentAgent,
   type SubagentHandle,
   type SubmittedOutput,
   submittedOutput,
   wrapReminder,
 } from '@developerz.ai/ai-claude-compat';
-import type { Tool, ToolLoopAgent, ToolLoopAgentSettings } from 'ai';
+import type { Tool, ToolLoopAgentSettings, ToolSet } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
 import type { NestedConfig } from '../agent-config/agent-config-detector.ts';
@@ -156,7 +157,7 @@ export const FileManifestSchema = z.object({
 });
 export type FileManifest = z.infer<typeof FileManifestSchema>;
 
-export type WorkerAgent = ToolLoopAgent<never, WorkerTools>;
+export type WorkerAgent = SubagentAgent;
 
 export type WorkerInput = {
   group: PrGroup;
@@ -194,7 +195,7 @@ export type WorkerInput = {
   progressBlock?: string;
   // Optional handle from an earlier manifest-planning run (a prior CI-fix pass for this group). When
   // set, the manifest agent continues that conversation instead of planning fresh (issue #107).
-  priorHandle?: SubagentHandle<WorkerTools>;
+  priorHandle?: SubagentHandle;
   // The failing verify command's output, ALREADY rendered as a `<verify-output>` data envelope
   // (renderVerifyFailure). Set only for the verify gate's fix pass (commitWithVerify). Untrusted —
   // a test can print "ignore previous instructions" — so it rides a fenced data block, not the
@@ -222,7 +223,7 @@ export type WorkerInput = {
 export type WorkerResult =
   // `handle` retains the manifest-planning conversation so the next CI-fix pass for this group can
   // continue it instead of re-planning from zero (issue #107).
-  | { kind: 'ok'; delivery: WorkerDelivery; handle: SubagentHandle<WorkerTools> }
+  | { kind: 'ok'; delivery: WorkerDelivery; handle: SubagentHandle }
   // The Worker declared (via FileManifest.noChangesNeeded) that the task requires no code changes.
   // The task completes without a commit; nothing was branched, edited, or committed.
   | { kind: 'no-changes'; reason: string }
@@ -285,7 +286,7 @@ export function createWorkerAgent(init: WorkerSubagentInit<WorkerTools>): Worker
   return agent;
 }
 
-type WorkerPrepareStep = NonNullable<ToolLoopAgentSettings<never, WorkerTools>['prepareStep']>;
+type WorkerPrepareStep = NonNullable<ToolLoopAgentSettings<never, ToolSet>['prepareStep']>;
 
 // How many tool calls the manifest pass has made since its last write. Resets to zero on any write, so
 // a Coordinator taking the INLINE path (survey → write → survey → write) never accumulates a streak —
@@ -421,7 +422,7 @@ type PlanEditResult =
       kind: 'ok';
       changes: FileChange[];
       draftCommitMessage: string;
-      handle: SubagentHandle<WorkerTools>;
+      handle: SubagentHandle;
     }
   | { kind: 'no-changes'; reason: string }
   | { kind: 'blocked'; reason: string }
@@ -566,7 +567,7 @@ async function planManifest(
   agent: WorkerAgent,
   input: WorkerInput,
   onUsage: OnUsage | undefined,
-): Promise<{ submitted: SubmittedOutput<FileManifest>; handle: SubagentHandle<WorkerTools> }> {
+): Promise<{ submitted: SubmittedOutput<FileManifest>; handle: SubagentHandle }> {
   const prompt = buildManifestPrompt(input);
   const started = Date.now();
   let run = input.priorHandle
@@ -704,7 +705,7 @@ async function dirtyPaths(
         command: `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain -z`,
         description: 'snapshot the working tree before planning',
       },
-      { toolCallId: `worker-status-pre-${randomUUID()}`, messages: [] },
+      { toolCallId: `worker-status-pre-${randomUUID()}`, messages: [], context: undefined },
     );
     if (isAsyncIterable(out) || out.exitCode !== 0) return undefined;
     return new Set(parsePorcelainZ(out.stdout));

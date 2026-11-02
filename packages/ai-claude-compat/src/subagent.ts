@@ -10,13 +10,12 @@
 
 import {
   hasToolCall,
+  isStepCount,
   type LanguageModel,
   type LanguageModelUsage,
   type ModelMessage,
   NoOutputGeneratedError,
   type ProviderMetadata,
-  type StreamTextResult,
-  stepCountIs,
   type TimeoutConfiguration,
   type Tool,
   ToolLoopAgent,
@@ -124,6 +123,16 @@ export class StreamStallError extends Error {
   override readonly name = 'StreamStallError';
 }
 
+// The agent a subagent run drives. The tool set is opaque at the SDK boundary: ai@7's
+// `ToolLoopAgentSettings` resolves a per-tool context conditional (`toolsContext`), which stays
+// DEFERRED for an unresolved tool set — so the agent is built over the SDK's own `ToolSet` and the
+// per-role tool sets (PlannerTools/WorkerTools/…) keep their job: describing the tool RECORDS.
+// The tool set is a type parameter only where a caller needs to name its own tools.
+export type SubagentAgent = ToolLoopAgent<never, ToolSet>;
+
+// The streamed counterpart of GenerateResult.
+type StreamResult = Awaited<ReturnType<SubagentAgent['stream']>>;
+
 export type SubagentConfig<TOOLS extends ToolSet> = {
   model: LanguageModel;
   tools: TOOLS;
@@ -136,11 +145,12 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   submit: Tool;
   // Step cap; falls back to defaultMaxSteps.
   maxSteps?: number;
-  // Per-step LLM request deadline, armed at generate time (see createSubagent — a constructor-level
-  // timeout is a verified no-op in ai@6.0.182). Omitted → no deadline, behavior byte-identical to
-  // before. Policy-free passthrough: aitm supplies `{ stepMs }` from config; compat sets no default.
+  // Per-step LLM request deadline, armed at generate time (see createSubagent — the deadline rides
+  // the per-call `timeout` so the SDK's abort can be translated into a deadline-named error).
+  // Omitted → no deadline, behavior byte-identical to before. Policy-free passthrough: aitm supplies
+  // `{ stepMs }` from config; compat sets no default.
   // A per-call `timeout` passed to `agent.generate` wins over this one. See issue #129.
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
   // Optional per-step hook (the AI SDK's `prepareStep`). Policy-free passthrough: aitm builds one
   // to swap in compacted messages between steps (issue #102), and later a deferred-tool-activation
   // step composes into the SAME function — one prepareStep may return both `messages` and
@@ -148,17 +158,16 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
   // SDK's own settings so it matches the ToolLoopAgent constructor exactly (writing
   // `PrepareStepFunction<TOOLS>` here trips its `Record<string, Tool>` constraint under
   // exactOptionalPropertyTypes, since ToolSet's element is a wider Tool union).
-  prepareStep?: ToolLoopAgentSettings<never, TOOLS>['prepareStep'];
-  // Provider-specific options (the AI SDK's `providerOptions`), armed at generate time for the same
-  // reason as `timeout`: ai@6.0.182's `ToolLoopAgent.generate` overwrites constructor settings with
-  // the per-call value, so a construction-only value is dropped. Policy-free passthrough — aitm uses
-  // it to ride OpenRouter server tools (e.g. `{ openrouter: { tools: [...] } }`, issue #112). A
-  // per-call `providerOptions` on `agent.generate` wins. Omitted → no options, byte-identical.
-  providerOptions?: ToolLoopAgentSettings<never, TOOLS>['providerOptions'];
+  prepareStep?: ToolLoopAgentSettings<never, ToolSet>['prepareStep'];
+  // Provider-specific options (the AI SDK's `providerOptions`), a persistent agent setting the
+  // constructor forwards on every generate. Policy-free passthrough — aitm uses it to ride
+  // OpenRouter server tools (e.g. `{ openrouter: { tools: [...] } }`, issue #112). A per-call
+  // `providerOptions` on `agent.generate` wins. Omitted → no options, byte-identical.
+  providerOptions?: ToolLoopAgentSettings<never, ToolSet>['providerOptions'];
   // Per-step callback (the AI SDK's agent-wide `onStepFinish`). Policy-free passthrough: aitm uses it
   // to append each completed step to a persisted transcript (issue #108). Omitted → not registered,
   // behavior byte-identical.
-  onStepFinish?: ToolLoopAgentSettings<never, TOOLS>['onStepFinish'];
+  onStepFinish?: ToolLoopAgentSettings<never, ToolSet>['onStepFinish'];
   // Forwarded to callWithStepTimeout's RetryOptions (slice 01b) so a caller can surface each retry
   // attempt (e.g. to the console) instead of a whole backoff window going silent. Omitted → no sink,
   // byte-identical retry behavior.
@@ -189,12 +198,12 @@ export type SubagentConfig<TOOLS extends ToolSet> = {
 export function createSubagent<TOOLS extends ToolSet>(
   config: SubagentConfig<TOOLS>,
   defaultMaxSteps: number,
-): ToolLoopAgent<never, TOOLS> {
-  const agent = new ToolLoopAgent<never, TOOLS>({
+): SubagentAgent {
+  const agent = new ToolLoopAgent<never, ToolSet>({
     model: config.model,
     tools: { ...config.tools, submit: config.submit },
     instructions: config.systemPrompt,
-    stopWhen: [stepCountIs(config.maxSteps ?? defaultMaxSteps), hasToolCall(SUBMIT_TOOL_NAME)],
+    stopWhen: [isStepCount(config.maxSteps ?? defaultMaxSteps), hasToolCall(SUBMIT_TOOL_NAME)],
     ...(config.prepareStep ? { prepareStep: config.prepareStep } : {}),
     // Unlike `timeout`, providerOptions is a persistent agent setting (not an AgentCallParameters
     // per-call field), so the constructor value is forwarded on every generate — no generate-time
@@ -214,13 +223,10 @@ export function createSubagent<TOOLS extends ToolSet>(
   return agent;
 }
 
-// Arm the per-step deadline (and retry reporting) at generate time. The pinned AI SDK (ai@6.0.182)
-// drops a constructor-level `timeout`: `ToolLoopAgent.generate` destructures the per-call `timeout`
-// and forwards it to `generateText`, so the prepared constructor settings are overwritten with
-// `undefined` on every call that omits it — which is every aitm call site. We therefore wrap
-// `generate` to inject the configured timeout unless the caller passed a `timeout` of their own (that
-// one means the caller owns the deadline, so we leave the call untouched), and translate the SDK's
-// generic abort into a deadline-named error via callWithStepTimeout. `onRetry` rides along
+// Arm the per-step deadline (and retry reporting) at generate time. The configured deadline rides
+// the per-call `timeout` — unless the caller passed a `timeout` of their own (that one means the
+// caller owns the deadline, so we leave the call untouched) — and the SDK's generic abort is
+// translated into a deadline-named error via callWithStepTimeout. `onRetry` rides along
 // unconditionally — it is armed even with no configured `timeout`, so a caller that only wants retry
 // visibility doesn't have to opt into a deadline to get it.
 //
@@ -229,13 +235,13 @@ export function createSubagent<TOOLS extends ToolSet>(
 // so whichever fires first aborts the step). Disarming the deadline on its presence would mean a run
 // that opts into cancellation silently loses its stall protection. The signal rides into the kernel so
 // a caller-cancelled abort is never relabelled a deadline breach and retries stop on cancel.
-function armStepTimeout<TOOLS extends ToolSet>(
-  agent: ToolLoopAgent<never, TOOLS>,
-  timeout: TimeoutConfiguration | undefined,
+function armStepTimeout(
+  agent: SubagentAgent,
+  timeout: TimeoutConfiguration<ToolSet> | undefined,
   onRetry: RetryOptions['onRetry'],
   runSignal: AbortSignal | undefined,
 ): void {
-  type Generate = ToolLoopAgent<never, TOOLS>['generate'];
+  type Generate = SubagentAgent['generate'];
   const original = agent.generate.bind(agent) as Generate;
   const wrapped: Generate = async (params) => {
     // The agent's run-scoped signal rides on every call, so a generation the caller does not drive
@@ -288,12 +294,12 @@ function mergeSignals(
 // in. Before it, a stall aborts and re-invokes streamText once (a persistent one throws
 // StreamStallError). After it, a stall that outlasts the grace window is a hard StreamStallError too —
 // never a re-run, so a finished coding step's PR is never duplicated. A clean drain returns the result.
-function armStreaming<TOOLS extends ToolSet>(
-  agent: ToolLoopAgent<never, TOOLS>,
+function armStreaming(
+  agent: SubagentAgent,
   onStream: SubagentStreamSink,
   watchdog: StreamWatchdog,
 ): void {
-  type Generate = ToolLoopAgent<never, TOOLS>['generate'];
+  type Generate = SubagentAgent['generate'];
   const stream = agent.stream.bind(agent);
   const streamed: Generate = async (params) => {
     let stallRetries = 0;
@@ -302,7 +308,7 @@ function armStreaming<TOOLS extends ToolSet>(
       try {
         const result = await stream({ ...params, abortSignal: controller.signal });
         const outcome = await consumeStreamWithWatchdog(
-          result.fullStream,
+          result.stream,
           {
             onPart: (part) => {
               if (part.type === 'text-delta') {
@@ -314,7 +320,7 @@ function armStreaming<TOOLS extends ToolSet>(
                   input: part.input,
                 });
               } else if (part.type === 'error') {
-                // streamText surfaces a provider failure as an `error` part (the fullStream then ends
+                // streamText surfaces a provider failure as an `error` part (the stream then ends
                 // without throwing and the result promises reject with a generic NoOutputGeneratedError).
                 // Re-throw the underlying error so the retry/timeout kernel classifies it exactly as it
                 // would a generateText throw — a transient 429 stays retryable, a deadline abort a timeout.
@@ -470,14 +476,12 @@ function emitStreamEvent(onStream: SubagentStreamSink, event: SubagentStreamEven
 }
 
 // Parity core of the stream funnel: drain the fully-consumed stream's resolved fields into the exact
-// GenerateTextResult shape agent.generate produces. `output`/`experimental_output` throw
-// NoOutputGeneratedError precisely as a non-streamed result does when no Output spec is set — compat
-// never sets one (structured output rides the submit tool), so a caller that ignores them stays
-// identical and a stray read fails identically. Every other field is already settled once fullStream
-// drains, so awaiting them is immediate.
-async function streamResultToGenerate<TOOLS extends ToolSet>(
-  result: StreamTextResult<TOOLS, never>,
-): Promise<GenerateResult<TOOLS>> {
+// GenerateTextResult shape agent.generate produces. `output` throws NoOutputGeneratedError precisely
+// as a non-streamed result does when no Output spec is set — compat never sets one (structured
+// output rides the submit tool), so a caller that ignores them stays identical and a stray read
+// fails identically. Every other field is already settled once the stream drains, so awaiting them
+// is immediate.
+async function streamResultToGenerate(result: StreamResult): Promise<GenerateResult> {
   return {
     content: await result.content,
     text: await result.text,
@@ -499,11 +503,10 @@ async function streamResultToGenerate<TOOLS extends ToolSet>(
     request: await result.request,
     response: await result.response,
     providerMetadata: await result.providerMetadata,
+    responseMessages: await result.responseMessages,
     steps: await result.steps,
+    finalStep: await result.finalStep,
     get output(): never {
-      throw new NoOutputGeneratedError();
-    },
-    get experimental_output(): never {
       throw new NoOutputGeneratedError();
     },
   };
@@ -516,7 +519,7 @@ export class StepTimeoutError extends Error {
   override readonly name = 'StepTimeoutError';
 }
 
-function stepTimeoutMessage(timeout: TimeoutConfiguration): string {
+function stepTimeoutMessage(timeout: TimeoutConfiguration<ToolSet>): string {
   const ms = typeof timeout === 'number' ? timeout : (timeout.stepMs ?? timeout.totalMs);
   return `LLM step exceeded the configured deadline (${ms} ms)`;
 }
@@ -542,7 +545,7 @@ function isAbortError(err: unknown): boolean {
 // (notably `onRetry`) into the kernel so a caller can surface each retry attempt to the console.
 export async function callWithStepTimeout<T>(
   call: () => Promise<T>,
-  timeout: TimeoutConfiguration | undefined,
+  timeout: TimeoutConfiguration<ToolSet> | undefined,
   retry: RetryOptions = {},
 ): Promise<T> {
   return callWithRetry(async () => {
@@ -564,8 +567,8 @@ export async function callWithStepTimeout<T>(
 // `...(timeout !== undefined ? { timeout } : {})` spread repeated at the direct generateText sites.
 export function withTimeout<T extends object>(
   options: T,
-  timeout: TimeoutConfiguration | undefined,
-): T | (T & { timeout: TimeoutConfiguration }) {
+  timeout: TimeoutConfiguration<ToolSet> | undefined,
+): T | (T & { timeout: TimeoutConfiguration<ToolSet> }) {
   return timeout === undefined ? options : { ...options, timeout };
 }
 
@@ -951,8 +954,8 @@ export type SchemaRetryOptions = {
 // maxRetries; returns the last typed failure once retries exhaust. A success on retry is
 // indistinguishable to the caller from a first-try success. This is the recovery layer for the
 // number-one weak-model failure mode: one mangled schema no longer ends the run leg.
-export async function runWithSchemaRetry<TOOLS extends ToolSet, OUTPUT>(
-  agent: ToolLoopAgent<never, TOOLS>,
+export async function runWithSchemaRetry<OUTPUT>(
+  agent: SubagentAgent,
   schema: z.ZodType<OUTPUT>,
   prompt: string,
   options: SchemaRetryOptions = {},
@@ -981,47 +984,45 @@ export async function runWithSchemaRetry<TOOLS extends ToolSet, OUTPUT>(
 
 // The generate result an agent produces — kept as an indexed type so callers read `.steps` /
 // `.response.messages` without restating the SDK's deep result generic.
-type GenerateResult<TOOLS extends ToolSet> = Awaited<
-  ReturnType<ToolLoopAgent<never, TOOLS>['generate']>
->;
+type GenerateResult = Awaited<ReturnType<SubagentAgent['generate']>>;
 
 // Feed a generation's total usage + resolved model id to an optional sink (issue #114). The
 // schema-retry loop hides the raw result from planner/reviewer callers, so it meters here.
 // Fire-and-forget: a throwing sink or a missing field must never break the run leg.
-function reportUsage<TOOLS extends ToolSet>(
+function reportUsage(
   onUsage: SchemaRetryOptions['onUsage'],
-  result: GenerateResult<TOOLS>,
+  result: GenerateResult,
   meta?: { latencyMs?: number; retries?: number },
 ): void {
   if (!onUsage) return;
   try {
-    onUsage(result.totalUsage, result.response.modelId, undefined, meta);
+    onUsage(result.usage, result.finalStep.response.modelId, undefined, meta);
   } catch {
     // observability must never break the run
   }
 }
 
 // A completed subagent run plus the full conversation, so a later call can continue it (#107).
-export type SubagentHandle<TOOLS extends ToolSet> = {
-  agent: ToolLoopAgent<never, TOOLS>;
+export type SubagentHandle = {
+  agent: SubagentAgent;
   // The request messages plus every assistant/tool message the run produced, in order.
   messages: ModelMessage[];
 };
 
 // A run's raw result (for submittedOutput) paired with the handle to continue from.
-export type SubagentRun<TOOLS extends ToolSet> = {
-  result: GenerateResult<TOOLS>;
-  handle: SubagentHandle<TOOLS>;
+export type SubagentRun = {
+  result: GenerateResult;
+  handle: SubagentHandle;
 };
 
 // The one replay primitive: run the agent over `messages`, returning the result and the conversation
 // after it (input + response.messages). Schema-retry (#101) and continuation (#107) both build on it,
 // so there is never a second parallel replay path.
-async function generateOverMessages<TOOLS extends ToolSet>(
-  agent: ToolLoopAgent<never, TOOLS>,
+async function generateOverMessages(
+  agent: SubagentAgent,
   messages: ModelMessage[],
   signal?: AbortSignal,
-): Promise<{ result: GenerateResult<TOOLS>; messages: ModelMessage[] }> {
+): Promise<{ result: GenerateResult; messages: ModelMessage[] }> {
   const result = await agent.generate({
     messages,
     // Key-absence preserved when unset, so a signal-free call is byte-identical to before.
@@ -1039,11 +1040,11 @@ export type SubagentRunOptions = {
 };
 
 // Run a subagent from a fresh prompt, returning its result and a handle to continue the conversation.
-export async function runSubagent<TOOLS extends ToolSet>(
-  agent: ToolLoopAgent<never, TOOLS>,
+export async function runSubagent(
+  agent: SubagentAgent,
   prompt: string,
   options: SubagentRunOptions = {},
-): Promise<SubagentRun<TOOLS>> {
+): Promise<SubagentRun> {
   const { result, messages } = await generateOverMessages(
     agent,
     [{ role: 'user', content: prompt }],
@@ -1056,11 +1057,11 @@ export async function runSubagent<TOOLS extends ToolSet>(
 // tool calls and results included) plus one new user message. A fresh step budget applies, and
 // submittedOutput on the result reflects only this run's submission. Callers may pass a handle whose
 // messages were externally reshaped (e.g. compacted summary + tail) — they are used as-is.
-export async function continueSubagent<TOOLS extends ToolSet>(
-  handle: SubagentHandle<TOOLS>,
+export async function continueSubagent(
+  handle: SubagentHandle,
   followUpPrompt: string,
   options: SubagentRunOptions = {},
-): Promise<SubagentRun<TOOLS>> {
+): Promise<SubagentRun> {
   const { result, messages } = await generateOverMessages(
     handle.agent,
     [...handle.messages, { role: 'user', content: followUpPrompt }],

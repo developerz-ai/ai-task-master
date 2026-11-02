@@ -10,7 +10,13 @@
 // rather than runWorker, whose manifest→checkout→commit flow would corrupt an in-progress rebase.
 
 import { callWithStepTimeout } from '@developerz.ai/ai-claude-compat';
-import { generateText, type LanguageModel, stepCountIs, type TimeoutConfiguration } from 'ai';
+import {
+  generateText,
+  isStepCount,
+  type LanguageModel,
+  type TimeoutConfiguration,
+  type ToolSet,
+} from 'ai';
 import type { LoggerLike } from '../logger/logger.ts';
 import {
   AGENT_STEP_BACKSTOP,
@@ -28,7 +34,7 @@ export type ConflictResolverInit = {
   // Coding-style digest (CLAUDE.md / AGENTS.md), prepended to the resolver's system prompt.
   styleContents: string;
   // Per-step LLM request deadline (issue #129). Unset → none. A stalled step aborts → `unresolved`.
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
   // Provider options forwarded to the generate call (e.g. OpenRouter web_search). Unset → none.
   providerOptions?: SubagentInit<WorkerTools>['providerOptions'];
   // Usage sink, recorded under the worker role. Unset → no accounting.
@@ -90,7 +96,7 @@ export function buildConflictResolver(init: ConflictResolverInit): ConflictResol
               cwd: checkoutPath,
             }),
             prompt: buildConflictPrompt(checkoutPath, baseBranch, conflictedFiles, attempt),
-            stopWhen: stepCountIs(CONFLICT_RESOLVER_MAX_STEPS),
+            stopWhen: isStepCount(CONFLICT_RESOLVER_MAX_STEPS),
             ...(init.providerOptions !== undefined
               ? { providerOptions: init.providerOptions }
               : {}),

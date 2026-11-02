@@ -177,6 +177,7 @@ export {
   type StreamWatchdog,
   type StreamWatchdogConfig,
   SUBMIT_TOOL_NAME,
+  type SubagentAgent,
   type SubagentConfig,
   type SubagentHandle,
   type SubagentRun,

@@ -99,7 +99,7 @@ test('logVerify: a missing logger is a silent no-op', () => {
 
 test('runVerify: runs the command in the checkout with the hard-ceiling timeout, and never throws on a failing exit', async () => {
   let seen: BashInput | undefined;
-  const bash = tool<BashInput, BashOutput>({
+  const bash = tool<BashInput, BashOutput, Record<string, unknown>>({
     description: 'run a bash command in the checkout',
     inputSchema: z.object({
       command: z.string(),

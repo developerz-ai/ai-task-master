@@ -80,7 +80,7 @@ function baseSubagents(overrides: Partial<FixSessionSubagents> = {}): FixSession
   };
 }
 
-function okWorker(handle: SubagentHandle<WorkerTools> = workerHandle()): WorkerResult {
+function okWorker(handle: SubagentHandle = workerHandle()): WorkerResult {
   return {
     kind: 'ok',
     delivery: {

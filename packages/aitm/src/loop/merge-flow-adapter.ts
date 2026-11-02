@@ -189,7 +189,7 @@ export async function mergeFlowAdapter(
                 tools: workerTools,
                 styleContents,
                 // The resolver runs on the Worker's record, deferred surface included (issue #339).
-                prepareStep: deferredPrepareStep<WorkerTools>(undefined, workerMount, workerTools),
+                prepareStep: deferredPrepareStep(undefined, workerMount, workerTools),
                 timeout: { stepMs: input.resolved.llmStepTimeoutMs },
                 ...(workerUsage ? { onUsage: workerUsage } : {}),
                 onStepFinish: agentStepProgress(

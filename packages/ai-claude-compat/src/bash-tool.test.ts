@@ -376,8 +376,10 @@ test('bashTool: input schema requires description; run_in_background never fails
 test('bashTool: description text carries the contract + file-tool steering (issue #103)', () => {
   // Wired with a manager: the background sentence is part of the contract only when the capability
   // is actually mounted (issue #182), and this test is about the contract being stated in full.
-  const desc =
+  // v7 lets a tool compute its description per call; this one declares a fixed string.
+  const raw =
     bashTool({ cwd: '/w', processManager: new ProcessManager({ cwd: '/w' }) }).description ?? '';
+  const desc = typeof raw === 'string' ? raw : '';
   assert.match(desc, /working directory PERSISTS/i);
   assert.match(desc, /variables, functions.*does NOT|does NOT/i);
   assert.match(desc, /cat.*head.*tail.*sed.*awk.*echo/i);

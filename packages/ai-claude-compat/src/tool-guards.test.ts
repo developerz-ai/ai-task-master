@@ -260,6 +260,7 @@ async function callRepair(
   tools: ToolSet,
 ): Promise<{ toolName: string; toolCallId: string; input: string } | null> {
   const fixed = await repair({
+    instructions: undefined,
     system: undefined,
     messages: [],
     toolCall: { type: 'tool-call', toolCallId: 'c1', toolName, input: '{"path":"a"}' },

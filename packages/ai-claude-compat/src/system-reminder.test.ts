@@ -79,7 +79,10 @@ test('withReminders: preserves execute and the typed output bit-for-bit', async 
   const base = objectTool();
   const decorated = withReminders(base, () => ['x']);
   assert.strictEqual(decorated.execute, base.execute, 'execute is the same reference');
-  const out = await decorated.execute?.({ path: 'a.ts' }, { toolCallId: 'c', messages: [] });
+  const out = await decorated.execute?.(
+    { path: 'a.ts' },
+    { toolCallId: 'c', messages: [], context: {} },
+  );
   assert.deepEqual(out, { ok: true, path: 'a.ts' }, 'typed output is unchanged');
 });
 

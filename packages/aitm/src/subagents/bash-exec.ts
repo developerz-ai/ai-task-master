@@ -35,7 +35,7 @@ export async function runBash(
 ): Promise<void> {
   const out = await exec(
     { command, description: 'worker commit-phase git/format step' },
-    { toolCallId: `worker-bash-${randomUUID()}`, messages: [] },
+    { toolCallId: `worker-bash-${randomUUID()}`, messages: [], context: undefined },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');

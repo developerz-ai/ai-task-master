@@ -1,11 +1,11 @@
 // A typed `StepResult` test double (issue #132).
 //
-// `prepareStep` receives full `StepResult` objects — 24 fields — but aitm's compaction step reads
+// `prepareStep` receives full `StepResult` objects — 25 fields — but aitm's compaction step reads
 // exactly two of them: `response.messages` and `usage.inputTokens`. The compaction tests therefore
 // passed `{ response: { messages } }` literals, which is honest about what is exercised and is also
 // 33 of the suite's type errors.
 //
-// `stepResult` fills the other 22 fields with empty defaults so a caller states only what it cares
+// `stepResult` fills the other 23 fields with empty defaults so a caller states only what it cares
 // about, and the object it gets back is the real type. If the SDK adds a required field, this
 // factory fails to compile once instead of every call site failing separately.
 
@@ -17,11 +17,13 @@ export type Step = PrepareStepArg['steps'][number];
 
 export function stepResult(over: Partial<Step> = {}): Step {
   return {
+    callId: 'call-0',
     stepNumber: 0,
     model: { provider: 'test', modelId: 'test-model' },
-    functionId: undefined,
-    metadata: undefined,
-    experimental_context: undefined,
+    // ai@7 splits the runtime context from the per-tool context: the shared runtime data a step
+    // ran with, and the context each tool received. Neither is read by aitm's compaction step.
+    toolsContext: {},
+    runtimeContext: {},
     content: [],
     text: '',
     reasoning: [],
@@ -46,6 +48,16 @@ export function stepResult(over: Partial<Step> = {}): Step {
         cacheWriteTokens: undefined,
       },
       outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
+    },
+    performance: {
+      effectiveOutputTokensPerSecond: 0,
+      outputTokensPerSecond: undefined,
+      inputTokensPerSecond: undefined,
+      effectiveTotalTokensPerSecond: 0,
+      stepTimeMs: 0,
+      responseTimeMs: 0,
+      toolExecutionMs: {},
+      timeToFirstOutputMs: undefined,
     },
     warnings: undefined,
     request: {},
@@ -73,7 +85,12 @@ export function prepareStepArg(
     steps,
     stepNumber: steps.length,
     model: new MockLanguageModelV3(),
+    instructions: undefined,
+    initialInstructions: undefined,
     messages,
-    experimental_context: undefined,
+    initialMessages: messages,
+    responseMessages: [],
+    toolsContext: {},
+    runtimeContext: {},
   };
 }

@@ -21,7 +21,7 @@
 // verify can't be made fully green in one pass.
 
 import type { MemoryIndexEntry } from '@developerz.ai/ai-claude-compat';
-import type { LanguageModel, TimeoutConfiguration } from 'ai';
+import type { LanguageModel, TimeoutConfiguration, ToolSet } from 'ai';
 import type { NestedConfig } from '../agent-config/agent-config-detector.ts';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../domain/model.ts';
@@ -90,7 +90,7 @@ export type SelfReviewSubagents = {
   // window fills, using the 'coding'-tier model id.
   compactor?: CompactorLike;
   // Per-step LLM request deadline forwarded to the review Worker agent. Unset → none.
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
   // Provider options forwarded to the review Worker agent (e.g. OpenRouter web_search). Unset → none.
   providerOptions?: SubagentInit<WorkerTools>['providerOptions'];
   // Usage sink forwarded to the review Worker agent, recorded under the worker role. Unset → none.
@@ -242,7 +242,7 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
   if (subagents.runWorkerOverride) return subagents.runWorkerOverride(baseInput);
 
   const compaction = subagents.compactor
-    ? buildCompactionStep<WorkerTools>({
+    ? buildCompactionStep({
         compactor: subagents.compactor,
         modelId: subagents.credentials.modelIdForCapability('coding'),
         ...(input.logger ? { logger: input.logger } : {}),
@@ -250,7 +250,7 @@ async function runReviewWorker(input: SelfReviewInput, task: Task): Promise<Work
     : undefined;
   // Deferred loading (issue #333): recompute the active tool set each step so a name activated by
   // `tool_search` becomes callable. Nothing deferred → the compaction step (or none) stands.
-  const prepareStep = deferredPrepareStep<WorkerTools>(
+  const prepareStep = deferredPrepareStep(
     compaction,
     subagents.deferredMount,
     subagents.workerTools,

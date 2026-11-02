@@ -36,7 +36,7 @@ export type ExploreToolInit = {
   model: LanguageModel;
   readTools: ToolSet;
   // Optional per-step LLM request deadline (issue #129). Unset → no deadline.
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
   // Optional token-usage sink (issue #114). Fire-and-forget, never breaks the run.
   onUsage?: OnUsage;
 };

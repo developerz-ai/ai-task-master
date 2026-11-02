@@ -21,7 +21,7 @@
 // iteration because their tool bindings (checkout, threads) change each iteration.
 
 import type { SubagentHandle } from '@developerz.ai/ai-claude-compat';
-import type { LanguageModel, TimeoutConfiguration } from 'ai';
+import type { LanguageModel, TimeoutConfiguration, ToolSet } from 'ai';
 import type { PrGroup } from '../domain/pr-group.ts';
 import { CiFailed } from '../github/errors.ts';
 import {
@@ -116,7 +116,7 @@ export type TakeOverSubagents = {
   verifyCommand?: string;
   // Per-step LLM request deadline, armed on both take-over agents (Worker + Reviewer). Unset → none.
   // Orthogonal to the flow's between-iterations `signal` cancel (issue #129).
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
   // Live progress stream for the take-over agents (silent-run fix): forwarded verbatim to both
   // agents' `onStepFinish`; the editor variant reaches the fix Worker's parallel fanout. Unset →
   // silent, matching prior behavior.
@@ -218,7 +218,7 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
   // The CI-fix Worker's manifest conversation, retained across fix passes so the next one continues
   // where the last left off instead of cold-starting (#107). Same role as run-loop-adapter's
   // ciFixHandles map — a take-over drives a single PR, so one handle suffices.
-  let ciFixHandle: SubagentHandle<WorkerTools> | undefined;
+  let ciFixHandle: SubagentHandle | undefined;
   for (; iteration < maxIterations; iteration++) {
     if (input.signal?.aborted) return cancelled();
 
@@ -481,11 +481,7 @@ async function runReviewerThreads(
     // No compaction step on this agent, so activation is the whole prepareStep when it applies.
     ...(reviewerMount && reviewerMount.activated !== null
       ? {
-          prepareStep: deferredPrepareStep<ReviewerTools>(
-            undefined,
-            reviewerMount,
-            input.subagents.reviewerTools,
-          ),
+          prepareStep: deferredPrepareStep(undefined, reviewerMount, input.subagents.reviewerTools),
         }
       : {}),
     ...(input.subagents.timeout !== undefined ? { timeout: input.subagents.timeout } : {}),
@@ -512,7 +508,7 @@ async function runReviewerThreads(
 function runCiFixSession(
   input: TakeOverFlowInput,
   runCmd: RunCmd,
-  priorHandle: SubagentHandle<WorkerTools> | undefined,
+  priorHandle: SubagentHandle | undefined,
 ): Promise<FixSessionResult> {
   const { subagents } = input;
   const group: PrGroup = {

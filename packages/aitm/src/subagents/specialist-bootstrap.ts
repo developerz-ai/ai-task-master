@@ -9,7 +9,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type AgentDefinition, loadAgents } from '@developerz.ai/ai-claude-compat';
-import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
+import { generateText, type LanguageModel, type TimeoutConfiguration, type ToolSet } from 'ai';
 import type { PrGroup } from '../domain/pr-group.ts';
 import { type OnUsage, reportUsage } from './factory.ts';
 import { STOPWORDS } from './specialist-registry.ts';
@@ -17,7 +17,7 @@ import { STOPWORDS } from './specialist-registry.ts';
 export type SpecialistBootstrapInit = {
   // Smart-tier handle (the planner's model): team design is a planning judgment, not codegen.
   model: LanguageModel;
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
   // Recorded under the planner role, like the style digest (#114).
   onUsage?: OnUsage;
   onProgress?: (message: string) => void;

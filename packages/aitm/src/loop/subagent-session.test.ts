@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { RetryInfo } from '@developerz.ai/ai-claude-compat';
-import type { AssistantModelMessage, ToolSet } from 'ai';
+import type { AssistantModelMessage } from 'ai';
 import { labelText } from '../observability/step-progress.ts';
 import type { TranscriptRecorder } from '../state/transcript-store.ts';
 import { stepResponse, stepResult } from '../testing/step-results.ts';
@@ -91,7 +91,7 @@ test('recordStepDeltas: an empty delta (identical length) records nothing', asyn
 });
 
 test('buildSubagentSession: composes the tag from phase + counter', () => {
-  const session = buildSubagentSession<ToolSet>({
+  const session = buildSubagentSession({
     role: 'worker',
     model: 'k3',
     ctx: 'g1',
@@ -103,7 +103,7 @@ test('buildSubagentSession: composes the tag from phase + counter', () => {
 });
 
 test('buildSubagentSession: omitting counter leaves a phase-only tag', () => {
-  const session = buildSubagentSession<ToolSet>({
+  const session = buildSubagentSession({
     role: 'planner',
     model: 'k3',
     phase: 'planning',
@@ -113,7 +113,7 @@ test('buildSubagentSession: omitting counter leaves a phase-only tag', () => {
 });
 
 test('buildSubagentSession: the label carries model, role and ctx — no specialist/file when omitted', () => {
-  const session = buildSubagentSession<ToolSet>({
+  const session = buildSubagentSession({
     role: 'worker',
     model: 'k3',
     ctx: 'g1',
@@ -124,7 +124,7 @@ test('buildSubagentSession: the label carries model, role and ctx — no special
 });
 
 test('buildSubagentSession: a routed specialist name replaces the bare role in the label', () => {
-  const session = buildSubagentSession<ToolSet>({
+  const session = buildSubagentSession({
     role: 'worker',
     model: 'k3',
     ctx: 'g1',
@@ -136,13 +136,13 @@ test('buildSubagentSession: a routed specialist name replaces the bare role in t
 });
 
 test('buildSubagentSession: streaming true yields an onStream renderer; false omits it', () => {
-  const streamed = buildSubagentSession<ToolSet>({
+  const streamed = buildSubagentSession({
     role: 'worker',
     model: 'k3',
     phase: 'working',
     streaming: true,
   });
-  const notStreamed = buildSubagentSession<ToolSet>({
+  const notStreamed = buildSubagentSession({
     role: 'worker',
     model: 'k3',
     phase: 'working',
@@ -154,7 +154,7 @@ test('buildSubagentSession: streaming true yields an onStream renderer; false om
 
 test('buildSubagentSession: onStepFinish folds the recorder delta in alongside the progress line', async () => {
   const { recorder, calls } = stubRecorder();
-  const session = buildSubagentSession<ToolSet>({
+  const session = buildSubagentSession({
     role: 'worker',
     model: 'k3',
     phase: 'working',
@@ -172,7 +172,7 @@ test('buildSubagentSession: onStepFinish folds the recorder delta in alongside t
 });
 
 test('buildSubagentSession: no recorder → onStepFinish is still callable (progress-only)', () => {
-  const session = buildSubagentSession<ToolSet>({
+  const session = buildSubagentSession({
     role: 'worker',
     model: 'k3',
     phase: 'working',
@@ -185,7 +185,7 @@ test('buildSubagentSession: no recorder → onStepFinish is still callable (prog
 });
 
 test('buildSubagentSession: onRetry writes a retry line under the session tag', () => {
-  const session = buildSubagentSession<ToolSet>({
+  const session = buildSubagentSession({
     role: 'ci-fix',
     model: 'k3',
     ctx: 'g1',
@@ -200,7 +200,7 @@ test('buildSubagentSession: onRetry writes a retry line under the session tag', 
 });
 
 test('buildSubagentSession: start() returns an idempotent stop function', () => {
-  const session = buildSubagentSession<ToolSet>({
+  const session = buildSubagentSession({
     role: 'worker',
     model: 'k3',
     phase: 'working',

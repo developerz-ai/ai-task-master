@@ -30,7 +30,7 @@ export async function runVerify(
   const command = `cd ${shQuote(input.checkoutPath)} && ${input.verifyCommand}`;
   const out = await exec(
     { command, description: 'run the configured verify command', timeoutMs: VERIFY_TIMEOUT_MS },
-    { toolCallId: `worker-verify-${randomUUID()}`, messages: [] },
+    { toolCallId: `worker-verify-${randomUUID()}`, messages: [], context: undefined },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');

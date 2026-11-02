@@ -104,7 +104,7 @@ function makeTools(
   const statusQueries = new Map<string, number>();
   let bareStatusCount = 0;
   const tools: WorkerTools = workerTools({
-    readFile: tool<ReadFileInput, ReadFileOutput>({
+    readFile: tool<ReadFileInput, ReadFileOutput, Record<string, unknown>>({
       description: 'read a file from the checkout',
       inputSchema: z.object({ path: z.string() }),
       execute: async (input) => {
@@ -112,7 +112,7 @@ function makeTools(
         return { content: '' };
       },
     }),
-    writeFile: tool<WriteFileInput, WriteFileOutput>({
+    writeFile: tool<WriteFileInput, WriteFileOutput, Record<string, unknown>>({
       description: 'write a file in the checkout',
       inputSchema: z.object({ path: z.string(), content: z.string() }),
       execute: async (input) => {
@@ -120,7 +120,7 @@ function makeTools(
         return { ok: true };
       },
     }),
-    bash: tool<BashInput, BashOutput>({
+    bash: tool<BashInput, BashOutput, Record<string, unknown>>({
       description: 'run a bash command in the checkout',
       inputSchema: z.object({
         command: z.string(),
@@ -551,7 +551,7 @@ test('runWorker: creates the group branch before the editor fanout writes (branc
   // One unified timeline so the checkout can be ordered against the fanout: each editor's on-disk
   // verification (`git status --porcelain -- <path>`) marks that file's edit as complete.
   const order: string[] = [];
-  const bash = tool<BashInput, BashOutput>({
+  const bash = tool<BashInput, BashOutput, Record<string, unknown>>({
     description: 'run a bash command in the checkout',
     inputSchema: z.object({
       command: z.string(),
@@ -1494,7 +1494,7 @@ function makeVerifyTools(
   const verifies: BashInput[] = [];
   let vi = 0;
   const base = makeTools().tools;
-  const bash = tool<BashInput, BashOutput>({
+  const bash = tool<BashInput, BashOutput, Record<string, unknown>>({
     description: 'run a bash command in the checkout',
     inputSchema: z.object({
       command: z.string(),

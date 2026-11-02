@@ -3,7 +3,7 @@
 // Two things make the raw call awkward, and every tool test was working around them by hand — or
 // not working around them at all, which is where ~74 of the suite's type errors came from:
 //
-//   1. `execute` takes (input, ToolCallOptions). Tests care about the input and nothing else, but
+//   1. `execute` takes (input, ToolExecutionOptions). Tests care about the input and nothing else, but
 //      the second argument is not optional.
 //   2. Its return is `O | AsyncIterable<O>` — a tool may stream. Every aitm tool resolves a single
 //      value, so a test that reaches straight for `.someField` is reading a union member that does
@@ -18,7 +18,11 @@ import type { Tool } from 'ai';
 type ExecuteOptions = Parameters<NonNullable<Tool<unknown, unknown>['execute']>>[1];
 
 // Minimal shape the SDK requires; aitm's tools read none of it.
-const CALL_OPTIONS: ExecuteOptions = { toolCallId: 'aitm-test-call', messages: [] };
+const CALL_OPTIONS: ExecuteOptions = {
+  toolCallId: 'aitm-test-call',
+  messages: [],
+  context: undefined,
+};
 
 function isAsyncIterable<O>(value: O | AsyncIterable<O>): value is AsyncIterable<O> {
   return typeof value === 'object' && value !== null && Symbol.asyncIterator in value;

@@ -21,7 +21,7 @@ import type {
   SkillDefinition,
   SubagentHandle,
 } from '@developerz.ai/ai-claude-compat';
-import type { LanguageModel, ModelMessage, TimeoutConfiguration } from 'ai';
+import type { LanguageModel, ModelMessage, TimeoutConfiguration, ToolSet } from 'ai';
 import type { NestedConfig } from '../agent-config/agent-config-detector.ts';
 import { buildCompactionStep, type CompactorLike } from '../compaction/compaction-step.ts';
 import type { Capability } from '../domain/model.ts';
@@ -93,7 +93,7 @@ export type FixSessionSubagents = {
   // continues when its context window fills, using the 'coding'-tier model id (issue #102).
   compactor?: CompactorLike;
   // Per-step LLM request deadline, forwarded to the CI-fix Worker agent (issue #129). Unset → none.
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
   // Provider options forwarded to the CI-fix Worker agent — the adapter attaches OpenRouter
   // web_search here by default for fix sessions (issue #112). Unset → none.
   providerOptions?: SubagentInit<WorkerTools>['providerOptions'];
@@ -155,7 +155,7 @@ export type FixSessionInput = {
   logger?: LoggerLike;
   // Handle from this group's previous CI-fix pass (#107). When set, the fix Worker continues that
   // manifest-planning conversation — it remembers what earlier passes already tried.
-  priorHandle?: SubagentHandle<WorkerTools>;
+  priorHandle?: SubagentHandle;
   // Run-scoped cancellation, forwarded to the fix Worker agent (see SubagentInit.signal) so an abort
   // tears its in-flight generation down. Mirrors TakeOverFlowInput.signal. Unset → no signal.
   signal?: AbortSignal;
@@ -163,7 +163,7 @@ export type FixSessionInput = {
 
 export type FixSessionResult =
   // `handle` retains the fix Worker's manifest conversation for the next fix pass to continue (#107).
-  | { kind: 'fixed'; handle: SubagentHandle<WorkerTools> } // committed + rebased + force-pushed; CI re-runs.
+  | { kind: 'fixed'; handle: SubagentHandle } // committed + rebased + force-pushed; CI re-runs.
   | { kind: 'blocked'; reason: string }; // Worker couldn't fix, or rebase/push failed.
 
 // The push-path outcome — handle-agnostic, since rebaseAndForcePush is also shared by the take-over
@@ -301,7 +301,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
   }
   // Summarize-and-continue when the coding-tier context window fills (issue #102).
   const compaction = subagents.compactor
-    ? buildCompactionStep<WorkerTools>({
+    ? buildCompactionStep({
         compactor: subagents.compactor,
         modelId: subagents.credentials.modelIdForCapability('coding'),
         ...(input.logger ? { logger: input.logger } : {}),
@@ -311,7 +311,7 @@ async function runFixWorker(input: FixSessionInput, task: Task): Promise<WorkerR
   // `tool_search` becomes callable. `activated: null` means nothing was deferred for this role, so
   // the compaction step (or no step at all) stands unchanged.
   const mount = subagents.deferredMount;
-  const prepareStep = deferredPrepareStep<WorkerTools>(compaction, mount, subagents.workerTools);
+  const prepareStep = deferredPrepareStep(compaction, mount, subagents.workerTools);
   const agent = createWorkerAgent({
     model: subagents.credentials.modelForCapability('coding'),
     tools: subagents.workerTools,

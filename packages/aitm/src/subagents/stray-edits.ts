@@ -31,7 +31,7 @@ export async function discardStrayEdits(
       command: `git -C ${wt} status --porcelain`,
       description: 'check for stray edits left by a non-committing subagent pass',
     },
-    { toolCallId: `stray-edits-status-${randomUUID()}`, messages: [] },
+    { toolCallId: `stray-edits-status-${randomUUID()}`, messages: [], context: undefined },
   );
   if (isAsyncIterable(out)) return;
   if (out.exitCode !== 0) return;
@@ -63,7 +63,7 @@ async function runBash(
 ): Promise<void> {
   const out = await exec(
     { command, description: 'stray-edit cleanup git step' },
-    { toolCallId: `stray-edits-bash-${randomUUID()}`, messages: [] },
+    { toolCallId: `stray-edits-bash-${randomUUID()}`, messages: [], context: undefined },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');

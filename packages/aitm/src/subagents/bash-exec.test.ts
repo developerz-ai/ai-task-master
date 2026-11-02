@@ -18,7 +18,7 @@ test('isAsyncIterable: true for an async iterable, false for a plain object or p
 });
 
 test('requireExec: returns the execute function when present', () => {
-  const bash = tool<BashInput, BashOutput>({
+  const bash = tool<BashInput, BashOutput, Record<string, unknown>>({
     description: 'run a bash command',
     inputSchema: z.object({
       command: z.string(),
@@ -48,7 +48,7 @@ test('requireExec: throws when the bash tool has no execute function', () => {
 });
 
 test('runBash: resolves silently on a zero exit', async () => {
-  const bash = tool<BashInput, BashOutput>({
+  const bash = tool<BashInput, BashOutput, Record<string, unknown>>({
     description: 'run a bash command',
     inputSchema: z.object({
       command: z.string(),
@@ -63,7 +63,7 @@ test('runBash: resolves silently on a zero exit', async () => {
 });
 
 test('runBash: throws with the exit code and stderr on a non-zero exit', async () => {
-  const bash = tool<BashInput, BashOutput>({
+  const bash = tool<BashInput, BashOutput, Record<string, unknown>>({
     description: 'run a bash command',
     inputSchema: z.object({
       command: z.string(),

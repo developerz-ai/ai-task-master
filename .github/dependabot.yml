@@ -1,0 +1,29 @@
+# Dependency updates for developerz-ai/ai-task-master (established by dz-runner setup mode).
+# Proposed by developerz.ai onboarding (an automated agent), because this repository
+# had no dependency-update configuration. Dependabot opens the update pull requests
+# weekly; developerz.ai reviews them, and whether they merge automatically follows
+# this repository's merge policy. Minor and patch updates arrive as one pull request
+# per ecosystem; a major update arrives on its own. Edit this file to change what is
+# updated or when, or delete it to stop.
+version: 2
+updates:
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "23:00"
+    groups:
+      bun-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "23:00"
+    groups:
+      github-actions-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

@@ -28,11 +28,14 @@ function grounded(
 
 // A catalog stub. `maxOutputTokens` left undefined means "the catalog published none", which makes
 // the reserve the full RESERVE_CEILING (20k) — so a 100k window is usable up to 80k.
-function stubLimits(contextLength: number, maxOutputTokens?: number): ModelLimitsLookup {
+function stubLimits(
+  contextLength: number | undefined,
+  maxOutputTokens?: number,
+): ModelLimitsLookup {
   return {
     forModel: async (id: string): Promise<ModelLimits> => ({
       modelId: id,
-      contextLength,
+      ...(contextLength !== undefined ? { contextLength } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     }),
     preload: async () => {},
@@ -116,14 +119,35 @@ test('shouldCompact: a large max-output model still reserves only the ceiling', 
   });
 });
 
-test('shouldCompact: skips a window too small to hold a reply plus any history', async () => {
+test('shouldCompact: unknown for a window too small to hold a reply plus any history', async () => {
   // 8k window, 20k reserve → nothing to compact into; summarizing every step would burn calls and
   // never bring the conversation under budget.
   const c = new Compactor({
     summarizer: new MockLanguageModelV3(),
     limits: stubLimits(8_000),
   });
-  assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(7_000)), { kind: 'skip' });
+  assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(7_000)), { kind: 'unknown' });
+  assert.equal(await c.usableInputTokensFor('openai/gpt-5'), undefined);
+});
+
+test('shouldCompact and usableInputTokensFor reject unusable budgets', async () => {
+  for (const reserveTokens of [100_000, 200_000, Number.NaN, Infinity, -Infinity, -1]) {
+    const c = new Compactor({
+      summarizer: new MockLanguageModelV3(),
+      limits: stubLimits(100_000),
+      reserveTokens,
+    });
+    assert.deepEqual(await c.shouldCompact('m', estimated(1)), { kind: 'unknown' });
+    assert.equal(await c.usableInputTokensFor('m'), undefined);
+  }
+  for (const maxOutputTokens of [0, -1, Number.NaN, Infinity, -Infinity]) {
+    const c = new Compactor({
+      summarizer: new MockLanguageModelV3(),
+      limits: stubLimits(100_000, maxOutputTokens),
+    });
+    assert.deepEqual(await c.shouldCompact('m', estimated(1)), { kind: 'unknown' });
+    assert.equal(await c.usableInputTokensFor('m'), undefined);
+  }
 });
 
 test('usableInputTokens: window minus the reserve, floored at zero', () => {
@@ -160,7 +184,7 @@ test('usableInputTokensFor: returns the window minus the reserve for the model',
 });
 
 test('usableInputTokensFor: undefined for an absent, non-finite, or non-positive window', async () => {
-  for (const contextLength of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+  for (const contextLength of [undefined, 0, -1, Number.NaN, Infinity, -Infinity]) {
     assert.equal(
       await new Compactor({
         summarizer: new MockLanguageModelV3(),
@@ -181,13 +205,15 @@ test('shouldCompact returns compact above the threshold and carries keepLastStep
   assert.deepEqual(decision, { kind: 'compact', keepLastSteps: 3, contextLength: 100_000 });
 });
 
-test('shouldCompact skips when contextLength is zero, negative, or non-finite', async () => {
-  for (const contextLength of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+test('shouldCompact returns unknown when contextLength is absent, nonpositive, or nonfinite', async () => {
+  for (const contextLength of [undefined, 0, -1, Number.NaN, Infinity, -Infinity]) {
     const c = new Compactor({
       summarizer: new MockLanguageModelV3(),
       limits: stubLimits(contextLength),
     });
-    assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(1_000_000)), { kind: 'skip' });
+    assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(1_000_000)), {
+      kind: 'unknown',
+    });
   }
 });
 

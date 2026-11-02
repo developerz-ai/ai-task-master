@@ -24,6 +24,98 @@ const opus: CatalogRow = {
 };
 const gpt5: CatalogRow = { id: 'openai/gpt-5', context_length: 128_000 };
 
+test('profile overrides win per field without changing independent pricing', async () => {
+  const provider = stubCatalog([
+    {
+      id: 'm',
+      context_length: 100_000,
+      max_completion_tokens: 10_000,
+      pricing: { prompt: '0.001', completion: '0.002' },
+    },
+  ]);
+  const reference = stubCatalog([
+    {
+      id: 'x/m',
+      context_length: 200_000,
+      max_completion_tokens: 20_000,
+      pricing: { prompt: '1', completion: '2' },
+    },
+  ]);
+  for (const overrides of [
+    { contextLength: 150_000 },
+    { maxOutputTokens: 5_000 },
+    { contextLength: 150_000, maxOutputTokens: 5_000 },
+  ]) {
+    const limits = await new ModelLimitsRegistry(provider, reference, overrides).forModel('m');
+    assert.equal(limits.contextLength, overrides.contextLength ?? 100_000);
+    assert.equal(limits.maxOutputTokens, overrides.maxOutputTokens ?? 10_000);
+    assert.equal(limits.contextSource, overrides.contextLength ? 'profile' : 'provider');
+    assert.equal(limits.pricingSource, 'provider');
+    assert.equal(limits.promptUsdPerToken, 0.001);
+  }
+  const borrowed = await new ModelLimitsRegistry(stubCatalog([{ id: 'm' }]), reference, {
+    contextLength: 150_000,
+  }).forModel('m');
+  assert.equal(borrowed.maxOutputTokens, 20_000);
+  assert.equal(borrowed.contextSource, 'profile');
+  assert.equal(borrowed.pricingSource, 'reference');
+  assert.equal(borrowed.promptUsdPerToken, 1);
+});
+
+test('provider hits without windows remain unresolved on reference miss/outage unless overridden', async () => {
+  for (const reference of [
+    stubCatalog([]),
+    {
+      listModels: async (): Promise<OpenRouterModel[]> => {
+        throw new Error('reference offline');
+      },
+    },
+  ]) {
+    const provider = stubCatalog([{ id: 'new-model' }]);
+    assert.equal(
+      (await new ModelLimitsRegistry(provider, reference).forModel('new-model')).contextLength,
+      undefined,
+    );
+    const registry = new ModelLimitsRegistry(provider, reference, {
+      contextLength: 100_000,
+      maxOutputTokens: 8_000,
+    });
+    assert.equal((await registry.forModel('new-model')).contextSource, 'profile');
+    await assert.rejects(() => registry.forModel('absent'), ModelNotFound);
+    const partial = await new ModelLimitsRegistry(provider, reference, {
+      maxOutputTokens: 8_000,
+    }).forModel('new-model');
+    assert.equal(partial.contextLength, undefined);
+  }
+});
+
+test('malformed effective limits cannot advertise a usable window', async () => {
+  for (const overrides of [
+    { contextLength: 0 },
+    { contextLength: -1 },
+    { contextLength: Infinity },
+    { contextLength: 1.5 },
+    { contextLength: Number.MAX_SAFE_INTEGER + 1 },
+    { maxOutputTokens: 0 },
+    { maxOutputTokens: NaN },
+    { maxOutputTokens: 100_000 },
+  ]) {
+    const limits = await new ModelLimitsRegistry(
+      stubCatalog([{ id: 'm', context_length: 100_000 }]),
+      undefined,
+      overrides,
+    ).forModel('m');
+    assert.equal(limits.contextLength, undefined);
+    assert.equal(limits.contextSource, undefined);
+  }
+  for (const context_length of [0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    const limits = await new ModelLimitsRegistry(
+      stubCatalog([{ id: 'm', context_length }]),
+    ).forModel('m');
+    assert.equal(limits.contextLength, undefined);
+  }
+});
+
 test('ModelLimitsRegistry is constructible', () => {
   const r = new ModelLimitsRegistry(makeStub([]));
   assert.ok(r instanceof ModelLimitsRegistry);

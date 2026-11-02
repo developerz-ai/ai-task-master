@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { test } from 'node:test';
+import { afterEach, beforeEach, test } from 'node:test';
 import type { RunLoopInput, RunMergeFlowInput } from '../composition/run-input.ts';
 import type { LlmFetch } from '../credentials/llm-fetch.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
@@ -25,6 +25,13 @@ import {
 } from './commands.ts';
 
 const FAKE_KEY = 'sk-or-fake-test-key';
+const realFetch = globalThis.fetch;
+beforeEach(() => {
+  globalThis.fetch = async () => Response.json({ data: [] });
+});
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
 
 async function tempHome(): Promise<{ path: string; cleanup: () => Promise<void> }> {
   const path = await mkdtemp(join(tmpdir(), 'aitm-home-'));
@@ -105,6 +112,177 @@ function stubGithub(opts: {
   return stub as unknown as import('../github/github-client.ts').GitHubClient;
 }
 
+const windowCases = [
+  {
+    name: 'provider hit without limits and reference miss',
+    provider: {},
+    reference: {},
+    pass: false,
+  },
+  { name: 'reference outage', provider: {}, reference: {}, outage: true, pass: false },
+  {
+    name: 'complete profile override during reference outage',
+    provider: {},
+    reference: {},
+    outage: true,
+    overrides: { contextLength: 100_000, maxOutputTokens: 8_000 },
+    pass: true,
+  },
+  {
+    name: 'context-only override',
+    provider: { max_completion_tokens: 8_000 },
+    reference: {},
+    overrides: { contextLength: 100_000 },
+    pass: true,
+  },
+  {
+    name: 'output-only override with provider context',
+    provider: { context_length: 100_000 },
+    reference: {},
+    overrides: { maxOutputTokens: 8_000 },
+    pass: true,
+  },
+  {
+    name: 'output-only override without context',
+    provider: {},
+    reference: {},
+    overrides: { maxOutputTokens: 8_000 },
+    pass: false,
+  },
+  {
+    name: 'reference context fills provider gap',
+    provider: {},
+    reference: { context_length: 100_000 },
+    pass: true,
+  },
+  {
+    name: 'window smaller than default reserve',
+    provider: { context_length: 1_000 },
+    reference: {},
+    pass: false,
+  },
+  {
+    name: 'inconsistent effective pair',
+    provider: { context_length: 100_000, max_completion_tokens: 100_000 },
+    reference: {},
+    pass: false,
+  },
+];
+
+for (const scenario of windowCases) {
+  for (const action of ['start', 'resume', 'merge-pr'] as const) {
+    test(`real window preflight: ${action}: ${scenario.name}`, async () => {
+      const repo = await makeTempRepo({ withClaudeMd: true });
+      const home = await tempHome();
+      let closed = 0;
+      let plannerCalls = 0;
+      let styleCalls = 0;
+      let flowCalls = 0;
+      try {
+        await writeFile(
+          join(home.path, '.aitm.json'),
+          JSON.stringify({
+            activeProfile: 'p',
+            profiles: {
+              p: {
+                baseURL: 'https://provider.invalid/v1',
+                models: {
+                  generic: 'new-model',
+                  smart: 'new-model',
+                  coding: 'new-model',
+                  fast: 'new-model',
+                },
+                ...scenario.overrides,
+              },
+            },
+          }),
+        );
+        globalThis.fetch = async (url) => {
+          if (String(url).startsWith('https://provider.invalid/')) {
+            return Response.json({ data: [{ id: 'new-model', ...scenario.provider }] });
+          }
+          if (scenario.outage) throw new Error('reference offline');
+          return Response.json({
+            data:
+              Object.keys(scenario.reference).length === 0
+                ? []
+                : [{ id: 'x/new-model', ...scenario.reference }],
+          });
+        };
+        const common = {
+          cwd: repo.path,
+          homeDir: home.path,
+          env: { OPENROUTER_API_KEY: FAKE_KEY },
+          authStatus: okAuth(),
+          stdout: () => {},
+          stderr: () => {},
+          makeLlmFetch: async () => ({
+            fetch: realFetch,
+            close: async () => {
+              closed++;
+            },
+          }),
+          resolveStyle: async () => {
+            styleCalls++;
+            return STUB_DIGEST;
+          },
+        };
+        const startCtx: StartCtx = {
+          ...common,
+          modelBanner: async () => 'injected banner must not bypass preflight',
+          runPlanner: async () => {
+            plannerCalls++;
+            return { kind: 'ok', groups: [] };
+          },
+          runLoop: async (input) => {
+            flowCalls++;
+            const limits = await input.modelLimits?.forModel('new-model');
+            assert.equal(limits?.contextLength, 100_000);
+            return { kind: 'success', outcomes: [] };
+          },
+        };
+        if (action === 'resume') {
+          await seedStartState(repo.path);
+          await writeFile(join(repo.path, '.ai-task-master/goal.txt'), 'goal');
+        }
+        if (action === 'merge-pr') await seedState(repo.path);
+        const result =
+          action === 'start'
+            ? await runStart({ kind: 'start', goal: 'goal' }, startCtx)
+            : action === 'resume'
+              ? await runResume({ kind: 'resume' }, startCtx)
+              : await runMergePr(
+                  { kind: 'merge-pr', pr: 7, resume: false },
+                  {
+                    ...common,
+                    runMergeFlow: async () => {
+                      flowCalls++;
+                      return { kind: 'success', outcomes: [] };
+                    },
+                  },
+                );
+        assert.equal(result.code, scenario.pass ? 0 : 1, result.message);
+        assert.equal(flowCalls, scenario.pass ? 1 : 0);
+        assert.equal(styleCalls, scenario.pass ? 1 : 0);
+        if (!scenario.pass) {
+          assert.equal(plannerCalls, 0);
+          assert.match(result.message ?? '', /new-model/);
+          assert.match(result.message ?? '', /https:\/\/provider.invalid\/v1/);
+          assert.match(result.message ?? '', /profile p/);
+          assert.match(result.message ?? '', /aitm profile set p contextLength/);
+          assert.match(result.message ?? '', /maxOutputTokens/);
+        }
+        assert.equal(closed, 1);
+        const lock = await acquireRunLock(join(repo.path, '.ai-task-master'));
+        await lock.release();
+      } finally {
+        await repo.cleanup();
+        await home.cleanup();
+      }
+    });
+  }
+}
+
 // ---- runStart ---------------------------------------------------------------
 
 test('runStart: happy path → initialises state, calls runLoop, exits 0', async () => {
@@ -120,6 +298,7 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async (input) => {
           loopCalls++;
@@ -162,6 +341,7 @@ test('runStart: constructs a Logger and threads it into the loop input (finding 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async (input) => {
           captured.push(input);
@@ -190,6 +370,7 @@ test('runStart: releases the run lock when the run ends', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
@@ -231,6 +412,7 @@ test('runStart: releases the keep-alive transport when the run ends', async () =
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         makeLlmFetch: llm.make,
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
@@ -256,6 +438,7 @@ test('runStart: a throwing loop still releases the keep-alive transport', async 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         makeLlmFetch: llm.make,
         runLoop: async () => {
@@ -284,6 +467,7 @@ test('runStart: another run holds the state dir → exit 1, loop never runs', as
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => {
           loopCalls++;
@@ -314,6 +498,7 @@ test('runStart: prints the auto-merge banner to stdout when auto-merge is on (de
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         stdout: (chunk) => {
           out += chunk;
@@ -341,6 +526,7 @@ test('runStart: --no-automerge suppresses the banner', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         stdout: (chunk) => {
           out += chunk;
@@ -374,6 +560,7 @@ test('runStart: --pr-per-task with --no-automerge → exit 1, loop never runs', 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         runLoop: async () => {
           assert.fail('runLoop must not run for a rejected flag combo');
         },
@@ -403,6 +590,7 @@ test('runStart: --pr-per-task with config autoMerge:false → exit 1 (config pat
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         runLoop: async () => {
           assert.fail('runLoop must not run for a rejected config combo');
         },
@@ -427,6 +615,7 @@ test('runStart: missing API key → exit 1 with actionable message', async () =>
         homeDir: home.path,
         env: {},
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         runLoop: async () => {
           assert.fail('runLoop must not be called when API key is missing');
         },
@@ -452,6 +641,7 @@ test('runStart: no CLAUDE.md/AGENTS.md and no --style → proceeds with a defaul
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => {
           loopCalls++;
@@ -483,6 +673,7 @@ test('runStart: no CLAUDE.md/AGENTS.md notice goes through ctx.stderr, not bare 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         stderr: err.out,
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
@@ -555,6 +746,7 @@ test('runStart: WorkLoopResult.blocked → exit 1 carrying reason', async () => 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => ({
           kind: 'blocked',
@@ -582,6 +774,7 @@ test('runStart: awaiting-pr (--no-automerge) → exit 0 with merge-pr instructio
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => ({ kind: 'awaiting-pr', prs: [17], outcomes: [] }),
       },
@@ -607,6 +800,7 @@ test('runStart: loop cancelled → exit 2', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => ({ kind: 'cancelled', outcomes: [] }),
       },
@@ -630,6 +824,7 @@ test('runStart: session-cap → exit 0', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => ({ kind: 'session-cap', outcomes: [] }),
       },
@@ -659,6 +854,7 @@ test('runStart: CLI overrides reach the persisted run state', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
@@ -687,6 +883,7 @@ test('runStart: --max-fix-attempts reaches the resolved config handed to the loo
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async (input) => {
           seen = input.resolved.maxCiFixAttempts;
@@ -713,6 +910,7 @@ test('runStart: without --max-fix-attempts the loop gets the default cap (issue 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async (input) => {
           seen = input.resolved.maxCiFixAttempts;
@@ -740,6 +938,7 @@ test('runStart: threads the resolved llmStepTimeoutMs into both the style-digest
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: async (input) => {
           styleSeen = input.llmStepTimeoutMs;
           return STUB_DIGEST;
@@ -793,6 +992,7 @@ test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups +
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runPlanner: async (input) => {
           seq.push('plan');
@@ -837,6 +1037,7 @@ test('runStart: resume (existing state.json) skips runPlanner, preserves prior p
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runPlanner: async () => {
           plannerCalls++;
@@ -874,6 +1075,7 @@ test('runStart: an unparseable state.json is replaced, not treated as a run to p
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         modelBanner: async () => '',
         runPlanner: async (input) => {
@@ -913,6 +1115,7 @@ test('runStart: a state.json from a newer aitm is refused, never replaced', asyn
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         modelBanner: async () => '',
         runPlanner: async () => {
@@ -959,6 +1162,7 @@ test('runStart: resume with empty prGroups (prior planning blocked) re-runs runP
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runPlanner: async () => {
           plannerCalls++;
@@ -991,6 +1195,7 @@ test('runStart: runPlanner blocked → exit 1 with reason, runLoop not invoked',
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         runPlanner: async () => ({ kind: 'blocked', reason: 'goal is not actionable' }),
         runLoop: async () => {
           assert.fail('runLoop must not run when planning blocks');
@@ -1023,6 +1228,7 @@ test('runStart: default resolveStyle reuses cached coding-style.md (no LLM call)
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         // No resolveStyle stub → exercises defaultResolveStyle; the cache hit avoids any LLM call.
         runLoop: async (input) => {
           captured.push(input);
@@ -1055,6 +1261,7 @@ test('runStart: resolveStyle failure never blocks → falls back to raw agent-co
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: async () => {
           throw new Error('distiller exploded');
         },
@@ -1085,6 +1292,7 @@ test('runStart: the run abort signal reaches the style-digest call', async () =>
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         signal: controller.signal,
         resolveStyle: async (input) => {
           seenSignal = input.signal;
@@ -1201,6 +1409,7 @@ test('runMergePr: happy path with --pr override', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           captured.push(input);
@@ -1233,6 +1442,7 @@ test('runMergePr: the run abort signal reaches the style-digest call', async () 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         signal: controller.signal,
         resolveStyle: async (input) => {
           seenSignal = input.signal;
@@ -1271,6 +1481,7 @@ test('runMergePr: config-resolution warnings go through ctx.stderr, not bare pro
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         stderr: err.out,
         runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
@@ -1297,6 +1508,7 @@ test('runMergePr: constructs a Logger and threads it into the merge flow (findin
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           captured.push(input);
@@ -1329,6 +1541,7 @@ test('runMergePr: builds a usage tracker, threads it to the flow, and flushes to
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         stdout: (chunk) => {
           out += chunk;
@@ -1365,6 +1578,7 @@ test('runMergePr: releases the keep-alive transport when the flow ends', async (
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         makeLlmFetch: llm.make,
         runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
@@ -1392,6 +1606,7 @@ test('runMergePr: another run holds the state dir → exit 1, flow never runs', 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async () => {
           flowCalls++;
@@ -1421,6 +1636,7 @@ test('runMergePr: threads --max-iterations through to the flow', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           captured.push(input);
@@ -1448,6 +1664,7 @@ test('runMergePr: flow cancelled → exit 2', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async () => ({ kind: 'cancelled', outcomes: [] }),
       },
@@ -1473,6 +1690,7 @@ test('runMergePr: flow blocked (iteration cap exhausted) → exit 1', async () =
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async () => ({
           kind: 'blocked',
@@ -1502,6 +1720,7 @@ test('runMergePr: flow blocked (rebase conflict) → exit 1', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async () => ({
           kind: 'blocked',
@@ -1531,6 +1750,7 @@ test('runMergePr: falls back to state.currentPr when --pr absent', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           prSeen = input.pr;
@@ -1561,6 +1781,7 @@ test('runMergePr: resume false ignores stale persisted currentPr, takes over cur
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           prSeen = input.pr;
@@ -1596,6 +1817,7 @@ test('runMergePr: resume false on a mid-plan run → re-points currentPr, keeps 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           captured.push(input);
@@ -1637,6 +1859,7 @@ test('runMergePr: resume false with no prior state → synthesizes and persists 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           prSeen = input.pr;
@@ -1674,6 +1897,7 @@ test('runMergePr: resume false with unreadable state → exit 1, file untouched'
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async () => {
           flowCalls++;
@@ -1706,6 +1930,7 @@ test('runMergePr: no state file + --pr synthesizes state and runs the flow', asy
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runMergeFlow: async (input) => {
           flowPr.push(input.pr);
@@ -1740,6 +1965,7 @@ test('runMergePr: no state, no --pr, no branch PR → exit 1 with help', async (
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         runMergeFlow: async () => {
           assert.fail('flow must not run when no PR can be discovered');
         },
@@ -1767,6 +1993,7 @@ test('runMergePr: missing API key → exit 1, flow not invoked', async () => {
         homeDir: home.path,
         env: {},
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         runMergeFlow: async () => {
           called = true;
           return { kind: 'success', outcomes: [] };
@@ -1821,6 +2048,7 @@ test('runMergePr: no --pr and no currentPr → exit 1', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -2448,6 +2676,7 @@ test('runResume: reuses the persisted goal and criteria instead of retyping them
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async (input) => {
           captured.push(input);
@@ -2478,6 +2707,7 @@ test('runResume: start flags still apply to the resumed run', async () => {
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async (input) => {
           captured.push(input);
@@ -2504,6 +2734,7 @@ test('runResume: a directory that never started says so, and does not run the lo
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => {
           loopCalls++;
@@ -2606,6 +2837,7 @@ test('runStart: a finished run in the directory is superseded — the new goal i
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         modelBanner: async () => '',
         stdout: (chunk) => {
@@ -2648,6 +2880,7 @@ test('runResume: a completed run reports "already complete" and does not run the
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => {
           loopCalls++;
@@ -2682,6 +2915,7 @@ test('runResume: an unreadable state dir reports the real failure, not "nothing 
         homeDir: home.path,
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
+        checkModelWindows: async () => {},
         resolveStyle: okStyle(),
         runLoop: async () => {
           loopCalls++;

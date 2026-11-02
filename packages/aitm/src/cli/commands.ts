@@ -18,6 +18,7 @@ import {
   defaultAgentConfig,
 } from '../agent-config/agent-config-detector.ts';
 import { composeStyleGuide, StyleDistiller } from '../agent-config/coding-style.ts';
+import { usableInputTokens } from '../compaction/compactor.ts';
 import type { RunLoopInput, RunMergeFlowInput } from '../composition/run-input.ts';
 import { ConfigLoader } from '../config/config-loader.ts';
 import { ConfigWriter } from '../config/config-writer.ts';
@@ -127,6 +128,7 @@ export type StartCtx = {
   // the run's ModelLimitsRegistry, which fetches the provider catalog. Injected so tests that assert
   // on stdout don't depend on a network round-trip whose success changes what gets printed.
   modelBanner?: () => Promise<string>;
+  checkModelWindows?: typeof checkModelWindows;
   // The run's keep-alive transport factory. Defaults to `createLlmFetch`; injected so tests can pin
   // that the handle is released on every exit path without opening a real socket pool.
   makeLlmFetch?: () => Promise<LlmFetch | undefined>;
@@ -143,6 +145,7 @@ export type MergePrCtx = {
   env?: Record<string, string | undefined>;
   authStatus?: AuthStatusFn;
   runMergeFlow?: (input: RunMergeFlowInput) => Promise<WorkLoopResult>;
+  checkModelWindows?: typeof checkModelWindows;
   // Test seam: when omitted, a real GitHubClient(cwd) is constructed. Tests pass a
   // stub so the take-over flow does not actually shell out to git on a temp repo.
   github?: GitHubClient;
@@ -302,6 +305,54 @@ export async function startupModelBanner(
     (s): s is string => s !== undefined && s !== '',
   );
   return modelBanner(entries, where.length > 0 ? where.join(' · ') : 'default provider');
+}
+
+export async function checkModelWindows(
+  limits: ModelLimitsLookup,
+  resolved: Pick<ResolvedConfig, 'models' | 'activeProfile' | 'baseURL'>,
+): Promise<void> {
+  const endpoint = resolved.baseURL ?? OPENROUTER_REFERENCE_URL;
+  const profile = resolved.activeProfile ?? '<name>';
+  const models = Object.entries(DEFAULT_MODELS).map(
+    ([capability, fallback]) =>
+      resolved.models[capability as keyof typeof DEFAULT_MODELS] ||
+      resolved.models.generic ||
+      fallback,
+  );
+  for (const modelId of new Set(models)) {
+    try {
+      const entry = await limits.forModel(modelId);
+      const window = entry.contextLength;
+      if (
+        window === undefined ||
+        !Number.isSafeInteger(window) ||
+        window <= 0 ||
+        (entry.maxOutputTokens !== undefined &&
+          (!Number.isSafeInteger(entry.maxOutputTokens) ||
+            entry.maxOutputTokens <= 0 ||
+            entry.maxOutputTokens >= window)) ||
+        usableInputTokens(window, entry.maxOutputTokens) <= 0
+      ) {
+        throw new Error('unresolved or nonusable context window');
+      }
+    } catch (err) {
+      throw new Error(
+        `Cannot start inference for model "${modelId}" at ${endpoint} (profile ${profile}): ${errMsg(err)}. ` +
+          'Select a model with published limits, or set verified limits with ' +
+          `\`aitm profile set ${profile} contextLength <tokens>\` and ` +
+          `\`aitm profile set ${profile} maxOutputTokens <tokens>\` ` +
+          '(positive safe integers; maxOutputTokens < contextLength).',
+      );
+    }
+  }
+}
+
+function registryFor(resolved: ResolvedConfig, signal?: AbortSignal): ModelLimitsRegistry {
+  return new ModelLimitsRegistry(
+    new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL, signal),
+    new OpenRouterReferenceCatalog(OPENROUTER_REFERENCE_URL, signal),
+    resolved,
+  );
 }
 
 // Non-fatal warnings go to the injected stderr sink (default process.stderr) so they never
@@ -502,6 +553,13 @@ export async function runStart(
     const logger = new Logger(resolved.logLevel, runId, join(stateDir, 'logs', `${runId}.log`));
     disposer.add(() => logger.flush());
 
+    const modelLimits = registryFor(resolved, ctx.signal);
+    try {
+      await (ctx.checkModelWindows ?? checkModelWindows)(modelLimits, resolved);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+
     // Planning phase (issue #17): a one-shot step that runs the Planner once, before the loop,
     // so `prGroups` is populated and the loop has something to iterate. Gated on whether a plan
     // is already persisted — not merely on `resuming` — because a prior run whose planning
@@ -537,16 +595,10 @@ export async function runStart(
     // Per-run token/cost accounting (issue #114). One ModelLimitsRegistry for the run — shared by the
     // tracker's pricing and the Compactor's context lookup (#102) so the catalog is fetched at most
     // once. The tracker's onUsage sinks are bound in the adapter; totals flush after the loop.
-    const modelLimits = new ModelLimitsRegistry(
-      new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL, ctx.signal),
-      new OpenRouterReferenceCatalog(OPENROUTER_REFERENCE_URL, ctx.signal),
-    );
     const usage = new UsageTracker(modelLimits);
 
-    // Print the resolved window + price per model before any tokens are spent. A provider that
-    // publishes no context window disables autocompaction for the whole run, and one that publishes no
-    // pricing reduces the end-of-run summary to `cost unknown` — both used to surface only after the
-    // fact, if at all. Best-effort: a catalog that won't load must not stop the run.
+    // Window validation above is mandatory; the banner itself is best-effort diagnostics.
+    // Missing pricing still reduces the end-of-run summary to `cost unknown`.
     try {
       const banner = await (ctx.modelBanner ?? (() => startupModelBanner(modelLimits, resolved)))();
       if (banner !== '') (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(banner);
@@ -828,6 +880,13 @@ export async function runMergePr(
       return { code: 1, message: 'gh CLI is not authenticated. Run `gh auth login`.' };
     }
 
+    const modelLimits = registryFor(resolved, ctx.signal);
+    try {
+      await (ctx.checkModelWindows ?? checkModelWindows)(modelLimits, resolved);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+
     // Same read-or-distill-or-fallback as runStart; reuses the cached digest a prior `aitm start`
     // wrote, or distills once for a hand-built take-over PR. Never blocks the merge flow.
     const resolveStyle = ctx.resolveStyle ?? defaultResolveStyle;
@@ -848,10 +907,6 @@ export async function runMergePr(
     // Per-run token/cost accounting (issue #114/#190) — the parity gap that left `aitm merge-pr`
     // spend entirely unaccounted. One ModelLimitsRegistry for the tracker's pricing (a red-PR fix
     // session runs the same coding-tier Worker as `aitm start`); totals flush after the flow.
-    const modelLimits = new ModelLimitsRegistry(
-      new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL, ctx.signal),
-      new OpenRouterReferenceCatalog(OPENROUTER_REFERENCE_URL, ctx.signal),
-    );
     const usage = new UsageTracker(modelLimits);
 
     const runMergeFlow = ctx.runMergeFlow ?? defaultRunMergeFlow;

@@ -117,6 +117,7 @@ test('aitm start: SIGINT mid-run reaps the MCP child and surfaces cancelled (exi
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'sk-or-test-key' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         resolveStyle: async () => '# CLAUDE.md\n',
         signal: controller.signal,
         runLoop: (input) =>

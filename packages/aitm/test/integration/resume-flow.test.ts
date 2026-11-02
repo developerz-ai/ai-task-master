@@ -197,6 +197,7 @@ test('resume-flow: second runStart resumes from state.json after blocked exit', 
       homeDir: repo.path,
       env: { OPENROUTER_API_KEY: 'test-key-x' },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
     };
 
     // ── First run: blocked immediately, no git work ──────────────────────
@@ -297,6 +298,7 @@ test('resume-flow: --no-automerge exits 0 with merge-pr instruction; merge-pr pi
       homeDir: repo.path,
       env: { OPENROUTER_API_KEY: 'test-key-x' },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
     };
 
     // ── runStart with --no-automerge ─────────────────────────────────────
@@ -377,6 +379,7 @@ test('resume-flow: interrupt after pr-open; resume picks up at waiting-ci withou
       homeDir: repo.path,
       env: { OPENROUTER_API_KEY: 'test-key-x' },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
     };
 
     // ── First run: working → pr-open → waiting-ci (autoMerge:false halts here) ──

@@ -204,6 +204,8 @@ function jsonClone<T>(value: T): T {
 const ALLOWED_PROFILE_ROOT_KEYS: ReadonlySet<string> = new Set([
   'openrouterApiKey',
   'baseURL',
+  'contextLength',
+  'maxOutputTokens',
   'models',
   'providerRouting',
   'fallbackModels',
@@ -235,7 +237,7 @@ function ownProfile<T>(profiles: Record<string, T>, name: string): T | undefined
 }
 
 const KEY_SURFACE_HINT =
-  'Allowed keys: openrouterApiKey, baseURL, models.<tier>, providerRouting.<field>, fallbackModels.<tier>, reasoningEffort.<tier>.';
+  'Allowed keys: openrouterApiKey, baseURL, contextLength, maxOutputTokens, models.<tier>, providerRouting.<field>, fallbackModels.<tier>, reasoningEffort.<tier>.';
 
 // Parse and validate a profile key path. Enforces the documented key surface and rejects
 // dangerous segments, so neither `set` nor `get` can mutate prototypes or write off-schema.

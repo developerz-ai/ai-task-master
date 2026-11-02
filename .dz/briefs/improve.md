@@ -25,3 +25,14 @@ a missing publish and a stuck Dependabot PR belong to `health`.
 
 One small PR per improvement, its evidence in the body, `bun run lint && bun run typecheck && bun run typecheck:tests && bun run test:node` green first. Never bump the version or touch release automation here. No co-author trailers (`CLAUDE.md`).
 Check no open PR or issue already covers it. If nothing is worth changing, do nothing: no empty PRs, no churn.
+
+## Rows
+
+- `first-monday-only`: Act only on the first Monday of the month; on any other Monday stop here, file nothing, open nothing.
+- `gate-on-main`: The gate on fresh `main` (`bun run lint && bun run typecheck && bun run typecheck:tests && bun run test:node`) is green; anything it found broken or flaky is picked first — the root cause, never a retry or a skip.
+- `dependency-majors`: Dependency majors exist per `bun outdated`; a `bun.lock` resync is its own PR, never inside a release.
+- `open-bugs`: Open bugs exist per `gh issue list --state open --label bug --json number,title,url`; each is picked starting from a test that fails on `main`.
+- `readme-drift`: README claims that no longer match the code.
+- `dead-code`: Dead code, after the README claims that no longer match the code.
+- `already-covered`: No open PR or issue already covers the improvement.
+- `nothing-worth-changing`: Nothing is worth changing: do nothing, no empty PRs, no churn.

@@ -25,7 +25,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | Modules | ESM only, `"type": "module"`; named exports only |
 | TypeScript | `^7.0.2`, `strict: true` |
 | AI SDK | `ai` `^6.0.182`, `ToolLoopAgent` (v6; the AI SDK 5 name `experimental_Agent` is gone) |
-| Lint/format | Biome 2.5.6 — `bun run lint` = `biome check .` |
+| Lint/format | Biome 2.6.4 — `bun run lint` = `biome check .` |
 | Packages | `@developerz.ai/aitm` 0.0.56 + `@developerz.ai/ai-claude-compat` 0.0.56; aitm pins compat EXACTLY, versions move in lockstep |
 
 ## Commands
@@ -96,6 +96,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 - A failure's safety net is "do less" (skip the phase, let the caller proceed as it would have), never "run the thing we just rejected".
 - The only two exceptions, both about DATA rather than code: an on-disk state/config file written by an older version must still parse (`state/` migrations); a documented CLI/config key is renamed in one release with the old name removed, not aliased forever.
 - No comments unless the WHY is non-obvious; names carry intent.
+- **Biome formats code, not prose.** Its Markdown and YAML formatters are off in `biome.json` (`markdown.formatter.enabled` / `yaml.formatter.enabled` = `false`); the docs are hand-written (house-style tables, historical plan files) and the YAML is hand-tuned. Turn them on only in a PR that reformats every document it touches.
 - Conventional commits; no co-author trailers.
 
 ## TypeScript
@@ -124,7 +125,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 - **A release bump never regenerates `bun.lock`.** Bump the three version lines (both package `version` fields + aitm's exact `@developerz.ai/ai-claude-compat` pin), run `bun install`, open the PR. The lockfile is not part of a release.
 - `bun.lock`'s workspace `version` entries lag the published versions **on purpose**. Never "fix" that with a matching guard: `bun install` rewrites the lockfile only when *resolution* changes, and a `version` field moving is not one — an equality check is red after every release by construction, and the only way to green it is to regenerate, which is the thing the rule exists to prevent.
 - **Regenerating is a dependency upgrade, not a metadata fix.** Deleting `bun.lock` and reinstalling resolves every unpinned range to current (measured on #327: 71 packages moved — `ai` 6.0.182 → 6.0.240, `@ai-sdk/provider` 3.0.10 → 3.0.14, `@biomejs/biome` 2.4.15 → 2.5.6, `@types/node`, `tsx`, the whole `@sentry/*`/`@esbuild/*` sets — while the workspace `version` lines were 3 of 160 changed lines). Landing that inside a release PR would ship an unreviewed SDK upgrade under a title about something else.
-- So: resync the lockfile in **its own PR**, whose subject is the upgrade. Enumerate the moved packages in the body and verify `typecheck`, `typecheck:tests`, `lint`, and `node --test` against the upgraded tree — `bun install --frozen-lockfile` passing proves nothing here, since it does not gate on the workspace `version` field. Bump `biome.json`'s `$schema` in the same PR when biome moves (`bunx @biomejs/biome migrate --write`).
+- So: resync the lockfile in **its own PR**, whose subject is the upgrade. Enumerate the moved packages in the body and verify `typecheck`, `typecheck:tests`, `lint`, and `node --test` against the upgraded tree — `bun install --frozen-lockfile` passing proves nothing here, since it does not gate on the workspace `version` field. Bump `biome.json`'s `$schema` in the same PR when biome moves (`bunx @biomejs/biome migrate --write`), and keep Biome's Markdown/YAML formatters off (House style).
 
 ## Tolerated check failures
 - `github/check-tolerance.ts` holds a whitelist of `{ check, description, reason, match }` rules; a failure matching one is treated as *skipped*, so `waitForChecks` neither reports it as failed nor loops on it. Built in: **CodeRabbit quota failures** — `match: 'contains'` on `rate limit` and `limit reached`. A real verdict (`1 issue found`, `Review failed`) contains neither and still fails CI, as does the same message from any other check.

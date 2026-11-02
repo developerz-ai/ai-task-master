@@ -28,11 +28,11 @@ export type StyleDistillerInit = {
   // Usage sink for the style-digest call, recorded under the planner role (#114). It runs on the
   // planner's model. Unset → no accounting.
   onUsage?: OnUsage;
-  // Progress sink fired ONCE per distill call, right before the LLM call (slice 01b): names the
-  // signals feeding the digest so a silent pre-planning pause reads as `coding style: distilling
-  // from <labels>` instead of nothing. Never per-signal — a repo with many config files must not
-  // spam the stream. Provider-agnostic module: an injected callback, not a direct console import,
-  // keeps this module decoupled from any particular output format.
+  // Progress sink fired ONCE per distill call, right before the LLM call (slice 01b): names every
+  // layer and file involved — style layers (user/project/nested; nested deferred/on-touch, NOT in
+  // the digest) and config/sample files — by repo-relative path, not `Signal.label`, so a silent
+  // pre-planning pause reads as `coding style: distilling from <entries>`. Never per-signal — many
+  // config files must not spam the stream. An injected callback keeps this module provider-agnostic.
   onProgress?: (message: string) => void;
 };
 
@@ -170,17 +170,21 @@ const EXPLORATION = [
   `capped at ${STYLE_EXPLORATION_MAX_STEPS} model steps in total.`,
 ].join('\n');
 
-type Signal = { label: string; body: string };
+// `progress` names the repo-relative label(s) this signal contributes to the coarse
+// `distilling from …` line — the layer for a style file, the file name for a config file, the
+// sampled paths for source/test samples. It never reaches the prompt: the rendered signal block is
+// byte-identical to the pre-progress prompt, so the digest and its cache are unaffected.
+type Signal = { label: string; body: string; progress: string[] };
 
-// Fire the coarse `distilling from <labels>` line once per distill call. Swallows a throwing sink —
-// observability must never break the distill pass.
+// Fire the coarse `distilling from <entries>` line once per distill call, flattening each signal's
+// `progress` list into it. Swallows a throwing sink — observability must never break the pass.
 function reportProgress(
   onProgress: StyleDistillerInit['onProgress'],
   signals: readonly Signal[],
 ): void {
   if (!onProgress) return;
   try {
-    onProgress(`coding style: distilling from ${signals.map((s) => s.label).join(', ')}`);
+    onProgress(`coding style: distilling from ${signals.flatMap((s) => s.progress).join(', ')}`);
   } catch {
     // observability must never break distillation
   }
@@ -246,16 +250,35 @@ async function gatherSignals(input: DistillInput): Promise<Signal[]> {
     signals.push({
       label: `Project style file (${config.flavor}: ${config.path})`,
       body: config.contents,
+      progress:
+        config.sources.length > 0
+          ? config.sources.map(
+              (source) =>
+                `${source.scope} style (${relative(repoRoot, source.path)}${source.scope === 'nested' ? '; deferred/on-touch' : ''})`,
+            )
+          : [
+              config.path
+                ? `project style (${relative(repoRoot, config.path)})`
+                : 'default style baseline (no file)',
+            ],
     });
   }
 
   const contributing = await readIfPresent(join(repoRoot, 'CONTRIBUTING.md'));
-  if (contributing !== null) signals.push({ label: 'CONTRIBUTING.md', body: contributing });
+  if (contributing !== null) {
+    signals.push({ label: 'CONTRIBUTING.md', body: contributing, progress: ['CONTRIBUTING.md'] });
+  }
 
   for (const block of await gatherConfigFiles(repoRoot)) signals.push(block);
 
   const scripts = await readPackageScripts(repoRoot);
-  if (scripts !== null) signals.push({ label: 'package.json scripts', body: scripts });
+  if (scripts !== null) {
+    signals.push({
+      label: 'package.json scripts',
+      body: scripts,
+      progress: ['package.json scripts'],
+    });
+  }
 
   for (const block of await gatherSourceSamples(repoRoot)) signals.push(block);
 
@@ -263,8 +286,7 @@ async function gatherSignals(input: DistillInput): Promise<Signal[]> {
 }
 
 // Real code from the repo — the half the config files cannot show. Sources and tests are separate
-// signals so the digest can speak to each, and each is ONE signal holding several excerpts so the
-// progress line stays a line instead of a file listing.
+// signals so the digest can speak to each. Display metadata lists only successfully read excerpts.
 async function gatherSourceSamples(repoRoot: string): Promise<Signal[]> {
   const files = await walkSourceFiles(repoRoot);
   if (files.length === 0) return [];
@@ -279,9 +301,21 @@ async function gatherSourceSamples(repoRoot: string): Promise<Signal[]> {
   const sources = plausible.filter((f) => !isTestPath(relative(repoRoot, f.path)));
   const signals: Signal[] = [];
   const source = await renderSamples(repoRoot, pickSamples(sources, SOURCE_SAMPLE_LIMIT));
-  if (source !== null) signals.push({ label: 'source samples', body: source });
+  if (source !== null) {
+    signals.push({
+      label: 'source samples',
+      body: source.body,
+      progress: [`source samples (${source.paths.join(', ')})`],
+    });
+  }
   const test = await renderSamples(repoRoot, pickSamples(tests, TEST_SAMPLE_LIMIT));
-  if (test !== null) signals.push({ label: 'test samples', body: test });
+  if (test !== null) {
+    signals.push({
+      label: 'test samples',
+      body: test.body,
+      progress: [`test samples (${test.paths.join(', ')})`],
+    });
+  }
   return signals;
 }
 
@@ -299,14 +333,17 @@ function pickSamples(
 async function renderSamples(
   repoRoot: string,
   picked: ReadonlyArray<{ path: string }>,
-): Promise<string | null> {
+): Promise<{ body: string; paths: string[] } | null> {
   const blocks: string[] = [];
+  const paths: string[] = [];
   for (const file of picked) {
     const body = await readIfPresent(file.path);
     if (body === null || body.trim() === '') continue;
-    blocks.push(`--- ${relative(repoRoot, file.path)} ---\n${body.slice(0, SAMPLE_CHAR_LIMIT)}`);
+    const path = relative(repoRoot, file.path);
+    paths.push(path);
+    blocks.push(`--- ${path} ---\n${body.slice(0, SAMPLE_CHAR_LIMIT)}`);
   }
-  return blocks.length === 0 ? null : blocks.join('\n\n');
+  return blocks.length === 0 ? null : { body: blocks.join('\n\n'), paths };
 }
 
 // A path is a test by the conventions every ecosystem actually uses: a `test`/`spec` directory, a
@@ -359,7 +396,7 @@ async function gatherConfigFiles(repoRoot: string): Promise<Signal[]> {
   const blocks: Signal[] = [];
   for (const name of picked) {
     const body = await readIfPresent(join(repoRoot, name));
-    if (body !== null) blocks.push({ label: name, body });
+    if (body !== null) blocks.push({ label: name, body, progress: [name] });
   }
   return blocks;
 }

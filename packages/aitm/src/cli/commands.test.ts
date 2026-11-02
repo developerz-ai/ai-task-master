@@ -1072,6 +1072,39 @@ test('runStart: resolveStyle failure never blocks → falls back to raw agent-co
   }
 });
 
+test('runStart: the run abort signal reaches the style-digest call', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    const controller = new AbortController();
+    let seenSignal: AbortSignal | undefined;
+    const result = await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        signal: controller.signal,
+        resolveStyle: async (input) => {
+          seenSignal = input.signal;
+          return STUB_DIGEST;
+        },
+        runLoop: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(
+      seenSignal,
+      controller.signal,
+      'the style digest is cancellable by the same handle as the rest of the run',
+    );
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 // ---- runMergePr -------------------------------------------------------------
 
 type SeedPatch = {
@@ -1180,6 +1213,40 @@ test('runMergePr: happy path with --pr override', async () => {
     assert.equal(captured[0]?.pr, 99);
     assert.equal(captured[0]?.resume, true);
     assert.equal(captured[0]?.styleDigest, STUB_DIGEST, 'resolved digest threaded to merge flow');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: the run abort signal reaches the style-digest call', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    const controller = new AbortController();
+    let seenSignal: AbortSignal | undefined;
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 99 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        signal: controller.signal,
+        resolveStyle: async (input) => {
+          seenSignal = input.signal;
+          return STUB_DIGEST;
+        },
+        runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
+      },
+    );
+    assert.equal(result.code, 0, result.message);
+    assert.equal(
+      seenSignal,
+      controller.signal,
+      'the take-over flow digests its style under the same abort handle',
+    );
   } finally {
     await repo.cleanup();
     await home.cleanup();

@@ -4,11 +4,12 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { agentConfig } from '../testing/domain-fixtures.ts';
-import { textResult } from '../testing/model-fixtures.ts';
+import { emptyUsage, type GenerateResult, textResult } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
 import { composeStyleGuide, isTestPath, StyleDistiller } from './coding-style.ts';
+import { STYLE_EXPLORATION_MAX_STEPS } from './style-exploration.ts';
 
 function claudeConfig(path: string, contents: string): AgentConfig {
   return agentConfig({ flavor: 'claude', path, contents });
@@ -39,6 +40,17 @@ function throwingModel(): MockLanguageModelV3 {
       throw new Error('model unavailable');
     },
   });
+}
+
+// A tool-call turn: the model asks for a file instead of answering. `input` is a JSON string, per
+// the provider spec.
+function toolCallResult(toolCallId: string, toolName: string, input: unknown): GenerateResult {
+  return {
+    content: [{ type: 'tool-call', toolCallId, toolName, input: JSON.stringify(input) }],
+    finishReason: { unified: 'tool-calls', raw: undefined },
+    usage: emptyUsage(),
+    warnings: [],
+  };
 }
 
 test('StyleDistiller is constructible', () => {
@@ -339,6 +351,120 @@ test('StyleDistiller: an implausibly large file is never sampled', async () => {
 
     assert.match(prompt(), /HANDWRITTEN_MARKER/, 'real hand-written source is sampled');
     assert.doesNotMatch(prompt(), /GENERATED_MARKER/, 'the oversized file is skipped entirely');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: the model explores docs/STYLE.md and its text reaches the next turn', async () => {
+  // The signal bundle cannot see a style doc outside its file list, so the digest used to be
+  // empty for such a repo. The exploration tool is what makes the convention discoverable.
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    await mkdir(join(repo.path, 'docs'), { recursive: true });
+    await writeFile(
+      join(repo.path, 'docs', 'STYLE.md'),
+      'STYLE_FILE_MARKER: indent with two spaces\n',
+    );
+    const turns: string[] = [];
+    const offered: string[] = [];
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        calls += 1;
+        turns.push(JSON.stringify(options.prompt));
+        offered.push(...(options.tools ?? []).map((t) => t.name));
+        if (calls === 1) {
+          return toolCallResult('read-1', 'readRepoFile', { path: 'docs/STYLE.md' });
+        }
+        return textResult('# Coding Style\n\n- two spaces\nCODING_STYLE_COMPLETE');
+      },
+    });
+    const config = claudeConfig(join(repo.path, 'CLAUDE.md'), '# x\n');
+    const digest = await new StyleDistiller({ model }).distill({ config, repoRoot: repo.path });
+
+    assert.equal(
+      digest,
+      '# Coding Style\n\n- two spaces',
+      "the digest is the model's cleaned output",
+    );
+    assert.equal(calls, 2, 'the model explored once, then answered');
+    assert.deepEqual([...new Set(offered)], ['readRepoFile'], 'the only tool offered reads a file');
+    assert.match(turns[1] ?? '', /STYLE_FILE_MARKER/, "the explored file's text reached the model");
+    assert.doesNotMatch(
+      turns[0] ?? '',
+      /STYLE_FILE_MARKER/,
+      'the explored file never entered the first prompt',
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: an always-exploring model is stopped at the exploration step cap', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls += 1;
+        return toolCallResult(`read-${calls}`, 'readRepoFile', { path: 'docs/STYLE.md' });
+      },
+    });
+    const config = claudeConfig(join(repo.path, 'CLAUDE.md'), '# x\n');
+    await new StyleDistiller({ model }).distill({ config, repoRoot: repo.path });
+
+    assert.ok(calls > 1, 'the exploration loop really ran');
+    assert.equal(calls, STYLE_EXPLORATION_MAX_STEPS, 'the model was stopped at the step cap');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: the first prompt keeps the deterministic signal section byte-identical', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    const stylePath = join(repo.path, 'CLAUDE.md');
+    const config = claudeConfig(stylePath, '# x\n');
+    const { model, prompt } = modelReturning('# Coding Style\n\n- ok\nCODING_STYLE_COMPLETE');
+    await new StyleDistiller({ model }).distill({ config, repoRoot: repo.path });
+    const sent = prompt();
+
+    const expectedSignals = [
+      '## Raw style signals',
+      `----- BEGIN Project style file (claude: ${stylePath}) -----`,
+      '# x',
+      // The blank line is the style file's own trailing newline — the body is embedded verbatim.
+      '',
+      `----- END Project style file (claude: ${stylePath}) -----`,
+    ].join('\n');
+    assert.ok(
+      sent.includes(expectedSignals),
+      'the signal section is byte-identical to the pre-exploration prompt',
+    );
+    assert.ok(
+      sent.indexOf('readRepoFile') > sent.indexOf(expectedSignals),
+      'the exploration instruction is a constant tail after the signal block',
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: an aborted signal degrades to an empty digest (never throws)', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    const controller = new AbortController();
+    controller.abort();
+    const config = claudeConfig(join(repo.path, 'CLAUDE.md'), '# raw fallback\n- rule\n');
+    const digest = await new StyleDistiller({ model: stallingModel() }).distill({
+      config,
+      repoRoot: repo.path,
+      signal: controller.signal,
+    });
+
+    assert.equal(digest, '');
+    assert.match(composeStyleGuide(config, digest), /# raw fallback/);
   } finally {
     await repo.cleanup();
   }

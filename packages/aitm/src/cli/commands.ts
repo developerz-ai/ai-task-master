@@ -74,6 +74,9 @@ export type ResolveStyleInput = {
   llmStepTimeoutMs: number;
   // Usage sink for the style-digest call, recorded under the planner role (#114). Unset → none.
   usage?: UsageTracker;
+  // The run's abort handle, threaded into the style-digest call so a cancelled run stops the
+  // distillation instead of waiting the model out. Unset → no cancellation.
+  signal?: AbortSignal;
 };
 
 // Inputs for the optional one-shot planning phase (issue #17). Mirrors the Planner's needs:
@@ -564,6 +567,7 @@ export async function runStart(
         state,
         llmStepTimeoutMs: resolved.llmStepTimeoutMs,
         usage,
+        ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
       });
     } catch {
       styleDigest = agentConfig.contents;
@@ -835,6 +839,7 @@ export async function runMergePr(
         agentConfig,
         state,
         llmStepTimeoutMs: resolved.llmStepTimeoutMs,
+        ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
       });
     } catch {
       styleDigest = agentConfig.contents;
@@ -1262,7 +1267,11 @@ async function defaultResolveStyle(input: ResolveStyleInput): Promise<string> {
       // silent gap — fired by StyleDistiller itself, once it knows what it actually gathered.
       onProgress: (message) => harnessProgress(`${message} with ${plannerModelId}`),
     });
-    digest = await distiller.distill({ config: agentConfig, repoRoot: cwd });
+    digest = await distiller.distill({
+      config: agentConfig,
+      repoRoot: cwd,
+      ...(input.signal !== undefined ? { signal: input.signal } : {}),
+    });
   } catch {
     harnessProgress('coding style: distillation unavailable — using the raw style file');
     return composeStyleGuide(agentConfig, '');

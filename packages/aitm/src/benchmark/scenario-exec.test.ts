@@ -110,7 +110,7 @@ function survivorPids(absTestPath: string): Promise<number[]> {
 function windowsSurvivorPids(absTestPath: string): Promise<number[]> {
   const needle = absTestPath.replace(/'/g, "''");
   const script =
-    `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ` +
+    `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and ` +
     `$_.CommandLine.Contains('${needle}') } | ForEach-Object { $_.ProcessId }`;
   return new Promise((resolve, reject) => {
     const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
@@ -142,6 +142,18 @@ function killSurvivors(pids: number[]): void {
     }
   }
 }
+
+test('scenario-exec: the Windows survivor scan excludes its own PowerShell process', {
+  skip: process.platform !== 'win32',
+  timeout: 30_000,
+}, async () => {
+  const dir = await makeCheckout(PASSING_TEST);
+  try {
+    assert.deepEqual(await windowsSurvivorPids(join(dir, 'slugify.test.ts')), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('scenario-exec: a correct produced test executes green (exit 0, output captured)', {
   timeout: 30_000,

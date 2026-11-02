@@ -4,7 +4,8 @@
 # weekly; developerz.ai reviews them, and whether they merge automatically follows
 # this repository's merge policy. Minor and patch updates arrive as one pull request
 # per ecosystem; a major update arrives on its own. Edit this file to change what is
-# updated or when, or delete it to stop.
+# updated or when, or delete it to stop. The 14-day cooldown lets a compromised release get
+# caught before it reaches us; security updates are unaffected.
 version: 2
 updates:
   - package-ecosystem: "bun"
@@ -13,6 +14,8 @@ updates:
       interval: "weekly"
       day: "tuesday"
       time: "23:00"
+    cooldown:
+      default-days: 14
     groups:
       bun-minor-and-patch:
         patterns: ["*"]
@@ -23,6 +26,8 @@ updates:
       interval: "weekly"
       day: "tuesday"
       time: "23:00"
+    cooldown:
+      default-days: 14
     groups:
       github-actions-minor-and-patch:
         patterns: ["*"]

@@ -38,6 +38,28 @@ export type ScenarioExecResult = {
 // the run, and enforced with SIGKILL by the executor — a hung test is killed, never waited out.
 export const TEST_EXEC_TIMEOUT_MS = 60_000;
 
+// The number of tests the runner reports as PASSED — the evidence that a produced test actually
+// EXECUTED. The runners disagree on both the stream and the shape: node:test's TAP reporter writes
+// `# pass 3` to stdout, its spec reporter (the default since node 22) writes `ℹ pass 1`, and bun
+// writes ` 1 pass` to STDERR. Both shapes are matched, in BOTH streams — a parser that read stdout
+// only (or matched 'passed' only) scored a successful grade-2 run as a failure. Each pattern is
+// anchored to a line start, so a produced test's own output cannot masquerade as a count.
+const PASS_COUNT_AFTER_WORD = /^[ \t]*[^ \t\n]*[ \t]*pass[ \t]+(\d+)/gim;
+const PASS_COUNT_BEFORE_WORD = /^[ \t]*(\d+)[ \t]+pass(?:ed)?\b/gim;
+
+// Zero means "no test executed" — a refusal, not a pass.
+export function countExecutedTests(stdout: string, stderr: string): number {
+  let most = 0;
+  for (const output of [stdout, stderr]) {
+    for (const pattern of [PASS_COUNT_AFTER_WORD, PASS_COUNT_BEFORE_WORD]) {
+      for (const match of output.matchAll(pattern)) {
+        most = Math.max(most, Number(match[1] ?? 0));
+      }
+    }
+  }
+  return most;
+}
+
 export type BenchScenario = {
   id: string;
   title: string;
@@ -140,17 +162,14 @@ const multiFileFeature: BenchScenario = {
     }
     // Exit 0 alone proves nothing: node:test and bun both exit 0 when every test was SKIPPED, so
     // `test('slugify', { skip: true }, …)` clears every static check and executes nothing. Require
-    // the runner's own executed-test evidence — node:test TAP prints `# pass N`, bun prints
-    // `N passed`/`N pass` — and treat zero as a refusal, not a pass.
-    const executed = [...exec.stdout.matchAll(/# pass (\d+)|\b(\d+) passed?\b/g)].reduce(
-      (max, m) => Math.max(max, Number(m[1] ?? m[2] ?? 0)),
-      0,
-    );
+    // the runner's own executed-test evidence — parsed from BOTH streams, because the runners
+    // disagree on where they print it (node: stdout, bun: stderr) — and treat zero as a refusal.
+    const executed = countExecutedTests(exec.stdout, exec.stderr);
     if (executed < 1) {
-      const stdoutTail = exec.stdout.length > 0 ? `\n${exec.stdout.slice(-2000)}` : '';
+      const tail = `${exec.stdout}${exec.stderr}`.slice(-2000);
       return {
         ok: false,
-        detail: `no test executed: exit 0 but stdout reports no passing test (was it skipped?)${stdoutTail}`,
+        detail: `no test executed: exit 0 but the runner reports no passing test (was it skipped?)${tail.length > 0 ? `\n${tail}` : ''}`,
       };
     }
     return {

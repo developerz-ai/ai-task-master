@@ -6,11 +6,12 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
-import { makeSandboxTestRunner } from './scenario-exec.ts';
+import { killProcessTree, makeSandboxTestRunner } from './scenario-exec.ts';
+import { scenarioById } from './scenarios.ts';
 
 const GOOD_MOD =
   'export function slugify(input: string): string {\n' +
@@ -37,9 +38,9 @@ const WRONG_EXPECTATION_TEST =
   '});\n';
 
 // Hung FOREVER: no self-exit, no rescue timer — only the budget kill can end it, so any process
-// the kill misses leaks, and the timeout test below catches exactly that by watching `ps`.
-// The pending promise alone does NOT hang: an unresolved promise keeps nothing alive, so on node 20
-// and 22 the produced file's event loop drains and the process EXITS on its own ("Promise
+// the kill misses leaks, and the timeout test below catches exactly that by watching the process
+// table. The pending promise alone does NOT hang: an unresolved promise keeps nothing alive, so on
+// node 20 and 22 the produced file's event loop drains and the process EXITS on its own ("Promise
 // resolution is still pending but the event loop has already resolved") — the run then ends before
 // the budget, which is not a timeout at all. The live interval is what holds the loop open on every
 // runtime, so the budget kill really is the only way out.
@@ -60,13 +61,28 @@ async function makeCheckout(testBody: string): Promise<string> {
   return dir;
 }
 
+// The grade-2 scenario's own fixture shape — src/slugify.ts + src/slugify.test.ts inside the
+// checkout — so the REAL runner's output can be fed to the REAL verifier.
+async function makeScenarioCheckout(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-scenario-exec-'));
+  await mkdir(join(dir, 'src'), { recursive: true });
+  await writeFile(join(dir, 'src', 'slugify.ts'), GOOD_MOD);
+  await writeFile(join(dir, 'src', 'slugify.test.ts'), PASSING_TEST);
+  return dir;
+}
+
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-// POSIX only: pids of live processes whose command line still names the produced test file. After
-// the budget kill NOTHING may remain — `node --test` executes the produced file in a child of the
-// spawned wrapper, so a kill that reaches only the wrapper strands that child (reparented, hung
-// forever) while the runner itself reports a tidy timeout.
-function survivorPids(): Promise<number[]> {
+// The pids of live processes whose command line names THIS fixture's absolute test path. The path
+// is unique per fixture (mkdtemp), so the scan can never reach another run's processes: a
+// machine-wide 'slugify.test.ts' substring matched every CONCURRENT fixture's worker, and the
+// cleanup below then SIGKILLed a process that had nothing to do with this test.
+//
+// POSIX only: `node --test` executes the produced file in a child of the spawned wrapper, so a kill
+// that reaches only the wrapper strands that child (reparented, hung forever) while the runner
+// itself reports a tidy timeout.
+function survivorPids(absTestPath: string): Promise<number[]> {
+  if (process.platform === 'win32') return windowsSurvivorPids(absTestPath);
   return new Promise((resolve, reject) => {
     const ps = spawn('ps', ['-eo', 'pid=,args=']);
     let out = '';
@@ -82,7 +98,31 @@ function survivorPids(): Promise<number[]> {
       resolve(
         out
           .split('\n')
-          .filter((line) => line.includes('slugify.test.ts'))
+          .filter((line) => line.includes(absTestPath))
+          .map((line) => Number.parseInt(line.trim(), 10))
+          .filter((pid) => Number.isInteger(pid)),
+      );
+    });
+  });
+}
+
+// Windows: the process table with command lines comes from CIM (wmic is gone from recent Windows).
+function windowsSurvivorPids(absTestPath: string): Promise<number[]> {
+  const needle = absTestPath.replace(/'/g, "''");
+  const script =
+    `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ` +
+    `$_.CommandLine.Contains('${needle}') } | ForEach-Object { $_.ProcessId }`;
+  return new Promise((resolve, reject) => {
+    const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+    let out = '';
+    ps.stdout?.on('data', (chunk: Buffer) => {
+      out += chunk.toString('utf8');
+    });
+    ps.once('error', reject);
+    ps.once('close', () => {
+      resolve(
+        out
+          .split('\n')
           .map((line) => Number.parseInt(line.trim(), 10))
           .filter((pid) => Number.isInteger(pid)),
       );
@@ -91,9 +131,16 @@ function survivorPids(): Promise<number[]> {
 }
 
 // Reap anything the budget kill missed so a red run cannot leak a forever-hung process onto the
-// machine; callers assert on the list they passed in.
+// machine. The list comes from the fixture-scoped scan above, so this can only ever touch THIS
+// fixture's processes.
 function killSurvivors(pids: number[]): void {
-  for (const pid of pids) process.kill(pid, 'SIGKILL');
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }
 }
 
 test('scenario-exec: a correct produced test executes green (exit 0, output captured)', {
@@ -130,9 +177,10 @@ test('scenario-exec: a wrong expectation exits non-zero with captured failure ou
 });
 
 test('scenario-exec: a hung test is SIGKILLed at the budget (timedOut, exitCode null)', {
-  timeout: 30_000,
+  timeout: 60_000,
 }, async () => {
   const dir = await makeCheckout(HANGING_TEST);
+  const absTestPath = join(dir, 'slugify.test.ts');
   try {
     // The fixture never returns on its own, so a broken kill path would hang the runner (and leak
     // its wrapper) forever: cap the wait, reap what leaked, and fail loudly instead.
@@ -145,28 +193,60 @@ test('scenario-exec: a hung test is SIGKILLed at the budget (timedOut, exitCode 
     ]);
     clearTimeout(bailTimer);
     if (result === null) {
-      killSurvivors(await survivorPids());
+      killSurvivors(await survivorPids(absTestPath));
       assert.fail('the runner never returned from a hung test — the budget kill is broken');
     }
     assert.equal(result.timedOut, true, 'the budget marks the run as timed out');
     assert.equal(result.exitCode, null, 'a killed run has no exit code');
-    if (process.platform !== 'win32') {
-      // A tidy timeout REPORT is not the contract — nothing may SURVIVE it. Watch ~3s: on node the
-      // produced test runs as a child of the killed wrapper, and only a kill that reached the whole
-      // process tree keeps that child from being reparented and hung forever.
-      let survivors: number[] = [];
-      for (let i = 0; i < 10 && survivors.length === 0; i++) {
-        await delay(300);
-        survivors = await survivorPids();
-      }
-      killSurvivors(survivors);
-      assert.deepEqual(
-        survivors,
-        [],
-        'no produced-test process may survive the budget kill (killing the wrapper alone strands its child)',
-      );
+    // A tidy timeout REPORT is not the contract — nothing may SURVIVE it. Watch a few seconds: on
+    // node the produced test runs as a child of the killed wrapper, and only a kill that reached the
+    // whole process tree keeps that child from being reparented and hung forever. On Windows the
+    // same holds for `node --test`'s worker, which taskkill /T reaches and a wrapper-only kill
+    // would strand.
+    let survivors: number[] = [];
+    for (let i = 0; i < 6 && survivors.length === 0; i++) {
+      await delay(300);
+      survivors = await survivorPids(absTestPath);
     }
+    killSurvivors(survivors);
+    assert.deepEqual(
+      survivors,
+      [],
+      'no produced-test process may survive the budget kill (killing the wrapper alone strands its child)',
+    );
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scenario-exec: the Windows budget kill takes the whole tree down (taskkill /T /F)', {
+  // On a real Windows host the hang test above drives the REAL taskkill; the fake here pins the
+  // COMMAND on the platform CI runs on (Linux), where a wrapper-only kill would be invisible.
+  skip: process.platform === 'win32' ? 'the real taskkill is exercised by the hang test' : false,
+  timeout: 30_000,
+}, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aitm-taskkill-'));
+  const binDir = join(dir, 'bin');
+  const argsFile = join(dir, 'taskkill-args.txt');
+  await mkdir(binDir, { recursive: true });
+  await writeFile(
+    join(binDir, 'taskkill'),
+    `#!/bin/sh\nprintf '%s' "$*" > '${argsFile}'\nexit 0\n`,
+  );
+  await chmod(join(binDir, 'taskkill'), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${binDir}${delimiter}${savedPath ?? ''}`;
+  try {
+    await killProcessTree(4242, 'win32');
+    const recorded = await readFile(argsFile, 'utf8');
+    assert.equal(
+      recorded,
+      '/pid 4242 /T /F',
+      'the Windows kill must take the tree down (taskkill /T), not just the wrapper',
+    );
+  } finally {
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -187,6 +267,40 @@ test('scenario-exec: the runner never rejects, even across repeated calls', {
     assert.ok(
       missing.exitCode === null || missing.exitCode !== 0,
       'a missing produced test can never read as a pass',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The regression this pins (#368): the verdict must read the runner's ACTUAL summary. node:test's
+// TAP reporter prints `# pass 2` to stdout, its spec reporter (the default since node 22) prints
+// `ℹ pass 2`, and bun prints ` 2 pass` — on STDERR. A parser that read stdout only (or matched
+// 'passed' only) scored a successful grade-2 run as a failure.
+test('scenario-exec: the real runner output drives the real verifier to a pass (#368)', {
+  timeout: 60_000,
+}, async () => {
+  const dir = await makeScenarioCheckout();
+  try {
+    const exec = await makeSandboxTestRunner(dir)('src/slugify.test.ts', 30_000);
+    assert.equal(exec.error, undefined, `the produced test ran: ${exec.error ?? 'no error'}`);
+    assert.equal(exec.exitCode, 0, 'the produced test passed');
+    const scenario = scenarioById('multi-file-feature');
+    assert.ok(scenario);
+    const result = await scenario.verify({
+      slug: 'acme/sandbox',
+      defaultBranch: 'main',
+      readFile: async (path) => {
+        if (path === 'src/slugify.ts') return GOOD_MOD;
+        if (path === 'src/slugify.test.ts') return PASSING_TEST;
+        return null;
+      },
+      runTest: async () => exec,
+    });
+    assert.equal(
+      result.ok,
+      true,
+      `the verdict must follow the runner's own summary: ${result.detail}`,
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

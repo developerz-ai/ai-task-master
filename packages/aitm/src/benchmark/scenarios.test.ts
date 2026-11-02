@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   BENCH_SCENARIOS,
+  countExecutedTests,
   type ScenarioExecResult,
   type ScenarioVerify,
   scenarioById,
@@ -311,4 +312,63 @@ test('multi-file-feature verify: a static failure short-circuits BEFORE runTest 
   );
   assert.equal(result.ok, false, 'the assertion-free stub still fails statically');
   assert.equal(calls, 0, 'the executor is never reached when a static check fails');
+});
+
+// ---- the executed-test count: every runner's own summary, on its own stream (#368) ----------
+
+test('countExecutedTests: reads each runner summary shape, on the stream it prints it', () => {
+  // node:test's TAP reporter (stdout).
+  assert.equal(countExecutedTests('# tests 2\n# pass 2\n# fail 0\n', ''), 2);
+  // node:test's spec reporter — the default since node 22 (stdout).
+  assert.equal(countExecutedTests('✔ slugify (1.1ms)\nℹ tests 1\nℹ pass 1\nℹ fail 0\n', ''), 1);
+  // bun prints the count BEFORE the word, on STDERR; stdout carries only the version banner.
+  assert.equal(countExecutedTests('bun test v1.4.4\n', ' 1 pass\n 0 fail\nRan 1 test.\n'), 1);
+  // jest-style `N passed` (some runners word it that way).
+  assert.equal(countExecutedTests('1 passed, 0 failed\n', ''), 1);
+});
+
+test('countExecutedTests: zero when nothing executed — a skip is not a pass', () => {
+  assert.equal(countExecutedTests('', ''), 0);
+  // node TAP, every test skipped.
+  assert.equal(countExecutedTests('# tests 1\n# pass 0\n# fail 0\n# skipped 1\n', ''), 0);
+  // bun, every test skipped.
+  assert.equal(countExecutedTests('bun test v1.4.4\n', ' 0 pass\n 0 fail\n 1 skip\n'), 0);
+});
+
+test("countExecutedTests: a produced test's own output cannot masquerade as a count", () => {
+  // "1 password" is not a pass count — the pattern must not read a number before a word that only
+  // starts with "pass".
+  assert.equal(countExecutedTests('✔ 1 password check [1ms]\nℹ tests 1\nℹ pass 0\n', ''), 0);
+  assert.equal(countExecutedTests('bun test v1.4.4\n', '(pass) slugify [2.44ms]\n'), 0);
+});
+
+test('multi-file-feature verify: with runTest, a BUN-shaped summary on stderr passes (#368)', async () => {
+  // The regression: bun prints ` N pass` on STDERR, so a stdout-only parser scored a successful
+  // grade-2 run as a failure.
+  const s = scenarioById('multi-file-feature');
+  assert.ok(s);
+  const result = await s.verify(
+    verifyCtx(execFiles, async () => ({
+      exitCode: 0,
+      stdout: 'bun test v1.4.4 (38afee6c8)\n',
+      stderr: 'slugify.test.ts:\n(pass) slugify [2.44ms]\n\n 2 pass\n 0 fail\n',
+      timedOut: false,
+    })),
+  );
+  assert.equal(result.ok, true, `a passing bun run must pass: ${result.detail}`);
+});
+
+test('multi-file-feature verify: with runTest, a BUN-shaped all-skipped run FAILS (#368)', async () => {
+  const s = scenarioById('multi-file-feature');
+  assert.ok(s);
+  const result = await s.verify(
+    verifyCtx(execFiles, async () => ({
+      exitCode: 0,
+      stdout: 'bun test v1.4.4 (38afee6c8)\n',
+      stderr: 'slugify.test.ts:\n(skip) slugify [0.10ms]\n\n 0 pass\n 0 fail\n 1 skip\n',
+      timedOut: false,
+    })),
+  );
+  assert.equal(result.ok, false, 'exit 0 with every test skipped must not pass');
+  assert.match(result.detail, /no test executed/);
 });

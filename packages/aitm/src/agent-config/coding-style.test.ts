@@ -7,7 +7,11 @@ import { agentConfig } from '../testing/domain-fixtures.ts';
 import { emptyUsage, type GenerateResult, textResult } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
-import type { AgentConfig } from './agent-config-detector.ts';
+import {
+  type AgentConfig,
+  AgentConfigDetector,
+  defaultAgentConfig,
+} from './agent-config-detector.ts';
 import { composeStyleGuide, isTestPath, StyleDistiller } from './coding-style.ts';
 import { STYLE_EXPLORATION_MAX_STEPS } from './style-exploration.ts';
 
@@ -262,6 +266,125 @@ test('StyleDistiller: onProgress fires once, naming every gathered signal (slice
     assert.match(messages[0] ?? '', /^coding style: distilling from /);
     assert.match(messages[0] ?? '', /CLAUDE\.md/);
     assert.match(messages[0] ?? '', /CONTRIBUTING\.md/);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: progress names root and custom project picks without changing prompt bytes', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  try {
+    await mkdir(join(repo.path, 'docs'));
+    await writeFile(join(repo.path, 'docs', 'style.md'), '# Custom rules\n');
+    for (const stylePath of [undefined, 'docs/style.md']) {
+      const config = await new AgentConfigDetector(repo.path).detect(
+        stylePath === undefined ? {} : { stylePath },
+      );
+      assert.ok(config);
+      const messages: string[] = [];
+      const withProgress = modelReturning('# Coding Style\n\n- ok\nCODING_STYLE_COMPLETE');
+      const withoutProgress = modelReturning('# Coding Style\n\n- ok\nCODING_STYLE_COMPLETE');
+      const input = { config, repoRoot: repo.path };
+      const digest = await new StyleDistiller({
+        model: withProgress.model,
+        onProgress: (message) => messages.push(message),
+      }).distill(input);
+      assert.equal(
+        digest,
+        await new StyleDistiller({ model: withoutProgress.model }).distill(input),
+      );
+      assert.equal(withProgress.prompt(), withoutProgress.prompt());
+      assert.deepEqual(messages, [
+        `coding style: distilling from project style (${stylePath ?? 'CLAUDE.md'})`,
+      ]);
+      const label = `Project style file (${config.flavor}: ${config.path})`;
+      assert.equal(
+        withProgress.prompt().split('## Raw style signals\n')[1]?.split('\n\n## Output format')[0],
+        `----- BEGIN ${label} -----\n${config.contents}\n----- END ${label} -----`,
+      );
+      assert.equal(digest, '# Coding Style\n\n- ok');
+    }
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: ordered layers include relative user paths and deferred nested rules only in progress', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const root = join(repo.path, 'project');
+    const userConfigDir = join(repo.path, 'user');
+    await mkdir(join(root, 'lib', 'deep'), { recursive: true });
+    await mkdir(userConfigDir);
+    await writeFile(join(userConfigDir, 'CLAUDE.md'), 'USER_RULE');
+    await writeFile(join(root, 'AGENTS.md'), 'PROJECT_RULE');
+    await writeFile(join(root, 'lib', 'CLAUDE.md'), 'NESTED_RULE');
+    await writeFile(join(root, 'lib', 'deep', 'AGENTS.md'), 'DEEP_RULE');
+    const config = await new AgentConfigDetector(root).detect({ userConfigDir });
+    assert.ok(config);
+    const { model, prompt } = modelReturning('# Coding Style\n\n- ok\nCODING_STYLE_COMPLETE');
+    const messages: string[] = [];
+    const digest = await new StyleDistiller({
+      model,
+      onProgress: (message) => messages.push(message),
+    }).distill({ config, repoRoot: root });
+    assert.deepEqual(messages, [
+      'coding style: distilling from user style (../user/CLAUDE.md), project style (AGENTS.md), nested style (lib/CLAUDE.md; deferred/on-touch), nested style (lib/deep/AGENTS.md; deferred/on-touch)',
+    ]);
+    assert.match(prompt(), /USER_RULE/);
+    assert.match(prompt(), /PROJECT_RULE/);
+    assert.doesNotMatch(prompt(), /NESTED_RULE|DEEP_RULE|deferred\/on-touch/);
+    assert.equal(digest, '# Coding Style\n\n- ok');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: default baseline progress has no fictitious file', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const { model, prompt } = modelReturning('# Coding Style\n\n- ok');
+    const messages: string[] = [];
+    await new StyleDistiller({ model, onProgress: (message) => messages.push(message) }).distill({
+      config: defaultAgentConfig(),
+      repoRoot: repo.path,
+    });
+    assert.deepEqual(messages, ['coding style: distilling from default style baseline (no file)']);
+    assert.match(prompt(), /BEGIN Project style file \(custom: \)/);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('StyleDistiller: progress lists only gathered configs, scripts and selected nonempty samples in order', async () => {
+  const repo = await makeTempRepo();
+  try {
+    await mkdir(join(repo.path, 'src'));
+    await mkdir(join(repo.path, 'tests'));
+    await mkdir(join(repo.path, 'node_modules'));
+    await mkdir(join(repo.path, 'tsconfig.unreadable.json'));
+    await writeFile(join(repo.path, 'CONTRIBUTING.md'), '# Contributing');
+    await writeFile(join(repo.path, 'tsconfig.json'), '{}');
+    await writeFile(join(repo.path, 'biome.json'), '{}');
+    await writeFile(join(repo.path, 'package.json'), '{"scripts":{"test":"node --test"}}');
+    await writeFile(join(repo.path, 'src', 'a.ts'), 'export const a = 1;');
+    await writeFile(join(repo.path, 'src', 'b.ts'), 'export const b = 2;');
+    await writeFile(join(repo.path, 'src', 'blank.ts'), ' '.repeat(100));
+    await writeFile(join(repo.path, 'src', 'generated.ts'), 'x'.repeat(200_001));
+    await writeFile(join(repo.path, 'node_modules', 'vendor.ts'), 'VENDOR');
+    await writeFile(join(repo.path, 'tests', 'app.test.ts'), 'test("app", () => {});');
+    const { model, prompt } = modelReturning('# Coding Style\n\n- ok');
+    const messages: string[] = [];
+    await new StyleDistiller({ model, onProgress: (message) => messages.push(message) }).distill({
+      config: null,
+      repoRoot: repo.path,
+    });
+    assert.deepEqual(messages, [
+      'coding style: distilling from CONTRIBUTING.md, biome.json, tsconfig.json, package.json scripts, source samples (src/a.ts, src/b.ts), test samples (tests/app.test.ts)',
+    ]);
+    assert.doesNotMatch(prompt(), /blank\.ts|generated\.ts|vendor\.ts|tsconfig\.unreadable/);
+    assert.match(prompt(), /--- src\/a\.ts ---\nexport const a = 1;/);
+    assert.match(prompt(), /--- tests\/app\.test\.ts ---\ntest\("app", \(\) => {}\);/);
   } finally {
     await repo.cleanup();
   }

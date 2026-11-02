@@ -10,7 +10,12 @@
 // broken MCP server should not block the whole run. Every stdio server's child pid is handed to
 // StdioProcessRegistry, which outlives close() as the guarantee that none of them zombie.
 
-import { experimental_createMCPClient, type MCPClient, type MCPClientConfig } from '@ai-sdk/mcp';
+import {
+  type Experimental_ManagedMCPClient,
+  experimental_createMCPClient,
+  type MCPClient,
+  type MCPClientConfig,
+} from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { ToolSet } from 'ai';
 import { DEFAULT_MCP_DEFER_TOOLS_OVER } from '../config/defaults.ts';
@@ -22,7 +27,12 @@ import { StdioProcessRegistry } from './stdio-process-registry.ts';
 
 export type TransportKind = 'stdio' | 'http' | 'sse';
 
-export type CreateMcpClient = (config: MCPClientConfig) => Promise<MCPClient>;
+// The SDK's client factory is overloaded: an events-managed variant and the plain client. This
+// manager never asks for managed events, but the factory's widest overload types its result as the
+// union — so the seam, and every client it hands back, carries that union.
+export type McpClientLike = MCPClient | Experimental_ManagedMCPClient;
+
+export type CreateMcpClient = (config: MCPClientConfig) => Promise<McpClientLike>;
 
 // One server's connect — createClient plus its first tools() listing — is bounded by this deadline:
 // a stdio server that spawns but never completes the MCP handshake (createClient resolves, tools()
@@ -68,7 +78,7 @@ export type McpClientInit = {
 type ConnectedServer = {
   name: string;
   transport: TransportKind;
-  client: MCPClient;
+  client: McpClientLike;
   tools: ToolSet;
 };
 
@@ -184,7 +194,7 @@ export class McpClientManager {
     // its tools() call wedged, and the finally snapshots the spawned child's pid. buildClientConfig is
     // inside the try so a throwing transport constructor is skipped like any other per-server failure
     // rather than rejecting the whole batch.
-    let client: MCPClient | undefined;
+    let client: McpClientLike | undefined;
     let config: MCPClientConfig | undefined;
     try {
       const transport = transportKind(server);
@@ -196,7 +206,7 @@ export class McpClientManager {
       // before its tools() call wedged; a createClient that never resolves leaves it undefined — the
       // child pid registered in `finally` is the reap guarantee there.
       const connected = await withDeadline(
-        (async (): Promise<{ client: MCPClient; tools: ToolSet }> => {
+        (async (): Promise<{ client: McpClientLike; tools: ToolSet }> => {
           const c = await this.createClient(cfg);
           client = c;
           const tools = (await c.tools()) as ToolSet;

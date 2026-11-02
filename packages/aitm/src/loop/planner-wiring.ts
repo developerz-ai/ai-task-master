@@ -364,7 +364,7 @@ export async function defaultPlanGroups(
   // Streaming (slice 07): when on, live text/tool lines print via session.onStream below, so the
   // step-finish renderer is told to skip them (textAndTools: false) — it still renders reasoning,
   // which has no live equivalent.
-  const session = buildSubagentSession<PlannerTools>({
+  const session = buildSubagentSession({
     role: 'planner',
     model: shortModelName(plannerModelId),
     phase: 'planning',
@@ -405,7 +405,7 @@ export async function defaultPlanGroups(
     // No compaction step on this role, so activation is the whole prepareStep when it applies.
     ...(plannerMount.activated === null
       ? {}
-      : { prepareStep: deferredPrepareStep<PlannerTools>(undefined, plannerMount, plannerTools) }),
+      : { prepareStep: deferredPrepareStep(undefined, plannerMount, plannerTools) }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(plannerUsage ? { onUsage: plannerUsage } : {}),
     onStepFinish: session.onStepFinish,
@@ -501,7 +501,7 @@ export async function defaultAssessGoal(
     ...(assessorMount.activated === null
       ? {}
       : {
-          prepareStep: deferredPrepareStep<PlannerTools>(undefined, assessorMount, assessorTools),
+          prepareStep: deferredPrepareStep(undefined, assessorMount, assessorTools),
         }),
     timeout: { stepMs: input.resolved.llmStepTimeoutMs },
     ...(usage ? { onUsage: usage } : {}),

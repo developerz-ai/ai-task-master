@@ -75,7 +75,7 @@ function makeTools(
 ): { tools: ReviewerTools; calls: ToolCalls } {
   const calls: ToolCalls = { reads: [], writes: [], bashes: [], githubs: [] };
   const tools: ReviewerTools = reviewerTools({
-    readFile: tool<ReadFileInput, ReadFileOutput>({
+    readFile: tool<ReadFileInput, ReadFileOutput, Record<string, unknown>>({
       description: 'read a file from the checkout',
       inputSchema: z.object({ path: z.string() }),
       execute: async (input) => {
@@ -83,7 +83,7 @@ function makeTools(
         return { content: '' };
       },
     }),
-    writeFile: tool<WriteFileInput, WriteFileOutput>({
+    writeFile: tool<WriteFileInput, WriteFileOutput, Record<string, unknown>>({
       description: 'write a file in the checkout',
       inputSchema: z.object({ path: z.string(), content: z.string() }),
       execute: async (input) => {
@@ -91,7 +91,7 @@ function makeTools(
         return { ok: true };
       },
     }),
-    bash: tool<BashInput, BashOutput>({
+    bash: tool<BashInput, BashOutput, Record<string, unknown>>({
       description: 'run a bash command in the checkout',
       inputSchema: z.object({
         command: z.string(),
@@ -109,7 +109,7 @@ function makeTools(
         };
       },
     }),
-    github: tool<GithubToolInput, GithubToolOutput>({
+    github: tool<GithubToolInput, GithubToolOutput, Record<string, unknown>>({
       description: 'reply to or resolve a PR review thread',
       inputSchema: z.discriminatedUnion('action', [
         z.object({

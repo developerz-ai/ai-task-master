@@ -8,8 +8,12 @@
 // SRP: this module owns the assessment agent and its prompt. Planning from `remaining` is the
 // Planner's job (planner.ts); looping the waves is the adapter's (run-loop-adapter.ts).
 
-import { createSubagent, runWithSchemaRetry } from '@developerz.ai/ai-claude-compat';
-import { type ToolLoopAgent, tool } from 'ai';
+import {
+  createSubagent,
+  runWithSchemaRetry,
+  type SubagentAgent,
+} from '@developerz.ai/ai-claude-compat';
+import { tool } from 'ai';
 import { z } from 'zod';
 import { AGENT_STEP_BACKSTOP, forwardInit, type SubagentInit } from './factory.ts';
 import type { PlannerTools } from './planner.ts';
@@ -28,7 +32,7 @@ export const GoalAssessmentSchema = z.object({
 });
 export type GoalAssessment = z.infer<typeof GoalAssessmentSchema>;
 
-export type GoalAssessorAgent = ToolLoopAgent<never, PlannerTools>;
+export type GoalAssessorAgent = SubagentAgent;
 
 // The assessor reads the repo but never writes it, so it takes the Planner's read-only tool surface.
 export type GoalAssessorInput = {

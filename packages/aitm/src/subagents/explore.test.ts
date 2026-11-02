@@ -37,15 +37,17 @@ test('buildExploreTool wires the fast model + trio into a callable survey tool',
     model: textModel('Auth lives in src/auth.ts:12.'),
     readTools: trio,
   });
+  // v7 lets a tool compute its description per call; this one declares a fixed string.
+  const description = typeof t.description === 'string' ? t.description : '';
   assert.ok(
-    t.description && /self-contained/i.test(t.description),
+    /self-contained/i.test(description),
     'description states the prompt must be self-contained',
   );
   const exec = t.execute;
   assert.equal(typeof exec, 'function');
   const out = await (exec as (i: { prompt: string }, o: unknown) => Promise<string>)(
     { prompt: 'Where does auth live?' },
-    { toolCallId: 'c', messages: [] },
+    { toolCallId: 'c', messages: [], context: undefined },
   );
   assert.equal(out, 'Auth lives in src/auth.ts:12.');
 });

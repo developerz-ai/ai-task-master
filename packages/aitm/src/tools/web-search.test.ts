@@ -98,7 +98,7 @@ test('webSearchTool: queries the endpoint and returns parsed results', async () 
   });
   const out = (await tool.execute?.(
     { query: 'openrouter api', maxResults: 5 },
-    { toolCallId: 't1', messages: [] },
+    { toolCallId: 't1', messages: [], context: undefined },
   )) as WebSearchOutput;
 
   assert.equal(calls.length, 1);
@@ -114,7 +114,7 @@ test('webSearchTool: a non-200 response yields an error note and no results', as
   });
   const out = (await tool.execute?.(
     { query: 'x' },
-    { toolCallId: 't2', messages: [] },
+    { toolCallId: 't2', messages: [], context: undefined },
   )) as WebSearchOutput;
   assert.deepEqual(out.results, []);
   assert.match(out.error ?? '', /HTTP 202/);
@@ -128,7 +128,7 @@ test('webSearchTool: a network failure is caught and reported, never thrown', as
   });
   const out = (await tool.execute?.(
     { query: 'x' },
-    { toolCallId: 't3', messages: [] },
+    { toolCallId: 't3', messages: [], context: undefined },
   )) as WebSearchOutput;
   assert.deepEqual(out.results, []);
   assert.match(out.error ?? '', /boom/);
@@ -151,7 +151,7 @@ test('webSearchTool: validates content-type and rejects unexpected types', async
   });
   const out = (await tool2.execute?.(
     { query: 'test' },
-    { toolCallId: 't4', messages: [] },
+    { toolCallId: 't4', messages: [], context: undefined },
   )) as WebSearchOutput;
   assert.deepEqual(out.results, []);
   assert.match(out.error ?? '', /unexpected content-type/);
@@ -186,7 +186,7 @@ test('webSearchTool: caller-requested maxResults above the ceiling is clamped to
   });
   const out = (await tool.execute?.(
     { query: 'test', maxResults: 100 },
-    { toolCallId: 't8', messages: [] },
+    { toolCallId: 't8', messages: [], context: undefined },
   )) as WebSearchOutput;
   assert.equal(out.error, undefined);
   assert.equal(out.results.length, 15, 'clamped to the 15-result ceiling despite 20 available');
@@ -200,7 +200,7 @@ test('webSearchTool: accepts text/html and text/plain content types', async () =
     });
     const out = (await tool.execute?.(
       { query: 'test' },
-      { toolCallId: `t5-${contentType}`, messages: [] },
+      { toolCallId: `t5-${contentType}`, messages: [], context: undefined },
     )) as WebSearchOutput;
     assert.equal(out.error, undefined, `${contentType} should be accepted`);
     assert.ok(out.results.length > 0, `${contentType} should yield results`);
@@ -214,7 +214,7 @@ test('webSearchTool: normalizes content-type — charset/casing accepted, substr
   });
   const okOut = (await accepted.execute?.(
     { query: 'test' },
-    { toolCallId: 't6', messages: [] },
+    { toolCallId: 't6', messages: [], context: undefined },
   )) as WebSearchOutput;
   assert.equal(okOut.error, undefined, 'media type is compared after trim + lowercase');
   assert.ok(okOut.results.length > 0);
@@ -226,7 +226,7 @@ test('webSearchTool: normalizes content-type — charset/casing accepted, substr
   });
   const trapOut = (await trap.execute?.(
     { query: 'test' },
-    { toolCallId: 't7', messages: [] },
+    { toolCallId: 't7', messages: [], context: undefined },
   )) as WebSearchOutput;
   assert.deepEqual(trapOut.results, []);
   assert.match(trapOut.error ?? '', /unexpected content-type/);

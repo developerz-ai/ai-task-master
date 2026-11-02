@@ -563,6 +563,8 @@ test('grepTool: still skips NUL-binary and oversized files, and does not follow 
 });
 
 test('grepTool description steers content search away from bash grep/rg', () => {
-  const desc = grepTool({ cwd: '/tmp' }).description ?? '';
+  // v7 lets a tool compute its description per call; this one declares a fixed string.
+  const raw = grepTool({ cwd: '/tmp' }).description ?? '';
+  const desc = typeof raw === 'string' ? raw : '';
   assert.match(desc, /never invoke `grep` or `rg` through the bash tool/);
 });

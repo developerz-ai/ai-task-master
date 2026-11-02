@@ -18,9 +18,7 @@ import { type Compactor, effectiveInputTokens, type LiveContextSize } from './co
 // The concrete (non-optional) prepareStep function type for a given tool set — extracted from the
 // SDK's own settings so it matches createSubagent's field exactly (see the note in subagent.ts on
 // why we can't write PrepareStepFunction<TOOLS> under exactOptionalPropertyTypes).
-type CompactionPrepareStep<TOOLS extends ToolSet> = NonNullable<
-  ToolLoopAgentSettings<never, TOOLS>['prepareStep']
->;
+type CompactionPrepareStep = NonNullable<ToolLoopAgentSettings<never, ToolSet>['prepareStep']>;
 
 // Narrow port over the Compactor methods this step calls, so tests/stubs can satisfy it
 // structurally (Compactor is a class with private state; a plain object can't otherwise match it,
@@ -64,9 +62,7 @@ type CompactionStepResult = { messages: ModelMessage[] } | undefined;
 // Build a `prepareStep` that compacts context when it crosses the threshold. Unknown windows and
 // unusable verification budgets reject inference; transient lookup and summarizer errors retain
 // their logged recovery paths.
-export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
-  init: CompactionStepInit,
-): CompactionPrepareStep<TOOLS> {
+export function buildCompactionStep(init: CompactionStepInit): CompactionPrepareStep {
   // The summary produced by the previous compaction in this run, threaded back into compact() so a
   // repeat compaction UPDATES that anchor in place (Compactor's anchored-update path) instead of
   // re-summarizing from scratch and letting the note drift. A closure var, not a scan of `older`: the

@@ -13,7 +13,13 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, extname, join, relative } from 'node:path';
 import { withTimeout } from '@developerz.ai/ai-claude-compat';
-import { generateText, type LanguageModel, stepCountIs, type TimeoutConfiguration } from 'ai';
+import {
+  generateText,
+  isStepCount,
+  type LanguageModel,
+  type TimeoutConfiguration,
+  type ToolSet,
+} from 'ai';
 import { type OnUsage, reportUsage } from '../observability/usage-sink.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
 import { STYLE_EXPLORATION_MAX_STEPS, styleExplorationTools } from './style-exploration.ts';
@@ -24,7 +30,7 @@ export type StyleDistillerInit = {
   model: LanguageModel;
   // Per-step LLM request deadline (issue #129). Unset → no deadline. On expiry the SDK aborts and
   // the existing catch degrades to the raw style contents — a stalled style step never hangs the run.
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
   // Usage sink for the style-digest call, recorded under the planner role (#114). It runs on the
   // planner's model. Unset → no accounting.
   onUsage?: OnUsage;
@@ -211,7 +217,7 @@ export class StyleDistiller {
             // The one read-only exploration tool, under the step cap: the model can read a
             // convention file the signal bundle does not carry — and can do nothing else.
             tools: styleExplorationTools(input.repoRoot),
-            stopWhen: stepCountIs(STYLE_EXPLORATION_MAX_STEPS),
+            stopWhen: isStepCount(STYLE_EXPLORATION_MAX_STEPS),
             ...(input.signal !== undefined ? { abortSignal: input.signal } : {}),
           },
           this.init.timeout,

@@ -157,7 +157,7 @@ test('buildConflictResolver: an activation step filters the deferred surface per
     model,
     tools,
     styleContents: '',
-    prepareStep: deferredPrepareStep<WorkerTools>(undefined, mount, tools),
+    prepareStep: deferredPrepareStep(undefined, mount, tools),
   });
   await resolve({
     checkoutPath: '/tmp/wt',

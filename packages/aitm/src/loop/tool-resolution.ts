@@ -286,9 +286,7 @@ function surplusMcpTools(set: ToolSet): ToolSet {
   return out;
 }
 
-type PrepareStep<TOOLS extends ToolSet> = NonNullable<
-  ToolLoopAgentSettings<never, TOOLS>['prepareStep']
->;
+type PrepareStep = NonNullable<ToolLoopAgentSettings<never, ToolSet>['prepareStep']>;
 
 // Deferred-loading mount for a role (issue #119). Splits the surface's surplus into directly-mounted
 // (full schema) vs. deferred (name-only + `tool_search` + guard). Below the threshold nothing is
@@ -339,23 +337,23 @@ export function mountRoleTools<T extends ToolSet>(
 // The role's prepareStep: activation composed onto whatever the caller already had. `base` is
 // optional because the CI-fix session and the Planner build one only when a Compactor is configured;
 // the overload pair keeps a caller that always has one from being handed `| undefined` back.
-export function deferredPrepareStep<TOOLS extends ToolSet>(
-  base: PrepareStep<TOOLS>,
+export function deferredPrepareStep(
+  base: PrepareStep,
   mount: DeferredMount | undefined,
   tools: ToolSet,
-): PrepareStep<TOOLS>;
-export function deferredPrepareStep<TOOLS extends ToolSet>(
-  base: PrepareStep<TOOLS> | undefined,
+): PrepareStep;
+export function deferredPrepareStep(
+  base: PrepareStep | undefined,
   mount: DeferredMount | undefined,
   tools: ToolSet,
-): PrepareStep<TOOLS> | undefined;
-export function deferredPrepareStep<TOOLS extends ToolSet>(
-  base: PrepareStep<TOOLS> | undefined,
+): PrepareStep | undefined;
+export function deferredPrepareStep(
+  base: PrepareStep | undefined,
   mount: DeferredMount | undefined,
   tools: ToolSet,
-): PrepareStep<TOOLS> | undefined {
+): PrepareStep | undefined {
   return mount && mount.activated !== null
-    ? withActiveTools<TOOLS>(base, tools, mount.deferredNames, mount.activated)
+    ? withActiveTools(base, tools, mount.deferredNames, mount.activated)
     : base;
 }
 
@@ -402,17 +400,17 @@ export function activeToolNames(
 // `base` is optional because the CI-fix session builds its prepareStep only when a Compactor is
 // configured (issue #193); with none, activation is still the whole job and there is nothing to
 // compose onto.
-export function withActiveTools<TOOLS extends ToolSet>(
-  base: PrepareStep<TOOLS> | undefined,
+export function withActiveTools(
+  base: PrepareStep | undefined,
   tools: ToolSet,
   deferredNames: ReadonlySet<string>,
   activated: ReadonlySet<string>,
-): PrepareStep<TOOLS> {
+): PrepareStep {
   return async (options) => {
     const result = await base?.(options);
     return {
       ...(result ?? {}),
-      activeTools: activeToolNames(tools, deferredNames, activated) as Array<keyof TOOLS>,
+      activeTools: activeToolNames(tools, deferredNames, activated),
     };
   };
 }

@@ -65,7 +65,7 @@ export function reviewerTools(over: Partial<ReviewerTools> = {}): ReviewerTools 
 // A `WorkerResult` of kind 'ok' carries the manifest-planning conversation so a later CI-fix pass
 // can continue it (#107). Tests that only assert on the delivery still have to supply one; the
 // agent is never touched on those paths, so it stands in as an opaque marker.
-export function workerHandle(marker = 'worker-handle'): SubagentHandle<WorkerTools> {
+export function workerHandle(marker = 'worker-handle'): SubagentHandle {
   return { agent: {} as never, messages: [{ role: 'user', content: marker }] };
 }
 

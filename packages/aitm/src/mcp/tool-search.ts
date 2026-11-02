@@ -9,7 +9,7 @@
 // a new invocation starts fully deferred again. The adapter (run-loop-adapter.ts) composes the
 // activation set into the single #102 `prepareStep`, adding activated names to `activeTools`.
 
-import type { Tool, ToolCallOptions, ToolSet } from 'ai';
+import type { Tool, ToolExecutionOptions, ToolSet } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
 
@@ -188,7 +188,7 @@ export function guardDeferred<const T extends AnyTool>(
   const inputSchema = base.inputSchema;
   const wrapped = {
     ...base,
-    execute: async (input: unknown, options: ToolCallOptions) => {
+    execute: async (input: unknown, options: ToolExecutionOptions<unknown>) => {
       if (!activated.has(name)) return guardResult(name);
       if (!baseExecute) return notExecutableResult(name);
       // Narrow via the tool's own input schema if available, else pass through

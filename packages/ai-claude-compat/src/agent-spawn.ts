@@ -8,14 +8,16 @@
 // shares NO parent conversation — each call's `prompt` must be self-contained (stated in the tool
 // description). Read-only enforcement is by explicit `allowedTools` allowlist, never name-sniffing.
 // Nesting is bounded two ways: a construction-time check forbids a toolset that holds its own spawn
-// tool, and a run-time depth guard (threaded via experimental_context) caps transitive A→B→A chains.
+// tool, and a run-time depth guard (threaded through the child's per-tool context) caps transitive
+// A→B→A chains.
 
 import {
   generateText,
+  isStepCount,
   type LanguageModel,
-  stepCountIs,
   type TimeoutConfiguration,
   type Tool,
+  type ToolExecutionOptions,
   type ToolSet,
   tool,
 } from 'ai';
@@ -45,8 +47,8 @@ export type AgentToolOptions = {
   maxOutputChars?: number;
   // Optional tighter child deadline. The parent's per-step deadline already propagates via the
   // execute abortSignal (#129); this bounds the child more aggressively when a caller wants it.
-  timeout?: TimeoutConfiguration;
-  // Optional token-usage sink (issue #114). Fired once per generate call with the child's totalUsage,
+  timeout?: TimeoutConfiguration<ToolSet>;
+  // Optional token-usage sink (issue #114). Fired once per generate call with the child's usage,
   // modelId, and providerMetadata. Fire-and-forget: a recording error must never break the run.
   onUsage?: (
     usage: import('ai').LanguageModelUsage,
@@ -89,11 +91,11 @@ const agentToolInputSchema = z.object({
 
 export type AgentToolInput = z.infer<typeof agentToolInputSchema>;
 
-// Transitive depth is threaded through the AI SDK's experimental_context, which the SDK passes by
-// reference to every tool.execute in a generation (its "treat as immutable / mutation races" contract
-// proves it is not cloned). A child sees its own depth without any change to the tool input schema or
-// caller wiring. The key is a Symbol so it can't collide with a caller's own context fields, and
-// object spread copies it, so an existing context object rides through untouched.
+// Transitive depth is threaded through the child's per-tool context. ai@7 gives every tool its OWN
+// context — the `toolsContext` entry for that tool — and hands it to `tool.execute` by reference (its
+// "treat as immutable / mutation races" contract proves it is not cloned). The key is a Symbol so it
+// can't collide with a caller's own context fields, and object spread copies it, so an existing
+// context object rides through untouched.
 const AGENT_DEPTH_KEY: unique symbol = Symbol('aitm.agent-spawn.depth');
 
 function readAgentDepth(context: unknown): number {
@@ -105,6 +107,29 @@ function readAgentDepth(context: unknown): number {
 function withAgentDepth(context: unknown, depth: number): unknown {
   const base = typeof context === 'object' && context !== null ? context : {};
   return { ...base, [AGENT_DEPTH_KEY]: depth };
+}
+
+// The child's tool records, each wrapped so it runs with the child's context: the caller's own
+// context fields plus the depth this child adds. The child's generation sets no `toolsContext` of
+// its own, so the per-tool context the SDK would supply is empty and the caller's context is what
+// the child's tools see.
+function childToolSet(tools: ToolSet, context: unknown, depth: number): ToolSet {
+  const out: ToolSet = {};
+  for (const [name, entry] of Object.entries(tools)) {
+    const baseExecute = entry.execute;
+    out[name] =
+      baseExecute === undefined
+        ? entry
+        : ({
+            ...entry,
+            execute: async (input: unknown, options: ToolExecutionOptions<unknown>) =>
+              baseExecute(input as never, {
+                ...options,
+                context: withAgentDepth(context, depth),
+              }),
+          } as ToolSet[string]);
+  }
+  return out;
 }
 
 export function makeAgentTool(
@@ -152,23 +177,21 @@ export function makeAgentTool(
       // where the offending tool is a different handle the static check can't see. Refuse before
       // spawning — returned, not thrown, so a capped path degrades to a message (like a provider error)
       // instead of aborting the parent step, and the refused generate is never paid for.
-      const parentDepth = readAgentDepth(options.experimental_context);
+      const parentDepth = readAgentDepth(options.context);
       if (parentDepth >= maxDepth) {
         return `${AGENT_TOOL_DEPTH_EXCEEDED_PREFIX} (depth ${parentDepth}, cap ${maxDepth}) — cannot delegate deeper; do this work directly.`;
       }
-      const childContext = withAgentDepth(options.experimental_context, parentDepth + 1);
       try {
         const result = await callWithStepTimeout(
           () =>
             generateText({
               model: opts.model,
-              system: spec.systemPrompt,
-              tools: opts.tools,
-              prompt,
-              stopWhen: stepCountIs(maxSteps),
+              instructions: spec.systemPrompt,
               // Carry the incremented depth into the child so any agent tool it invokes sees the frame
               // it adds and the guard keeps counting down the chain.
-              experimental_context: childContext,
+              tools: childToolSet(opts.tools, options.context, parentDepth + 1),
+              prompt,
+              stopWhen: isStepCount(maxSteps),
               // Forward the parent's per-step deadline (#129) so a stalled child can't outlive the
               // parent step; a caller-supplied opts.timeout bounds it tighter still.
               ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
@@ -177,11 +200,15 @@ export function makeAgentTool(
           opts.timeout,
         );
         // Report token usage to the optional sink (fire-and-forget, never breaks the run). Provider
-        // metadata is the top-level `result.providerMetadata`; `result.response` only carries the
-        // response id/modelId/timestamp, so reading providerMetadata off it would always be undefined.
+        // metadata lives on the final step; `response` only carries the response id/modelId/timestamp,
+        // so reading providerMetadata off it would always be undefined.
         if (opts.onUsage) {
           try {
-            opts.onUsage(result.totalUsage, result.response.modelId, result.providerMetadata);
+            opts.onUsage(
+              result.usage,
+              result.finalStep.response.modelId,
+              result.finalStep.providerMetadata,
+            );
           } catch {
             // Swallow recording errors — a broken sink must never abort the run.
           }

@@ -272,7 +272,7 @@ test('makeAgentTool: two parallel execute calls return independent, uncorrupted 
 });
 
 // ---- transitive subagent depth guard (issue #270) ----
-// Depth is threaded through experimental_context under a private key, so these tests exercise it the
+// Depth is threaded through the child's per-tool context under a private key, so these tests exercise it the
 // only faithful way: build a real chain (an agent tool whose child invokes a nested agent tool) and
 // observe behavior — the nested delegate spawns or is refused depending on the cap.
 
@@ -311,17 +311,17 @@ function callToolThenConclude(
   });
 }
 
-// Run an agent tool with a caller-supplied experimental_context (the parent's own context object).
+// Run an agent tool with a caller-supplied context (the parent's own context object).
 async function runWithContext(
   t: { execute?: unknown },
   prompt: string,
-  experimentalContext: unknown,
+  callerContext: unknown,
 ): Promise<string> {
   const exec = t.execute;
   if (typeof exec !== 'function') throw new Error('tool has no execute');
   return (await (exec as (i: { prompt: string }, o: unknown) => Promise<string>)(
     { prompt },
-    { toolCallId: 'test', messages: [], experimental_context: experimentalContext },
+    { toolCallId: 'test', messages: [], context: callerContext },
   )) as string;
 }
 
@@ -396,7 +396,7 @@ test('makeAgentTool: a spawned child preserves the caller context, riding depth 
     description: 'records the context it is invoked with',
     inputSchema: z.object({ q: z.string() }),
     execute: async (_input, options) => {
-      seen = options.experimental_context;
+      seen = options.context;
       return 'ok';
     },
   });

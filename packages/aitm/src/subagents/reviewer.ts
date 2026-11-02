@@ -20,8 +20,9 @@ import {
   createSubagent,
   formatSubmitIssues,
   runWithSchemaRetry,
+  type SubagentAgent,
 } from '@developerz.ai/ai-claude-compat';
-import { type Tool, type ToolLoopAgent, tool } from 'ai';
+import { type Tool, tool } from 'ai';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
 import type { GithubToolInput, GithubToolOutput } from '../tools/github-thread-tool.ts';
@@ -54,7 +55,7 @@ export const ThreadResolutionOutputSchema = z.object({
 });
 export type ThreadResolutionOutput = z.infer<typeof ThreadResolutionOutputSchema>;
 
-export type ReviewerAgent = ToolLoopAgent<never, ReviewerTools>;
+export type ReviewerAgent = SubagentAgent;
 
 export type ReviewerInput = {
   pr: number;
@@ -335,7 +336,7 @@ async function execBash(
 ): Promise<BashOutput> {
   const out = await exec(
     { command, description: 'reviewer commit step' },
-    { toolCallId: `reviewer-bash-${Date.now()}`, messages: [] },
+    { toolCallId: `reviewer-bash-${Date.now()}`, messages: [], context: undefined },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');

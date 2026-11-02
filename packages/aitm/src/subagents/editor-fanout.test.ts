@@ -27,17 +27,17 @@ import type { FileManifestEntry, WorkerInput, WorkerTools } from './worker.ts';
 
 function makeTools(): WorkerTools {
   return workerTools({
-    readFile: tool<ReadFileInput, ReadFileOutput>({
+    readFile: tool<ReadFileInput, ReadFileOutput, Record<string, unknown>>({
       description: 'read a file from the checkout',
       inputSchema: z.object({ path: z.string() }),
       execute: async () => ({ content: '' }),
     }),
-    writeFile: tool<WriteFileInput, WriteFileOutput>({
+    writeFile: tool<WriteFileInput, WriteFileOutput, Record<string, unknown>>({
       description: 'write a file in the checkout',
       inputSchema: z.object({ path: z.string(), content: z.string() }),
       execute: async () => ({ ok: true }),
     }),
-    bash: tool<BashInput, BashOutput>({
+    bash: tool<BashInput, BashOutput, Record<string, unknown>>({
       description: 'run a bash command in the checkout',
       inputSchema: z.object({
         command: z.string(),

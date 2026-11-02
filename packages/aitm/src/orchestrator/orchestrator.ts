@@ -11,7 +11,7 @@
 // SDK references:
 //   docs/vendor/ai-sdk/chunk-04.md §"ToolLoopAgent"
 //   docs/vendor/ai-sdk/chunk-09.md §"Subagents" §"Controlling What the Model Sees"
-//   docs/vendor/ai-sdk/chunk-09.md §"Loop Control" — stopWhen: [stepCountIs(N), hasToolCall('done')]
+//   docs/vendor/ai-sdk/chunk-09.md §"Loop Control" — stopWhen: [isStepCount(N), hasToolCall('done')]
 
 import { callWithStepTimeout, withTimeout } from '@developerz.ai/ai-claude-compat';
 import {
@@ -19,6 +19,7 @@ import {
   type LanguageModel,
   type ModelMessage,
   type TimeoutConfiguration,
+  type ToolSet,
   tool,
 } from 'ai';
 import { ExecaError, execa } from 'execa';
@@ -155,7 +156,7 @@ export type OrchestratorInit = {
   runCmd?: RunCmd;
   // Per-step LLM request deadline for the two direct generateText sites (commit-message refine, PR
   // compose). Unset → no deadline. Threaded from resolved config as `{ stepMs }`. Issue #129.
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
   // Usage sink for the two direct generateText sites, recorded under the orchestrator role (#114).
   onUsage?: OnUsage;
   // Run-scoped cancellation for the Orchestrator's OWN work — the two direct generateText calls and

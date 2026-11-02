@@ -72,7 +72,7 @@ export function createScoutLeadRunner(init: ScoutLeadInit): ScoutLeadRunner {
       {
         model: init.model,
         tools,
-        prepareStep: deferredPrepareStep<PlannerTools>(undefined, mount, tools),
+        prepareStep: deferredPrepareStep(undefined, mount, tools),
         systemPrompt: init.systemPrompt,
         submit: tool({
           description: 'Submit the scout wave to dispatch (the ScoutPlan schema).',

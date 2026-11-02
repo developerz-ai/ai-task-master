@@ -22,7 +22,7 @@
 //     (use prepareStep to swap in compacted messages between steps)
 
 import { callWithStepTimeout, withTimeout } from '@developerz.ai/ai-claude-compat';
-import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
+import { generateText, type LanguageModel, type TimeoutConfiguration, type ToolSet } from 'ai';
 import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import { safeStringify } from '../serialization/safe-stringify.ts';
 
@@ -58,7 +58,7 @@ export type CompactionInit = {
   // Per-step LLM request deadline for the summarizer call (issue #129). Unset → no deadline. On
   // expiry the SDK aborts; callWithStepTimeout surfaces a named StepTimeoutError to the prepareStep
   // caller rather than hanging the step.
-  timeout?: TimeoutConfiguration;
+  timeout?: TimeoutConfiguration<ToolSet>;
 };
 
 // Ceiling on the reply reserve. Input and output share the window, so some of it must stay free —

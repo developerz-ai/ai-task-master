@@ -627,7 +627,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
   // fix passes for a group continue the same Worker conversation instead of re-planning cold — the
   // Worker remembers what earlier passes already tried (issue #107). Never shared across groups; not
   // persisted (a crash falls back to a cold start — durable transcripts are #108).
-  const ciFixHandles = new Map<string, SubagentHandle<WorkerTools>>();
+  const ciFixHandles = new Map<string, SubagentHandle>();
 
   // Per-group Coordinator conversation, carried task→task for the life of the group. Timing a real
   // run showed roughly half the wall-clock going to re-orientation: every task in a group cold-started
@@ -711,7 +711,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       input,
       checkout.path,
     );
-    const reviewerCompaction = buildCompactionStep<ReviewerTools>({
+    const reviewerCompaction = buildCompactionStep({
       compactor,
       modelId: input.credentials.modelIdFor('reviewer'),
       ...(input.logger ? { logger: input.logger } : {}),
@@ -726,7 +726,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       `group ${checkout.groupId}: addressing ${threads.length} review thread(s) on PR #${pr} with ${reviewerModelId}`,
       { phase: 'reviewing', ...reviewerCounter },
     );
-    const session = buildSubagentSession<ReviewerTools>({
+    const session = buildSubagentSession({
       role: 'reviewer',
       model: shortModelName(reviewerModelId),
       ctx: checkout.groupId,
@@ -747,7 +747,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         }),
         reviewerMount.indexBlock,
       ),
-      prepareStep: deferredPrepareStep<ReviewerTools>(reviewerCompaction, reviewerMount, tools),
+      prepareStep: deferredPrepareStep(reviewerCompaction, reviewerMount, tools),
       timeout: stepTimeout,
       ...(reviewerUsage ? { onUsage: reviewerUsage } : {}),
       onStepFinish: session.onStepFinish,
@@ -845,7 +845,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         input,
         checkout.path,
       );
-      const workerCompaction = buildCompactionStep<WorkerTools>({
+      const workerCompaction = buildCompactionStep({
         compactor,
         modelId: input.credentials.modelIdFor('worker'),
         ...(input.logger ? { logger: input.logger } : {}),
@@ -874,7 +874,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         buildSpecialistSignal(group, task),
       );
       const specialist = routed?.agent ?? null;
-      const session = buildSubagentSession<WorkerTools>({
+      const session = buildSubagentSession({
         role: 'worker',
         model: workerModel,
         ctx: group.id,
@@ -916,7 +916,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           }),
           workerMount.indexBlock,
         ),
-        prepareStep: deferredPrepareStep<WorkerTools>(workerCompaction, workerMount, tools),
+        prepareStep: deferredPrepareStep(workerCompaction, workerMount, tools),
         timeout: stepTimeout,
         ...(providerOptions !== undefined ? { providerOptions } : {}),
         ...(workerUsage ? { onUsage: workerUsage } : {}),
@@ -1047,7 +1047,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
       const selfReviewModel = shortModelName(selfReviewModelId);
       // Prefer the configured verifyCommand; else a conservative typecheck fallback for a TS repo.
       const verifyCommand = selfReviewVerifyCommand(input.resolved.verifyCommand, checkout.path);
-      const session = buildSubagentSession<WorkerTools>({
+      const session = buildSubagentSession({
         role: 'self-review',
         model: selfReviewModel,
         ctx: group.id,
@@ -1137,7 +1137,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
         `group ${group.id}: CI failed on PR #${pr} — running fix session with ${ciFixModelId}`,
         { phase: 'ci-fix', ...stepCounter(group.id) },
       );
-      const session = buildSubagentSession<WorkerTools>({
+      const session = buildSubagentSession({
         role: 'ci-fix',
         model: ciFixModel,
         ctx: group.id,
@@ -1179,7 +1179,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
             styleContents: style,
             // Same record the fix Worker uses, deferred surface included (#193) — so the resolver
             // needs the same activation step or it carries every unactivated schema (issue #339).
-            prepareStep: deferredPrepareStep<WorkerTools>(undefined, ciFixMount, ciFixWorkerTools),
+            prepareStep: deferredPrepareStep(undefined, ciFixMount, ciFixWorkerTools),
             timeout: stepTimeout,
             ...(ciFixProviderOptions !== undefined
               ? { providerOptions: ciFixProviderOptions }

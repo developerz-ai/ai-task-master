@@ -13,7 +13,7 @@ function makeBash(handler: (command: string) => Partial<BashOutput> = () => ({})
   cmds: string[];
 } {
   const cmds: string[] = [];
-  const bash = tool<BashInput, BashOutput>({
+  const bash = tool<BashInput, BashOutput, Record<string, unknown>>({
     description: 'run a bash command in the checkout',
     inputSchema: z.object({
       command: z.string(),

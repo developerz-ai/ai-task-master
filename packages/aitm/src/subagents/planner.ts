@@ -14,8 +14,9 @@ import {
   createSubagent,
   formatSubmitIssues,
   runWithSchemaRetry,
+  type SubagentAgent,
 } from '@developerz.ai/ai-claude-compat';
-import { type Tool, type ToolLoopAgent, tool } from 'ai';
+import { type Tool, tool } from 'ai';
 import type { z } from 'zod';
 import { type Plan, PlanSchema } from '../plan/schema.ts';
 import type { DatetimeInput, DatetimeOutput } from '../tools/datetime.ts';
@@ -29,7 +30,7 @@ import {
   type SubagentInit,
 } from './factory.ts';
 
-export type PlannerAgent = ToolLoopAgent<never, PlannerTools>;
+export type PlannerAgent = SubagentAgent;
 
 // The Planner only surveys the repo — it gets the read-only subset of the Claude-Code-style
 // tool surface (no write/edit/bash), plus web + time tools (issue #112). The optional fetchHtml is a

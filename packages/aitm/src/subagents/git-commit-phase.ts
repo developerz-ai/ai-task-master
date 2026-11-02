@@ -94,7 +94,7 @@ async function committedFileChanges(
       command: `git -C ${shQuote(checkoutPath)} --no-optional-locks diff-tree --no-commit-id --name-status -r HEAD`,
       description: 'list the files in the verify-gate commit',
     },
-    { toolCallId: `worker-difftree-${randomUUID()}`, messages: [] },
+    { toolCallId: `worker-difftree-${randomUUID()}`, messages: [], context: undefined },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');

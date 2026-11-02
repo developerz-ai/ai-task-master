@@ -428,7 +428,7 @@ test('withActiveTools: with no base step, activation alone is the whole prepareS
   const tools: ToolSet = { readFile: mcpFake('Read a file.'), mcp__gh__x: mcpFake('Do a thing.') };
   const deferred = new Set(['mcp__gh__x']);
 
-  const beforeSearch = await withActiveTools<ToolSet>(
+  const beforeSearch = await withActiveTools(
     undefined,
     tools,
     deferred,
@@ -440,7 +440,7 @@ test('withActiveTools: with no base step, activation alone is the whole prepareS
     'the deferred tool is withheld and nothing else is dropped',
   );
 
-  const afterSearch = await withActiveTools<ToolSet>(
+  const afterSearch = await withActiveTools(
     undefined,
     tools,
     deferred,
@@ -455,12 +455,7 @@ test('withActiveTools: with no base step, activation alone is the whole prepareS
 test('withActiveTools: a base step keeps its own result alongside activeTools (issue #119)', async () => {
   const tools: ToolSet = { readFile: mcpFake('Read a file.') };
   const base = async (): Promise<{ messages: [] }> => ({ messages: [] });
-  const out = await withActiveTools<ToolSet>(
-    base,
-    tools,
-    new Set(),
-    new Set(),
-  )(prepareStepArg([], []));
+  const out = await withActiveTools(base, tools, new Set(), new Set())(prepareStepArg([], []));
   assert.deepEqual(out?.messages, [], "the base step's override survives");
   assert.ok(out?.activeTools?.includes('readFile'));
 });

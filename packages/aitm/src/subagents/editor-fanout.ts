@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import type { BashInput, BashOutput } from '@developerz.ai/ai-claude-compat';
 import { callWithStepTimeout, runPool } from '@developerz.ai/ai-claude-compat';
-import { generateText, stepCountIs, type Tool } from 'ai';
+import { generateText, isStepCount, type Tool } from 'ai';
 import { withNestedConfig } from '../agent-config/nested-reminders.ts';
 import { SUBAGENT_LIMIT_DEFAULT } from '../domain/subagent-limit.ts';
 import type { FileChange } from '../domain/worker-delivery.ts';
@@ -362,7 +362,7 @@ async function runEditorPass(
           ...(teamBrief ? { teamBrief } : {}),
         }),
         prompt,
-        stopWhen: stepCountIs(EDITOR_MAX_STEPS),
+        stopWhen: isStepCount(EDITOR_MAX_STEPS),
         abortSignal: signal,
         // web_search (issue #112) rides providerOptions.openrouter when the adapter enabled it for
         // this Worker. The old `{ openai: { parallelToolCalls: true } }` was dead — the OpenRouter
@@ -426,7 +426,7 @@ export async function editorTouchedPath(
   const command = `git -C ${shQuote(checkoutPath)} --no-optional-locks status --porcelain -z -- ${shQuote(filePath)}`;
   const out = await exec(
     { command, description: 'verify the editor changed the file on disk' },
-    { toolCallId: `worker-status-${randomUUID()}`, messages: [] },
+    { toolCallId: `worker-status-${randomUUID()}`, messages: [], context: undefined },
   );
   if (isAsyncIterable(out)) {
     throw new Error('bash tool returned an async iterable; expected a single result');

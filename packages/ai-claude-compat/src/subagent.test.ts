@@ -29,6 +29,7 @@ import {
   StreamStallError,
   type StreamTimerFactory,
   SUBMIT_TOOL_NAME,
+  type SubagentAgent,
   type SubagentStreamEvent,
   submittedOutput,
   withTimeout,
@@ -93,7 +94,7 @@ function scriptedModel(inputForCall: (idx: number) => { submit: string } | { noS
   return { model, calls: () => i, promptAt: (n) => prompts[n] ?? '' };
 }
 
-function agentFor(model: MockLanguageModelV3): ToolLoopAgent<never, Record<string, never>> {
+function agentFor(model: MockLanguageModelV3): SubagentAgent {
   return createSubagent(
     { model, tools: {}, systemPrompt: 'sys', submit: submitTool(OutSchema) },
     12,

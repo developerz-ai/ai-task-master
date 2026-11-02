@@ -29,8 +29,11 @@ function search(surface: ReturnType<typeof toolSearch>, input: ToolSearchInput):
   const exec = surface.tool.execute;
   if (typeof exec !== 'function') throw new Error('tool_search has no execute');
   return (
-    exec as (i: ToolSearchInput, o: { toolCallId: string; messages: never[] }) => ToolSearchOutput
-  )(input, { toolCallId: 'c', messages: [] });
+    exec as (
+      i: ToolSearchInput,
+      o: { toolCallId: string; messages: never[]; context: undefined },
+    ) => ToolSearchOutput
+  )(input, { toolCallId: 'c', messages: [], context: undefined });
 }
 
 function renderSearch(

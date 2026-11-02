@@ -27,8 +27,8 @@ import type { TranscriptRecorder } from '../state/transcript-store.ts';
 
 // The SDK step event a role's `onStepFinish` receives — spelled once so every buildSubagentSession
 // caller shares one slot instead of restating the settings-indexed type.
-export type StepEvent<TOOLS extends ToolSet> = Parameters<
-  NonNullable<ToolLoopAgentSettings<never, TOOLS>['onStepFinish']>
+export type StepEvent = Parameters<
+  NonNullable<ToolLoopAgentSettings<never, ToolSet>['onStepFinish']>
 >[0];
 
 // An `onStepFinish` handler that records only the per-step message delta (issue #175). `ai@6` hands
@@ -81,11 +81,11 @@ export type SubagentSessionInit = {
   recorder?: TranscriptRecorder | null;
 };
 
-export type SubagentSession<TOOLS extends ToolSet> = {
+export type SubagentSession = {
   tag: RunStep;
   label: StreamLabel;
   heartbeatSink: HeartbeatSink;
-  onStepFinish: (event: StepEvent<TOOLS>) => void;
+  onStepFinish: (event: StepEvent) => void;
   onRetry: (info: RetryInfo) => void;
   onStream?: ReturnType<typeof createLiveStreamRenderer>;
   // Starts the liveliness heartbeat (issue #01b) and returns its idempotent stop function — call it
@@ -93,9 +93,7 @@ export type SubagentSession<TOOLS extends ToolSet> = {
   start(): () => void;
 };
 
-export function buildSubagentSession<TOOLS extends ToolSet>(
-  init: SubagentSessionInit,
-): SubagentSession<TOOLS> {
+export function buildSubagentSession(init: SubagentSessionInit): SubagentSession {
   const tag: RunStep = { phase: init.phase, ...(init.counter ?? {}) };
   const label = agentLabel({
     model: init.model,
@@ -105,7 +103,7 @@ export function buildSubagentSession<TOOLS extends ToolSet>(
   });
   const heartbeatSink = createHeartbeatSink(defaultProgressSink());
   const onStepFinish =
-    composeStepFinish<StepEvent<TOOLS>>(
+    composeStepFinish<StepEvent>(
       init.recorder ? recordStepDeltas(init.recorder) : undefined,
       agentStepProgress(label, tag, heartbeatSink, { textAndTools: !init.streaming }),
     ) ?? (() => {});

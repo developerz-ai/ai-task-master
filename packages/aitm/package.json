@@ -48,16 +48,16 @@
     "@openrouter/ai-sdk-provider": "^2.9.0",
     "ai": "^6.0.182",
     "execa": "^10.2.1",
-    "zod": "^4.4.3"
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "@sentry/node": "^11.10.0",
     "undici": "^7.21.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.15",
+    "@biomejs/biome": "^2.6.4",
     "@types/node": "^25.7.0",
-    "tsx": "^4.22.0",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
 }

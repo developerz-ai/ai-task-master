@@ -1,0 +1,29 @@
+# Weekly, with minor and patch updates grouped per ecosystem; a major update arrives on its own.
+# The 14-day cooldown lets a compromised release get caught before it reaches us. Security updates
+# are unaffected.
+version: 2
+updates:
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "23:00"
+    cooldown:
+      default-days: 14
+    groups:
+      bun-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "23:00"
+    cooldown:
+      default-days: 14
+    groups:
+      github-actions-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

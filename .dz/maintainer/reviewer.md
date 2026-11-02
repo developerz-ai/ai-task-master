@@ -7,7 +7,7 @@
 
 ## Stack
 
-Bun + TypeScript monorepo. The gate is `bin/check` (`bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && bun run test:node`): a change that does not pass it is not proven, whatever its description says.
+Bun + TypeScript monorepo. The gate is `bin/check` (`bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && bun run test:node && npm run test:integration -w @developerz.ai/aitm`): a change that does not pass it is not proven, whatever its description says.
 
 ## Review conventions
 

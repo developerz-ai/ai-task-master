@@ -17,3 +17,11 @@ For each unhealthy signal, one ask, unless an open issue already carries its exa
 Titles are stable: nothing that changes run to run (sha, run URL, version) goes in one; that goes in the body,
 with the command and its output. Unreadable evidence is no verdict: re-run it, never file it as a defect.
 A red `main` comes first: nothing releases from it.
+
+## Rows
+
+- `main-green`: Main CI succeeds on the `origin/main` tip; a null conclusion or another sha is no verdict.
+- `release-published`: The release workflow succeeds on the latest matching release tag's commit; no run on that sha is no verdict.
+- `npm-tree`: Both published npm package versions equal the tree versions, or an open release PR or in-flight run explains the difference.
+- `github-release`: The GitHub Release for that tag is published and is not a draft.
+- `dependabot-stuck`: No open Dependabot PR has failed checks and more than 7 days since `updatedAt`.

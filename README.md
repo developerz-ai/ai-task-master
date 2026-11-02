@@ -8,7 +8,7 @@
 
 Give `aitm` a sentence, walk away, come back to a stack of merged pull requests. It runs a Planner → Worker → Reviewer loop against a real repo using the [Vercel AI SDK](https://ai-sdk.dev) and [OpenRouter](https://openrouter.ai), and ships the work as PR-sized commits with CI gating and review-comment handling baked in.
 
-> 💡 **Inspired by** the (now deprecated) [`developerz-ai/claude-task-master`](https://github.com/developerz-ai/claude-task-master). `aitm` is the spiritual successor — same idea (a task-master that drives the work to merge), rebuilt on the Vercel AI SDK + OpenRouter, provider-agnostic, with concurrent PR groups, MCP client support, and a much smaller surface area.
+> **Inspired by** [`developerz-ai/claude-task-master`](https://github.com/developerz-ai/claude-task-master): same idea (a task-master that drives the work to merge), built here on the Vercel AI SDK + OpenRouter, provider-agnostic, with MCP client support and a much smaller surface area.
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](./tsconfig.json)
 [![Bun](https://img.shields.io/badge/Bun-≥1.1-fbf0df?logo=bun&logoColor=black)](https://bun.sh)

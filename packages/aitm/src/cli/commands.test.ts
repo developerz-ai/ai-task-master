@@ -24,6 +24,15 @@ import {
   runStart,
 } from './commands.ts';
 
+// @types/node 26 split assert.equal's message parameter into an optional
+// `Error | AssertMessageFunction` overload and a required `string` one, so an optional string
+// message no longer typechecks. Narrow it here: the generated default message still survives
+// when the command result carries none.
+function assertEqual(actual: unknown, expected: unknown, message?: string): void {
+  if (message === undefined) assert.equal(actual, expected);
+  else assert.equal(actual, expected, message);
+}
+
 const FAKE_KEY = 'sk-or-fake-test-key';
 const realFetch = globalThis.fetch;
 beforeEach(() => {
@@ -261,7 +270,7 @@ for (const scenario of windowCases) {
                     },
                   },
                 );
-        assert.equal(result.code, scenario.pass ? 0 : 1, result.message);
+        assertEqual(result.code, scenario.pass ? 0 : 1, result.message);
         assert.equal(flowCalls, scenario.pass ? 1 : 0);
         assert.equal(styleCalls, scenario.pass ? 1 : 0);
         if (!scenario.pass) {
@@ -307,7 +316,7 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(loopCalls, 1);
     assert.ok(captured[0], 'runLoop received input');
     assert.equal(captured[0]?.styleDigest, STUB_DIGEST, 'resolved digest threaded to runLoop');
@@ -349,7 +358,7 @@ test('runStart: constructs a Logger and threads it into the loop input (finding 
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     // Before this wiring every `logger?.warn(...)` in the loop was a runtime no-op — the loop never
     // received a Logger. Assert a real one now reaches the adapter so those diagnostics can fire.
     assert.ok(captured[0]?.logger instanceof Logger, 'a live Logger is threaded to the loop');
@@ -375,7 +384,7 @@ test('runStart: releases the run lock when the run ends', async () => {
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     await assert.rejects(
       () => readFile(join(repo.path, '.ai-task-master', 'run.lock'), 'utf8'),
       /ENOENT/,
@@ -418,7 +427,7 @@ test('runStart: releases the keep-alive transport when the run ends', async () =
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(llm.closes(), 1, 'the undici pool is closed, not leaked past the run');
   } finally {
     await repo.cleanup();
@@ -506,7 +515,7 @@ test('runStart: prints the auto-merge banner to stdout when auto-merge is on (de
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.match(out, /auto-merge is ON/);
   } finally {
     await repo.cleanup();
@@ -537,7 +546,7 @@ test('runStart: --no-automerge suppresses the banner', async () => {
         modelBanner: async () => '',
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     // The banner is suppressed, but the end-of-run usage summary is always written (issue #114).
     assert.ok(!out.includes('auto-merge is ON'), 'no auto-merge banner');
     assert.match(out, /^Usage: /, 'usage summary line still written');
@@ -1005,7 +1014,7 @@ test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups +
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     // Planning is a one-shot phase that runs once, before the loop.
     assert.deepEqual(seq, ['plan', 'loop']);
     assert.equal(plannerInput[0]?.goal, 'add a hello.txt with the word hi');
@@ -1046,7 +1055,7 @@ test('runStart: resume (existing state.json) skips runPlanner, preserves prior p
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(plannerCalls, 0, 'planner must not run on resume — prGroups already persisted');
     const persisted = JSON.parse(
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
@@ -1085,7 +1094,7 @@ test('runStart: an unparseable state.json is replaced, not treated as a run to p
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(plannerGoal, 'add hello', 'the run started fresh instead of refusing');
     const persisted = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')) as {
       runId: string;
@@ -1171,7 +1180,7 @@ test('runStart: resume with empty prGroups (prior planning blocked) re-runs runP
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(plannerCalls, 1, 'planner must re-run when no plan is persisted yet');
     const persisted = JSON.parse(
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
@@ -1236,7 +1245,7 @@ test('runStart: default resolveStyle reuses cached coding-style.md (no LLM call)
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     const style = captured[0]?.styleDigest ?? '';
     assert.match(style, /cached digest/, 'cached digest reused, no LLM call');
     // The verbatim half is re-composed every run, so a CLAUDE.md edit is never pinned by the cache.
@@ -1271,7 +1280,7 @@ test('runStart: resolveStyle failure never blocks → falls back to raw agent-co
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(captured[0]?.styleDigest, claudeMd, 'falls back to raw contents, run not blocked');
   } finally {
     await repo.cleanup();
@@ -1301,7 +1310,7 @@ test('runStart: the run abort signal reaches the style-digest call', async () =>
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(
       seenSignal,
       controller.signal,
@@ -1417,7 +1426,7 @@ test('runMergePr: happy path with --pr override', async () => {
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.ok(captured[0], 'flow was called');
     assert.equal(captured[0]?.pr, 99);
     assert.equal(captured[0]?.resume, true);
@@ -1451,7 +1460,7 @@ test('runMergePr: the run abort signal reaches the style-digest call', async () 
         runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(
       seenSignal,
       controller.signal,
@@ -1487,7 +1496,7 @@ test('runMergePr: config-resolution warnings go through ctx.stderr, not bare pro
         runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.match(err.text(), /unknown config key "bogusKey"/);
   } finally {
     await repo.cleanup();
@@ -1516,7 +1525,7 @@ test('runMergePr: constructs a Logger and threads it into the merge flow (findin
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.ok(
       captured[0]?.logger instanceof Logger,
       'a live Logger is threaded to the take-over flow',
@@ -1552,7 +1561,7 @@ test('runMergePr: builds a usage tracker, threads it to the flow, and flushes to
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.ok(captured[0]?.usage, 'usage tracker threaded to the merge flow');
     assert.match(out, /^Usage: /m, 'end-of-run usage summary printed');
     const persisted = JSON.parse(
@@ -1584,7 +1593,7 @@ test('runMergePr: releases the keep-alive transport when the flow ends', async (
         runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(llm.closes(), 1);
   } finally {
     await repo.cleanup();
@@ -1644,7 +1653,7 @@ test('runMergePr: threads --max-iterations through to the flow', async () => {
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(captured[0]?.maxIterations, 7);
   } finally {
     await repo.cleanup();
@@ -1758,7 +1767,7 @@ test('runMergePr: falls back to state.currentPr when --pr absent', async () => {
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(prSeen, 73);
   } finally {
     await repo.cleanup();
@@ -1790,7 +1799,7 @@ test('runMergePr: resume false ignores stale persisted currentPr, takes over cur
         github: stubGithub({ currentBranch: 'feature-branch', prForBranch: { number: 99 } }),
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(prSeen, 99, 'PR resolved from current branch, not the stale persisted currentPr');
     const persisted = JSON.parse(
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
@@ -1825,7 +1834,7 @@ test('runMergePr: resume false on a mid-plan run → re-points currentPr, keeps 
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(captured[0]?.pr, 88, 'take-over PR wins over the persisted currentPr');
     const persisted = JSON.parse(
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
@@ -1867,7 +1876,7 @@ test('runMergePr: resume false with no prior state → synthesizes and persists 
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(prSeen, 42);
     const persisted = JSON.parse(
       await readFile(join(repo.path, '.ai-task-master', 'state.json'), 'utf8'),
@@ -1938,7 +1947,7 @@ test('runMergePr: no state file + --pr synthesizes state and runs the flow', asy
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(flowPr[0], 42);
     // Persisted so the next call resumes without --pr.
     const persisted = JSON.parse(
@@ -2075,7 +2084,7 @@ test('runConfig set → file persisted, exit 0', async () => {
       },
       { cwd: repo.path, homeDir: home.path },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     const raw = await readFile(join(home.path, '.aitm.json'), 'utf8');
     const parsed = JSON.parse(raw) as { models?: { smart?: string } };
     assert.equal(parsed.models?.smart, 'anthropic/claude-opus-4.7');
@@ -2684,7 +2693,7 @@ test('runResume: reuses the persisted goal and criteria instead of retyping them
         },
       },
     );
-    assert.equal(result.code, 0, result.message);
+    assertEqual(result.code, 0, result.message);
     assert.equal(captured[0]?.goal, 'add jwt auth');
     assert.equal(captured[0]?.criteria, 'tests pass');
   } finally {

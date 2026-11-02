@@ -5,6 +5,7 @@
 //   Run scenarios and append one JSONL row each to a ledger (keeps every sandbox repo for review):
 //     OPENROUTER_API_KEY=… AITM_SANDBOX_REPO=<owner> AITM_BENCH_MODEL=<model> \
 //       bun scripts/benchmark.ts run [--scenario <id>] [--out <ledger.jsonl>]
+//   #   AITM_BENCH_EXEC=1  also EXECUTE the produced tests during verification (runs model code locally; CI never sets this)
 //
 //   Compare two ledgers (e.g. one model vs another) by scenario — verdict flips + token/cost/ms deltas:
 //     bun scripts/benchmark.ts compare <baseline.jsonl> <candidate.jsonl> [--labels <a>,<b>]

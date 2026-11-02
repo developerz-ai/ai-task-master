@@ -35,6 +35,21 @@ test('readBenchConfig: model precedence is AITM_BENCH_MODEL > AITM_SMOKE_MODEL >
   );
 });
 
+test('readBenchConfig: exec is opt-in via AITM_BENCH_EXEC=1 EXACTLY (running model code is never on by default)', () => {
+  const base = { OPENROUTER_API_KEY: 'k', AITM_SANDBOX_REPO: 'acme' };
+  assert.equal(readBenchConfig(base)?.exec, false, 'unset -> static-only verification');
+  assert.equal(readBenchConfig({ ...base, AITM_BENCH_EXEC: '0' })?.exec, false);
+  assert.equal(
+    readBenchConfig({ ...base, AITM_BENCH_EXEC: 'true' })?.exec,
+    false,
+    'only the literal "1" opts in',
+  );
+  assert.equal(readBenchConfig({ ...base, AITM_BENCH_EXEC: 'yes' })?.exec, false);
+  assert.equal(readBenchConfig({ ...base, AITM_BENCH_EXEC: '1' })?.exec, true);
+  // The exec flag cannot conjure a config: without the key + sandbox there is still nothing to run.
+  assert.equal(readBenchConfig({ AITM_BENCH_EXEC: '1' }), null);
+});
+
 // ---- LIVE: gated scenario runs ---------------------------------------------
 
 const cfg = readBenchConfig(process.env);

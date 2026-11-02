@@ -7,7 +7,10 @@
 // artifact a model comparison reviews by hand, so the row records `repo`/`pr` to find it later.
 //
 // Gated exactly like the smoke (OPENROUTER_API_KEY + AITM_SANDBOX_REPO) so CI without secrets skips.
-// Portable Node APIs only (bun + node).
+// Executing the produced tests during verification is a SECOND, separate opt-in (AITM_BENCH_EXEC=1):
+// it runs MODEL-PRODUCED code locally, so it never engages on its own — CI sets no AITM_* env — and
+// a failed checkout sync to the verify ref is reported as a verdict failure, never a silent static
+// pass. Portable Node APIs only (bun + node).
 
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,7 +18,8 @@ import { dirname, join } from 'node:path';
 import { execa } from 'execa';
 import type { BenchRow } from '../../../src/benchmark/bench-row.ts';
 import { buildBenchRow } from '../../../src/benchmark/bench-row.ts';
-import type { BenchScenario } from '../../../src/benchmark/scenarios.ts';
+import { makeSandboxTestRunner } from '../../../src/benchmark/scenario-exec.ts';
+import type { BenchScenario, ScenarioVerify } from '../../../src/benchmark/scenarios.ts';
 import { main } from '../../../src/cli/cli.ts';
 import { StateStore } from '../../../src/state/state-store.ts';
 import { buildFixtureConfig } from '../e2e-smoke.ts';
@@ -25,11 +29,17 @@ export type BenchConfig = {
   // GitHub owner (org or user) a fresh throwaway repo is created under.
   owner: string;
   model: string;
+  // Whether verification may EXECUTE the produced test (attaches ScenarioVerify.runTest to the
+  // scenario's verify). Strictly opt-in via AITM_BENCH_EXEC=1 — see readBenchConfig — because the
+  // executed code is model-produced.
+  exec: boolean;
 };
 
 // Null when the benchmark is not configured — callers skip cleanly. Reuses the smoke's two gating envs
 // so an operator who can run the smoke can run the benchmark; the model is overridable per comparison
 // (AITM_BENCH_MODEL) and defaults to the same free model the smoke uses (never spends by default).
+// AITM_BENCH_EXEC is the explicit gate for executing model-produced tests during verification; CI
+// sets no AITM_* env, so live execution cannot engage there.
 export function readBenchConfig(env: Record<string, string | undefined>): BenchConfig | null {
   const apiKey = env.OPENROUTER_API_KEY;
   const sandbox = env.AITM_SANDBOX_REPO;
@@ -37,7 +47,9 @@ export function readBenchConfig(env: Record<string, string | undefined>): BenchC
   const owner = sandbox.split('/')[0] ?? sandbox;
   const model =
     env.AITM_BENCH_MODEL ?? env.AITM_SMOKE_MODEL ?? 'qwen/qwen3-next-80b-a3b-instruct:free';
-  return { apiKey, owner, model };
+  // Strict on purpose: only the literal '1' opts in — 'true', 'yes', '0' all leave verification
+  // static-only, because this flag enables running MODEL-PRODUCED code.
+  return { apiKey, owner, model, exec: env.AITM_BENCH_EXEC === '1' };
 }
 
 // Read a file's decoded content from a repo ref via gh, or null when it is absent (non-zero exit).
@@ -138,12 +150,40 @@ export async function runScenario(
     // ---- Scenario verdict on the produced code (independent of the loop's self-reported status) --
     let outcome: 'pass' | 'fail' = 'fail';
     if (verifyRef) {
+      const ref = verifyRef;
       const read = fileReader(slug);
-      const result = await scenario.verify({
-        slug,
-        defaultBranch: verifyRef,
-        readFile: (path) => read(path, verifyRef),
-      });
+      // Executing the produced test is opt-in (cfg.exec, from AITM_BENCH_EXEC=1): sync the LOCAL
+      // checkout to the verify ref first, so the test runs against exactly the graded code. A failed
+      // sync must never degrade into a silent static pass — it attaches a runTest that always
+      // reports the failure as an error, so the scenario's verdict fails with the reason in detail.
+      let runTest: ScenarioVerify['runTest'] | undefined;
+      if (cfg.exec) {
+        const fetch = await execa('git', ['fetch', '-q', 'origin', ref], {
+          cwd: dir,
+          reject: false,
+        });
+        const checkout =
+          fetch.exitCode === 0
+            ? await execa('git', ['checkout', '-q', '-f', 'FETCH_HEAD'], {
+                cwd: dir,
+                reject: false,
+              })
+            : null;
+        const failed = checkout ?? fetch;
+        runTest =
+          failed.exitCode === 0
+            ? makeSandboxTestRunner(dir)
+            : async () => ({
+                exitCode: null,
+                stdout: '',
+                stderr: '',
+                timedOut: false,
+                error: `sandbox checkout to ${ref} failed: ${failed.stderr.trim()}`,
+              });
+      }
+      const ctx: ScenarioVerify = { slug, defaultBranch: ref, readFile: (path) => read(path, ref) };
+      if (runTest) ctx.runTest = runTest;
+      const result = await scenario.verify(ctx);
       outcome = result.ok ? 'pass' : 'fail';
       log(`[${scenario.id}] verify: ${outcome} — ${result.detail}`);
     } else {

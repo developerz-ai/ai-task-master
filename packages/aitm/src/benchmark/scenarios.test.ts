@@ -3,15 +3,27 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BENCH_SCENARIOS, type ScenarioVerify, scenarioById } from './scenarios.ts';
+import {
+  BENCH_SCENARIOS,
+  type ScenarioExecResult,
+  type ScenarioVerify,
+  scenarioById,
+  TEST_EXEC_TIMEOUT_MS,
+} from './scenarios.ts';
 
-// A ScenarioVerify whose readFile is backed by an in-memory map (null for absent paths).
-function verifyCtx(files: Record<string, string>): ScenarioVerify {
-  return {
+// A ScenarioVerify whose readFile is backed by an in-memory map (null for absent paths). The exec
+// capability is attached ONLY when given: absent means the scenario must stay on the static path.
+function verifyCtx(
+  files: Record<string, string>,
+  runTest?: ScenarioVerify['runTest'],
+): ScenarioVerify {
+  const ctx: ScenarioVerify = {
     slug: 'acme/sandbox',
     defaultBranch: 'main',
     readFile: async (path) => files[path] ?? null,
   };
+  if (runTest) ctx.runTest = runTest;
+  return ctx;
 }
 
 test('scenarioById: resolves a known id, undefined otherwise', () => {
@@ -57,7 +69,8 @@ test('multi-file-feature verify: a well-formed module + test passes; a stub test
     true,
   );
   // A test file that references the symbol but carries no test construct / assertion must NOT pass —
-  // the static check is honest about rejecting a stub even though it does not run the test (#308).
+  // the static path never runs the test; it only rejects the stub, and runTest executes the produced
+  // test when opted in (#308).
   const stubTest = '// slugify tests coming soon\n';
   assert.equal(
     (await s.verify(verifyCtx({ 'src/slugify.ts': goodMod, 'src/slugify.test.ts': stubTest }))).ok,
@@ -94,8 +107,9 @@ test('cross-file-refactor verify: passes only when both the definition and the c
 });
 
 test('multi-file-feature verify: rejects the stubs the first version let through (#308)', async () => {
-  // The check cannot tell a right assertion from a wrong one — only running the test could, and that
-  // is what #308 is blocked on. It CAN reject a test that never exercises the function, which the
+  // The static path cannot tell a right assertion from a wrong one — that is what running the test
+  // does, via the opt-in runTest capability (#308). It CAN reject a test that never exercises the
+  // function, which the
   // original four regexes did not: `references` matched a bare mention and `hasAssert` matched the
   // `import assert` line.
   const s = scenarioById('multi-file-feature');
@@ -175,4 +189,126 @@ test('multi-file-feature verify: a second call that is never asserted is not a s
     false,
     'one asserted call plus one bare call is one case, not two',
   );
+});
+
+// ---- grade 2 with execution opted in (#308): the produced test's real result decides -----------
+
+// A well-formed static fixture: satisfies every static check, so verify() reaches runTest.
+const execMod =
+  'export function slugify(input: string): string {\n' +
+  "  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n" +
+  '}\n';
+const execTest =
+  "import assert from 'node:assert';\nimport { test } from 'node:test';\n" +
+  "import { slugify } from './slugify.ts';\ntest('slugify', () => {\n" +
+  "  assert.equal(slugify('A B'), 'a-b');\n  assert.equal(slugify('--Hi--'), 'hi');\n});\n";
+const execFiles = { 'src/slugify.ts': execMod, 'src/slugify.test.ts': execTest };
+
+test('multi-file-feature verify: with runTest, a produced test that passes decides the verdict (pass)', async () => {
+  const s = scenarioById('multi-file-feature');
+  assert.ok(s);
+  let calls = 0;
+  let calledPath = '';
+  let calledBudget = 0;
+  const passingExec: ScenarioExecResult = {
+    exitCode: 0,
+    stdout: '# pass 1\n# fail 0\n',
+    stderr: '',
+    timedOut: false,
+  };
+  const result = await s.verify(
+    verifyCtx(execFiles, async (testPath, timeoutMs) => {
+      calls++;
+      calledPath = testPath;
+      calledBudget = timeoutMs;
+      return passingExec;
+    }),
+  );
+  assert.equal(result.ok, true, 'a produced test that actually passes passes the scenario');
+  assert.match(result.detail, /src\/slugify\.test\.ts/, 'the pass detail names the executed test');
+  assert.equal(calls, 1, 'runTest ran exactly once');
+  assert.equal(calledPath, 'src/slugify.test.ts', 'the scenario executes the produced test file');
+  assert.equal(calledBudget, TEST_EXEC_TIMEOUT_MS, 'the budget is the pinned TEST_EXEC_TIMEOUT_MS');
+});
+
+test('multi-file-feature verify: with runTest, a well-formed test exiting non-zero FAILS', async () => {
+  const s = scenarioById('multi-file-feature');
+  assert.ok(s);
+  const result = await s.verify(
+    verifyCtx(execFiles, async () => ({
+      exitCode: 1,
+      stdout: '# fail 1\n',
+      stderr: "AssertionError: Expected 'a-b' but got 'nope'",
+      timedOut: false,
+    })),
+  );
+  assert.equal(result.ok, false, 'a well-formed test that fails on execution must fail');
+  assert.match(result.detail, /exited 1/);
+  assert.ok(result.detail.includes("Expected 'a-b'"), 'the detail carries the stderr tail');
+});
+
+test('multi-file-feature verify: with runTest, exit 0 with zero executed tests FAILS (an all-skipped test executes nothing)', async () => {
+  const s = scenarioById('multi-file-feature');
+  assert.ok(s);
+  // A produced test that skips itself (`test('slugify', { skip: true })`) clears every static check
+  // and exits 0 on both runners — the verdict must demand executed-test evidence, not just exit 0.
+  const result = await s.verify(
+    verifyCtx(execFiles, async () => ({
+      exitCode: 0,
+      stdout: '# pass 0\n# fail 0\n# skipped 1\n',
+      stderr: '',
+      timedOut: false,
+    })),
+  );
+  assert.equal(result.ok, false, 'exit 0 with every test skipped must not pass');
+  assert.match(result.detail, /no test executed/);
+});
+
+test('multi-file-feature verify: with runTest, a hung test past the execution budget FAILS', async () => {
+  const s = scenarioById('multi-file-feature');
+  assert.ok(s);
+  const result = await s.verify(
+    verifyCtx(execFiles, async () => ({
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+      timedOut: true,
+    })),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /60000ms execution budget/);
+});
+
+test('multi-file-feature verify: with runTest, a command that cannot run at all FAILS', async () => {
+  const s = scenarioById('multi-file-feature');
+  assert.ok(s);
+  const result = await s.verify(
+    verifyCtx(execFiles, async () => ({
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+      timedOut: false,
+      error: 'sandbox checkout to main failed: fatal: bad object',
+    })),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /could not execute/);
+  assert.match(result.detail, /bad object/, 'the detail carries the underlying error');
+});
+
+test('multi-file-feature verify: a static failure short-circuits BEFORE runTest (#308)', async () => {
+  const s = scenarioById('multi-file-feature');
+  assert.ok(s);
+  let calls = 0;
+  const result = await s.verify(
+    verifyCtx(
+      { 'src/slugify.ts': execMod, 'src/slugify.test.ts': '// slugify tests coming soon\n' },
+      async () => {
+        calls++;
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+      },
+    ),
+  );
+  assert.equal(result.ok, false, 'the assertion-free stub still fails statically');
+  assert.equal(calls, 0, 'the executor is never reached when a static check fails');
 });

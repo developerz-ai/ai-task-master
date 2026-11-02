@@ -51,7 +51,7 @@
     "zod": "^4.4.3"
   },
   "optionalDependencies": {
-    "@sentry/node": "^10.62.0",
+    "@sentry/node": "^11.10.0",
     "undici": "^7.21.0"
   },
   "devDependencies": {

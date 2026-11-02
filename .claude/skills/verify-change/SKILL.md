@@ -17,7 +17,7 @@ passes it locally passes everywhere.
 |------|---------|------------|
 | install | `bin/setup` | bun install |
 | run | `bin/dev` | bun packages/aitm/scripts/debug-start.ts — on developerz.ai runs, start it with code_bash_background when you need a running stack |
-| prove | `bin/check` | bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && bun run test:node |
+| prove | `bin/check` | bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && bun run test:node && npm run test:integration -w @developerz.ai/aitm |
 | stop | `bin/stop` | true — on developerz.ai runs, the platform runs this when your session ends — do not stop the stack yourself |
 
 ## Rules

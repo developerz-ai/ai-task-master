@@ -23,7 +23,9 @@ aitm profile show [<name>]
 ```
 
 Profiles are **global-only** (always written to `~/.aitm.json`); there is no `--project`
-selector. `<key>` for `set`/`get` is `openrouterApiKey`, `baseURL`, or `models.<tier>`.
+selector. Scalar `<key>` values for `set`/`get` are `openrouterApiKey`, `baseURL`,
+`contextLength` and `maxOutputTokens`. Nested keys are `models.<tier>`,
+`providerRouting.<field>`, `fallbackModels.<tier>` and `reasoningEffort.<tier>`.
 
 `<name>` must be non-empty and cannot be `__proto__`, `prototype`, or `constructor`: those name
 `Object.prototype` members, so every subcommand rejects them up front and profile lookups are
@@ -78,6 +80,37 @@ So an explicit `openrouterApiKey` / `baseURL` in a config file still overrides t
 the profile beats a stale `OPENROUTER_API_KEY` in the environment. No active profile → resolution
 is identical to before profiles existed (full back-compat). A dangling `activeProfile` (set but no
 matching profile) warns and falls back to top-level/env rather than failing the run.
+
+## Model window overrides
+
+When a provider lists a model but neither it nor the reference catalog supplies a usable window,
+`start`, `resume` and `merge-pr` refuse inference with the affected model and endpoint/profile.
+Set verified numeric limits to recover (illustrative values):
+
+```sh
+aitm profile set custom contextLength 100000
+aitm profile set custom maxOutputTokens 8000
+aitm profile get custom contextLength    # 100000
+aitm profile get custom maxOutputTokens  # 8000
+aitm profile use custom
+```
+
+Both fields are optional **finite positive safe integers** (maximum `9007199254740991`). Fractions,
+zero, negatives, strings, null and nonfinite/unsafe values are rejected. When both exist,
+`maxOutputTokens` must be strictly less than `contextLength`. For example, setting output to
+`100000` after the above context value fails without changing the file. Every set validates the
+whole resulting profile before an atomic write; `show` and `rename` preserve both numbers.
+
+Per-field precedence: **active global profile override > provider catalog > reference catalog**.
+Inactive or project-defined profiles supply no limits. Limits are retained in resolution and run
+snapshots; an overridden context is labelled `(profile override)` in the banner. Pricing provenance
+is independent. The effective limits must leave positive usable input after the reply reserve
+(`min(20000, maxOutputTokens)`, or `20000` if output is unknown).
+
+These overrides are shared by **every selected capability model**, including explicit config/CLI
+model selections — not per-model caps. Use conservative values supported by all selected models or
+a separate profile; do not copy one model's large window onto a smaller one. There are no limit
+environment variables or flags. See [config.md](../config.md#profile-model-windows) for JSON examples.
 
 ## Security
 

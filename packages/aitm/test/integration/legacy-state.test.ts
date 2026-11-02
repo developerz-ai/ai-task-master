@@ -267,6 +267,7 @@ test('legacy-state: runStart resumes from legacy state.json and drives WorkLoop 
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         // Stub: skip real LLM call for style distillation.
         resolveStyle: async () => '# CLAUDE.md\n',
         runLoop: async (input: RunLoopInput): Promise<WorkLoopResult> => {

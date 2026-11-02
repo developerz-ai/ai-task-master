@@ -175,11 +175,11 @@ calling support (see above). Example shape:
 
 ## Model catalog: context window + pricing
 
-`GET {baseURL}/models` is the only place `aitm` learns a model's **context window**, and that window is what decides when the Compactor auto-compacts (see below). The same response supplies per-token pricing for the run's cost line, and `max_completion_tokens` (top-level or under `top_provider`) sizes the reply reserve.
+`GET {baseURL}/models` identifies models served by the provider and may publish their **context windows**. Missing limits can be filled from OpenRouter's public reference catalog or verified active-profile overrides. The resolved window decides when the Compactor auto-compacts. Catalog pricing supplies the run's cost line; `max_completion_tokens` (top-level or under `top_provider`) sizes the reply reserve unless explicitly overridden.
 
 OpenRouter publishes `context_length` on every entry. Other OpenAI-compatible catalogs spell it differently or omit it, so the parser accepts, in order: `context_length`, `top_provider.context_length`, `max_model_len`, `context_window`. Entries that fail to parse are dropped individually rather than failing the whole catalog — one odd model must not cost the run its autocompaction and its cost accounting.
 
-A model whose catalog publishes **no** window is not compacted: `aitm` skips rather than guessing a size and truncating a conversation on a wrong number. If a long run on a custom endpoint never seems to compact, check that its `/models` response carries one of the four keys above.
+A catalog hit proves that a model exists, not that its context window is known. Some gateways publish only IDs. A new model may also be absent from OpenRouter's reference catalog, or that catalog may be unreachable. `start`, `resume` and `merge-pr` refuse unresolved or nonusable windows before planner, coding-style or loop inference rather than running with compaction disabled.
 
 Explicit `null` counts as absent. OpenRouter ships `top_provider.max_completion_tokens: null` for models that publish no output cap, and a schema that accepted only *missing* would fail the entry and drop the whole model — losing its window and its price along with it.
 
@@ -197,17 +197,17 @@ On the first of those, autocompaction was inert for the entire run and every cos
 So whatever the configured endpoint leaves blank is filled from `https://openrouter.ai/api/v1/models`, which needs **no** API key. Resolution is per field group:
 
 ```
-window   provider catalog → OpenRouter list → unknown (no compaction)
+window   explicit profile override → provider catalog → OpenRouter list → unresolved (startup refusal)
 pricing  provider catalog → OpenRouter list → unknown (cost unknown)
 ```
 
 Rules that keep this honest:
 
-- **The configured provider always wins.** A partially-published catalog keeps its own window and borrows only the price.
+- **Explicit profile limits win per field**, then the configured provider, then the reference catalog. A partially-published catalog keeps its own fields unless overridden. Pricing is independent of limit overrides.
 - **Pricing moves as a whole sheet**, never half from each source — a provider prompt rate paired with an OpenRouter completion rate describes no real price list.
 - **Model matching is exact or nothing.** `glm-5.2` → `z-ai/glm-5.2` (org-stripped), `k3` → `moonshotai/kimi-k3` (hyphen-boundary suffix). An ambiguous match yields nothing: mispricing a run is worse than not pricing it.
 - **Borrowed prices are LIST prices**, not what a subscription billed. Anything sourced this way is labelled, in the startup banner and in the end-of-run line (`$1.2345 est. at OpenRouter list rates`).
-- **The fetch is skipped** when the provider's catalog is already complete, and a failure to reach it degrades to "unknown" rather than failing the run.
+- **The reference fetch is skipped** when the provider's catalog is already complete. Reference failure leaves gaps unresolved: missing pricing means `cost unknown`, but a missing window blocks inference unless a valid profile override supplies it.
 - **Both catalog fetches are time-boxed** (20s, `AbortSignal.timeout`) **and cancellable**. They run at startup, and the degrade-to-unknown path only catches a *rejection* — an endpoint that accepts the connection and then stalls would otherwise hang the run before its first task. The deadline alone is not enough: preload runs before task one, so a Ctrl-C would sit out the full 20s. Both clients also take the run's abort signal and compose it with the deadline (`catalogFetchSignal`, hand-rolled rather than `AbortSignal.any`, which Node 20.0–20.2 lacks), releasing the listener once the request settles.
 
 ### Startup banner
@@ -220,7 +220,28 @@ Models — z.ai · https://api.z.ai/api/coding/paas/v4
   glm-5-turbo  fast                    202.8K ctx  in $1.20/M · out $4.00/M · cached $0.240/M   (window + price from OpenRouter list — your endpoint publishes none)
 ```
 
-A model with no window shows `window unknown — autocompaction off`, which is the warning that used to be invisible until a long run overflowed. When the catalog cannot be reached at all the banner is silent rather than printing a table of unknowns.
+Window validation is mandatory even when the banner is replaced or cannot print. An unresolved window means startup refusal, not `autocompaction off`. A diagnostic entry without a window says `window unresolved — startup requires a usable window`.
+
+### Recovering an unresolved window
+
+Check the provider's supported limits, then set them on the active global profile (example numbers
+only):
+
+```sh
+aitm profile set custom contextLength 100000
+aitm profile set custom maxOutputTokens 8000
+aitm profile use custom
+```
+
+Create `custom` first with `aitm profile add custom` if needed. Alternatively select a model whose
+limits are published. No `dist` patch or reference-catalog update is required or assumed.
+
+Both overrides are optional finite positive safe integers; when both are set, output must be less
+than context. Invalid writes leave configuration unchanged, and the effective pair must leave
+positive usable input after reserving up to 20000 reply tokens. The overrides apply conservatively
+to **all selected capability models in the profile**, not one model. A context override is labelled
+`(profile override)` in the banner; it does not change price provenance. See
+[config.md](./config.md#profile-model-windows) for JSON, precedence and budget details.
 
 ## Per-model sampling defaults
 

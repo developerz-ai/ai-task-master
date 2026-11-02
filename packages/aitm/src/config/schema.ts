@@ -103,12 +103,21 @@ export const ProfileSchema = z
     openrouterApiKey: z.string().optional(),
     baseURL: z.url().optional(),
     models: CapabilityModelsSchema.optional(),
+    contextLength: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    maxOutputTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     // Provider-shaped, so profile-able (issues #124, #125).
     providerRouting: ProviderRoutingSchema.optional(),
     fallbackModels: FallbackModelsSchema.optional(),
     reasoningEffort: ReasoningEffortMapSchema.optional(),
   })
-  .passthrough();
+  .passthrough()
+  .refine(
+    (profile) =>
+      profile.contextLength === undefined ||
+      profile.maxOutputTokens === undefined ||
+      profile.maxOutputTokens < profile.contextLength,
+    { message: 'maxOutputTokens must be less than contextLength', path: ['maxOutputTokens'] },
+  );
 
 export type Profile = z.infer<typeof ProfileSchema>;
 
@@ -302,6 +311,8 @@ export type ResolvedConfig = {
   // Name of the active provider profile, if one supplied provider defaults for this run.
   // Undefined → no profile layer. Recorded for the snapshot and `aitm config list`.
   activeProfile?: string | undefined;
+  contextLength?: number | undefined;
+  maxOutputTokens?: number | undefined;
   // Optional OpenAI-compatible base URL override. Undefined → the provider default. User-owned only:
   // resolved global > profile config, then the OPENROUTER_BASE_URL env var as fallback; a project
   // config's baseURL is stripped (untrusted-repo trust boundary), so it is never attacker-set.

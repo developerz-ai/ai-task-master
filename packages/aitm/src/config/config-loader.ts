@@ -291,6 +291,8 @@ export class ConfigLoader {
     sources.openrouterApiKey = apiKeySource;
     sources.baseURL = baseURLSource ?? 'default';
     if (active) sources.activeProfile = 'global';
+    if (profile?.contextLength !== undefined) sources.contextLength = 'profile';
+    if (profile?.maxOutputTokens !== undefined) sources.maxOutputTokens = 'profile';
 
     // Per-tier provenance for the composite provider maps (each tier can win from a different layer).
     const models = this.resolveModels(global, project, profile, cliOverrides);
@@ -331,6 +333,10 @@ export class ConfigLoader {
       openrouterApiKey: apiKey,
       apiKeySource,
       ...(active ? { activeProfile: active.name } : {}),
+      ...(profile?.contextLength !== undefined ? { contextLength: profile.contextLength } : {}),
+      ...(profile?.maxOutputTokens !== undefined
+        ? { maxOutputTokens: profile.maxOutputTokens }
+        : {}),
       baseURL,
       models: models.value,
       maxPrs: trackNullable(

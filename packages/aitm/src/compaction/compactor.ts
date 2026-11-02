@@ -27,6 +27,7 @@ import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
 import { safeStringify } from '../serialization/safe-stringify.ts';
 
 export type CompactionDecision =
+  | { kind: 'unknown' }
   | { kind: 'skip' }
   // contextLength is carried so the wiring can log it per compaction without a second lookup.
   | { kind: 'compact'; keepLastSteps: number; contextLength: number };
@@ -126,11 +127,8 @@ export function effectiveInputTokens(live: LiveContextSize): number {
 export class Compactor {
   constructor(private readonly init: CompactionInit) {}
 
-  // Resolve the model's window and the usable input budget in one lookup. Returns undefined for an
-  // absent, non-finite, or non-positive window — the real case on an OpenAI-compatible catalog that
-  // publishes no context length (see contextLengthOf) — which every caller treats as "we don't know
-  // enough to compact". Shared by shouldCompact and usableInputTokensFor so the budget the trigger
-  // fires on and the budget the post-compaction check verifies against can never drift.
+  // Resolve the trigger and verification budget together. An absent or unusable window cannot
+  // establish that inference fits, so both callers expose it as unknown rather than room remaining.
   private async resolveWindow(
     modelId: string,
   ): Promise<{ contextLength: number; usable: number } | undefined> {
@@ -138,24 +136,26 @@ export class Compactor {
     if (contextLength === undefined || !Number.isFinite(contextLength) || contextLength <= 0) {
       return undefined;
     }
-    return {
-      contextLength,
-      usable: usableInputTokens(contextLength, maxOutputTokens, this.init.reserveTokens),
-    };
+    if (
+      maxOutputTokens !== undefined &&
+      (!Number.isFinite(maxOutputTokens) || maxOutputTokens <= 0)
+    ) {
+      return undefined;
+    }
+    const reserve = this.init.reserveTokens;
+    if (reserve !== undefined && (!Number.isFinite(reserve) || reserve < 0)) return undefined;
+    const usable = usableInputTokens(contextLength, maxOutputTokens, reserve);
+    if (!Number.isFinite(usable) || usable <= 0) return undefined;
+    return { contextLength, usable };
   }
 
   async shouldCompact(modelId: string, live: LiveContextSize): Promise<CompactionDecision> {
     const window = await this.resolveWindow(modelId);
     if (window === undefined) {
-      return { kind: 'skip' };
+      return { kind: 'unknown' };
     }
     const liveInputTokens = effectiveInputTokens(live);
     if (!Number.isFinite(liveInputTokens) || liveInputTokens < 0) {
-      return { kind: 'skip' };
-    }
-    // A window at or below its own reserve leaves nothing to compact INTO — summarizing would not
-    // bring the conversation under the budget, so skip rather than burn a summarizer call per step.
-    if (window.usable <= 0) {
       return { kind: 'skip' };
     }
     if (liveInputTokens >= window.usable) {
@@ -171,8 +171,7 @@ export class Compactor {
   // The usable input-token budget for this model — its context window minus the reply reserve, the
   // exact figure shouldCompact compares against. The compaction step re-checks each stage's result
   // against it (prune, then summarize, then hard-truncate) so a partial reclaim is never sent still
-  // over budget. undefined mirrors resolveWindow: a window we cannot reason about, which shouldCompact
-  // would already have skipped, so in practice this is always a number by the time the step asks.
+  // over budget. undefined means the window or its derived budget is unknown or unusable.
   async usableInputTokensFor(modelId: string): Promise<number | undefined> {
     return (await this.resolveWindow(modelId))?.usable;
   }

@@ -8,6 +8,52 @@ import {
   ProfileSchema,
 } from './schema.ts';
 
+test('profile window overrides accept omitted, partial and complete limits', () => {
+  for (const limits of [
+    {},
+    { contextLength: 100_000 },
+    { maxOutputTokens: 8_000 },
+    { contextLength: 100_000, maxOutputTokens: 8_000 },
+  ]) {
+    assert.deepEqual(ProfileSchema.parse(limits), limits);
+    assert.deepEqual(ConfigFileSchema.parse({ profiles: { p: limits } }).profiles?.p, limits);
+  }
+});
+
+test('profile windows reject invalid numeric values and inconsistent pairs, including nested config', () => {
+  for (const key of ['contextLength', 'maxOutputTokens']) {
+    for (const value of [
+      0,
+      -1,
+      1.5,
+      NaN,
+      Infinity,
+      -Infinity,
+      Number.MAX_SAFE_INTEGER + 1,
+      '100000',
+      null,
+      true,
+      {},
+      [],
+    ]) {
+      assert.equal(
+        ProfileSchema.safeParse({ [key]: value }).success,
+        false,
+        `${key}: ${String(value)}`,
+      );
+      assert.equal(
+        ConfigFileSchema.safeParse({ profiles: { p: { [key]: value } } }).success,
+        false,
+      );
+    }
+  }
+  for (const maxOutputTokens of [100_000, 100_001]) {
+    const limits = { contextLength: 100_000, maxOutputTokens };
+    assert.equal(ProfileSchema.safeParse(limits).success, false);
+    assert.equal(ConfigFileSchema.safeParse({ profiles: { p: limits } }).success, false);
+  }
+});
+
 test('ConfigFileSchema accepts empty object (all fields optional)', () => {
   const parsed = ConfigFileSchema.parse({});
   assert.deepEqual(parsed, {});

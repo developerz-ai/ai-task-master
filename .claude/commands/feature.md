@@ -1,7 +1,7 @@
 ---
 description: End-to-end feature/bug-sweep workflow for aitm — understand, reproduce against a real run, explore and build with a hive of parallel agents in this one checkout (never worktrees), path-disjoint slices, verify under Bun AND Node, PR, merge, and (only when asked) release to npm. Tracks in GitHub issues. Reads intent from the prompt.
 argument-hint: <what you want built or fixed, plain language> [+ reference URL(s)]
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Agent, Task, SendMessage, TaskCreate, TaskUpdate, TaskList, Skill, WebFetch, mcp__glitchtip
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Agent, Task, SendMessage, TaskCreate, TaskUpdate, TaskList, Skill, WebFetch, mcp__sentry-mcp
 ---
 
 # /feature
@@ -59,7 +59,7 @@ An agent runs lint and tests narrowed to its **own** files; whole-repo green is 
 
 2. **Distrust the paperwork.** `docs/`, `VERIFICATION.md` and old issues rot in both directions. Check any plan or status claim against the code and `git log` for the area before planning work off it — merged PR titles are the cheapest ground truth. State plainly which claims you falsified, so nobody re-implements shipped work or "fixes" working code.
 
-3. **Reproduce before you theorise.** For a reported defect, real-run evidence beats reasoning: run the actual entry point (`aitm start …`, `aitm merge-pr --pr N`) against a **throwaway** git repo and the sandbox `gh` account, and read the structured stderr log — phase/step lines, the redacted transcript, the state written under `state/`. If the report came from a user's run, **`mcp__glitchtip`** may already hold the error with the module and version (`observability/` reports there); check it before guessing. Never point a reproduction at a real repo you care about. A finding with a real-run fingerprint outranks one derived from reading alone.
+3. **Reproduce before you theorise.** For a reported defect, real-run evidence beats reasoning: run the actual entry point (`aitm start …`, `aitm merge-pr --pr N`) against a **throwaway** git repo and the sandbox `gh` account, and read the structured stderr log — phase/step lines, the redacted transcript, the state written under `state/`. If the report came from a user's run, **`mcp__sentry-mcp`** may already hold the error with the module and version (`observability/` reports there); check it before guessing. Never point a reproduction at a real repo you care about. A finding with a real-run fingerprint outranks one derived from reading alone.
 
 4. **Explore (parallel).** Fan out `Agent` Explore agents (very thorough) over the affected modules under `packages/aitm/src/<module>/`, plus `packages/ai-claude-compat` if the AI-SDK/compat layer is involved: patterns to mirror (`file:line`), the paired unit tests vs integration under `packages/aitm/test/integration/`, and the constraints. Give each a **disjoint** area, and require of every finding severity, `file:line`, a one-sentence defect statement and a **concrete failure scenario** (inputs → wrong outcome). Demand two more things: the doc claims they **falsified**, and the brief premises that turned out **true**. Produce a ranked worklist; log what the survey could not cover. **Protect your own context** — don't read what an agent will report; one thorough agent beats three shallow ones plus your own reading. (There is no codegraph index in this repo; `Grep`/`Glob` over the module map is the structure tool.)
 

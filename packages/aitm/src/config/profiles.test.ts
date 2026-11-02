@@ -25,6 +25,53 @@ async function readGlobal(home: string): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(join(home, '.aitm.json'), 'utf8'));
 }
 
+test('profile window set/get persist numeric limits and preserve them on rename/show', async () => {
+  await withManager(async ({ manager, home }) => {
+    await manager.add('p');
+    await manager.set('p', 'contextLength', '100000');
+    await manager.set('p', 'maxOutputTokens', '8000');
+    assert.equal(await manager.get('p', 'contextLength'), 100_000);
+    assert.equal(await manager.get('p', 'maxOutputTokens'), 8_000);
+    const renamed = await manager.rename('p', 'renamed');
+    assert.equal(renamed.contextLength, 100_000);
+    assert.equal(renamed.maxOutputTokens, 8_000);
+    const shown = await new ProfileManager(home).show('renamed');
+    assert.equal(shown.profile.contextLength, 100_000);
+    assert.equal(shown.profile.maxOutputTokens, 8_000);
+  });
+});
+
+test('invalid profile windows never mutate persisted config', async () => {
+  await withManager(async ({ manager, home }) => {
+    await manager.add('p');
+    await manager.set('p', 'contextLength', 100_000);
+    await manager.set('p', 'maxOutputTokens', 8_000);
+    const before = await readFile(join(home, '.aitm.json'), 'utf8');
+    for (const key of ['contextLength', 'maxOutputTokens']) {
+      for (const value of [
+        0,
+        -1,
+        1.5,
+        NaN,
+        Infinity,
+        -Infinity,
+        Number.MAX_SAFE_INTEGER + 1,
+        '"100000"',
+        null,
+        true,
+        {},
+        [],
+      ]) {
+        await assert.rejects(() => manager.set('p', key, value));
+        assert.equal(await readFile(join(home, '.aitm.json'), 'utf8'), before);
+      }
+    }
+    await assert.rejects(() => manager.set('p', 'maxOutputTokens', 100_000), /maxOutputTokens/);
+    await assert.rejects(() => manager.set('p', 'contextLength', 8_000), /maxOutputTokens/);
+    assert.equal(await readFile(join(home, '.aitm.json'), 'utf8'), before);
+  });
+});
+
 test('ProfileManager is constructible', () => {
   assert.ok(new ProfileManager('/tmp/home') instanceof ProfileManager);
 });

@@ -204,6 +204,7 @@ test('start-flow: plan→work→PR open transitions prGroups[0].status to awaiti
         homeDir: repo.path, // no global config in the temp dir
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         runLoop: makeRunLoop(mockModel),
       },
     );
@@ -263,6 +264,7 @@ test('start-flow: 2-task group writes [x] per completed task in plan.md', async 
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         runLoop: async (input: RunLoopInput): Promise<WorkLoopResult> => {
           const planGroup: PrGroup = {
             id: 'hello-world',

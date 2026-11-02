@@ -115,6 +115,8 @@ code-execution surfaces). Keys absent from a file fall through per the
 | `baseURL` | URL string | `https://openrouter.ai/api/v1` | global, + profile | OpenAI-compatible endpoint override. Project value ignored + warned. Env `OPENROUTER_BASE_URL`. See [baseURL](#baseurl). |
 | `activeProfile` | string | unset | global | Name of the `profiles` entry seeding this run. See [Profiles](#profiles). |
 | `profiles` | map | `{}` | global | Named provider bundles (write via `aitm profile …`). See [Profiles](#profiles). |
+| `profiles.<name>.contextLength` | positive safe integer | unset | active global profile only | Explicit context window shared by the selected models. See [Profile model windows](#profile-model-windows). |
+| `profiles.<name>.maxOutputTokens` | positive safe integer | unset | active global profile only | Reply cap used for the compaction reserve; must be less than `contextLength` when both are set. |
 | `models` | `{generic,smart,coding,fast}` | provider defaults | project + global, + profile, CLI `--model` (pins `generic`) | Per-capability model ids. See [Per-role models](#per-role-models). |
 | `providerRouting` | object | unset | project + global, + profile | OpenRouter `provider.*` routing controls. See [providers.md](./providers.md#routing-controls). |
 | `fallbackModels` | `{tier: string[]}` | unset | project + global, + profile | Per-tier failover model ids. See [providers.md](./providers.md#routing-controls). |
@@ -197,6 +199,56 @@ top-level dropped, or coherent top-level shadowing the profile), so the shadow i
 `activeProfile` set → resolution is identical to before profiles existed (full back-compat). A dangling `activeProfile` (named but absent from
 `profiles`) warns and falls back rather than failing the run. Full command reference and presets:
 [`commands/profile.md`](./commands/profile.md).
+
+### Profile model windows
+
+A provider may list a model without publishing its window, and OpenRouter's public reference
+catalog may not yet list a new model. `start`, `resume` and `merge-pr` refuse inference until every
+resolved capability model has a valid context window and a positive usable input budget. The error
+identifies the model, endpoint and active profile. Missing pricing alone is not a startup error.
+
+Set verified limits on the **active global profile**, not as top-level/project settings, flags or
+environment variables. Either field may be omitted. Values must be finite, positive safe integers
+(up to `9007199254740991`), not numeric strings, fractions, zero or null. When both are supplied,
+`maxOutputTokens < contextLength`; the effective pair is checked again after catalog resolution.
+
+```json
+{
+  "activeProfile": "custom",
+  "profiles": {
+    "custom": {
+      "baseURL": "https://provider.example/v1",
+      "models": { "generic": "new-model", "smart": "new-model", "coding": "new-model", "fast": "new-model" },
+      "contextLength": 100000,
+      "maxOutputTokens": 8000
+    }
+  }
+}
+```
+
+Recovery after checking the provider's actual supported limits (these numbers are illustrative):
+
+```sh
+aitm profile set custom contextLength 100000
+aitm profile set custom maxOutputTokens 8000
+aitm profile use custom
+aitm start "your goal"
+```
+
+Create the profile first with `aitm profile add custom` if none exists, or select a model with
+published limits instead. Each `profile set` validates the complete resulting profile before an
+atomic write; an invalid value or inconsistent pair leaves the file unchanged.
+
+Precedence is independent per field: **explicit profile override > provider catalog > reference
+catalog**. Inactive profiles and project-defined profiles never supply overrides. The resolved
+limits retain profile provenance and appear in the run snapshot. The banner labels an explicit
+context as `(profile override)`; pricing keeps its independent provider/reference provenance.
+
+These are deliberately **shared-profile**, not per-model, overrides: they apply to every selected
+capability model, including models selected by top-level/project config or `--model`. Choose
+conservative limits valid for all of them, or use a separate profile. The usable input budget is
+`max(0, contextLength - reserve)`, with reserve `min(20000, maxOutputTokens)` when supplied, otherwise
+`20000`. A window with no remaining input budget is refused at startup.
 
 ## allowForcePush
 

@@ -136,6 +136,7 @@ test('ci-fix-loop: CI fails once, Worker fixes, re-poll succeeds, PR merges → 
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         resolveStyle: async () => '# CLAUDE.md\n',
         runMergeFlow: async (input: RunMergeFlowInput): Promise<WorkLoopResult> => {
           const flowResult = await runTakeOverFlow({
@@ -234,6 +235,7 @@ test('ci-fix-loop: maxIterations=1 exhausted with always-failing CI → exit 1',
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         resolveStyle: async () => '# CLAUDE.md\n',
         runMergeFlow: async (input: RunMergeFlowInput): Promise<WorkLoopResult> => {
           const flowResult = await runTakeOverFlow({
@@ -308,6 +310,7 @@ test('ci-fix-loop: MergeConflict thrown by mergePr propagates to exit 1', async 
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         resolveStyle: async () => '# CLAUDE.md\n',
         // runMergeFlow is NOT catching the MergeConflict — let it propagate to runMergePr's
         // outer try-catch, which maps any thrown error to { code: 1 }.
@@ -377,6 +380,7 @@ test('ci-fix-loop: pre-aborted AbortSignal yields exit 2 (cancelled)', async () 
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         resolveStyle: async () => '# CLAUDE.md\n',
         signal: ac.signal,
         runMergeFlow: async (input: RunMergeFlowInput): Promise<WorkLoopResult> => {

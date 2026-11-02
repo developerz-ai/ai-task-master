@@ -1,11 +1,8 @@
 // The one-time startup banner: what every configured model's context window and price actually
 // resolved to, and where those numbers came from.
 //
-// This is diagnostic, not decorative. A provider that publishes no context window silently disables
-// autocompaction for the whole run (the Compactor will not compact a window it doesn't know), and a
-// provider that publishes no pricing silently reduces the end-of-run summary to `cost unknown`. Both
-// were invisible until the run was over. Printed once at start, they are visible before any tokens
-// are spent.
+// Startup validates model windows separately. The banner shows their provenance alongside pricing;
+// missing pricing reduces the end-of-run summary to `cost unknown`, not a startup error.
 //
 // SRP: formatting only. ModelLimitsRegistry resolves the numbers; commands.ts prints the string.
 
@@ -44,13 +41,11 @@ function pricePart(limits: ModelLimits): string {
   return parts.join(' · ');
 }
 
-// The window, or the consequence of not having one. Saying "autocompaction off" here is the whole
-// point of the banner: it is the difference between a long run that compacts and one that walks into
-// a context-overflow error with no warning.
+// A missing window is unresolved, never permission to run without compaction.
 function contextPart(limits: ModelLimits | undefined): string {
   const window = limits?.contextLength;
-  if (window === undefined) return 'window unknown — autocompaction off';
-  return `${formatTokens(window)} ctx`;
+  if (window === undefined) return 'window unresolved — startup requires a usable window';
+  return `${formatTokens(window)} ctx${limits?.contextSource === 'profile' ? ' (profile override)' : ''}`;
 }
 
 // Where the numbers came from, when it isn't the provider itself. A reference-sourced price is a

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { afterEach, beforeEach, test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import type { ErrorReporter } from '../observability/error-reporter.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
@@ -10,6 +10,13 @@ import type { EntrypointProcess, MainCtx } from './cli.ts';
 import { forceExit, installSignalHandlers, isEntrypoint, main, runEntrypoint } from './cli.ts';
 
 const FAKE_KEY = 'sk-or-fake-test-key';
+const realFetch = globalThis.fetch;
+beforeEach(() => {
+  globalThis.fetch = async () => Response.json({ data: [] });
+});
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
 
 type Capture = {
   out: string[];
@@ -100,6 +107,52 @@ test('main: missing goal → usage on stderr, exit 2', async () => {
   assert.match(cap.err.join(''), /Usage:/);
 });
 
+test('main forwards a rejecting preflight for start, resume and merge-pr without inference', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let checks = 0;
+    let flows = 0;
+    const cap = capture();
+    const ctx: MainCtx = {
+      ...cap.ctx,
+      cwd: repo.path,
+      homeDir: home.path,
+      env: { OPENROUTER_API_KEY: FAKE_KEY },
+      authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {
+        checks++;
+        throw new Error('test window refusal');
+      },
+      runPlanner: async () => {
+        flows++;
+        return { kind: 'blocked', reason: 'unexpected' };
+      },
+      runLoop: async () => {
+        flows++;
+        return { kind: 'success', outcomes: [] };
+      },
+      runMergeFlow: async () => {
+        flows++;
+        return { kind: 'success', outcomes: [] };
+      },
+    };
+    for (const argv of [['start', 'goal'], ['resume'], ['merge-pr', '--pr', '7']]) {
+      assert.equal(await main(argv, ctx), 1);
+      assert.match(cap.err.join(''), /test window refusal/);
+    }
+    assert.equal(checks, 3);
+    assert.equal(flows, 0);
+    for (const argv of [['help'], ['config', 'list'], ['profile', 'list']]) {
+      assert.equal(await main(argv, ctx), 0);
+    }
+    assert.equal(checks, 3, 'non-inference commands never check windows');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
 // ---- start dispatch --------------------------------------------------------
 
 test('main: start with stubbed env routes to runStart and forwards exit code', async () => {
@@ -114,6 +167,7 @@ test('main: start with stubbed env routes to runStart and forwards exit code', a
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
       runLoop: async () => {
         called++;
         return { kind: 'success', outcomes: [] };
@@ -142,6 +196,7 @@ test('main: start threads ctx.signal into the run loop', async () => {
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
       signal: controller.signal,
       runLoop: async (input) => {
         received = input.signal;
@@ -167,6 +222,7 @@ test('main: start without OPENROUTER_API_KEY → exit 1, message on stderr', asy
       homeDir: home.path,
       env: {},
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
       runLoop: async () => {
         assert.fail('runLoop must not be invoked when API key is missing');
       },
@@ -197,6 +253,7 @@ test('main: merge-pr --pr N with no prior state → exit 0 (take-over path)', as
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
       runMergeFlow: async () => {
         flowRan = true;
         return { kind: 'success', outcomes: [] };
@@ -223,6 +280,7 @@ test('main: merge-pr threads ctx.signal into the merge flow', async () => {
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
       signal: controller.signal,
       runMergeFlow: async (input) => {
         received = input.signal;
@@ -250,6 +308,7 @@ test('main: merge-pr with an aborted signal → flow cancels → exit 2', async 
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
       signal: controller.signal,
       // Mirrors the real take-over loop: an already-aborted signal short-circuits to cancelled.
       runMergeFlow: async (input) =>
@@ -403,6 +462,7 @@ test('main: start success (code 0) routes message to stdout, not stderr', async 
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
       runLoop: async () => {
         return { kind: 'success', outcomes: [] };
       },
@@ -426,6 +486,7 @@ test('main: start session-cap (code 0, message) routes to stdout, not stderr', a
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
       runLoop: async () => {
         return { kind: 'session-cap', outcomes: [] };
       },
@@ -450,6 +511,7 @@ test('main: start awaiting-pr (code 0, message) routes to stdout, not stderr', a
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
       runLoop: async () => {
         return { kind: 'awaiting-pr', outcomes: [], prs: [42] };
       },
@@ -495,6 +557,7 @@ test('main: start cancelled (code 2, message) routes to stderr, not stdout', asy
       homeDir: home.path,
       env: { OPENROUTER_API_KEY: FAKE_KEY },
       authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+      checkModelWindows: async () => {},
       runLoop: async () => {
         return { kind: 'cancelled', outcomes: [] };
       },

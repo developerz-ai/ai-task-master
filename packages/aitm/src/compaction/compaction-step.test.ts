@@ -84,7 +84,7 @@ function stubCompactor(opts: {
   // The usable input-token budget the post-compaction fit check verifies against. Defaults large so
   // control-flow tests (whose small message arrays trivially fit) exercise the intended path; the
   // overflow-guarantee tests set it small to force the summarize / hard-truncate escalation.
-  usable?: number;
+  usable?: number | undefined;
 }): CompactorLike {
   return {
     shouldCompact: async () => {
@@ -97,7 +97,7 @@ function stubCompactor(opts: {
       if (opts.compactReturnsUndefined) return undefined;
       return opts.summary ?? 'SUMMARY';
     },
-    usableInputTokensFor: async () => opts.usable ?? 1_000_000,
+    usableInputTokensFor: async () => ('usable' in opts ? opts.usable : 1_000_000),
   };
 }
 
@@ -432,6 +432,64 @@ test('buildCompactionStep: below threshold → pass-through, summarizer never ca
   );
   assert.equal(result, undefined);
   assert.equal(compactCalls, 0);
+});
+
+test('buildCompactionStep: unknown window rejects before inference, including the first step', async () => {
+  let compactCalls = 0;
+  const compactor = stubCompactor({
+    decision: { kind: 'unknown' },
+    onCompact: () => {
+      compactCalls++;
+    },
+  });
+  const build = buildCompactionStep({ compactor, modelId: 'unpublished/model' });
+  for (const steps of [[], [step(2)]]) {
+    await assert.rejects(
+      async () => build(prepareStepArg(steps, msgs(3))),
+      /unpublished\/model.*usable context window.*contextLength.*maxOutputTokens/,
+    );
+  }
+  assert.equal(compactCalls, 0);
+});
+
+test('buildCompactionStep: missing or unusable verification budgets reject instead of accepting candidates', async () => {
+  for (const usable of [undefined, 0, -1, Number.NaN, Infinity, -Infinity]) {
+    for (const messages of [msgs(7), bigToolConversation('small tail')]) {
+      let compactCalls = 0;
+      const compactor = stubCompactor({
+        decision: { kind: 'compact', keepLastSteps: 1, contextLength: 100_000 },
+        usable,
+        onCompact: () => {
+          compactCalls++;
+        },
+      });
+      await assert.rejects(
+        async () =>
+          buildCompactionStep({ compactor, modelId: 'unpublished/model' })(
+            prepareStepArg([step(2), step(4), step(6)], messages),
+          ),
+        /unpublished\/model.*usable input budget.*contextLength.*maxOutputTokens/,
+      );
+      assert.equal(compactCalls, 0, 'no summarizer call without a verifiable budget');
+    }
+  }
+});
+
+test('buildCompactionStep: real Compactor rejects an unpublished window', async () => {
+  const compactor = new Compactor({
+    summarizer: new MockLanguageModelV3(),
+    limits: {
+      forModel: async (modelId) => ({ modelId }),
+      preload: async () => {},
+    },
+  });
+  await assert.rejects(
+    async () =>
+      buildCompactionStep({ compactor, modelId: 'unpublished/model' })(
+        prepareStepArg([], [msg('user', 'goal')]),
+      ),
+    /unpublished\/model.*usable context window/,
+  );
 });
 
 test('buildCompactionStep: empty message array → pass-through (nothing to send yet)', async () => {

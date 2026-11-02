@@ -899,6 +899,7 @@ test('crash-durability: prPerTask + no-automerge is rejected before any side eff
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         runLoop: async () => {
           assert.fail('runLoop must not run for a rejected --pr-per-task/--no-automerge combo');
         },
@@ -964,6 +965,7 @@ test('crash-durability: a dirty tree at run entry is refused untouched; committi
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         resolveStyle: async () => 'stub digest\n',
         runLoop: runLoopHitsAcquire,
       },
@@ -1005,6 +1007,7 @@ test('crash-durability: a dirty tree at run entry is refused untouched; committi
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         resolveStyle: async () => 'stub digest\n',
         runLoop: runLoopHitsAcquire,
       },
@@ -1059,6 +1062,7 @@ test('crash-durability: a concurrent run while the lock is held is refused untou
           homeDir: input.cwd,
           env: { OPENROUTER_API_KEY: 'test-key-x' },
           authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+          checkModelWindows: async () => {},
           resolveStyle: async () => 'stub digest\n',
           runLoop: async () => {
             innerLoopCalls += 1;
@@ -1077,6 +1081,7 @@ test('crash-durability: a concurrent run while the lock is held is refused untou
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         resolveStyle: async () => 'stub digest\n',
         runLoop: holderRunLoop,
       },
@@ -1185,6 +1190,7 @@ test('crash-durability: `merge-pr --no-resume` re-pointing currentPr crashes mid
           homeDir: repo.path,
           env: { OPENROUTER_API_KEY: 'test-key-x' },
           authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+          checkModelWindows: async () => {},
           resolveStyle: async () => 'stub digest\n',
           runMergeFlow: async () => {
             flowCallsDuringCrash += 1;
@@ -1230,6 +1236,7 @@ test('crash-durability: `merge-pr --no-resume` re-pointing currentPr crashes mid
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         resolveStyle: async () => 'stub digest\n',
         runMergeFlow: async (input) => {
           capturedPr = input.pr;

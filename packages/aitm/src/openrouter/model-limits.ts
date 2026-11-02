@@ -2,7 +2,7 @@
 // Cached per-run after first fetch — model catalog changes slowly.
 // docs/auth.md, src/compaction/compactor.ts
 //
-// Two sources, in precedence order. The active provider's own `/models` is authoritative. Whatever it
+// Explicit profile limits win per field. Otherwise the active provider's `/models` wins; whatever it
 // omits is filled from OpenRouter's public catalog (reference-catalog.ts), because a subscription
 // gateway routinely publishes an id and nothing else — measured: z.ai's coding endpoint publishes no
 // window and no pricing at all, which left the Compactor permanently inert (it will not compact a
@@ -28,9 +28,7 @@ export type LimitSource = 'provider' | 'reference';
 
 export type ModelLimits = {
   modelId: string;
-  // Undefined when neither source publishes a window for this model. Consumers skip rather than
-  // guess: the Compactor does not compact a model whose window it doesn't know, exactly as it treats
-  // a non-finite one.
+  // Undefined when no source supplies a valid window. Startup refuses inference rather than guessing.
   contextLength?: number;
   // The most the model may emit in one reply. Input and output share the window, so this is the
   // slice of it that cannot hold conversation — the Compactor reserves it. Undefined when neither
@@ -46,7 +44,7 @@ export type ModelLimits = {
   cacheWriteUsdPerToken?: number;
   // Set only alongside the value they describe. `pricingSource: 'reference'` is what makes a cost
   // figure an estimate; the CLI must say so rather than print it as billed.
-  contextSource?: LimitSource;
+  contextSource?: LimitSource | 'profile';
   pricingSource?: LimitSource;
 };
 
@@ -82,6 +80,10 @@ export class ModelLimitsRegistry implements ModelLimitsLookup {
   constructor(
     private readonly client: ModelCatalogClient,
     private readonly reference?: ReferenceCatalogClient,
+    private readonly overrides: {
+      contextLength?: number | undefined;
+      maxOutputTokens?: number | undefined;
+    } = {},
   ) {}
 
   async forModel(modelId: string): Promise<ModelLimits> {
@@ -122,8 +124,25 @@ export class ModelLimitsRegistry implements ModelLimitsLookup {
     for (const m of models) {
       next.set(m.id, limitsOf(m, m.id, 'provider'));
     }
-    this.cache = next;
     await this.fillFromReference(next);
+    for (const entry of next.values()) {
+      if (this.overrides.contextLength !== undefined) {
+        entry.contextLength = this.overrides.contextLength;
+        entry.contextSource = 'profile';
+      }
+      if (this.overrides.maxOutputTokens !== undefined) {
+        entry.maxOutputTokens = this.overrides.maxOutputTokens;
+      }
+      if (
+        !validLimit(entry.contextLength) ||
+        (entry.maxOutputTokens !== undefined &&
+          (!validLimit(entry.maxOutputTokens) || entry.maxOutputTokens >= entry.contextLength))
+      ) {
+        delete entry.contextLength;
+        delete entry.contextSource;
+      }
+    }
+    this.cache = next;
   }
 
   // Fill what the provider's catalog left blank. Skipped entirely when nothing is missing (a native
@@ -146,6 +165,10 @@ export class ModelLimitsRegistry implements ModelLimitsLookup {
       cache.set(entry.modelId, merge(entry, limitsOf(match, entry.modelId, 'reference')));
     }
   }
+}
+
+function validLimit(value: number | undefined): value is number {
+  return value !== undefined && Number.isSafeInteger(value) && value > 0;
 }
 
 // A resolved entry still missing something the reference book could supply.

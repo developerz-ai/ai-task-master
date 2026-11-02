@@ -61,9 +61,9 @@ type ToolResultOutput = Extract<
 
 type CompactionStepResult = { messages: ModelMessage[] } | undefined;
 
-// Build a `prepareStep` that compacts context when it crosses the threshold. Never throws: a lookup
-// miss (ModelNotFound) or a summarizer error logs a warning and passes the messages through
-// uncompacted, so compaction failure can never crash the step.
+// Build a `prepareStep` that compacts context when it crosses the threshold. Unknown windows and
+// unusable verification budgets reject inference; transient lookup and summarizer errors retain
+// their logged recovery paths.
 export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
   init: CompactionStepInit,
 ): CompactionPrepareStep<TOOLS> {
@@ -143,6 +143,11 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
         });
         return undefined;
       }
+      if (decision.kind === 'unknown') {
+        throw new Error(
+          `Model "${init.modelId}" has no usable context window. Set contextLength and maxOutputTokens on the active profile, or select a model with published limits.`,
+        );
+      }
       if (decision.kind === 'skip') return undefined;
 
       // No completed steps yet — the first prepareStep of a run, or of a #107 `priorHandle`
@@ -168,9 +173,13 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
       // The usable input-token budget for this model (its window minus the reply reserve) — the same
       // figure shouldCompact just fired on. Every stage below VERIFIES its result against this before
       // returning it: a stage that reclaims some context but not enough must never be sent, or it is the
-      // exact overflow compaction exists to prevent (finding 08, HIGH). undefined = a window we cannot
-      // reason about, which shouldCompact would already have skipped — treat as "cannot verify, fits".
+      // exact overflow compaction exists to prevent (finding 08, HIGH).
       const usable = await init.compactor.usableInputTokensFor(init.modelId);
+      if (usable === undefined || !Number.isFinite(usable) || usable <= 0) {
+        throw new Error(
+          `Model "${init.modelId}" has no usable input budget to verify compaction. Set contextLength and maxOutputTokens on the active profile, or select a model with published limits.`,
+        );
+      }
       // Fixed overhead the message char-estimate cannot see (system prompt + tool schemas): the gap
       // between the grounded live size and the char estimate of those same live messages. Carried onto
       // every candidate so a "fits" verdict measures what the provider actually bills, not just message
@@ -178,7 +187,7 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
       // over it), so a candidate exactly at the budget is treated as still needing to shrink.
       const overhead = Math.max(0, liveInputTokens - estimatedInputTokens);
       const fits = (candidate: readonly ModelMessage[]): boolean =>
-        usable === undefined || estimateTokens(candidate) + overhead < usable;
+        estimateTokens(candidate) + overhead < usable;
 
       // Cheap prune stage first (no model call): clear the payloads of large, older tool results,
       // keeping a recency shield of recent tool output and the kept-steps tail verbatim. Stale results

@@ -31,6 +31,54 @@ function makeWarnCollector(): { calls: string[]; warn: (m: string) => void } {
   return { calls, warn: (m) => calls.push(m) };
 }
 
+test('active global profile windows retain provenance and snapshots; other profiles cannot supply them', async () => {
+  const home = await tempDir('aitm-home-');
+  const cwd = await tempDir('aitm-cwd-');
+  try {
+    await writeGlobalConfig(home.path, {
+      activeProfile: 'p',
+      profiles: {
+        p: { contextLength: 100_000, maxOutputTokens: 8_000 },
+        inactive: { contextLength: 200_000 },
+      },
+    });
+    await writeProjectConfig(cwd.path, {
+      activeProfile: 'project',
+      profiles: { p: { contextLength: 999_999 }, project: { contextLength: 999_999 } },
+    });
+    const loader = new ConfigLoader(cwd.path, home.path, { OPENROUTER_API_KEY: 'sk-env' });
+    const { resolved, sources } = await loader.resolveWithSources({});
+    assert.equal(resolved.contextLength, 100_000);
+    assert.equal(resolved.maxOutputTokens, 8_000);
+    assert.equal(sources.contextLength, 'profile');
+    assert.equal(sources.maxOutputTokens, 'profile');
+    await loader.writeSnapshot(resolved, join(cwd.path, '.ai-task-master'));
+    const snapshot = JSON.parse(
+      await readFile(join(cwd.path, '.ai-task-master/config.snapshot.json'), 'utf8'),
+    );
+    assert.equal(snapshot.contextLength, 100_000);
+    assert.equal(snapshot.maxOutputTokens, 8_000);
+    await writeGlobalConfig(home.path, { profiles: { inactive: { contextLength: 200_000 } } });
+    const inactive = await loader.resolve({});
+    assert.equal(inactive.contextLength, undefined);
+    assert.equal(inactive.maxOutputTokens, undefined);
+    await writeGlobalConfig(home.path, {
+      activeProfile: 'p',
+      profiles: { p: { maxOutputTokens: 4_000 } },
+    });
+    const partial = await loader.resolve({});
+    assert.equal(partial.contextLength, undefined);
+    assert.equal(partial.maxOutputTokens, 4_000);
+    await writeGlobalConfig(home.path, {
+      profiles: { p: { contextLength: 10, maxOutputTokens: 10 } },
+    });
+    await assert.rejects(() => loader.resolve({}), /maxOutputTokens/);
+  } finally {
+    await home.cleanup();
+    await cwd.cleanup();
+  }
+});
+
 test('ConfigLoader is constructible', () => {
   const loader = new ConfigLoader('/tmp/repo', '/tmp/home', {});
   assert.ok(loader instanceof ConfigLoader);

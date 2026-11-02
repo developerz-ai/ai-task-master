@@ -2,6 +2,30 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { type BannerEntry, formatRate, formatTokens, modelBanner } from './model-banner.ts';
 
+test('modelBanner: profile windows are distinct from independently borrowed prices', () => {
+  const out = modelBanner(
+    [
+      {
+        capability: 'coding',
+        modelId: 'm',
+        limits: {
+          modelId: 'm',
+          contextLength: 100_000,
+          maxOutputTokens: 8_000,
+          contextSource: 'profile',
+          promptUsdPerToken: 0.001,
+          completionUsdPerToken: 0.002,
+          pricingSource: 'reference',
+        },
+      },
+    ],
+    'p',
+  );
+  assert.match(out, /100.0K ctx \(profile override\)/);
+  assert.match(out, /price from OpenRouter list/);
+  assert.doesNotMatch(out, /window from OpenRouter list/);
+});
+
 test('formatTokens: millions and thousands stay readable', () => {
   assert.equal(formatTokens(1_048_576), '1.0M');
   assert.equal(formatTokens(202_752), '202.8K');
@@ -28,10 +52,9 @@ test('modelBanner: capabilities sharing a model collapse onto one line', () => {
 });
 
 test('modelBanner: a missing window names the consequence, not just the gap', () => {
-  // The whole reason this line exists — an unknown window means the Compactor cannot fire, and that
-  // is invisible until a long run overflows.
+  // An unresolved window is a startup error, not permission to run without compaction.
   const out = modelBanner([{ capability: 'coding', modelId: 'm', limits: undefined }], 'p');
-  assert.match(out, /window unknown — autocompaction off/);
+  assert.match(out, /window unresolved — startup requires a usable window/);
   assert.match(out, /price unknown/);
 });
 

@@ -35,6 +35,7 @@ export type MainCtx = {
   stdout?: (chunk: string) => void;
   stderr?: (chunk: string) => void;
   authStatus?: StartCtx['authStatus'];
+  checkModelWindows?: StartCtx['checkModelWindows'];
   runPlanner?: StartCtx['runPlanner'];
   runLoop?: StartCtx['runLoop'];
   runMergeFlow?: MergePrCtx['runMergeFlow'];
@@ -97,6 +98,7 @@ function buildStartCtx(ctx: MainCtx): StartCtx {
   if (ctx.homeDir !== undefined) out.homeDir = ctx.homeDir;
   if (ctx.env !== undefined) out.env = ctx.env;
   if (ctx.authStatus !== undefined) out.authStatus = ctx.authStatus;
+  if (ctx.checkModelWindows !== undefined) out.checkModelWindows = ctx.checkModelWindows;
   if (ctx.runPlanner !== undefined) out.runPlanner = ctx.runPlanner;
   if (ctx.runLoop !== undefined) out.runLoop = ctx.runLoop;
   if (ctx.signal !== undefined) out.signal = ctx.signal;
@@ -109,6 +111,7 @@ function buildMergePrCtx(ctx: MainCtx): MergePrCtx {
   if (ctx.homeDir !== undefined) out.homeDir = ctx.homeDir;
   if (ctx.env !== undefined) out.env = ctx.env;
   if (ctx.authStatus !== undefined) out.authStatus = ctx.authStatus;
+  if (ctx.checkModelWindows !== undefined) out.checkModelWindows = ctx.checkModelWindows;
   if (ctx.runMergeFlow !== undefined) out.runMergeFlow = ctx.runMergeFlow;
   if (ctx.signal !== undefined) out.signal = ctx.signal;
   return out;

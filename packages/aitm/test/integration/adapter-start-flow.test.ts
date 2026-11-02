@@ -138,6 +138,7 @@ test('adapter start-flow: runStart → runLoopAdapter drives real home/graph/git
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         runLoop: integrationSeams(makeMockModel(), branch.trim()),
       },
     );
@@ -184,6 +185,7 @@ test('adapter start-flow: planner blocked propagates to exit 1', async () => {
         homeDir: repo.path,
         env: { OPENROUTER_API_KEY: 'test-key-x' },
         authStatus: async () => ({ ok: true, scopes: ['repo'] }),
+        checkModelWindows: async () => {},
         runLoop: (input) =>
           runLoopAdapter(input, {
             planGroups: async () => ({ kind: 'blocked', reason: 'goal is not actionable' }),

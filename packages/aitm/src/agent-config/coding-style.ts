@@ -2,8 +2,10 @@
 //   1. the project's own CLAUDE.md/AGENTS.md, VERBATIM — it is the repo's house rules, and a
 //      summarizer silently drops rules ("no default exports", "tests must pass under Node too"),
 //      which is how an agent ends up violating a file it was told to follow;
-//   2. a distilled digest from one smart-tier LLM call, whose job is the conventions the style file
-//      does NOT state — where tests live, how they run, what the formatter/compiler enforce.
+//   2. a distilled digest from one bounded multi-step smart-tier LLM call, whose job is the
+//      conventions the style file does NOT state — where tests live, how they run, what the
+//      formatter/compiler enforce. That call may explore the repo through the single read-only
+//      readRepoFile tool, for at most STYLE_EXPLORATION_MAX_STEPS model steps.
 // SRP: this module only turns signals into that guide — it reads signals but never writes (caching is
 // StateStore's job; see plan slice 01).
 // Mirrors claudetm core/prompts_coding_style.py (reference behavior, not code).
@@ -11,9 +13,10 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, extname, join, relative } from 'node:path';
 import { withTimeout } from '@developerz.ai/ai-claude-compat';
-import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
+import { generateText, type LanguageModel, stepCountIs, type TimeoutConfiguration } from 'ai';
 import { type OnUsage, reportUsage } from '../observability/usage-sink.ts';
 import type { AgentConfig } from './agent-config-detector.ts';
+import { STYLE_EXPLORATION_MAX_STEPS, styleExplorationTools } from './style-exploration.ts';
 
 export type StyleDistillerInit = {
   // Smart-tier handle, e.g. Credentials.modelFor('planner'). Injected so this module stays
@@ -36,6 +39,9 @@ export type StyleDistillerInit = {
 export type DistillInput = {
   config: AgentConfig | null;
   repoRoot: string;
+  // The run's abort handle. An aborted distillation degrades to '' (the verbatim style file still
+  // reaches every prompt) instead of holding a cancelled run open for the model to finish.
+  signal?: AbortSignal;
 };
 
 // How much real code the digest gets to look at. The config files alone cannot show naming, error
@@ -151,6 +157,19 @@ const OUTPUT_FORMAT = [
   `End with: \`${COMPLETION_MARKER}\``,
 ].join('\n');
 
+// The exploration instruction rides AFTER the signal block, never inside it: the signal bundle is
+// the deterministic (provider-cached) prefix, and anything the model reads from the repo has to
+// arrive as a tool-result turn — never as part of that cached prompt.
+const EXPLORATION = [
+  '## Repository exploration',
+  'The signals above are a fixed bundle, and they can miss where this project keeps its',
+  'conventions (a style guide under docs/, a conventions page, a linter setup the bundle did not',
+  'cover). Before writing the guide, call `readRepoFile` on such a file — the path is relative to',
+  'the repository root — and fold the conventions it states into the digest: they are exactly the',
+  'conventions the style file does not spell out. Read only what you need; the exploration is',
+  `capped at ${STYLE_EXPLORATION_MAX_STEPS} model steps in total.`,
+].join('\n');
+
 type Signal = { label: string; body: string };
 
 // Fire the coarse `distilling from <labels>` line once per distill call. Swallows a throwing sink —
@@ -181,7 +200,18 @@ export class StyleDistiller {
     try {
       const started = Date.now();
       const result = await generateText(
-        withTimeout({ model: this.init.model, prompt: buildPrompt(signals) }, this.init.timeout),
+        withTimeout(
+          {
+            model: this.init.model,
+            prompt: buildPrompt(signals),
+            // The one read-only exploration tool, under the step cap: the model can read a
+            // convention file the signal bundle does not carry — and can do nothing else.
+            tools: styleExplorationTools(input.repoRoot),
+            stopWhen: stepCountIs(STYLE_EXPLORATION_MAX_STEPS),
+            ...(input.signal !== undefined ? { abortSignal: input.signal } : {}),
+          },
+          this.init.timeout,
+        ),
       );
       reportUsage(this.init.onUsage, result, { latencyMs: Date.now() - started });
       return cleanDigest(result.text);
@@ -356,7 +386,7 @@ function buildPrompt(signals: Signal[]): string {
   const blocks = signals
     .map((s) => `----- BEGIN ${s.label} -----\n${s.body}\n----- END ${s.label} -----`)
     .join('\n\n');
-  return [INTRO, '', '## Raw style signals', blocks, '', OUTPUT_FORMAT].join('\n');
+  return [INTRO, '', '## Raw style signals', blocks, '', OUTPUT_FORMAT, '', EXPLORATION].join('\n');
 }
 
 // Mirror of claudetm extract_coding_style: drop the completion marker, then return from the

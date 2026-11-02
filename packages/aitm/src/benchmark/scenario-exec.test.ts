@@ -38,10 +38,17 @@ const WRONG_EXPECTATION_TEST =
 
 // Hung FOREVER: no self-exit, no rescue timer — only the budget kill can end it, so any process
 // the kill misses leaks, and the timeout test below catches exactly that by watching `ps`.
+// The pending promise alone does NOT hang: an unresolved promise keeps nothing alive, so on node 20
+// and 22 the produced file's event loop drains and the process EXITS on its own ("Promise
+// resolution is still pending but the event loop has already resolved") — the run then ends before
+// the budget, which is not a timeout at all. The live interval is what holds the loop open on every
+// runtime, so the budget kill really is the only way out.
 const HANGING_TEST =
   "import { test } from 'node:test';\n" +
   "test('hangs forever', async () => {\n" +
-  '  await new Promise(() => {});\n' +
+  '  await new Promise(() => {\n' +
+  '    setInterval(() => {}, 1000);\n' +
+  '  });\n' +
   '});\n';
 
 // A bare checkout: the fixture files ONLY — no package.json, no node_modules — so the executor's

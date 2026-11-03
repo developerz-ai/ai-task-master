@@ -27,7 +27,7 @@ function withCapturedStderr(fn: () => void): string[] {
   return lines;
 }
 
-// The handler slices the cumulative list by COUNT, so these only have to be distinguishable — but
+// The handler records each step's own messages, so these only have to be distinguishable — but
 // they still have to be messages, which is what the old `['a', 'b'] as never` opted out of saying.
 function messages(...texts: string[]): AssistantModelMessage[] {
   return texts.map((text) => ({ role: 'assistant', content: text }));
@@ -68,24 +68,28 @@ test('onRetryProgress: writes the retry line through the given sink', () => {
   assert.match(lines[0] ?? '', /Rate limited \(timeout\), retrying in 1s \(1\/2\)/);
 });
 
-test('recordStepDeltas: records only the per-step delta across cumulative response.messages', async () => {
+test('recordStepDeltas: records every step-local response.messages list in full', async () => {
   const { recorder, calls } = stubRecorder();
   const handler = recordStepDeltas(recorder);
+  // ai@7 hands the callback a STEP-LOCAL list: each step carries only its own output, so a
+  // handler that sliced by a running offset would drop the leading messages of step 2 and 3.
   handler({ response: { messages: messages('a', 'b') } });
-  handler({ response: { messages: messages('a', 'b', 'c', 'd') } });
+  handler({ response: { messages: messages('c', 'd') } });
+  handler({ response: { messages: messages('e') } });
   // Give the fire-and-forget `void recorder.step(...)` calls a tick to land.
   await Promise.resolve();
   assert.deepEqual(
     calls.map((c) => c[0]),
-    [messages('a', 'b'), messages('c', 'd')],
+    [messages('a', 'b'), messages('c', 'd'), messages('e')],
+    'the messages of each step are recorded in full — no leading message dropped',
   );
 });
 
-test('recordStepDeltas: an empty delta (identical length) records nothing', async () => {
+test('recordStepDeltas: a step with no messages records nothing', async () => {
   const { recorder, calls } = stubRecorder();
   const handler = recordStepDeltas(recorder);
   handler({ response: { messages: messages('a') } });
-  handler({ response: { messages: messages('a') } });
+  handler({ response: { messages: [] } });
   await Promise.resolve();
   assert.equal(calls.length, 1);
 });

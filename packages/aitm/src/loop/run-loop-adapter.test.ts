@@ -1259,9 +1259,9 @@ test('runLoopAdapter: a run that throws still releases MCP and the background pr
   }
 });
 
-// ---- recordStepDeltas: per-step transcript deltas from cumulative SDK events (issue #175) ----
+// ---- recordStepDeltas: per-step transcript records from step-local SDK events (issue #175) ----
 
-test('recordStepDeltas: records only the per-step delta from cumulative onStepFinish events (issue #175)', () => {
+test('recordStepDeltas: records the step-local onStepFinish messages of each step in full (issue #175)', () => {
   const recorded: Array<{ count: number; usage: unknown }> = [];
   const recorder: TranscriptRecorder = {
     step: async (messages, usage) => {
@@ -1272,23 +1272,25 @@ test('recordStepDeltas: records only the per-step delta from cumulative onStepFi
   };
   const onStep = recordStepDeltas(recorder);
   const m = (i: number) => ({ role: 'assistant' as const, content: `m${i}` });
-  // ai@6 hands the callback the CUMULATIVE response list each step: [m0,m1], [m0..m3], [m0..m5].
+  // ai@7 hands the callback a STEP-LOCAL list — that one model call's own output
+  // (ai/dist/index.js:5701; the SDK cumulative aggregate is `steps.flatMap(...)` at :5333).
+  // A handler that sliced by a running offset would drop the leading messages of steps 2 and 3.
   onStep({ response: { messages: [m(0), m(1)] }, usage: modelUsage({ totalTokens: 7 }) });
-  onStep({ response: { messages: [m(0), m(1), m(2), m(3)] } });
-  onStep({ response: { messages: [m(0), m(1), m(2), m(3), m(4), m(5)] } });
+  onStep({ response: { messages: [m(2), m(3)] } });
+  onStep({ response: { messages: [m(4), m(5)] } });
   assert.deepEqual(
     recorded.map((r) => r.count),
     [2, 2, 2],
-    'per-step deltas, not the cumulative [2, 4, 6]',
+    'the messages of each step are recorded in full — no leading message dropped',
   );
   assert.equal(
     (recorded[0]?.usage as { totalTokens?: number } | undefined)?.totalTokens,
     7,
-    'usage forwarded with the first delta',
+    'usage forwarded with the first step',
   );
 });
 
-test('recordStepDeltas: a step with no new messages records nothing (issue #175)', () => {
+test('recordStepDeltas: a step with no messages records nothing (issue #175)', () => {
   let calls = 0;
   const recorder: TranscriptRecorder = {
     step: async () => {
@@ -1300,7 +1302,7 @@ test('recordStepDeltas: a step with no new messages records nothing (issue #175)
   const onStep = recordStepDeltas(recorder);
   const m = (i: number) => ({ role: 'assistant' as const, content: `m${i}` });
   onStep({ response: { messages: [m(0)] } });
-  onStep({ response: { messages: [m(0)] } }); // unchanged cumulative → empty delta → no write
+  onStep({ response: { messages: [] } }); // step-local and empty → nothing to write
   assert.equal(calls, 1);
 });
 

@@ -113,11 +113,11 @@ const ANCHORED_UPDATE_INSTRUCTIONS = [
 // The token count the trigger compares against the context window. Prefer the provider-reported
 // prompt tokens of the most recent call (+ the char-estimated delta appended since): a char estimate
 // over messages alone omits the system prompt and tool schemas, so it under-counts and compacts too
-// late. But never fall BELOW the char estimate — the installed ai does not persist a prepareStep
-// `messages` override across steps, so the step right after a compaction reports the small compacted
-// call's input while the live array has reverted to the full history; trusting that small reported
-// figure would skip compaction and let the window overflow (see compaction-step.ts, "Size off the
-// LIVE messages"). Flooring by the estimate keeps that case safe. No reported usage → the estimate.
+// late. But never fall BELOW the char estimate: the provider's figure counts only what it was billed
+// for the last call, which can be smaller than the live array (the system prompt and tool schemas it
+// includes are invisible to a message-only estimate); trusting that smaller reported figure would
+// skip compaction and let the window overflow (see compaction-step.ts, "Size off the LIVE messages").
+// Flooring by the estimate keeps that case safe. No reported usage → the estimate.
 export function effectiveInputTokens(live: LiveContextSize): number {
   if (live.reported === undefined) return live.estimatedInputTokens;
   const grounded = live.reported.lastCallInputTokens + live.reported.sinceTokens;

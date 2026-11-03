@@ -113,10 +113,11 @@ function validMessages(
 // at the end, so a bad transcript can't flood the log with a warning per element. Unknown `kind`s are
 // ignored (forward-compatible).
 //
-// Transcripts written before issue #175 stored `step.messages` as the CUMULATIVE response list per
-// step (each record re-includes the whole conversation), so a record whose leading run equals the
-// accumulated messages is de-overlapped to just its new suffix. Post-fix (per-step-delta) records
-// don't overlap and append whole — the same rule handles both, keeping resume context duplicate-free.
+// Records written now carry each step's OWN response.messages — step-local in ai@7 (that one
+// model call's output, ai/dist/index.js:5701) — so consecutive records are disjoint and append
+// whole. The isLeadingRun de-overlap below fires only on pre-#175 files, whose records re-include
+// the whole conversation; it exists purely for backwards compatibility with those already-written
+// transcripts, keeping resume context duplicate-free.
 export function reconstructTranscript(
   raw: string,
   onWarn: (message: string) => void = () => {},

@@ -78,8 +78,11 @@ export type SubagentInit<TTools extends ToolSet = ToolSet> = {
 // createSubagent (all roles) or is read by every runner (onUsage), so only this one is role-specific.
 //
 // Per-step callback FACTORY for the Worker's parallel editor fanout (silent-run fix; per-editor labels,
-// issue #131). Editors can't share one `onStepFinish` instance: the transcript recorder slices
-// cumulative response messages (#175), which interleaved parallel editor conversations would corrupt.
+// issue #131). Editors can't share one `onStepFinish` instance: each editor is its own agent/generate
+// with its own step stream, so one shared handler would have to attribute each step to an editor — and
+// could not, since the step event carries no editor identity. (The recorder's old reason for the same
+// split is gone: `step.response.messages` is STEP-LOCAL in ai@7 — that one model call's output,
+// ai/dist/index.js:5701 — so the recorder writes each step's own messages and never slices.)
 // `editorTag` is the basename-or-directory label runEditor derives for its leaf (e.g. `login.ts` or
 // `auth`), so the caller's stream label names WHICH editor is working, not just that an editor is.
 // Handlers built here must read only per-step fields (e.g. the progress stream). Unset → editors stay

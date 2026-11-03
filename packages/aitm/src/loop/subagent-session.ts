@@ -31,22 +31,22 @@ export type StepEvent = Parameters<
   NonNullable<ToolLoopAgentSettings<never, ToolSet>['onStepFinish']>
 >[0];
 
-// An `onStepFinish` handler that records only the per-step message delta (issue #175). `ai@6` hands
-// the callback the CUMULATIVE response-message list each step (per-step lengths [2, 4, 6] on a live
-// run), not a delta — recording it verbatim grew transcript files O(N²) and made resume replay a
-// duplicated conversation. Tracking the count already recorded and slicing keeps each record a true
-// delta. One handler per recorder (fresh closure state); exported for tests.
+// An `onStepFinish` handler that records each step's own response messages (issue #175). `ai@7`
+// hands the callback a StepResult whose `response.messages` is STEP-LOCAL — that one model call's
+// output, not a running total (ai/dist/index.js:5701 builds it from that step's own content; the
+// SDK's own cumulative aggregate is `steps.flatMap((step) => step.response.messages)` at :5333).
+// Slicing by a running offset therefore dropped the leading messages of every step after the first
+// — live data loss from the persisted transcript — so each step's list is recorded in full.
+// One handler per recorder (fresh closure state); exported for tests.
 export function recordStepDeltas(
   recorder: TranscriptRecorder,
 ): (event: {
   response: { messages: readonly ModelMessage[] };
   usage?: Parameters<TranscriptRecorder['step']>[1];
 }) => void {
-  let recorded = 0;
   return (event) => {
-    const delta = event.response.messages.slice(recorded);
-    recorded = event.response.messages.length;
-    if (delta.length > 0) void recorder.step(delta, event.usage);
+    if (event.response.messages.length > 0)
+      void recorder.step(event.response.messages, event.usage);
   };
 }
 

@@ -6,9 +6,10 @@
 // between the banner and the usage summary.
 //
 // The step handler reads ONLY the per-step fields of the AI SDK's StepResult (`text`,
-// `toolCalls`) — never the cumulative `response.messages` — so one handler is safe to share
-// across the Worker's parallel editor fanout, unlike the transcript recorder's delta slicing
-// (issue #175).
+// `toolCalls`) — never the cumulative aggregate — so one handler is safe to share across the
+// Worker's parallel editor fanout. `step.response.messages` is STEP-LOCAL in ai@7 (that one model
+// call's output, ai/dist/index.js:5701), so the transcript recorder now writes each step's own
+// messages in full and never slices by a running offset.
 //
 // Split by responsibility: pure formatting (step-progress-format.ts), the output seam plus
 // per-step/harness emitters (step-progress-sink.ts), and the live-stream renderer

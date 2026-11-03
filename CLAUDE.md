@@ -24,7 +24,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | Runtime APIs | `node:fs/promises`, `node:child_process`/`execa`, web `fetch` |
 | Modules | ESM only, `"type": "module"`; named exports only |
 | TypeScript | `^7.0.2`, `strict: true` |
-| AI SDK | `ai` `^6.0.182`, `ToolLoopAgent` (v6; the AI SDK 5 name `experimental_Agent` is gone); MCP client `@ai-sdk/mcp` `^2.0.87` |
+| AI SDK | `ai` `^7.0.159`, `ToolLoopAgent` (v7; the AI SDK 5 name `experimental_Agent` survives only as an alias export of it, `ToolLoopAgent as Experimental_Agent`); MCP client `@ai-sdk/mcp` `^2.0.88` |
 | Lint/format | Biome 2.6.4 — `bun run lint` = `biome check .` |
 | Packages | `@developerz.ai/aitm` 0.0.56 + `@developerz.ai/ai-claude-compat` 0.0.56; aitm pins compat EXACTLY, versions move in lockstep |
 
@@ -109,7 +109,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 - `CLAUDE.md` in a target repo is a *coding-style signal*, not a provider signal — feed it to subagent system prompts.
 - Subagents-as-tools pattern (https://ai-sdk.dev/docs/agents/subagents): `Orchestrator` is the top-level agent; `Planner`, `Worker`, `Reviewer` are exposed to it as tools.
 - The fixed three-way split: `credentials/` builds the injected model handle from `OPENROUTER_API_KEY` + resolved `baseURL`; `openrouter/` owns the catalog client, model-limits lookup, and server-tools; `config/provider-presets.ts` owns the named presets (`openrouter`/`zai`/`moonshot`/…) resolved into that baseURL/key pair — don't add a fourth place that constructs an `OpenRouterClient`.
-- The root manifest pins `@ai-sdk/provider` on purpose. `@ai-sdk/mcp` v2 needs provider **v4**, `ai` v6 needs **v3**, and `@openrouter/ai-sdk-provider` declares no provider dependency at all — so npm hoists whichever copy it resolves first into `node_modules/@ai-sdk/provider`, and the OpenRouter model's types then stop matching `ai`'s `LanguageModel` (`credentials/credentials.ts` TS2322). The root devDependency puts the v3 copy in the hoisted slot; the SDK's v4 copy stays nested under `@ai-sdk/mcp`. Don't remove it, and don't move it past the v3 line.
+- `@ai-sdk/provider` resolves to a single major across the tree: `ai` v7 and `@ai-sdk/mcp` v2 both need **v4** (4.0.35), and `@openrouter/ai-sdk-provider` v3 declares no provider dependency at all (peer dependencies only). npm hoists that one copy into `node_modules/@ai-sdk/provider`, and the root devDependency pins the same v4 line (`^4.0.35`), so the OpenRouter model's types match `ai`'s `LanguageModel` (`credentials/credentials.ts`). Don't move the hoisted copy off v4.
 
 ## Testing
 - Every module has a paired `*.test.ts`. Two narrow exemptions, applied consistently: pure re-export barrels with no logic of their own (`export { ... } from './x.ts'` / `export type { ... }`) — e.g. `observability/step-progress.ts`; and test-only support/fixture modules consumed exclusively by `*.test.ts` files — e.g. `loop/work-loop-test-support.ts`. Everything else — including small constant/helper files with real logic — ships a paired test.

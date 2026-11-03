@@ -2,4 +2,4 @@
 # one-command check (typecheck + lint + unit + integration tests) — established by dz-runner setup mode. One command; adjust as the repo grows.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && bun run test:node && npm run test:integration -w @developerz.ai/aitm
+bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && npm run build -w @developerz.ai/ai-claude-compat && bun run test:node && npm run test:integration -w @developerz.ai/aitm

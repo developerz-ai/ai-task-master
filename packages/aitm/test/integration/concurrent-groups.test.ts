@@ -24,6 +24,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { execa } from 'execa';
+import type { PrGroup } from '../../src/domain/pr-group.ts';
 import type { ReviewThread } from '../../src/github/schema.ts';
 import type {
   WorkLoopGithub,
@@ -32,9 +33,10 @@ import type {
 } from '../../src/loop/work-loop.ts';
 import { WorkLoop } from '../../src/loop/work-loop.ts';
 import { PlanGraph } from '../../src/plan/plan-graph.ts';
-import type { PrGroup, RunState } from '../../src/state/schema.ts';
+import type { RunState } from '../../src/state/schema.ts';
 import { RunStateSchema } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
+import { workerHandle } from '../../src/testing/subagent-tools.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
 import { InPlaceCheckout } from '../../src/workspace/in-place-checkout.ts';
 
@@ -76,6 +78,7 @@ function makeGroup(id: string): PrGroup {
     pr: null,
     status: 'pending',
     stage: 'pending',
+    reviewGraceApplied: false,
   };
 }
 
@@ -185,6 +188,7 @@ test('concurrent-groups: two ready groups share one checkout with no branch/tree
             changes: [{ path: fileName, kind: 'create', summary: `adds ${fileName}` }],
             progressEntries: [`- added ${fileName}`],
           },
+          handle: workerHandle(),
         };
       },
       // No-op finalize: read HEAD back without mutating the tree (this test isn't exercising
@@ -200,7 +204,6 @@ test('concurrent-groups: two ready groups share one checkout with no branch/tree
         headRefName: delivery.branch,
         baseRefName: baseBranch,
       }),
-      runReviewer: async () => ({ kind: 'ok', resolutions: [] }),
       runCiFix: async () => ({ kind: 'ok' }),
       // Simulates the Reviewer: refuses to commit unless the checked-out branch IS the PR head
       // (mirrors reviewer.ts commitFix's headBranch assertion) — a review fix committed to the

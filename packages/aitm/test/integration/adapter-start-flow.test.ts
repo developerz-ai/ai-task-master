@@ -16,8 +16,10 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
-import type { RunLoopInput } from '../../src/cli/commands.ts';
 import { runStart } from '../../src/cli/commands.ts';
+import type { RunLoopInput } from '../../src/composition/run-input.ts';
+import type { PrGroup } from '../../src/domain/pr-group.ts';
+import type { WorkerDelivery } from '../../src/domain/worker-delivery.ts';
 import type { PullRequest } from '../../src/github/schema.ts';
 import { runLoopAdapter } from '../../src/loop/run-loop-adapter.ts';
 import type {
@@ -26,9 +28,8 @@ import type {
   WorkLoopResult,
 } from '../../src/loop/work-loop.ts';
 import { Orchestrator } from '../../src/orchestrator/orchestrator.ts';
-import type { PrGroup } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
-import type { WorkerDelivery } from '../../src/subagents/worker.ts';
+import { workerHandle } from '../../src/testing/subagent-tools.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
 
 function makeMockModel(): MockLanguageModelV3 {
@@ -69,6 +70,8 @@ const PLAN_GROUP: PrGroup = {
   branch: 'aitm/hello',
   pr: null,
   status: 'pending',
+  stage: 'pending',
+  reviewGraceApplied: false,
 };
 
 // Builds the seams that drive runLoopAdapter through real git while stubbing the model boundary.
@@ -87,7 +90,6 @@ function integrationSeams(mockModel: MockLanguageModelV3, defaultBranch: string)
           credentials: { modelFor: () => mockModel },
           agentConfig: input.agentConfig,
           rollingContext: '',
-          maxSessions: null,
           github: {
             createPr: async () => {
               throw new Error('createPr must not be called from finalizeCommit');
@@ -105,7 +107,7 @@ function integrationSeams(mockModel: MockLanguageModelV3, defaultBranch: string)
               changes: [{ path: 'hello.ts', kind: 'create', summary: 'creates hello export' }],
               progressEntries: ['- created hello.ts'],
             };
-            return { kind: 'ok', delivery };
+            return { kind: 'ok', delivery, handle: workerHandle() };
           },
           finalizeCommit: (group, delivery, checkoutPath) =>
             orchForFinalize.finalizeCommit(group, delivery, checkoutPath),
@@ -116,7 +118,8 @@ function integrationSeams(mockModel: MockLanguageModelV3, defaultBranch: string)
             headRefName: group.branch ?? `aitm/${group.id}`,
             baseRefName: baseBranch,
           }),
-          runReviewer: async () => ({ kind: 'ok', resolutions: [] }),
+          runCiFix: async () => ({ kind: 'ok' }),
+          addressReviews: async () => ({ kind: 'ok' }),
         };
       },
     });

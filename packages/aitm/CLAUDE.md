@@ -18,7 +18,7 @@ The gate is the repo root’s: `bin/check` (see the root `CLAUDE.md`).
 ## Conventions
 
 - Package scripts: `test:node` = `node --test --import tsx "src/**/*.test.ts"` (authoritative); `test` = `AITM_INSTANT_SLEEP=1 bun test` (passes locally, deliberately absent from CI); `test:integration` runs `test/**/*.test.ts` against real git.
-- `typecheck` (src) and `typecheck:tests` (test files) are separate tsc projects — both must pass.
+- `typecheck` (src product code) and `typecheck:tests` (src test files + the `test/` integration suite) are separate tsc projects — both must pass.
 - Integration tests mock nothing — real temp git repos, real `gh` against a sandbox account; mock only at module boundaries in unit tests.
 - Never add `bun test` to CI — oven-sh/bun#5090 makes the node:test shim ordering-dependent across files.
 - Dogfood changes via `bun packages/aitm/scripts/debug-start.ts` (throwaway repo, stops deterministically without a provider key, tears down on exit).

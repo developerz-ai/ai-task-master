@@ -39,7 +39,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | Workspace script (root delegates per-package) | Runs |
 | --- | --- |
 | `build` | per-package tsc — aitm `tsc -b tsconfig.build.json`, compat `tsc -p tsconfig.json` (root delegates via `bun run --filter '*'`) |
-| `typecheck` / `typecheck:tests` | Separate tsc projects for src and test files — both must pass |
+| `typecheck` / `typecheck:tests` | Separate tsc projects: `typecheck` = src product code; `typecheck:tests` = src test files + the `test/` integration suite — both must pass |
 | `test` | `AITM_INSTANT_SLEEP=1 bun test` — local only, never in CI |
 | `test:node` | `node --test --import tsx "src/**/*.test.ts"` — the authoritative unit runner |
 | `test:integration` | `node --test --import tsx "test/**/*.test.ts"` — real temp git repo + real `gh` sandbox |
@@ -47,7 +47,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 
 | ci.yml job | Steps | Why |
 | --- | --- | --- |
-| `bun` | install, lint, madge circular, typecheck, typecheck:tests | no `bun test` — oven-sh/bun#5090 |
+| `bun` | install, lint, madge circular, typecheck, typecheck:tests | no `bun test` — oven-sh/bun#5090; `typecheck:tests` also covers `packages/aitm/test/`, so integration-file type drift fails CI |
 | `node` | npm install, lint, `typecheck --workspaces`, `test:node --workspaces` | per-workspace npm — never shells out to bun |
 | `integration` | npm install, `test:integration -w @developerz.ai/aitm` | 20-min budget; `e2e-smoke` self-skips without secrets |
 

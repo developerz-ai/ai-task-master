@@ -32,8 +32,9 @@ import { test } from 'node:test';
 import type { ModelMessage } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
-import type { RunLoopInput } from '../../src/cli/commands.ts';
 import { runMergePr, runStart } from '../../src/cli/commands.ts';
+import type { RunLoopInput } from '../../src/composition/run-input.ts';
+import type { PrGroup } from '../../src/domain/pr-group.ts';
 import type { ReviewThread } from '../../src/github/schema.ts';
 import { normalizeResumeStatus } from '../../src/loop/resume-normalize.ts';
 import {
@@ -56,9 +57,10 @@ import {
 import { Orchestrator } from '../../src/orchestrator/orchestrator.ts';
 import { PlanGraph } from '../../src/plan/plan-graph.ts';
 import { PrContextStore } from '../../src/state/pr-context-store.ts';
-import { type PrGroup, type RunState, RunStateSchema } from '../../src/state/schema.ts';
+import { type RunState, RunStateSchema } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
 import { TranscriptStore } from '../../src/state/transcript-store.ts';
+import { workerHandle } from '../../src/testing/subagent-tools.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
 import { InPlaceCheckout } from '../../src/workspace/in-place-checkout.ts';
 
@@ -335,6 +337,7 @@ function crashGroup(overrides: Partial<PrGroup> = {}): PrGroup {
     pr: null,
     status: 'in-progress',
     stage: 'pr-open',
+    reviewGraceApplied: false,
     ...overrides,
   };
 }
@@ -591,14 +594,20 @@ test('crash-durability: kill after a task commit lands but before completeTask p
       pr: null,
       status: 'in-progress',
       stage: 'working',
+      reviewGraceApplied: false,
     };
     await store.init(baseState({ status: 'working', prGroups: [twoTaskGroup] }));
 
     const orch = new Orchestrator({
       credentials: { modelFor: () => mockModel() },
-      agentConfig: { flavor: 'claude', path: '/tmp/CLAUDE.md', contents: '' },
+      agentConfig: {
+        flavor: 'claude',
+        path: '/tmp/CLAUDE.md',
+        contents: '',
+        sources: [{ path: '/tmp/CLAUDE.md', scope: 'project' }],
+        nested: [],
+      },
       rollingContext: '',
-      maxSessions: null,
       github: {
         createPr: async () => {
           throw new Error('createPr must not be called from finalizeCommit');
@@ -681,6 +690,7 @@ test('crash-durability: kill after a task commit lands but before completeTask p
             changes: [{ path: 'world.ts', kind: 'create', summary: 'creates world export' }],
             progressEntries: ['- add world.ts'],
           },
+          handle: workerHandle(),
         };
       },
       finalizeCommit: async (group, delivery, checkoutPath, taskId) => {
@@ -1046,7 +1056,11 @@ test('crash-durability: a concurrent run while the lock is held is refused untou
     await execa('git', ['commit', '-m', 'initial commit'], { cwd: repo.path });
 
     let innerLoopCalls = 0;
-    let concurrentResult: Awaited<ReturnType<typeof runStart>> | null = null;
+    // A box, not a bare `let`: the concurrent attempt's result is assigned inside the holder
+    // run's own callback, so a plain `let` would stay narrowed to its `null` initializer at the
+    // assertion site (TypeScript cannot see the closure's assignment) and the truthiness
+    // assertion would collapse the type to `never`.
+    const concurrent: { result: Awaited<ReturnType<typeof runStart>> | null } = { result: null };
 
     const holderRunLoop = async (input: RunLoopInput): Promise<WorkLoopResult> => {
       // Progress this "process" makes while it holds the lock — must survive whatever the
@@ -1055,7 +1069,7 @@ test('crash-durability: a concurrent run while the lock is held is refused untou
 
       // A second `aitm start` over the SAME state dir, invoked while this run still holds
       // run.lock — the real race two overlapping invocations would hit.
-      concurrentResult = await runStart(
+      concurrent.result = await runStart(
         { kind: 'start', goal: 'a different goal entirely' },
         {
           cwd: input.cwd,
@@ -1087,13 +1101,13 @@ test('crash-durability: a concurrent run while the lock is held is refused untou
       },
     );
 
-    assert.ok(concurrentResult, 'the concurrent attempt ran');
+    assert.ok(concurrent.result, 'the concurrent attempt ran');
     assert.equal(
-      concurrentResult?.code,
+      concurrent.result.code,
       1,
-      `expected the concurrent run to be refused, got: ${concurrentResult?.message ?? ''}`,
+      `expected the concurrent run to be refused, got: ${concurrent.result.message ?? ''}`,
     );
-    assert.match(concurrentResult?.message ?? '', /another aitm run holds/);
+    assert.match(concurrent.result.message ?? '', /another aitm run holds/);
     assert.equal(innerLoopCalls, 0, 'the concurrent run must never reach its own loop');
 
     // The holder's own run must succeed, undisturbed by the refused concurrent attempt.
@@ -1156,6 +1170,7 @@ test('crash-durability: `merge-pr --no-resume` re-pointing currentPr crashes mid
           pr: 70,
           status: 'merged',
           stage: 'merged',
+          reviewGraceApplied: false,
         },
         {
           id: 'g2',
@@ -1169,6 +1184,7 @@ test('crash-durability: `merge-pr --no-resume` re-pointing currentPr crashes mid
           pr: 73,
           status: 'awaiting-pr',
           stage: 'waiting-ci',
+          reviewGraceApplied: false,
         },
       ],
     });

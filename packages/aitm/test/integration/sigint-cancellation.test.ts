@@ -24,6 +24,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { MockLanguageModelV3 } from 'ai/test';
 import { runStart } from '../../src/cli/commands.ts';
+import type { PrGroup } from '../../src/domain/pr-group.ts';
 import {
   CHECKS_START_WAIT_MS,
   GitHubClient,
@@ -38,7 +39,6 @@ import type {
   WorkLoopOrchestrator,
 } from '../../src/loop/work-loop.ts';
 import { McpClientManager } from '../../src/mcp/mcp-client.ts';
-import type { PrGroup } from '../../src/state/schema.ts';
 import {
   createPlannerAgent,
   PLANNER_SYSTEM_PREFIX,
@@ -50,6 +50,7 @@ import {
   runReviewer,
 } from '../../src/subagents/reviewer.ts';
 import { createWorkerAgent, runWorker, WORKER_SYSTEM_PREFIX } from '../../src/subagents/worker.ts';
+import { plannerTools, reviewerTools, workerTools } from '../../src/testing/subagent-tools.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -136,6 +137,8 @@ test('aitm start: SIGINT mid-run reaps the MCP child and surfaces cancelled (exi
                   branch: 'aitm/g',
                   pr: null,
                   status: 'pending',
+                  stage: 'pending',
+                  reviewGraceApplied: false,
                 },
               ],
             }),
@@ -266,7 +269,7 @@ test('runWorker: a real Coordinator generation (not a stub) rejects within secon
   // Coordinator could make a tool call.
   const agent = createWorkerAgent({
     model: stalling.model,
-    tools: {},
+    tools: workerTools(),
     systemPrompt: WORKER_SYSTEM_PREFIX,
     signal: controller.signal,
   });
@@ -279,6 +282,7 @@ test('runWorker: a real Coordinator generation (not a stub) rejects within secon
     pr: null,
     status: 'pending',
     stage: 'pending',
+    reviewGraceApplied: false,
   };
   const running = runWorker(agent, {
     group,
@@ -303,7 +307,7 @@ test('runPlanner: a real generation (not a stub) rejects within seconds of Ctrl-
   const stalling = stallingModel();
   const agent = createPlannerAgent({
     model: stalling.model,
-    tools: {},
+    tools: plannerTools(),
     systemPrompt: PLANNER_SYSTEM_PREFIX,
     signal: controller.signal,
   });
@@ -327,7 +331,7 @@ test('runReviewer: a real generation (not a stub) rejects within seconds of Ctrl
   const stalling = stallingModel();
   const agent = createReviewerAgent({
     model: stalling.model,
-    tools: {},
+    tools: reviewerTools(),
     systemPrompt: REVIEWER_SYSTEM_PREFIX,
     signal: controller.signal,
   });

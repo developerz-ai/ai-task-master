@@ -15,13 +15,20 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { type BashOutput, bashTool, evaluateCommand } from '@developerz.ai/ai-claude-compat';
+import {
+  type BashInput,
+  type BashOutput,
+  bashTool,
+  evaluateCommand,
+} from '@developerz.ai/ai-claude-compat';
 import { execa } from 'execa';
 import { ConfigLoader } from '../../src/config/config-loader.ts';
 import { providerSettings } from '../../src/credentials/credentials.ts';
 import type { CreateMcpClient } from '../../src/mcp/mcp-client.ts';
 import { McpClientManager } from '../../src/mcp/mcp-client.ts';
+import { mcpClientDouble } from '../../src/testing/mcp-client-double.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
+import { runTool } from '../../src/testing/tool-harness.ts';
 
 const ATTACKER_BASE_URL = 'http://attacker.example/v1';
 const ATTACKER_API_KEY = 'sk-attacker-controlled';
@@ -78,15 +85,14 @@ async function makeTrustedHome(): Promise<{ path: string; cleanup: () => Promise
   return { path, cleanup: () => rm(path, { recursive: true, force: true }) };
 }
 
-async function runBash(
-  t: { execute?: unknown },
-  input: { command: string; description: string },
-): Promise<BashOutput> {
-  const exec = t.execute;
-  if (typeof exec !== 'function') throw new Error('tool has no execute');
-  return (await (
-    exec as (i: typeof input, o: { toolCallId: string; messages: never[] }) => Promise<BashOutput>
-  )(input, { toolCallId: 'test', messages: [] })) as BashOutput;
+// The real bash tool, driven through the repo's own tool harness — it supplies the SDK's
+// (input, ToolExecutionOptions) call options and narrows the streaming-union result.
+function runBash(
+  t: ReturnType<typeof bashTool>,
+  command: string,
+  description = 'attacker attempt',
+) {
+  return runTool<BashInput, BashOutput>(t, { command, description });
 }
 
 test('hostile-repo: malicious baseURL/openrouterApiKey/hooks are stripped + warned, never resolved', async () => {
@@ -250,7 +256,9 @@ test('hostile-repo: repo-shipped bashRules cannot re-enable destructive commands
       { warn: (m) => warnings.push(m) },
     );
     const resolved = await loader.resolve({});
-    const bash = bashTool({ cwd: repo.path, rules: resolved.bashRules });
+    // `resolved.bashRules` is a readonly list (the loader never mutates it); the tool takes a
+    // mutable one, so hand it a copy.
+    const bash = bashTool({ cwd: repo.path, rules: [...resolved.bashRules] });
 
     for (const command of [
       'git push --force origin main',
@@ -258,25 +266,19 @@ test('hostile-repo: repo-shipped bashRules cannot re-enable destructive commands
       'gh pr merge 12 --squash',
       'git reset --hard HEAD~1',
     ]) {
-      const out = await runBash(bash, { command, description: 'attacker attempt' });
+      const out = await runBash(bash, command);
       assert.equal(out.denied, true, `${command} must be denied by the real bash tool`);
       assert.equal(out.exitCode, 126, `${command} must never spawn`);
     }
 
     // The repo-shipped deny (npm publish) still lands end to end — tightening is honored, not just
     // the built-in denies.
-    const publish = await runBash(bash, {
-      command: 'npm publish',
-      description: 'attacker attempt',
-    });
+    const publish = await runBash(bash, 'npm publish');
     assert.equal(publish.denied, true, 'the repo-shipped deny must still block npm publish');
     assert.equal(publish.exitCode, 126);
 
     // Governance isn't fail-closed on everything — an ungoverned command still actually runs.
-    const status = await runBash(bash, {
-      command: 'git status --short',
-      description: 'sanity check',
-    });
+    const status = await runBash(bash, 'git status --short', 'sanity check');
     assert.equal(status.denied, undefined);
     assert.equal(status.exitCode, 0);
 
@@ -326,14 +328,12 @@ test('hostile-repo: project-scoped stdio mcpServers ARE mounted and spawned (a d
       `no mcp server is warned about any more, got: ${JSON.stringify(warnings)}`,
     );
 
-    // And the run side actually connects them — one client per declared server.
+    // And the run side actually connects them — one client per declared server. The fake client is
+    // the repo's shared MCP double: a server that connects and lists no tools is all this asserts.
     const spawned: string[] = [];
     const createClient: CreateMcpClient = async (config) => {
       spawned.push(String(config.clientName ?? ''));
-      return {
-        tools: async () => ({}),
-        close: async () => {},
-      } as unknown as Awaited<ReturnType<CreateMcpClient>>;
+      return mcpClientDouble();
     };
     const manager = new McpClientManager({ servers: resolved.mcpServers, createClient });
     await manager.connectAll();

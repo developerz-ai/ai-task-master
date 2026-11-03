@@ -395,6 +395,12 @@ test('ci-fix-loop: pre-aborted AbortSignal yields exit 2 (cancelled)', async () 
         resolveStyle: async () => '# CLAUDE.md\n',
         signal: ac.signal,
         runMergeFlow: async (input: RunMergeFlowInput): Promise<WorkLoopResult> => {
+          // The contract under test: runMergePr forwards ctx.signal into RunMergeFlowInput.
+          // Assert it here and hand THAT signal to the flow — passing `ac.signal` directly
+          // would let this test pass even if the forwarding regressed.
+          const flowSignal = input.signal;
+          assert.ok(flowSignal, 'runMergePr must forward ctx.signal into RunMergeFlowInput');
+          assert.equal(flowSignal, ac.signal, 'the forwarded signal must be ctx.signal');
           const flowResult = await runTakeOverFlow({
             pr: 4,
             checkoutPath: repo.path,
@@ -423,11 +429,9 @@ test('ci-fix-loop: pre-aborted AbortSignal yields exit 2 (cancelled)', async () 
             mergeMethod: 'squash',
             maxIterations: 5,
             cooldownMs: 0,
-            // Thread signal from ctx.signal so the MergePrCtx.signal contract is tested. The
-            // ctx's signal is optional, but `exactOptionalPropertyTypes` forbids handing the
-            // flow an explicit `undefined` — the abort controller this test already aborted is
-            // the very same signal the ctx carries.
-            signal: ac.signal,
+            // The signal the ctx forwarded (asserted above), not a local copy of it — the
+            // cancellation path is only covered if runMergePr actually threads it through.
+            signal: flowSignal,
           });
           return toWorkLoopResult(flowResult, 4);
         },

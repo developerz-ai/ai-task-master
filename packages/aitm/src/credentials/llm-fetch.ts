@@ -14,13 +14,16 @@ export type Runtime = 'node' | 'bun' | 'deno' | 'other';
 
 // The dispatcher type Node's global fetch accepts on `RequestInit` (sourced from undici-types via
 // @types/node). We narrow the constructed Agent to this so `init.dispatcher` typechecks against the
-// global fetch — see `isDispatcher`.
+// global fetch — see `isKeepAliveAgent`.
 export type KeepAliveDispatcher = NonNullable<RequestInit['dispatcher']>;
 
-// The single slice of undici we construct. The `Agent` return is `unknown` on purpose: undici@7's
-// `Agent` and the undici-types@7 `Dispatcher` behind Node's global fetch drift between versions, so
-// a direct type match fails; we narrow the constructed value instead (`isDispatcher`). `unknown`
-// also lets tests inject a trivial fake Agent without reimplementing the whole Dispatcher surface.
+// The single slice of undici we construct. The `Agent` return is `unknown` on purpose: the optional
+// dependency is typed through this module's own structural `UndiciAgentModule`, and the value it
+// yields is undici 8's bundled `Agent` type — a different declaration from the `undici-types` 8
+// `Dispatcher` Node's global fetch accepts on `RequestInit`. Two independent type sources, so the
+// value is narrowed by shape at runtime (`isKeepAliveAgent`) instead of cast; that check also
+// guarantees the `destroy` the release path calls. `unknown` lets tests inject a trivial fake
+// Agent without reimplementing the whole Dispatcher surface.
 export type UndiciAgentModule = {
   Agent: new (options: { keepAliveTimeout?: number; connections?: number }) => unknown;
 };
@@ -60,8 +63,9 @@ export function detectRuntime(): Runtime {
 // value lacking it is not usable here — see `createLlmFetch`.
 export type KeepAliveAgent = KeepAliveDispatcher & { destroy: () => unknown };
 
-// A constructed undici Agent is a valid global-fetch dispatcher at runtime; the two undici type
-// versions differ only nominally, so trust the shape rather than casting.
+// A constructed undici Agent is a valid global-fetch dispatcher at runtime; the two type sources
+// are separate declarations (undici 8's bundled `Agent`, the `undici-types` 8 `Dispatcher`), so
+// trust the shape rather than casting.
 export function isKeepAliveAgent(value: unknown): value is KeepAliveAgent {
   return (
     typeof value === 'object' &&

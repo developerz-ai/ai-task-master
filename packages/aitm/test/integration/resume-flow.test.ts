@@ -23,8 +23,10 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { MockLanguageModelV3 } from 'ai/test';
 import { execa } from 'execa';
-import type { RunLoopInput } from '../../src/cli/commands.ts';
 import { runMergePr, runStart } from '../../src/cli/commands.ts';
+import type { RunLoopInput } from '../../src/composition/run-input.ts';
+import type { PrGroup } from '../../src/domain/pr-group.ts';
+import type { WorkerDelivery } from '../../src/domain/worker-delivery.ts';
 import type { PullRequest } from '../../src/github/schema.ts';
 import { normalizeResumeStatus } from '../../src/loop/resume-normalize.ts';
 import type {
@@ -36,9 +38,9 @@ import type {
 import { WorkLoop } from '../../src/loop/work-loop.ts';
 import { Orchestrator } from '../../src/orchestrator/orchestrator.ts';
 import { PlanGraph } from '../../src/plan/plan-graph.ts';
-import type { PrGroup, RunState } from '../../src/state/schema.ts';
+import type { RunState } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
-import type { WorkerDelivery } from '../../src/subagents/worker.ts';
+import { workerHandle } from '../../src/testing/subagent-tools.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
 import { InPlaceCheckout } from '../../src/workspace/in-place-checkout.ts';
 
@@ -93,6 +95,8 @@ function makeRunLoop(
       branch: 'aitm/hello',
       pr: null,
       status: 'pending',
+      stage: 'pending',
+      reviewGraceApplied: false,
     };
 
     let liveGroups: readonly PrGroup[] = [planGroup];
@@ -127,7 +131,6 @@ function makeRunLoop(
       credentials: { modelFor: () => mockModel },
       agentConfig: input.agentConfig,
       rollingContext: '',
-      maxSessions: null,
       github: {
         createPr: async () => {
           throw new Error('createPr must not be called from finalizeCommit');
@@ -146,7 +149,7 @@ function makeRunLoop(
           changes: [{ path: 'hello.ts', kind: 'create', summary: 'creates hello export' }],
           progressEntries: ['- created hello.ts'],
         };
-        return { kind: 'ok', delivery };
+        return { kind: 'ok', delivery, handle: workerHandle() };
       },
       finalizeCommit: (group, delivery, checkoutPath) =>
         orchForFinalize.finalizeCommit(group, delivery, checkoutPath),
@@ -157,7 +160,8 @@ function makeRunLoop(
         headRefName: group.branch ?? `aitm/${group.id}`,
         baseRefName: baseBranch,
       }),
-      runReviewer: async () => ({ kind: 'ok', resolutions: [] }),
+      runCiFix: async () => ({ kind: 'ok' }),
+      addressReviews: async () => ({ kind: 'ok' }),
     };
 
     const github = {
@@ -459,7 +463,8 @@ test('resume-flow: interrupt after pr-open; resume picks up at waiting-ci withou
                 baseRefName: baseBranch,
               };
             },
-            runReviewer: async () => ({ kind: 'ok', resolutions: [] }),
+            runCiFix: async () => ({ kind: 'ok' }),
+            addressReviews: async () => ({ kind: 'ok' }),
           };
 
           const { stdout: rawBranch } = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {

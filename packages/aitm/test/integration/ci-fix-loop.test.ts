@@ -40,8 +40,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { execa } from 'execa';
-import type { RunMergeFlowInput } from '../../src/cli/commands.ts';
 import { runMergePr } from '../../src/cli/commands.ts';
+import type { RunMergeFlowInput } from '../../src/composition/run-input.ts';
+import type { PrGroup } from '../../src/domain/pr-group.ts';
 import { MergeConflict } from '../../src/github/errors.ts';
 import type { CiResult, RunCmd } from '../../src/github/github-client.ts';
 import { defaultRunCmd } from '../../src/github/github-client.ts';
@@ -59,9 +60,10 @@ import type {
 import { WorkLoop } from '../../src/loop/work-loop.ts';
 import { PlanGraph } from '../../src/plan/plan-graph.ts';
 import { PrContextStore } from '../../src/state/pr-context-store.ts';
-import type { PrGroup, RunState } from '../../src/state/schema.ts';
+import type { RunState } from '../../src/state/schema.ts';
 import { RunStateSchema } from '../../src/state/schema.ts';
 import { StateStore } from '../../src/state/state-store.ts';
+import { workerHandle } from '../../src/testing/subagent-tools.ts';
 import { makeTempRepo } from '../../src/testing/temp-repo.ts';
 import { githubThreadTool } from '../../src/tools/github-thread-tool.ts';
 import { InPlaceCheckout } from '../../src/workspace/in-place-checkout.ts';
@@ -167,7 +169,9 @@ test('ci-fix-loop: CI fails once, Worker fixes, re-poll succeeds, PR merges → 
             subagents: {
               reviewerModel: input.credentials.modelFor('reviewer'),
               reviewerTools,
-              workerModel: input.credentials.modelFor('worker'),
+              // The shared CI-fix session picks its own model (the coding tier) through the
+              // credentials selector — there is no separate `workerModel` slot.
+              credentials: input.credentials,
               workerTools,
               styleContents: '# CLAUDE.md\n',
               runWorkerOverride: async () => {
@@ -180,6 +184,7 @@ test('ci-fix-loop: CI fails once, Worker fixes, re-poll succeeds, PR merges → 
                     changes: [{ path: 'index.ts', kind: 'modify' as const, summary: 'fix lint' }],
                     progressEntries: ['- fixed lint error'],
                   },
+                  handle: workerHandle(),
                 };
               },
             },
@@ -256,7 +261,9 @@ test('ci-fix-loop: maxIterations=1 exhausted with always-failing CI → exit 1',
             subagents: {
               reviewerModel: input.credentials.modelFor('reviewer'),
               reviewerTools,
-              workerModel: input.credentials.modelFor('worker'),
+              // The shared CI-fix session picks its own model (the coding tier) through the
+              // credentials selector — there is no separate `workerModel` slot.
+              credentials: input.credentials,
               workerTools,
               styleContents: '# CLAUDE.md\n',
               runWorkerOverride: async () => ({
@@ -267,6 +274,7 @@ test('ci-fix-loop: maxIterations=1 exhausted with always-failing CI → exit 1',
                   changes: [],
                   progressEntries: [],
                 },
+                handle: workerHandle(),
               }),
             },
             prContext: new PrContextStore(join(repo.path, '.ai-task-master')),
@@ -330,11 +338,14 @@ test('ci-fix-loop: MergeConflict thrown by mergePr propagates to exit 1', async 
               },
               replyToThread: async () => {},
               resolveThread: async () => {},
+              getFailedCiLogs: async () => [],
             },
             subagents: {
               reviewerModel: input.credentials.modelFor('reviewer'),
               reviewerTools,
-              workerModel: input.credentials.modelFor('worker'),
+              // The shared CI-fix session picks its own model (the coding tier) through the
+              // credentials selector — there is no separate `workerModel` slot.
+              credentials: input.credentials,
               workerTools,
               styleContents: '# CLAUDE.md\n',
             },
@@ -397,19 +408,26 @@ test('ci-fix-loop: pre-aborted AbortSignal yields exit 2 (cancelled)', async () 
               mergePr: async () => {},
               replyToThread: async () => {},
               resolveThread: async () => {},
+              getFailedCiLogs: async () => [],
             },
             subagents: {
               reviewerModel: input.credentials.modelFor('reviewer'),
               reviewerTools,
-              workerModel: input.credentials.modelFor('worker'),
+              // The shared CI-fix session picks its own model (the coding tier) through the
+              // credentials selector — there is no separate `workerModel` slot.
+              credentials: input.credentials,
               workerTools,
               styleContents: '# CLAUDE.md\n',
             },
+            prContext: new PrContextStore(join(repo.path, '.ai-task-master')),
             mergeMethod: 'squash',
             maxIterations: 5,
             cooldownMs: 0,
-            // Thread signal from ctx.signal so the MergePrCtx.signal contract is tested.
-            signal: input.signal,
+            // Thread signal from ctx.signal so the MergePrCtx.signal contract is tested. The
+            // ctx's signal is optional, but `exactOptionalPropertyTypes` forbids handing the
+            // flow an explicit `undefined` — the abort controller this test already aborted is
+            // the very same signal the ctx carries.
+            signal: ac.signal,
           });
           return toWorkLoopResult(flowResult, 4);
         },
@@ -464,6 +482,7 @@ function ciFixGroup(id: string, branch: string): PrGroup {
     pr: null,
     status: 'pending',
     stage: 'pending',
+    reviewGraceApplied: false,
   };
 }
 
@@ -567,6 +586,7 @@ test('ci-fix-loop (WorkLoop/autoMerge): CI fix reaches the real remote before th
             changes: [{ path: 'feature.ts', kind: 'create', summary: 'adds feature' }],
             progressEntries: ['- added feature.ts'],
           },
+          handle: workerHandle(),
         };
       },
       finalizeCommit: async (_group, _delivery, checkoutPath) => {
@@ -704,6 +724,7 @@ test('ci-fix-loop (WorkLoop/autoMerge): an unfixable red PR never merges and sta
             changes: [{ path: 'feature.ts', kind: 'create', summary: 'adds feature' }],
             progressEntries: ['- added feature.ts'],
           },
+          handle: workerHandle(),
         };
       },
       finalizeCommit: async (_group, _delivery, checkoutPath) => {

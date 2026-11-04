@@ -8,11 +8,19 @@ import type { RunLoopInput, RunMergeFlowInput } from '../composition/run-input.t
 import type { LlmFetch } from '../credentials/llm-fetch.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
 import { Logger } from '../logger/logger.ts';
+import {
+  type ModelLimits,
+  ModelNotFound,
+  type ModelLimitsLookup,
+} from '../openrouter/model-limits.ts';
 import { acquireRunLock } from '../state/run-lock.ts';
 import { CURRENT_SCHEMA_VERSION, type RunState } from '../state/schema.ts';
 import { makeTempRepo } from '../testing/temp-repo.ts';
 import type { CommandExit, McpLoginCtx, RunPlannerInput, StartCtx } from './commands.ts';
+import type { ResolvedConfig } from '../config/schema.ts';
 import {
+  assertWindowsResolvable,
+  configuredLimitsFrom,
   drainStdin,
   isRunComplete,
   runClean,
@@ -44,6 +52,13 @@ const STUB_DIGEST = '# Coding Style\n\nstub digest\n';
 // Stub the coding-style seam so unit tests never make a real LLM call via the default distiller.
 function okStyle(): NonNullable<StartCtx['resolveStyle']> {
   return async () => STUB_DIGEST;
+}
+
+// The startup model-window gate defaults to assertWindowsResolvable — a live provider-catalog
+// round-trip (preload + per-model forModel). Injected into every test whose flow reaches the
+// registry so no unit test makes a network fetch load-bearing.
+function okWindows(): NonNullable<StartCtx['checkModelWindows']> {
+  return async () => {};
 }
 
 // Writes a schema-valid state.json so `runStart` takes the resume branch (state.read()
@@ -121,6 +136,7 @@ test('runStart: happy path → initialises state, calls runLoop, exits 0', async
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async (input) => {
           loopCalls++;
           captured.push(input);
@@ -163,6 +179,7 @@ test('runStart: constructs a Logger and threads it into the loop input (finding 
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async (input) => {
           captured.push(input);
           return { kind: 'success', outcomes: [] };
@@ -191,6 +208,7 @@ test('runStart: releases the run lock when the run ends', async () => {
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -233,6 +251,7 @@ test('runStart: releases the keep-alive transport when the run ends', async () =
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         makeLlmFetch: llm.make,
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -258,6 +277,7 @@ test('runStart: a throwing loop still releases the keep-alive transport', async 
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         makeLlmFetch: llm.make,
+        checkModelWindows: okWindows(),
         runLoop: async () => {
           throw new Error('loop exploded');
         },
@@ -318,6 +338,7 @@ test('runStart: prints the auto-merge banner to stdout when auto-merge is on (de
         stdout: (chunk) => {
           out += chunk;
         },
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -345,6 +366,7 @@ test('runStart: --no-automerge suppresses the banner', async () => {
         stdout: (chunk) => {
           out += chunk;
         },
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
         // Stubbed so this assertion tests the auto-merge banner, not whether the model catalog was
         // reachable — the real one prints a table whose presence depends on a network round-trip.
@@ -453,6 +475,7 @@ test('runStart: no CLAUDE.md/AGENTS.md and no --style → proceeds with a defaul
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async () => {
           loopCalls++;
           return { kind: 'success', outcomes: [] };
@@ -485,6 +508,7 @@ test('runStart: no CLAUDE.md/AGENTS.md notice goes through ctx.stderr, not bare 
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         stderr: err.out,
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -556,6 +580,7 @@ test('runStart: WorkLoopResult.blocked → exit 1 carrying reason', async () => 
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async () => ({
           kind: 'blocked',
           reason: 'planner refused',
@@ -583,6 +608,7 @@ test('runStart: awaiting-pr (--no-automerge) → exit 0 with merge-pr instructio
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'awaiting-pr', prs: [17], outcomes: [] }),
       },
     );
@@ -608,6 +634,7 @@ test('runStart: loop cancelled → exit 2', async () => {
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'cancelled', outcomes: [] }),
       },
     );
@@ -631,6 +658,7 @@ test('runStart: session-cap → exit 0', async () => {
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'session-cap', outcomes: [] }),
       },
     );
@@ -660,6 +688,7 @@ test('runStart: CLI overrides reach the persisted run state', async () => {
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -688,6 +717,7 @@ test('runStart: --max-fix-attempts reaches the resolved config handed to the loo
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async (input) => {
           seen = input.resolved.maxCiFixAttempts;
           return { kind: 'success', outcomes: [] };
@@ -714,6 +744,7 @@ test('runStart: without --max-fix-attempts the loop gets the default cap (issue 
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async (input) => {
           seen = input.resolved.maxCiFixAttempts;
           return { kind: 'success', outcomes: [] };
@@ -744,6 +775,7 @@ test('runStart: threads the resolved llmStepTimeoutMs into both the style-digest
           styleSeen = input.llmStepTimeoutMs;
           return STUB_DIGEST;
         },
+        checkModelWindows: okWindows(),
         runLoop: async (input) => {
           loopSeen = input.resolved.llmStepTimeoutMs;
           return { kind: 'success', outcomes: [] };
@@ -799,6 +831,7 @@ test('runStart: fresh run invokes runPlanner before runLoop, persists prGroups +
           plannerInput.push(input);
           return { kind: 'ok', groups };
         },
+        checkModelWindows: okWindows(),
         runLoop: async () => {
           seq.push('loop');
           return { kind: 'success', outcomes: [] };
@@ -842,6 +875,7 @@ test('runStart: resume (existing state.json) skips runPlanner, preserves prior p
           plannerCalls++;
           return { kind: 'ok', groups: [] };
         },
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -880,6 +914,7 @@ test('runStart: an unparseable state.json is replaced, not treated as a run to p
           plannerGoal = input.goal;
           return { kind: 'ok', groups: [] };
         },
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -964,6 +999,7 @@ test('runStart: resume with empty prGroups (prior planning blocked) re-runs runP
           plannerCalls++;
           return { kind: 'ok', groups };
         },
+        checkModelWindows: okWindows(),
         runLoop: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -1024,6 +1060,7 @@ test('runStart: default resolveStyle reuses cached coding-style.md (no LLM call)
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         // No resolveStyle stub → exercises defaultResolveStyle; the cache hit avoids any LLM call.
+        checkModelWindows: okWindows(),
         runLoop: async (input) => {
           captured.push(input);
           return { kind: 'success', outcomes: [] };
@@ -1058,6 +1095,7 @@ test('runStart: resolveStyle failure never blocks → falls back to raw agent-co
         resolveStyle: async () => {
           throw new Error('distiller exploded');
         },
+        checkModelWindows: okWindows(),
         runLoop: async (input) => {
           captured.push(input);
           return { kind: 'success', outcomes: [] };
@@ -1169,6 +1207,7 @@ test('runMergePr: happy path with --pr override', async () => {
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async (input) => {
           captured.push(input);
           return { kind: 'success', outcomes: [] };
@@ -1206,6 +1245,7 @@ test('runMergePr: config-resolution warnings go through ctx.stderr, not bare pro
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         stderr: err.out,
+        checkModelWindows: okWindows(),
         runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -1231,6 +1271,7 @@ test('runMergePr: constructs a Logger and threads it into the merge flow (findin
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async (input) => {
           captured.push(input);
           return { kind: 'success', outcomes: [] };
@@ -1266,6 +1307,7 @@ test('runMergePr: builds a usage tracker, threads it to the flow, and flushes to
         stdout: (chunk) => {
           out += chunk;
         },
+        checkModelWindows: okWindows(),
         runMergeFlow: async (input) => {
           captured.push(input);
           return { kind: 'success', outcomes: [] };
@@ -1300,6 +1342,7 @@ test('runMergePr: releases the keep-alive transport when the flow ends', async (
         authStatus: okAuth(),
         resolveStyle: okStyle(),
         makeLlmFetch: llm.make,
+        checkModelWindows: okWindows(),
         runMergeFlow: async () => ({ kind: 'success', outcomes: [] }),
       },
     );
@@ -1355,6 +1398,7 @@ test('runMergePr: threads --max-iterations through to the flow', async () => {
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async (input) => {
           captured.push(input);
           return { kind: 'success', outcomes: [] };
@@ -1382,6 +1426,7 @@ test('runMergePr: flow cancelled → exit 2', async () => {
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async () => ({ kind: 'cancelled', outcomes: [] }),
       },
     );
@@ -1407,6 +1452,7 @@ test('runMergePr: flow blocked (iteration cap exhausted) → exit 1', async () =
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async () => ({
           kind: 'blocked',
           reason: 'iteration cap reached: 30 iterations without merge',
@@ -1436,6 +1482,7 @@ test('runMergePr: flow blocked (rebase conflict) → exit 1', async () => {
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async () => ({
           kind: 'blocked',
           reason: 'git rebase onto origin/main hit conflicts that need manual resolution',
@@ -1465,6 +1512,7 @@ test('runMergePr: falls back to state.currentPr when --pr absent', async () => {
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async (input) => {
           prSeen = input.pr;
           return { kind: 'success', outcomes: [] };
@@ -1495,6 +1543,7 @@ test('runMergePr: resume false ignores stale persisted currentPr, takes over cur
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async (input) => {
           prSeen = input.pr;
           return { kind: 'success', outcomes: [] };
@@ -1530,6 +1579,7 @@ test('runMergePr: resume false on a mid-plan run → re-points currentPr, keeps 
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async (input) => {
           captured.push(input);
           return { kind: 'success', outcomes: [] };
@@ -1571,6 +1621,7 @@ test('runMergePr: resume false with no prior state → synthesizes and persists 
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async (input) => {
           prSeen = input.pr;
           return { kind: 'success', outcomes: [] };
@@ -1640,6 +1691,7 @@ test('runMergePr: no state file + --pr synthesizes state and runs the flow', asy
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runMergeFlow: async (input) => {
           flowPr.push(input.pr);
           return { kind: 'success', outcomes: [] };
@@ -1759,6 +1811,219 @@ test('runMergePr: no --pr and no currentPr → exit 1', async () => {
     );
     assert.equal(result.code, 1);
     assert.match(result.message ?? '', /--pr|currentPr|PR to merge/i);
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+// ---- startup model-window gate (assertWindowsResolvable / configuredLimitsFrom) -------------
+
+// A minimal type-valid ResolvedConfig for the gate helpers — they read only `models` and
+// `activeProfile`, but the seam types are honest, so the fixture carries every required field.
+function gateResolved(over: Partial<ResolvedConfig> = {}): ResolvedConfig {
+  return {
+    openrouterApiKey: FAKE_KEY,
+    apiKeySource: 'env',
+    models: { generic: 'a/one', smart: 'a/two', coding: 'a/two', fast: 'b/three' },
+    reasoningEffort: {},
+    maxPrs: null,
+    maxSessions: null,
+    maxCiFixAttempts: 3,
+    llmStepTimeoutMs: 900_000,
+    autoMerge: true,
+    prPerTask: false,
+    mergeMethod: 'squash',
+    stylePath: null,
+    formatCommand: null,
+    verifyCommand: null,
+    selfReview: true,
+    skills: false,
+    resolveConflicts: true,
+    generateSpecialists: true,
+    logLevel: 'info',
+    concurrency: 1,
+    subagentLimit: 10,
+    allowForcePush: true,
+    bashRules: [],
+    mcpServers: {},
+    mcpDeferToolsOver: 20,
+    mcpServerSources: {},
+    streaming: false,
+    ...over,
+  };
+}
+
+function limitsEntry(modelId: string, over: Partial<ModelLimits> = {}): ModelLimits {
+  return { modelId, ...over };
+}
+
+// Stub ModelLimitsLookup over a canned map: a missing id throws ModelNotFound (exactly what the
+// real registry does for an id neither catalog lists), an Error value is thrown verbatim, and
+// `failPreload` makes the initial catalog fetch reject like an unreachable endpoint.
+function stubLimits(
+  entries: Record<string, ModelLimits | Error>,
+  opts: { failPreload?: Error } = {},
+): ModelLimitsLookup {
+  return {
+    preload: async () => {
+      if (opts.failPreload) throw opts.failPreload;
+    },
+    forModel: async (modelId) => {
+      const entry = entries[modelId];
+      if (entry instanceof Error) throw entry;
+      if (!entry) throw new ModelNotFound(modelId);
+      return entry;
+    },
+  };
+}
+
+test('assertWindowsResolvable: passes when every configured model resolves a window', async () => {
+  const limits = stubLimits({
+    'a/one': limitsEntry('a/one', { contextLength: 200_000 }),
+    'a/two': limitsEntry('a/two', { contextLength: 131_072 }),
+    'b/three': limitsEntry('b/three', { contextLength: 1_000_000 }),
+  });
+  await assertWindowsResolvable(limits, gateResolved());
+});
+
+test('assertWindowsResolvable: a configured contextLength satisfies the gate', async () => {
+  // The registry overlays configured values onto entries the provider catalog left blank
+  // (contextSource 'profile') — a window sourced from config passes exactly like a catalog one.
+  const limits = stubLimits({
+    'a/one': limitsEntry('a/one', { contextLength: 131_072, contextSource: 'profile' }),
+    'a/two': limitsEntry('a/two', { contextLength: 131_072, contextSource: 'profile' }),
+    'b/three': limitsEntry('b/three', { contextLength: 131_072, contextSource: 'profile' }),
+  });
+  await assertWindowsResolvable(limits, gateResolved());
+});
+
+test('assertWindowsResolvable: a model with no published window refuses, naming the model + the fix', async () => {
+  const limits = stubLimits({
+    'a/one': limitsEntry('a/one', { contextLength: 200_000 }),
+    // The gateway published an entry but no window — the measured z.ai-coding failure shape.
+    'a/two': limitsEntry('a/two'),
+    'b/three': limitsEntry('b/three', { contextLength: 131_072 }),
+  });
+  await assert.rejects(
+    () => assertWindowsResolvable(limits, gateResolved()),
+    (err: Error) => {
+      assert.match(err.message, /a\/two/);
+      assert.match(err.message, /aitm config set contextLength <n>/);
+      return true;
+    },
+  );
+});
+
+test('assertWindowsResolvable: with an active profile the fix names `aitm profile set`', async () => {
+  const limits = stubLimits({ 'a/one': limitsEntry('a/one') });
+  await assert.rejects(
+    () => assertWindowsResolvable(limits, gateResolved({ activeProfile: 'zai' })),
+    /aitm profile set zai contextLength <n>/,
+  );
+});
+
+test('assertWindowsResolvable: a model missing from the catalog refuses the same way', async () => {
+  const limits = stubLimits({ 'a/one': limitsEntry('a/one', { contextLength: 200_000 }) });
+  await assert.rejects(
+    () => assertWindowsResolvable(limits, gateResolved()),
+    (err: Error) => {
+      assert.match(err.message, /b\/three/);
+      assert.match(err.message, /aitm config set contextLength <n>/);
+      return true;
+    },
+  );
+});
+
+test('assertWindowsResolvable: an unloadable catalog refuses with an actionable message', async () => {
+  const limits = stubLimits({}, { failPreload: new Error('connect ECONNREFUSED') });
+  await assert.rejects(
+    () => assertWindowsResolvable(limits, gateResolved()),
+    (err: Error) => {
+      assert.match(err.message, /Could not load the provider model catalog/i);
+      assert.match(err.message, /ECONNREFUSED/);
+      return true;
+    },
+  );
+});
+
+test('configuredLimitsFrom: unique model ids, only the set fields, empty when unset', () => {
+  assert.deepEqual(configuredLimitsFrom(gateResolved()), {});
+  const configured = configuredLimitsFrom(
+    gateResolved({ contextLength: 131_072, maxOutputTokens: 16_384 }),
+  );
+  assert.deepEqual(Object.keys(configured).sort(), ['a/one', 'a/two', 'b/three'], 'ids deduped');
+  assert.deepEqual(configured['a/two'], { contextLength: 131_072, maxOutputTokens: 16_384 });
+  assert.deepEqual(configuredLimitsFrom(gateResolved({ contextLength: 131_072 }))['a/one'], {
+    contextLength: 131_072,
+  });
+});
+
+test('runStart: an unresolvable model window refuses → exit 1 before the banner/loop', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    let out = '';
+    const result = await runStart(
+      { kind: 'start', goal: 'g' },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        checkModelWindows: async () => {
+          throw new Error(
+            'No context window for model "a/two": the provider catalog does not publish one and no ' +
+              'contextLength is configured. Autocompaction cannot run without it. Set one: ' +
+              '`aitm config set contextLength <n>`.',
+          );
+        },
+        stdout: (chunk) => {
+          out += chunk;
+        },
+        runLoop: async () => {
+          assert.fail('runLoop must not run when the startup gate refuses');
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /a\/two/);
+    assert.match(result.message ?? '', /aitm config set contextLength/);
+    assert.ok(!out.includes('auto-merge is ON'), 'the refusal precedes the banner');
+  } finally {
+    await repo.cleanup();
+    await home.cleanup();
+  }
+});
+
+test('runMergePr: an unresolvable model window refuses → exit 1 before the flow', async () => {
+  const repo = await makeTempRepo({ withClaudeMd: true });
+  const home = await tempHome();
+  try {
+    await seedState(repo.path);
+    const result = await runMergePr(
+      { kind: 'merge-pr', resume: true, pr: 99 },
+      {
+        cwd: repo.path,
+        homeDir: home.path,
+        env: { OPENROUTER_API_KEY: FAKE_KEY },
+        authStatus: okAuth(),
+        resolveStyle: okStyle(),
+        checkModelWindows: async () => {
+          throw new Error(
+            'No context window for model "a/two": the provider catalog does not publish one and no ' +
+              'contextLength is configured. Autocompaction cannot run without it. Set one: ' +
+              '`aitm config set contextLength <n>`.',
+          );
+        },
+        runMergeFlow: async () => {
+          assert.fail('flow must not run when the startup gate refuses');
+        },
+      },
+    );
+    assert.equal(result.code, 1);
+    assert.match(result.message ?? '', /a\/two/);
   } finally {
     await repo.cleanup();
     await home.cleanup();
@@ -2382,6 +2647,7 @@ test('runResume: reuses the persisted goal and criteria instead of retyping them
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async (input) => {
           captured.push(input);
           return { kind: 'success', outcomes: [] };
@@ -2412,6 +2678,7 @@ test('runResume: start flags still apply to the resumed run', async () => {
         env: { OPENROUTER_API_KEY: FAKE_KEY },
         authStatus: okAuth(),
         resolveStyle: okStyle(),
+        checkModelWindows: okWindows(),
         runLoop: async (input) => {
           captured.push(input);
           return { kind: 'success', outcomes: [] };

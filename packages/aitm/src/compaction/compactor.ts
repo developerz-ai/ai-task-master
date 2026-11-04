@@ -23,11 +23,20 @@
 
 import { callWithStepTimeout, withTimeout } from '@developerz.ai/ai-claude-compat';
 import { generateText, type LanguageModel, type TimeoutConfiguration } from 'ai';
-import type { ModelLimitsLookup } from '../openrouter/model-limits.ts';
+import {
+  ModelNotFound,
+  type ModelLimits,
+  type ModelLimitsLookup,
+} from '../openrouter/model-limits.ts';
 import { safeStringify } from '../serialization/safe-stringify.ts';
 
 export type CompactionDecision =
   | { kind: 'skip' }
+  // The model's context window could not be resolved — no source publishes a contextLength, or the
+  // model is unknown to every catalog. Deliberately distinct from 'skip' ("nothing to do") so
+  // callers can tell they are flying blind: the loop wiring only warns and passes through, while the
+  // CLI startup gate refuses to start.
+  | { kind: 'unknown-window' }
   // contextLength is carried so the wiring can log it per compaction without a second lookup.
   | { kind: 'compact'; keepLastSteps: number; contextLength: number };
 
@@ -126,15 +135,25 @@ export function effectiveInputTokens(live: LiveContextSize): number {
 export class Compactor {
   constructor(private readonly init: CompactionInit) {}
 
-  // Resolve the model's window and the usable input budget in one lookup. Returns undefined for an
-  // absent, non-finite, or non-positive window — the real case on an OpenAI-compatible catalog that
-  // publishes no context length (see contextLengthOf) — which every caller treats as "we don't know
-  // enough to compact". Shared by shouldCompact and usableInputTokensFor so the budget the trigger
-  // fires on and the budget the post-compaction check verifies against can never drift.
+  // Resolve the model's window and the usable input budget in one lookup. Returns undefined for a
+  // window we cannot reason about — an absent, non-finite, or non-positive contextLength (the real
+  // case on an OpenAI-compatible catalog that publishes no context length, see contextLengthOf) or a
+  // ModelNotFound from a model no catalog lists — which shouldCompact reports as 'unknown-window'.
+  // Shared by shouldCompact and usableInputTokensFor so the budget the trigger fires on and the
+  // budget the post-compaction check verifies against can never drift.
   private async resolveWindow(
     modelId: string,
   ): Promise<{ contextLength: number; usable: number } | undefined> {
-    const { contextLength, maxOutputTokens } = await this.init.limits.forModel(modelId);
+    let limits: ModelLimits;
+    try {
+      limits = await this.init.limits.forModel(modelId);
+    } catch (err) {
+      // Only the named miss is "unresolvable"; any other failure (network, schema) propagates so the
+      // wiring's threshold-lookup handler still sees it.
+      if (err instanceof ModelNotFound) return undefined;
+      throw err;
+    }
+    const { contextLength, maxOutputTokens } = limits;
     if (contextLength === undefined || !Number.isFinite(contextLength) || contextLength <= 0) {
       return undefined;
     }
@@ -146,8 +165,10 @@ export class Compactor {
 
   async shouldCompact(modelId: string, live: LiveContextSize): Promise<CompactionDecision> {
     const window = await this.resolveWindow(modelId);
+    // An unresolvable window is its own decision, not a silent skip: "compaction not needed" and
+    // "flying blind" must be distinguishable — the wiring warns on the latter, the CLI gate refuses.
     if (window === undefined) {
-      return { kind: 'skip' };
+      return { kind: 'unknown-window' };
     }
     const liveInputTokens = effectiveInputTokens(live);
     if (!Number.isFinite(liveInputTokens) || liveInputTokens < 0) {
@@ -172,7 +193,8 @@ export class Compactor {
   // exact figure shouldCompact compares against. The compaction step re-checks each stage's result
   // against it (prune, then summarize, then hard-truncate) so a partial reclaim is never sent still
   // over budget. undefined mirrors resolveWindow: a window we cannot reason about, which shouldCompact
-  // would already have skipped, so in practice this is always a number by the time the step asks.
+  // would already have reported as 'unknown-window', so in practice this is always a number by the
+  // time the step asks.
   async usableInputTokensFor(modelId: string): Promise<number | undefined> {
     return (await this.resolveWindow(modelId))?.usable;
   }

@@ -36,7 +36,13 @@ import type { WorkLoopResult } from '../loop/work-loop.ts';
 import { harnessProgress } from '../observability/step-progress.ts';
 import { roleUsageSink, UsageTracker } from '../observability/usage-tracker.ts';
 import { OpenRouterClient } from '../openrouter/client.ts';
-import { type ModelLimitsLookup, ModelLimitsRegistry } from '../openrouter/model-limits.ts';
+import {
+  type ConfiguredModelLimits,
+  type ModelLimits,
+  ModelLimitsRegistry,
+  type ModelLimitsLookup,
+  ModelNotFound,
+} from '../openrouter/model-limits.ts';
 import {
   OPENROUTER_REFERENCE_URL,
   OpenRouterReferenceCatalog,
@@ -124,6 +130,12 @@ export type StartCtx = {
   // the run's ModelLimitsRegistry, which fetches the provider catalog. Injected so tests that assert
   // on stdout don't depend on a network round-trip whose success changes what gets printed.
   modelBanner?: () => Promise<string>;
+  // The startup model-window gate, run before the banner and the loop: throws when no source — the
+  // provider catalog or a configured `contextLength` — can resolve a context window for a configured
+  // model, so the run refuses with an actionable fix instead of starting with a permanently inert
+  // Compactor. Default: assertWindowsResolvable. Injected so unit tests make no live catalog fetch
+  // load-bearing.
+  checkModelWindows?: (limits: ModelLimitsLookup, resolved: ResolvedConfig) => Promise<void>;
   // The run's keep-alive transport factory. Defaults to `createLlmFetch`; injected so tests can pin
   // that the handle is released on every exit path without opening a real socket pool.
   makeLlmFetch?: () => Promise<LlmFetch | undefined>;
@@ -154,6 +166,9 @@ export type MergePrCtx = {
   signal?: AbortSignal;
   // See StartCtx.makeLlmFetch — same keep-alive transport seam for the take-over flow.
   makeLlmFetch?: () => Promise<LlmFetch | undefined>;
+  // See StartCtx.checkModelWindows — the same startup gate for the take-over flow, which runs the
+  // same coding-tier Worker and so needs the same resolvable-window guarantee before any work.
+  checkModelWindows?: (limits: ModelLimitsLookup, resolved: ResolvedConfig) => Promise<void>;
 };
 
 export type ConfigCtx = {
@@ -299,6 +314,74 @@ export async function startupModelBanner(
     (s): s is string => s !== undefined && s !== '',
   );
   return modelBanner(entries, where.length > 0 ? where.join(' · ') : 'default provider');
+}
+
+// The operator's configured per-model limits (resolved `contextLength`/`maxOutputTokens`), keyed by
+// the unique model ids this run will actually call. Passed as ModelLimitsRegistry's third argument
+// so a gateway catalog that publishes no window can still be supplied from config — the provider
+// catalog wins wherever it publishes a value, config fills only what it leaves blank. Empty when
+// neither key is configured, so the registry behaves exactly as it did before they existed.
+export function configuredLimitsFrom(
+  resolved: ResolvedConfig,
+): Record<string, ConfiguredModelLimits> {
+  if (resolved.contextLength === undefined && resolved.maxOutputTokens === undefined) return {};
+  const limits = {
+    ...(resolved.contextLength !== undefined ? { contextLength: resolved.contextLength } : {}),
+    ...(resolved.maxOutputTokens !== undefined
+      ? { maxOutputTokens: resolved.maxOutputTokens }
+      : {}),
+  };
+  const configured: Record<string, ConfiguredModelLimits> = {};
+  for (const modelId of new Set(Object.values(resolved.models))) {
+    configured[modelId] = { ...limits };
+  }
+  return configured;
+}
+
+// The startup gate: every configured model must have a resolvable context window before any work
+// starts. A model neither the provider catalog nor config supplies a window for would otherwise
+// begin a run whose Compactor is permanently inert (it cannot compact a transcript whose window it
+// does not know) — discoverable only when a long run silently overflows. Only the gate refuses;
+// mid-run compaction treats an unknown window as non-fatal (compaction-step warns and passes
+// through).
+export async function assertWindowsResolvable(
+  limits: ModelLimitsLookup,
+  resolved: ResolvedConfig,
+): Promise<void> {
+  try {
+    await limits.preload();
+  } catch (err) {
+    throw new Error(
+      `Could not load the provider model catalog (${errMsg(err)}) — aitm resolves each configured ` +
+        "model's context window from it at startup. Check connectivity and the configured baseURL.",
+    );
+  }
+  const fix =
+    resolved.activeProfile !== undefined
+      ? `aitm profile set ${resolved.activeProfile} contextLength <n>`
+      : 'aitm config set contextLength <n>';
+  for (const modelId of new Set(Object.values(resolved.models))) {
+    let entry: ModelLimits;
+    try {
+      entry = await limits.forModel(modelId);
+    } catch (err) {
+      if (err instanceof ModelNotFound) {
+        throw new Error(
+          `Model "${modelId}" is not in the provider catalog and no contextLength is configured ` +
+            'for it, so its context window cannot be resolved — autocompaction would be inert for ' +
+            `the whole run. Set one: \`${fix}\`.`,
+        );
+      }
+      throw err;
+    }
+    if (entry.contextLength === undefined || !Number.isFinite(entry.contextLength)) {
+      throw new Error(
+        `No context window for model "${modelId}": the provider catalog does not publish one and ` +
+          'no contextLength is configured. Autocompaction cannot run without it. Set one: ' +
+          `\`${fix}\`.`,
+      );
+    }
+  }
 }
 
 // Non-fatal warnings go to the injected stderr sink (default process.stderr) so they never
@@ -537,13 +620,24 @@ export async function runStart(
     const modelLimits = new ModelLimitsRegistry(
       new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL, ctx.signal),
       new OpenRouterReferenceCatalog(OPENROUTER_REFERENCE_URL, ctx.signal),
+      configuredLimitsFrom(resolved),
     );
     const usage = new UsageTracker(modelLimits);
 
-    // Print the resolved window + price per model before any tokens are spent. A provider that
-    // publishes no context window disables autocompaction for the whole run, and one that publishes no
-    // pricing reduces the end-of-run summary to `cost unknown` — both used to surface only after the
-    // fact, if at all. Best-effort: a catalog that won't load must not stop the run.
+    // Startup gate: every configured model must have a resolvable context window before the banner
+    // prints or the loop starts — otherwise the run would begin with a permanently inert Compactor,
+    // discovered only when a long run overflows. Refused with the model id and the config fix.
+    const checkModelWindows = ctx.checkModelWindows ?? assertWindowsResolvable;
+    try {
+      await checkModelWindows(modelLimits, resolved);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
+
+    // Print the resolved window + price per model before any tokens are spent. The gate above has
+    // already guaranteed every configured model a window; a provider that publishes no pricing
+    // still reduces the end-of-run summary to `cost unknown`. Best-effort: a catalog that won't
+    // load must not stop the run.
     try {
       const banner = await (ctx.modelBanner ?? (() => startupModelBanner(modelLimits, resolved)))();
       if (banner !== '') (ctx.stdout ?? ((chunk: string) => process.stdout.write(chunk)))(banner);
@@ -846,8 +940,18 @@ export async function runMergePr(
     const modelLimits = new ModelLimitsRegistry(
       new OpenRouterClient(resolved.openrouterApiKey, resolved.baseURL, ctx.signal),
       new OpenRouterReferenceCatalog(OPENROUTER_REFERENCE_URL, ctx.signal),
+      configuredLimitsFrom(resolved),
     );
     const usage = new UsageTracker(modelLimits);
+
+    // Same startup gate as runStart: the take-over flow's fix sessions run the same coding-tier
+    // Worker, so an unresolvable window refuses here too — exit 1 before the flow starts.
+    const checkModelWindows = ctx.checkModelWindows ?? assertWindowsResolvable;
+    try {
+      await checkModelWindows(modelLimits, resolved);
+    } catch (err) {
+      return { code: 1, message: errMsg(err) };
+    }
 
     const runMergeFlow = ctx.runMergeFlow ?? defaultRunMergeFlow;
     let result: WorkLoopResult;

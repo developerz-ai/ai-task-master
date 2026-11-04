@@ -53,16 +53,25 @@ function contextPart(limits: ModelLimits | undefined): string {
   return `${formatTokens(window)} ctx`;
 }
 
-// Where the numbers came from, when it isn't the provider itself. A reference-sourced price is a
-// LIST price for a comparable model — the run is billed by whatever the configured endpoint charges
-// (often a flat subscription), so this must never read as the amount charged.
+// Where the numbers came from, when it isn't the provider itself. A profile-configured window is
+// the operator's own setting — stated as configuration, never as a catalog figure. A reference-
+// sourced price is a LIST price for a comparable model — the run is billed by whatever the
+// configured endpoint charges (often a flat subscription), so this must never read as the amount
+// charged.
 function sourcePart(limits: ModelLimits | undefined): string {
   if (!limits) return '';
+  const configured: string[] = [];
   const borrowed: string[] = [];
+  if (limits.contextSource === 'profile') configured.push('window');
   if (limits.contextSource === 'reference') borrowed.push('window');
   if (limits.pricingSource === 'reference') borrowed.push('price');
-  if (borrowed.length === 0) return '';
-  return `(${borrowed.join(' + ')} from OpenRouter list — your endpoint publishes none)`;
+  const clauses: string[] = [];
+  if (configured.length > 0) clauses.push(`${configured.join(' + ')} from profile config`);
+  if (borrowed.length > 0) {
+    clauses.push(`${borrowed.join(' + ')} from OpenRouter list — your endpoint publishes none`);
+  }
+  if (clauses.length === 0) return '';
+  return `(${clauses.join('; ')})`;
 }
 
 // One line per distinct model, with the capabilities it serves collapsed onto it: generic/smart/

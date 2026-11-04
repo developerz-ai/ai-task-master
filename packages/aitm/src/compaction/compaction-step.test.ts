@@ -85,6 +85,8 @@ function stubCompactor(opts: {
   // control-flow tests (whose small message arrays trivially fit) exercise the intended path; the
   // overflow-guarantee tests set it small to force the summarize / hard-truncate escalation.
   usable?: number;
+  // Fires when usableInputTokensFor is consulted — lets tests prove it never runs on a given path.
+  onUsable?: () => void;
 }): CompactorLike {
   return {
     shouldCompact: async () => {
@@ -97,7 +99,10 @@ function stubCompactor(opts: {
       if (opts.compactReturnsUndefined) return undefined;
       return opts.summary ?? 'SUMMARY';
     },
-    usableInputTokensFor: async () => opts.usable ?? 1_000_000,
+    usableInputTokensFor: async () => {
+      opts.onUsable?.();
+      return opts.usable ?? 1_000_000;
+    },
   };
 }
 
@@ -485,6 +490,35 @@ test('buildCompactionStep: threshold lookup failure → pass-through + warning (
   assert.ok(
     events.some((e) => e.level === 'warn' && /threshold lookup failed/i.test(String(e.msg))),
   );
+});
+
+test('buildCompactionStep: unknown-window decision → pass-through, exactly one warn naming the model, compact never called', async () => {
+  // Mid-run stays non-fatal: an unresolvable window warns and passes the messages through — it never
+  // reaches the compaction machinery (no summarizer call, no usable-budget lookup).
+  const events: Array<Record<string, unknown>> = [];
+  let compactCalls = 0;
+  let usableCalls = 0;
+  const compactor = stubCompactor({
+    decision: { kind: 'unknown-window' },
+    onCompact: () => {
+      compactCalls++;
+    },
+    onUsable: () => {
+      usableCalls++;
+    },
+  });
+  const result = await buildCompactionStep({
+    compactor,
+    modelId: 'openai/gpt-5',
+    logger: captureLogger(events),
+  })(prepareStepArg([step(2)], msgs(3)));
+  assert.equal(result, undefined, 'messages pass through uncompacted');
+  assert.equal(compactCalls, 0, 'compact() never runs on an unknown window');
+  assert.equal(usableCalls, 0, 'usableInputTokensFor never consulted on an unknown window');
+  const warns = events.filter((e) => e.level === 'warn');
+  assert.equal(warns.length, 1, 'exactly one warning event');
+  assert.match(String(warns[0]?.msg), /context window unknown/);
+  assert.equal(warns[0]?.modelId, 'openai/gpt-5');
 });
 
 test('buildCompactionStep: summarizer failure but context already fits → pass-through + warning (non-fatal)', async () => {

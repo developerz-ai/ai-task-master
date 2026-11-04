@@ -298,3 +298,84 @@ test('ModelLimitsRegistry.all: every catalog model, resolved — the banner inpu
   const all = await registry.all();
   assert.deepEqual(all.map((l) => l.modelId).sort(), ['a', 'b']);
 });
+
+// ---- configured-limits overlay (provider → profile config → reference) ----
+
+test('ModelLimitsRegistry: a provider hit that publishes no window/output gets them from configured, tagged profile', async () => {
+  // The z.ai coding endpoint shape: an id and nothing else — now resolvable from the operator's own
+  // config before the reference book is even consulted.
+  const registry = new ModelLimitsRegistry(stubCatalog([{ id: 'glm-5.2' }]), undefined, {
+    'glm-5.2': { contextLength: 1_048_576, maxOutputTokens: 65_536 },
+  });
+  const limits = await registry.forModel('glm-5.2');
+  assert.equal(limits.contextLength, 1_048_576);
+  assert.equal(limits.contextSource, 'profile');
+  assert.equal(limits.maxOutputTokens, 65_536);
+});
+
+test('ModelLimitsRegistry: a reference-catalog miss still leaves the configured window in place', async () => {
+  // No comparable reference entry exists; the operator's window is the only one there is.
+  const registry = new ModelLimitsRegistry(
+    stubCatalog([{ id: 'm' }]),
+    stubCatalog([{ id: 'unrelated/other', context_length: 5 }]),
+    { m: { contextLength: 262_144 } },
+  );
+  const limits = await registry.forModel('m');
+  assert.equal(limits.contextLength, 262_144);
+  assert.equal(limits.contextSource, 'profile');
+});
+
+test('ModelLimitsRegistry: configured values beat a reference fill, which still supplies the pricing', async () => {
+  // The overlay runs before fillFromReference, so the reference book fills only what even
+  // configuration left blank — and merge() can never overwrite a configured value.
+  const registry = new ModelLimitsRegistry(
+    stubCatalog([{ id: 'm' }]),
+    stubCatalog([
+      {
+        id: 'x/m',
+        context_length: 999,
+        pricing: { prompt: '0.000003', completion: '0.000015' },
+      },
+    ]),
+    { m: { contextLength: 262_144 } },
+  );
+  const limits = await registry.forModel('m');
+  assert.equal(limits.contextLength, 262_144, 'configured window wins over the reference book');
+  assert.equal(limits.contextSource, 'profile');
+  assert.equal(limits.promptUsdPerToken, 0.000003, 'the reference book still fills pricing');
+  assert.equal(limits.completionUsdPerToken, 0.000015);
+  assert.equal(limits.pricingSource, 'reference');
+});
+
+test('ModelLimitsRegistry: a provider-published value is never overridden by configured', async () => {
+  // The endpoint aitm calls is authoritative; configuration only fills its gaps.
+  const registry = new ModelLimitsRegistry(
+    stubCatalog([{ id: 'm', context_length: 111 }]),
+    undefined,
+    { m: { contextLength: 999_999, maxOutputTokens: 8_192 } },
+  );
+  const limits = await registry.forModel('m');
+  assert.equal(limits.contextLength, 111, 'the provider window is kept');
+  assert.equal(limits.contextSource, 'provider');
+  assert.equal(limits.maxOutputTokens, 8_192, 'partial fill still applies to blank fields');
+});
+
+test('ModelLimitsRegistry: a configured id the provider catalog does not list resolves instead of throwing', async () => {
+  // A self-hosted/gateway id absent from every catalog must not kill the run with ModelNotFound.
+  const registry = new ModelLimitsRegistry(stubCatalog([{ id: 'listed/model' }]), undefined, {
+    'custom/self-hosted': { contextLength: 32_768 },
+  });
+  const limits = await registry.forModel('custom/self-hosted');
+  assert.deepEqual(limits, {
+    modelId: 'custom/self-hosted',
+    contextLength: 32_768,
+    contextSource: 'profile',
+  });
+});
+
+test('ModelLimitsRegistry: no configured limits → resolution identical to the catalogs alone', async () => {
+  const registry = new ModelLimitsRegistry(stubCatalog([{ id: 'm', context_length: 100 }]));
+  const limits = await registry.forModel('m');
+  assert.deepEqual(limits, { modelId: 'm', contextLength: 100, contextSource: 'provider' });
+  await assert.rejects(() => registry.forModel('mystery/model'), ModelNotFound);
+});

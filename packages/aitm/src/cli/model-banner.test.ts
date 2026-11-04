@@ -104,3 +104,48 @@ test('modelBanner: only the borrowed half is named when the provider published t
 test('modelBanner: no configured models prints nothing at all', () => {
   assert.equal(modelBanner([], 'p'), '');
 });
+
+test('modelBanner: a profile-configured window is labelled as configuration, never as a list estimate', () => {
+  // The operator set this window in config — attributing it to the OpenRouter list would be false.
+  const out = modelBanner(
+    [
+      {
+        capability: 'coding',
+        modelId: 'glm-5.2',
+        limits: {
+          modelId: 'glm-5.2',
+          contextLength: 1_048_576,
+          contextSource: 'profile',
+        },
+      },
+    ],
+    'z.ai',
+  );
+  assert.match(out, /window from profile config/);
+  assert.doesNotMatch(out, /OpenRouter list/);
+});
+
+test('modelBanner: a configured window and a borrowed price each say where they came from', () => {
+  // The operator set the window; the pricing is still an OpenRouter list estimate. One clause each,
+  // and the two never blend into a single borrowed list.
+  const out = modelBanner(
+    [
+      {
+        capability: 'coding',
+        modelId: 'k3',
+        limits: {
+          modelId: 'k3',
+          contextLength: 262_144,
+          contextSource: 'profile',
+          promptUsdPerToken: 0.000003,
+          completionUsdPerToken: 0.000015,
+          pricingSource: 'reference',
+        },
+      },
+    ],
+    'kimi',
+  );
+  assert.match(out, /window from profile config/);
+  assert.match(out, /price from OpenRouter list/);
+  assert.doesNotMatch(out, /window \+ price/);
+});

@@ -144,6 +144,15 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
         return undefined;
       }
       if (decision.kind === 'skip') return undefined;
+      // Known-unknown window: mid-run stays NON-fatal — warn and pass through uncompacted. The CLI
+      // startup gate (commands.ts) is the surface that refuses to run blind; here the run only has to
+      // stay honest about why nothing is compacting.
+      if (decision.kind === 'unknown-window') {
+        init.logger?.warn('context window unknown — compaction disabled for this model', {
+          modelId: init.modelId,
+        });
+        return undefined;
+      }
 
       // No completed steps yet — the first prepareStep of a run, or of a #107 `priorHandle`
       // continuation. There is no step boundary to cut, and a continuation's live tail must not be
@@ -169,7 +178,8 @@ export function buildCompactionStep<TOOLS extends ToolSet = ToolSet>(
       // figure shouldCompact just fired on. Every stage below VERIFIES its result against this before
       // returning it: a stage that reclaims some context but not enough must never be sent, or it is the
       // exact overflow compaction exists to prevent (finding 08, HIGH). undefined = a window we cannot
-      // reason about, which shouldCompact would already have skipped — treat as "cannot verify, fits".
+      // reason about, which shouldCompact would already have reported as 'unknown-window' — treat as
+      // "cannot verify, fits".
       const usable = await init.compactor.usableInputTokensFor(init.modelId);
       // Fixed overhead the message char-estimate cannot see (system prompt + tool schemas): the gap
       // between the grounded live size and the char estimate of those same live messages. Carried onto

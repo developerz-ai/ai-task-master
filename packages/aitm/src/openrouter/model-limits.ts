@@ -2,12 +2,15 @@
 // Cached per-run after first fetch — model catalog changes slowly.
 // docs/auth.md, src/compaction/compactor.ts
 //
-// Two sources, in precedence order. The active provider's own `/models` is authoritative. Whatever it
-// omits is filled from OpenRouter's public catalog (reference-catalog.ts), because a subscription
-// gateway routinely publishes an id and nothing else — measured: z.ai's coding endpoint publishes no
-// window and no pricing at all, which left the Compactor permanently inert (it will not compact a
-// model whose window it does not know) and every run's cost unknown. Reference-sourced values are
-// tagged so the CLI can render them as list-price estimates rather than as what the run was billed.
+// Three sources, in per-field precedence order. The active provider's own `/models` is
+// authoritative. Below it sits the operator's own configured limits (profile/global config
+// `contextLength`/`maxOutputTokens`). Whatever is still missing is filled from OpenRouter's public
+// catalog (reference-catalog.ts), because a subscription gateway routinely publishes an id and
+// nothing else — measured: z.ai's coding endpoint publishes no window and no pricing at all, which
+// left the Compactor permanently inert (it will not compact a model whose window it does not know)
+// and every run's cost unknown. Reference-sourced values are tagged so the CLI can render them as
+// list-price estimates rather than as what the run was billed; profile-sourced values are tagged so
+// it renders them as configuration rather than a catalog figure.
 
 import {
   contextLengthOf,
@@ -21,16 +24,23 @@ import { matchReferenceModel, type ReferenceCatalogClient } from './reference-ca
 // without an `as unknown as OpenRouterClient` cast at the constructor boundary.
 export type ModelCatalogClient = Pick<OpenRouterClient, 'listModels'>;
 
-// Where a resolved value came from. `provider` is the endpoint aitm actually calls; `reference` is
-// OpenRouter's public catalog, which prices a comparable model at LIST rates — not what a
-// subscription charged.
-export type LimitSource = 'provider' | 'reference';
+// Where a resolved value came from. `provider` is the endpoint aitm actually calls; `profile` is the
+// operator's own config setting; `reference` is OpenRouter's public catalog, which prices a
+// comparable model at LIST rates — not what a subscription charged.
+export type LimitSource = 'provider' | 'profile' | 'reference';
+
+// The limits an operator set in config (`contextLength`/`maxOutputTokens` on a profile or globally),
+// keyed by exact model id. The registry overlays them onto the catalogs — see overlayConfigured.
+export type ConfiguredModelLimits = {
+  contextLength?: number;
+  maxOutputTokens?: number;
+};
 
 export type ModelLimits = {
   modelId: string;
-  // Undefined when neither source publishes a window for this model. Consumers skip rather than
-  // guess: the Compactor does not compact a model whose window it doesn't know, exactly as it treats
-  // a non-finite one.
+  // Undefined when no source publishes a window for this model. Consumers decline rather than guess:
+  // the Compactor reports an unknown window (compaction stays off mid-run; the CLI startup gate
+  // refuses), exactly as it treats a non-finite one.
   contextLength?: number;
   // The most the model may emit in one reply. Input and output share the window, so this is the
   // slice of it that cannot hold conversation — the Compactor reserves it. Undefined when neither
@@ -77,11 +87,12 @@ export class ModelLimitsRegistry implements ModelLimitsLookup {
   private cache: Map<string, ModelLimits> | undefined;
   private loadPromise: Promise<void> | undefined;
 
-  // `reference` is optional so every existing construction site and test stub keeps working; without
-  // it the registry behaves exactly as it did before the reference book existed.
+  // `reference` and `configured` are optional so every existing construction site and test stub keeps
+  // working; without them the registry behaves exactly as it did before each source existed.
   constructor(
     private readonly client: ModelCatalogClient,
     private readonly reference?: ReferenceCatalogClient,
+    private readonly configured?: Record<string, ConfiguredModelLimits>,
   ) {}
 
   async forModel(modelId: string): Promise<ModelLimits> {
@@ -122,8 +133,44 @@ export class ModelLimitsRegistry implements ModelLimitsLookup {
     for (const m of models) {
       next.set(m.id, limitsOf(m, m.id, 'provider'));
     }
+    this.overlayConfigured(next);
     this.cache = next;
     await this.fillFromReference(next);
+  }
+
+  // Overlay the operator's configured limits onto the provider-resolved entries: a provider-published
+  // value always wins, a configured value fills only a field the provider left blank (contextSource
+  // 'profile' so the CLI renders it as configuration, not a catalog figure), and a configured id the
+  // provider catalog doesn't list is synthesized outright — the run starts on the operator's word
+  // instead of dying on ModelNotFound. Runs BEFORE fillFromReference so the reference book then fills
+  // only what even configuration left blank (pricing) and merge() can never overwrite a configured
+  // value.
+  private overlayConfigured(cache: Map<string, ModelLimits>): void {
+    if (!this.configured) return;
+    for (const [modelId, configured] of Object.entries(this.configured)) {
+      const existing = cache.get(modelId);
+      if (!existing) {
+        cache.set(modelId, {
+          modelId,
+          ...(configured.contextLength !== undefined
+            ? { contextLength: configured.contextLength, contextSource: 'profile' }
+            : {}),
+          ...(configured.maxOutputTokens !== undefined
+            ? { maxOutputTokens: configured.maxOutputTokens }
+            : {}),
+        });
+        continue;
+      }
+      cache.set(modelId, {
+        ...existing,
+        ...(existing.contextLength === undefined && configured.contextLength !== undefined
+          ? { contextLength: configured.contextLength, contextSource: 'profile' }
+          : {}),
+        ...(existing.maxOutputTokens === undefined && configured.maxOutputTokens !== undefined
+          ? { maxOutputTokens: configured.maxOutputTokens }
+          : {}),
+      });
+    }
   }
 
   // Fill what the provider's catalog left blank. Skipped entirely when nothing is missing (a native

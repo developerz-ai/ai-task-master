@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { StepTimeoutError } from '@developerz.ai/ai-claude-compat';
 import { MockLanguageModelV3 } from 'ai/test';
-import type { ModelLimits, ModelLimitsLookup } from '../openrouter/model-limits.ts';
+import {
+  ModelNotFound,
+  type ModelLimits,
+  type ModelLimitsLookup,
+} from '../openrouter/model-limits.ts';
 import { textResult } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import {
@@ -181,14 +185,81 @@ test('shouldCompact returns compact above the threshold and carries keepLastStep
   assert.deepEqual(decision, { kind: 'compact', keepLastSteps: 3, contextLength: 100_000 });
 });
 
-test('shouldCompact skips when contextLength is zero, negative, or non-finite', async () => {
+test('shouldCompact reports unknown-window when contextLength is zero, negative, or non-finite', async () => {
+  // A published-but-invalid window is as unresolvable as an absent one — an own decision, not a skip.
   for (const contextLength of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
     const c = new Compactor({
       summarizer: new MockLanguageModelV3(),
       limits: stubLimits(contextLength),
     });
-    assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(1_000_000)), { kind: 'skip' });
+    assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(1_000_000)), {
+      kind: 'unknown-window',
+    });
   }
+});
+
+test('shouldCompact reports unknown-window — not skip — when no source publishes a window', async () => {
+  // The old behavior lumped "window unknown" into "nothing to compact", hiding the gap for a whole
+  // run. It is its own decision now: the wiring warns, the CLI startup gate refuses.
+  const limits: ModelLimitsLookup = {
+    forModel: async (id: string): Promise<ModelLimits> => ({ modelId: id }),
+    preload: async () => {},
+  } satisfies ModelLimitsLookup;
+  const c = new Compactor({ summarizer: new MockLanguageModelV3(), limits });
+  assert.deepEqual(await c.shouldCompact('openai/gpt-5', estimated(1_000_000)), {
+    kind: 'unknown-window',
+  });
+});
+
+test('shouldCompact reports unknown-window on ModelNotFound, and usableInputTokensFor degrades to undefined', async () => {
+  // A model no catalog lists is unresolvable, not a crash: resolveWindow narrows its catch to
+  // ModelNotFound and shouldCompact reports it; the usable budget likewise becomes undefined.
+  const limits: ModelLimitsLookup = {
+    forModel: async () => {
+      throw new ModelNotFound('mystery/model');
+    },
+    preload: async () => {},
+  } satisfies ModelLimitsLookup;
+  const c = new Compactor({ summarizer: new MockLanguageModelV3(), limits });
+  assert.deepEqual(await c.shouldCompact('mystery/model', estimated(1_000)), {
+    kind: 'unknown-window',
+  });
+  assert.equal(await c.usableInputTokensFor('mystery/model'), undefined);
+});
+
+test('a lookup error that is not ModelNotFound still propagates from shouldCompact', async () => {
+  // The catch is narrowed on purpose: a network/schema failure belongs to the wiring's
+  // threshold-lookup path (warn + pass through), not to "window unknown".
+  const limits: ModelLimitsLookup = {
+    forModel: async () => {
+      throw new Error('catalog fetch failed');
+    },
+    preload: async () => {},
+  } satisfies ModelLimitsLookup;
+  const c = new Compactor({ summarizer: new MockLanguageModelV3(), limits });
+  await assert.rejects(
+    () => c.shouldCompact('openai/gpt-5', estimated(1_000)),
+    /catalog fetch failed/,
+  );
+});
+
+test('shouldCompact decision table: a known window still decides skip, never unknown-window', async () => {
+  // Room remaining, and a window too small to compact into, are genuine "nothing to do" outcomes —
+  // distinct from the unresolvable-window cases above.
+  const withRoom = new Compactor({
+    summarizer: new MockLanguageModelV3(),
+    limits: stubLimits(100_000),
+  });
+  assert.deepEqual(await withRoom.shouldCompact('openai/gpt-5', estimated(1_000)), {
+    kind: 'skip',
+  });
+  const tinyWindow = new Compactor({
+    summarizer: new MockLanguageModelV3(),
+    limits: stubLimits(8_000),
+  });
+  assert.deepEqual(await tinyWindow.shouldCompact('openai/gpt-5', estimated(7_000)), {
+    kind: 'skip',
+  });
 });
 
 test('shouldCompact skips when liveInputTokens is negative or non-finite', async () => {

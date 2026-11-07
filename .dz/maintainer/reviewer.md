@@ -7,7 +7,7 @@
 
 ## Stack
 
-Bun + TypeScript monorepo. The gate is `bin/check` (`bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && bun run test:node && npm run test:integration -w @developerz.ai/aitm`): a change that does not pass it is not proven, whatever its description says.
+Bun + TypeScript monorepo. The gate is `bin/check` (`bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && npm run build -w @developerz.ai/ai-claude-compat && bun run test:node && npm run test:integration -w @developerz.ai/aitm`): a change that does not pass it is not proven, whatever its description says.
 
 ## Review conventions
 
@@ -21,7 +21,7 @@ Bun + TypeScript monorepo. The gate is `bin/check` (`bun run typecheck && bun ru
 
 ## Gates that matter
 
-- `bin/check` is the local gate: `bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && bun run test:node` — proven green on a clean checkout.
+- `bin/check` is the local gate: `bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && npm run build -w @developerz.ai/ai-claude-compat && bun run test:node && npm run test:integration -w @developerz.ai/aitm` — proven green on a clean checkout.
 - CI (`ci.yml`) decides merges: the `bun` job (lint, madge import cycles, typecheck, typecheck:tests), the `node` job (`test:node` per workspace — the authoritative unit runner), and the `integration` job (real git + gh, 20-min budget).
 - `bun test` is deliberately NOT a gate (oven-sh/bun#5090 node:test shim breaks across files); never demand it in CI or block a PR on its absence.
 - "Proven" for a dependency-upgrade PR: typecheck, typecheck:tests, lint, and `test:node` against the upgraded tree — `bun install --frozen-lockfile` passing proves nothing.

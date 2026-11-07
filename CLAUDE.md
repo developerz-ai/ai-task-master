@@ -31,8 +31,8 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 ## Commands
 | `bin/` command | Runs |
 | --- | --- |
-| `bin/check` | The gate: `typecheck` → `typecheck:tests` → `lint` → `bunx madge@8.0.0 --circular packages/*/src` (import cycles) → `test:node` |
-| `bin/setup` | `bun install` |
+| `bin/check` | The gate: `bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && npm run build -w @developerz.ai/ai-claude-compat && bun run test:node && npm run test:integration -w @developerz.ai/aitm` (the madge step is the import-cycle check; the compat build produces the compat package's only export, `dist/index.js`, which a clean checkout lacks) |
+| `bin/setup` | `bun install && npm run build -w @developerz.ai/ai-claude-compat` |
 | `bin/dev` | `bun packages/aitm/scripts/debug-start.ts` — dogfood aitm on a throwaway repo |
 | `bin/stop` | No-op (nothing detected to stop) |
 
@@ -48,8 +48,8 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | ci.yml job | Steps | Why |
 | --- | --- | --- |
 | `bun` | install, lint, madge circular, typecheck, typecheck:tests | no `bun test` — oven-sh/bun#5090; `typecheck:tests` also covers `packages/aitm/test/`, so integration-file type drift fails CI |
-| `node` | npm install, lint, `typecheck --workspaces`, `test:node --workspaces` | per-workspace npm — never shells out to bun |
-| `integration` | npm install, `test:integration -w @developerz.ai/aitm` | 20-min budget; `e2e-smoke` self-skips without secrets |
+| `node` | npm install, `build (compat runtime)` (`npm run build -w @developerz.ai/ai-claude-compat`), lint, `typecheck --workspaces`, `test:node --workspaces` | per-workspace npm — never shells out to bun |
+| `integration` | npm install, `build (compat runtime)` (`npm run build -w @developerz.ai/ai-claude-compat`), `test:integration -w @developerz.ai/aitm` | 20-min budget; `e2e-smoke` self-skips without secrets |
 
 `release.yml` publishes via npm OIDC trusted publishing (no NPM_TOKEN), npm pinned 11.5.2 (11.6.x regressed provenance), builds then publishes **ai-claude-compat first**, then aitm.
 

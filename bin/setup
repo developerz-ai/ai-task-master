@@ -2,4 +2,4 @@
 # one-command setup — established by dz-runner setup mode. One command; adjust as the repo grows.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-bun install
+bun install && npm run build -w @developerz.ai/ai-claude-compat

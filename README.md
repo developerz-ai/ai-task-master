@@ -10,7 +10,7 @@ Give `aitm` a sentence, walk away, come back to a stack of merged pull requests.
 
 > **Inspired by** [`developerz-ai/claude-task-master`](https://github.com/developerz-ai/claude-task-master): same idea (a task-master that drives the work to merge), built here on the Vercel AI SDK + OpenRouter, provider-agnostic, with MCP client support and a much smaller surface area.
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](./tsconfig.json)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](./packages/aitm/tsconfig.json)
 [![Bun](https://img.shields.io/badge/Bun-≥1.1-fbf0df?logo=bun&logoColor=black)](https://bun.sh)
 [![Node](https://img.shields.io/badge/Node-≥20-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)

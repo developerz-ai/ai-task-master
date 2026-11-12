@@ -5,7 +5,7 @@ Fix confirmed findings from a 5-agent parallel sweep (2026-07-18, HEAD `7f9e8e5`
 
 ## Context
 - Stack: `packages/aitm` — TS strict, ESM, `ai` `experimental_Agent` + subagents-as-tools; OpenRouter-only via `Credentials`; `gh`/`git` via execa argv. Runs unchanged Bun + Node≥20 + Deno≥1.40.
-- Follows [`../../17/101-aitm-audit-remediation/`](../../../17/101-aitm-audit-remediation/overview.md) — partially remediated in PR #215 (its `status.yml` is stale). This hunt audited post-#215 HEAD; no finding here is already fixed. Its slice `08-prompt-templating` overlaps slice `06` here — reconcile, don't duplicate.
+- Follows [`../../17/101-aitm-audit-remediation/`](../../17/101-aitm-audit-remediation/overview.md) — partially remediated in PR #215 (its `status.yml` is stale). This hunt audited post-#215 HEAD; no finding here is already fixed. Its slice `08-prompt-templating` overlaps slice `06` here — reconcile, don't duplicate.
 - Production forces `concurrency = 1` (`run-loop-adapter.ts:563`). Non-mutexed `openPr`/`autoMergeFlow`/`addressReviews` are latent, not live — revisit before ever enabling concurrency > 1. Not in scope here.
 - **Verified clean (do not "fix")**: `atomicWrite` temp+fsync+rename core; `StateStore.update` serialization chain; `waitForChecks` backoff; `ModelLimits`/CLAUDE.md/specialist-roster caching; GraphQL pagination bounds; CI-fix attempt caps; `mcp-client` connect/close error paths; `web-fetch`/`web-search` body draining; system-prompt fencing via `slots.ts` `defuseEnvelopeTags` (except the one seam in `06`).
 - Reference patterns cited per slice: `state/state-store.ts` serialized RMW, `fs/atomic-write.ts`, `slots.ts` fencing, `worker.ts` `VERIFY_TAIL_MAX` cap discipline, `github-client.ts` `safeJson`.

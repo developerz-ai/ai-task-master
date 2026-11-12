@@ -1,6 +1,6 @@
 # developerz-ai/ai-task-master — packages/aitm
 
-> Workspace brain — established by dz-runner setup mode from this workspace, then owned by
+> Workspace brain — owned by this workspace's maintainers, then owned by
 > its maintainers. Correct it in place; setup never overwrites a brain that exists.
 
 The `aitm` CLI product (published as @developerz.ai/aitm) — goal in → Planner/Worker/Reviewer loop → merged PRs, on the Vercel AI SDK over OpenRouter-compatible providers.

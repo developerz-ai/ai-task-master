@@ -3,7 +3,7 @@ description: Regenerate bun.lock for a dependency upgrade in its own PR without 
 applies: [typescript, javascript, bun]
 ---
 
-> House skill — established by dz-runner setup mode from this repo's own evidence, then owned by its maintainers. Correct it in place; setup never overwrites a skill that exists.
+> House skill — owned by this repository's maintainers, and written from this repository's own evidence. Correct it in place; a skill that exists is never overwritten.
 
 1. Work in a PR whose SUBJECT is the upgrade — never inside a release PR.
 2. Delete `bun.lock` and run `bun install` to re-resolve; expect wide movement (measured on #327: 71 packages moved for 3 version-line changes).

@@ -1,6 +1,6 @@
 # AI-first scorecard
 
-> Written by the developerz.ai maintainer agent — established by dz-runner setup mode. Each onboarding run rewrites this file whole; the latest run wins, and the same card is stored on the platform.
+> Written by the developerz.ai maintainer agent — owned by this repository's maintainers. Each onboarding run rewrites this file whole; the latest run wins, and the same card is stored on the platform.
 
 - Run: `run_c4f1b97890bf430980033aa28e4827e9`
 - Computed: 2026-11-02T04:06:14.881Z

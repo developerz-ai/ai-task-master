@@ -3,7 +3,7 @@ description: Cut and publish a release of both workspace packages via OIDC trust
 applies: [typescript, javascript, bun]
 ---
 
-> House skill — established by dz-runner setup mode from this repo's own evidence, then owned by its maintainers. Correct it in place; setup never overwrites a skill that exists.
+> House skill — owned by this repository's maintainers, and written from this repository's own evidence. Correct it in place; a skill that exists is never overwritten.
 
 1. Bump the version in BOTH `packages/aitm/package.json` and `packages/ai-claude-compat/package.json` — keep them in lockstep; `aitm` pins compat to an exact version.
 2. Run `bun install` (updates lock metadata but NOT resolution — a version move is not a resolution change; `bun.lock` workspace version lines are allowed to lag).

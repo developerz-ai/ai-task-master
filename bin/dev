@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# one-command dev — established by dz-runner setup mode. One command; adjust as the repo grows.
+# one-command dev — the repository's own dev command. One command; adjust as the repo grows.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 bun packages/aitm/scripts/debug-start.ts

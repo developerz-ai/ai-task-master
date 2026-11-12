@@ -1,7 +1,7 @@
 # Reviewer instructions — developerz-ai/ai-task-master
 
 > Read by the developerz.ai reviewer at EVERY review of this repository, at the reviewed
-> commit, as this repo's own layer of the reviewer's prompt — established by dz-runner setup mode.
+> commit, as this repo's own layer of the reviewer's prompt — owned by this repository's maintainers.
 > It refines the platform rules (a finding is cited or withheld; the bot always discloses)
 > and never overrides them. Edit freely; keep it under 12,000 characters — past that it is cut.
 

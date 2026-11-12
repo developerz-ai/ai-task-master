@@ -3,7 +3,7 @@ name: aitm-cli
 description: Owns packages/aitm/src/cli (args parsing, dispatch, exit codes, help, format, mask-secret, model-banner, update). Use for cli flags, arg parsing, exit codes, help text, config display. Do NOT use for the planner/worker loop, state files or provider wiring.
 ---
 
-> Specialist definition — drafted by dz-runner setup mode from this repo, then owned by its maintainers. Correct it in place; setup never overwrites a definition that exists.
+> Specialist definition — owned by this repository's maintainers. Correct it in place; a definition that exists is never overwritten.
 
 ## Identity
 

@@ -3,23 +3,31 @@
 // This test ensures:
 // 1. Both package.json files declare the same Node engine version
 // 2. The declared version matches the documented minimum (Node ≥ 20)
-// 3. The declared version matches CLAUDE.md portability requirement
+// 3. The root README's requirements table, both package READMEs, and CLAUDE.md
+//    each document that same Node floor
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+// Matches only an explicit Node floor statement ("Node ≥ 20" / "Node >= 20") —
+// never a bare ">=20" from a dependency range or the Deno ≥ 1.40 clause, which
+// would let a Node-floor drift (e.g. "Node ≥ 22") pass the guard.
+const NODE_FLOOR_PATTERN = /Node\s*(?:≥|>=)\s*20\b/;
+
 test('engines-alignment: Node versions match across packages', async () => {
   // Read both package.json files
   const aitmPackageJsonPath = join(import.meta.dirname, '../../package.json');
   const compatPackageJsonPath = join(import.meta.dirname, '../../../ai-claude-compat/package.json');
+  const readmeRootPath = join(import.meta.dirname, '../../../../README.md');
   const readmeAitmPath = join(import.meta.dirname, '../../README.md');
   const readmeCompatPath = join(import.meta.dirname, '../../../ai-claude-compat/README.md');
   const claudeMdPath = join(import.meta.dirname, '../../../../CLAUDE.md');
 
   const aitmContent = await readFile(aitmPackageJsonPath, 'utf-8');
   const compatContent = await readFile(compatPackageJsonPath, 'utf-8');
+  const readmeRoot = await readFile(readmeRootPath, 'utf-8');
   const readmeAitm = await readFile(readmeAitmPath, 'utf-8');
   const readmeCompat = await readFile(readmeCompatPath, 'utf-8');
   const claudeMd = await readFile(claudeMdPath, 'utf-8');
@@ -56,28 +64,22 @@ test('engines-alignment: Node versions match across packages', async () => {
     `Declared Node engine major version (${majorVersion}) must match documented minimum (20)`,
   );
 
-  // Verify documentation mentions Node ≥ 20 or Node >= 20 in README files
-  const readmeAitmMentions20 =
-    readmeAitm.includes('Node ≥ 20') ||
-    readmeAitm.includes('Node >= 20') ||
-    readmeAitm.includes('≥20') ||
-    readmeAitm.includes('>=20');
-  assert(readmeAitmMentions20, 'packages/aitm/README.md must document the Node ≥ 20 requirement');
-
-  const readmeCompatMentions20 =
-    readmeCompat.includes('Node ≥ 20') ||
-    readmeCompat.includes('Node >= 20') ||
-    readmeCompat.includes('≥20') ||
-    readmeCompat.includes('>=20');
+  // Verify every document states the Node ≥ 20 floor explicitly — the root README's
+  // requirements table is the one readers check, so it is guarded too.
   assert(
-    readmeCompatMentions20,
+    NODE_FLOOR_PATTERN.test(readmeRoot),
+    'README.md requirements table must document the Node ≥ 20 requirement',
+  );
+  assert(
+    NODE_FLOOR_PATTERN.test(readmeAitm),
+    'packages/aitm/README.md must document the Node ≥ 20 requirement',
+  );
+  assert(
+    NODE_FLOOR_PATTERN.test(readmeCompat),
     'packages/ai-claude-compat/README.md must document the Node ≥ 20 requirement',
   );
-
-  // Verify CLAUDE.md documents the Node ≥ 20 portability requirement
-  const claudeMdMentions20 =
-    claudeMd.includes('Node ≥ 20') ||
-    claudeMd.includes('Node >= 20') ||
-    claudeMd.includes('≥ 1.40');
-  assert(claudeMdMentions20, 'CLAUDE.md must document Node ≥ 20 portability requirement');
+  assert(
+    NODE_FLOOR_PATTERN.test(claudeMd),
+    'CLAUDE.md must document the Node ≥ 20 portability requirement',
+  );
 });

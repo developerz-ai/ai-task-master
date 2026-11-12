@@ -28,17 +28,17 @@ passes it locally passes everywhere.
 
 ## Exit codes `bin/check` must use
 
-A coding box runs this gate before it commits, and it has to tell a FAILING change
-from a gate it could not run — otherwise correct work is thrown away as if it were
+Whatever runs this gate before a commit (a hook, CI, an agent) has to tell a FAILING
+change from a gate it could not run — otherwise correct work is thrown away as if it were
 red. Exit 1 cannot carry that difference, so one code is reserved:
 
-| Exit | Means | What the platform does |
-|------|-------|------------------------|
+| Exit | Means | What the caller does |
+|------|-------|----------------------|
 | 0 | the change passes | commit it |
 | 75 | a resource the gate NEEDS is unreachable (a database, a service, a credential) — it refused to grade | refuse the commit, and blame the environment, never the change |
 | any other non-zero | the gate ran and the change is red | refuse the commit, and blame the change |
 
 - Guard preconditions FIRST and `exit 75` when one is unmet. `exit 1` there tells the
-  platform your change is broken when it is your environment that is.
+  caller your change is broken when it is your environment that is.
 - Changed a dependency? Re-run `bin/setup` before `bin/check`, or you are proving a stale tree.
 - Add the test that fails first, then the fix — a green run that never went red proves nothing.

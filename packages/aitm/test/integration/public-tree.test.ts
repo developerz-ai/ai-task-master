@@ -195,12 +195,16 @@ describe('the public tree', () => {
     const tracked = trackedFiles();
     assert.ok(tracked.includes(SELF), 'the scan does not see this file');
     const offenders: string[] = [];
+    let checked = 0;
     for (const path of tracked) {
       if (!PREAMBLE_PATHS.some((pattern) => pattern.test(path))) continue;
       const file = readText(root, path);
       if (!file.read || file.text === null) continue;
+      checked += 1;
       if (!file.text.includes(PREAMBLE_MARKER)) offenders.push(path);
     }
+    // A renamed agent directory, or a read that fails for every file, checks nothing and passes.
+    assert.ok(checked > 0, 'the marker rule checked no agent or skill file');
     assert.deepEqual(
       offenders,
       [],

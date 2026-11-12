@@ -15,7 +15,6 @@ permissions:
 jobs:
   bun:
     name: bun (test + lint)
-    # GitHub-hosted runner (org rule: private repos on Ubicloud, public on GitHub-hosted).
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:

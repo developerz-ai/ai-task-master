@@ -13,7 +13,6 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 - **MUST** ship a paired `*.test.ts` with every module (two exemptions under Testing); no test, no merge.
 - **MUST** pass `bin/check` and run the suite under both `bun test` and `node --test` locally before every commit.
 - **MUST** keep provider wiring split exactly three ways — `credentials/` + `openrouter/` + `config/provider-presets.ts`; no fourth place constructs an `OpenRouterClient`.
-- **MUST** pass `--admin` when running or merging on the `developerz-ai` repos — `main` requires one approving review (Branch protection below).
 - **NEVER** add, stub, or leave TODOs for out-of-scope v1 features (mailbox, MCP server, webhooks, Docker) — stop and surface instead (Out of scope below).
 
 ## Stack
@@ -118,8 +117,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 - Tests must pass under both `bun test` and `node --test` (or `vitest run` with a Node target) locally before every commit. CI's `bun` job deliberately omits `bun test` (oven-sh/bun#5090), so the `node` + `integration` jobs are authoritative for portability enforcement.
 
 ## Branch protection & `--admin`
-- `main` on the `developerz-ai` repos requires **one approving review**, so `gh pr merge` on a solo-authored PR is refused with "the base branch policy prohibits the merge" even with every check green.
-- Running aitm here: pass `--admin` (`aitm start … --admin`, `aitm merge-pr --pr N --admin`) or the run blocks on a finished, green PR it cannot land. Merging by hand: `gh pr merge <n> --squash --admin`.
+- On a repo whose base branch requires an approving review, `gh pr merge` on a solo-authored PR is refused with "the base branch policy prohibits the merge" even with every check green, and an aitm run blocks on that finished PR. `--admin` (`aitm start … --admin`, `aitm merge-pr --pr N --admin`) merges past it and needs repo-admin rights.
 - `--admin` overrides the policy — it does not satisfy it. It never skips CI or ignores failing checks (those still route to the CI-fix loop); it only advances a CI *timeout* to the review stage rather than blocking.
 
 ## Releases and `bun.lock`

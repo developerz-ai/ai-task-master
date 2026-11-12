@@ -46,6 +46,12 @@ import { fileURLToPath } from 'node:url';
  * machine. A failure names the file, never the path it found, so a red run does
  * not print the path into a public log.
  *
+ * **No organisation CI topology.** A workflow comment named the CI provider
+ * that runs the organisation's private repositories and the routing rule
+ * between providers. The provider's name is checked for, assembled from parts
+ * like the setup mode's, with the same trade: it is in the history already, and
+ * the guard buys that the tree stops carrying it.
+ *
  * **Plan trackers name roles, not people.** The trackers named who created,
  * worked and owns each plan, and told the next executor to write their own name
  * in. A name cannot be checked for in general, but these three fields can be
@@ -80,6 +86,9 @@ const OWN_HOST = /\b(?:[a-z0-9-]+\.)*developerz\.ai\b/gi;
  * carries it in one piece.
  */
 const SETUP_MODE = ['dz', 'runner'].join('-');
+
+/** The CI provider for the organisation's private repositories, assembled from parts. */
+const PRIVATE_CI = ['ubi', 'cloud'].join('');
 
 /** The marker this repository's own agent and skill files carry. */
 const PREAMBLE_MARKER = "owned by this repository's maintainers";
@@ -211,6 +220,11 @@ function namesSetupMode(text: string): boolean {
   return text.toLowerCase().includes(SETUP_MODE.toLowerCase());
 }
 
+/** Whether one text names the organisation's private CI provider, in any case. */
+function namesPrivateCi(text: string): boolean {
+  return text.toLowerCase().includes(PRIVATE_CI);
+}
+
 describe('the public tree', () => {
   it('names no internal service on our own domain', () => {
     const root = repoRoot();
@@ -257,6 +271,26 @@ describe('the public tree', () => {
       offenders,
       [],
       `a tracked file names the internal setup mode: ${offenders.join(', ')}`,
+    );
+  });
+
+  it("names no CI provider for the organisation's private repositories", () => {
+    const root = repoRoot();
+    const tracked = trackedFiles();
+    assert.ok(tracked.includes(SELF), 'the scan does not see this file');
+    const offenders: string[] = [];
+    let read = 0;
+    for (const path of tracked) {
+      const file = readText(root, path);
+      if (!file.read) continue;
+      read += 1;
+      if (file.text !== null && namesPrivateCi(file.text)) offenders.push(path);
+    }
+    assert.ok(read > 0, 'the scan read no file at all');
+    assert.deepEqual(
+      offenders,
+      [],
+      `a tracked file names the organisation's private CI provider: ${offenders.join(', ')}`,
     );
   });
 
@@ -385,6 +419,15 @@ describe('the guard itself', () => {
     assert.equal(namesSetupMode(`established by ${SETUP_MODE} setup mode`), true);
     assert.equal(namesSetupMode(`established by ${SETUP_MODE.toUpperCase()} setup mode`), true);
     assert.equal(namesSetupMode("owned by this repository's maintainers"), false);
+  });
+
+  it('catches the private CI provider in any case, and lets the rest through', () => {
+    assert.equal(namesPrivateCi(`routed to ${PRIVATE_CI} for private repositories`), true);
+    assert.equal(
+      namesPrivateCi(`routed to ${PRIVATE_CI.toUpperCase()} for private repositories`),
+      true,
+    );
+    assert.equal(namesPrivateCi('routed to github actions'), false);
   });
 
   it('catches an env name no source reads, and lets a read one through', () => {

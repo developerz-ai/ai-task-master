@@ -28,6 +28,16 @@ import { fileURLToPath } from 'node:url';
  * replaced with is checked instead: a file restored from a sibling repository
  * would not carry this repository's marker, and fails.
  *
+ * **No internal lane behind the public config.** The environment template
+ * declared a credential no tracked source reads, and a command file granted a
+ * tool on an MCP server kept for our own error tracker. Both describe a service
+ * that lives on our machines, not in this repository. So every name in the
+ * template is read by tracked source, and every MCP server a tracked agent,
+ * command or skill file calls is declared in the tracked `.mcp.json`. The trade:
+ * a server name cannot say whether it is ours, so re-declaring one is not
+ * caught. What is caught is the likely way back in, a command file copied from
+ * a sibling repository that calls a server this config dropped.
+ *
  * Git is the oracle for "tracked", invoked as a real `git ls-files`
  * subprocess, so the scope is the tree's own index and not a directory walk
  * that would also read a developer's untracked scratch file. The repository is
@@ -60,6 +70,10 @@ const SETUP_MODE = ['dz', 'runner'].join('-');
 
 /** The marker this repository's own agent and skill files carry. */
 const PREAMBLE_MARKER = "owned by this repository's maintainers";
+
+/** The environment template, and the tracked source that may read its names. */
+const ENV_TEMPLATE = '.env.example';
+const SOURCE = /^(?:packages\/[^/]+\/src\/|bin\/)/;
 
 /** The paths whose files carry a preamble, and so carry the marker. */
 const PREAMBLE_PATHS = [/^\.claude\/agents\//, /^\.claude\/skills\//];
@@ -134,6 +148,20 @@ function forbiddenOwnHosts(text: string): string[] {
     if (!PERMITTED_OWN_HOSTS.has(match[0].toLowerCase())) found.push(match[0]);
   }
   return found;
+}
+
+/** The names the environment template declares that no source text reads. */
+function unreadEnvNames(template: string, sources: string[]): string[] {
+  const names = [...template.matchAll(/^([A-Za-z_][A-Za-z0-9_]*)=/gm)].map((m) => m[1] ?? '');
+  return names.filter((name) => !sources.some((text) => new RegExp(`\\b${name}\\b`).test(text)));
+}
+
+/** The MCP servers one text calls a tool on that `declared` does not hold. */
+function undeclaredMcpServers(text: string, declared: Set<string>): string[] {
+  const named = [...text.matchAll(/\bmcp__([A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*)/g)].map(
+    (m) => m[1] ?? '',
+  );
+  return [...new Set(named)].filter((server) => !declared.has(server));
 }
 
 /** Whether one text names the internal setup mode, in any case. */
@@ -213,6 +241,52 @@ describe('the public tree', () => {
   });
 });
 
+describe('the public config', () => {
+  it('declares in the environment template only names tracked source reads', () => {
+    const root = repoRoot();
+    const tracked = trackedFiles();
+    assert.ok(tracked.includes(SELF), 'the scan does not see this file');
+    assert.ok(tracked.includes(ENV_TEMPLATE), `${ENV_TEMPLATE} is not tracked`);
+    const sources = tracked
+      .filter((path) => SOURCE.test(path) && !path.endsWith('.test.ts'))
+      .map((path) => readText(root, path).text)
+      .filter((text): text is string => text !== null);
+    assert.ok(sources.length > 0, 'the scan read no source file');
+    const unread = unreadEnvNames(readText(root, ENV_TEMPLATE).text ?? '', sources);
+    assert.deepEqual(
+      unread,
+      [],
+      `${ENV_TEMPLATE} declares name(s) no tracked source reads, so they belong to a service outside this repository: ${unread.join(', ')}`,
+    );
+  });
+
+  it('calls no MCP server the tracked config does not declare', () => {
+    const root = repoRoot();
+    const tracked = trackedFiles();
+    assert.ok(tracked.includes(SELF), 'the scan does not see this file');
+    const config = JSON.parse(readText(root, '.mcp.json').text ?? '{}') as {
+      mcpServers?: Record<string, unknown>;
+    };
+    const declared = new Set(Object.keys(config.mcpServers ?? {}));
+    const offenders: string[] = [];
+    let read = 0;
+    for (const path of tracked.filter((p) => p.startsWith('.claude/'))) {
+      const file = readText(root, path);
+      if (!file.read || file.text === null) continue;
+      read += 1;
+      for (const server of undeclaredMcpServers(file.text, declared)) {
+        offenders.push(`${path}: ${server}`);
+      }
+    }
+    assert.ok(read > 0, 'the scan read no .claude file');
+    assert.deepEqual(
+      offenders,
+      [],
+      `a tracked agent file calls an MCP server .mcp.json does not declare, so it lives only on our own machines: ${offenders.join(', ')}`,
+    );
+  });
+});
+
 describe('the guard itself', () => {
   it('catches an internal host in any case, and lets the public hosts through', () => {
     const gateway = ['mcp', 'developerz', 'ai'].join('.');
@@ -228,5 +302,18 @@ describe('the guard itself', () => {
     assert.equal(namesSetupMode(`established by ${SETUP_MODE} setup mode`), true);
     assert.equal(namesSetupMode(`established by ${SETUP_MODE.toUpperCase()} setup mode`), true);
     assert.equal(namesSetupMode("owned by this repository's maintainers"), false);
+  });
+
+  it('catches an env name no source reads, and lets a read one through', () => {
+    const template = '# comment\nREAD_ME=\nNOBODY=\n';
+    assert.deepEqual(unreadEnvNames(template, ['process.env.READ_ME']), ['NOBODY']);
+    assert.deepEqual(unreadEnvNames(template, ['READ_ME', 'env.NOBODY']), []);
+  });
+
+  it('catches an undeclared MCP server, with or without a tool name', () => {
+    const declared = new Set(['code-graph']);
+    const text = 'allowed-tools: Read, mcp__tracker-mcp, mcp__code-graph__explore, mcp__db_x__q';
+    assert.deepEqual(undeclaredMcpServers(text, declared), ['tracker-mcp', 'db_x']);
+    assert.deepEqual(undeclaredMcpServers('mcp__code-graph__a_b', declared), []);
   });
 });

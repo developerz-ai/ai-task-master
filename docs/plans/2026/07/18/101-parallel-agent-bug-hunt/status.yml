@@ -1,9 +1,9 @@
 plan: 101-parallel-agent-bug-hunt
 title: Parallel-Agent Bug Hunt — remediation
 status: not_started        # not_started | in_progress | blocked | complete | superseded
-created_by: ""            # the executor's own handle, filled on pickup
-worked_by: ""              # the executor's own handle, filled on pickup
-owner: ""                  # the executor's own handle, filled on pickup
+created_by: plan-author
+worked_by: ""
+owner: plan-owner
 percent: 0
 current_focus: ""          # start with 01 (PR idempotency) + 02 (signals); owner decisions gate 01 steps 2/4
 slices:

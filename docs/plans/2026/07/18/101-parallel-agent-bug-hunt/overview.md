@@ -9,7 +9,7 @@ Fix confirmed findings from a 5-agent parallel sweep (2026-07-18, HEAD `7f9e8e5`
 - Production forces `concurrency = 1` (`run-loop-adapter.ts:563`). Non-mutexed `openPr`/`autoMergeFlow`/`addressReviews` are latent, not live — revisit before ever enabling concurrency > 1. Not in scope here.
 - **Verified clean (do not "fix")**: `atomicWrite` temp+fsync+rename core; `StateStore.update` serialization chain; `waitForChecks` backoff; `ModelLimits`/CLAUDE.md/specialist-roster caching; GraphQL pagination bounds; CI-fix attempt caps; `mcp-client` connect/close error paths; `web-fetch`/`web-search` body draining; system-prompt fencing via `slots.ts` `defuseEnvelopeTags` (except the one seam in `06`).
 - Reference patterns cited per slice: `state/state-store.ts` serialized RMW, `fs/atomic-write.ts`, `slots.ts` fencing, `worker.ts` `VERIFY_TAIL_MAX` cap discipline, `github-client.ts` `safeJson`.
-- Prompt standards source: `~/workspace/developerz-ai/gold-standards-in-ai/docs/writing-for-agents/compressed-config.md`, the prompt-standards note in the sibling `claude-code-bible` repository (agent prompt <50 lines, fragments, per-spawn cost), `~/workspace/developerz-ai/claude-task-master` `prompts_base.py` PromptBuilder (`include_if` sections).
+- Prompt standards source: `gold-standards-in-ai/docs/writing-for-agents/compressed-config.md`, `claude-code-bible/docs/11-compressed-config.md` (agent prompt <50 lines, fragments, per-spawn cost), `claude-task-master` `prompts_base.py` PromptBuilder (`include_if` sections).
 
 ## Plan files (execute in order)
 1. [`01-pr-lifecycle-idempotency.md`](01-pr-lifecycle-idempotency.md) — crash-safe `gh pr create`; prPerTask+no-automerge duplicate PR; false `success` on awaiting-pr; partial group marked `merged` with a dropped task.

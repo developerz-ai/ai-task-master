@@ -181,14 +181,14 @@ test('Logger emits applied redaction in JSON output', () => {
   const err = captureStream(process.stderr);
   try {
     const log = new Logger('info', 'run-r');
-    log.info('auth', { apiKey: 'sk-leak', user: 'sebi' });
+    log.info('auth', { apiKey: 'sk-leak', user: 'alice' });
   } finally {
     err.restore();
   }
   const [record] = parseLines(err.lines);
   assert.ok(record);
   assert.equal(record.apiKey, '[REDACTED]');
-  assert.equal(record.user, 'sebi');
+  assert.equal(record.user, 'alice');
 });
 
 test('Logger scrubs secret-shaped substrings embedded in msg', () => {

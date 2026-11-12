@@ -4,7 +4,7 @@
 
 ## The mechanism
 
-**OpenCode** (`~/workspace/opencode/packages/opencode/src/tool/edit.ts`):
+**OpenCode** (`sst/opencode` `packages/opencode/src/tool/edit.ts`):
 - `replace()` (`:682`) tries a cascade of `Replacer` generators in order until one yields a locatable span: `SimpleReplacer` → `LineTrimmedReplacer` → `BlockAnchorReplacer` → `WhitespaceNormalizedReplacer` → `IndentationFlexibleReplacer` → `EscapeNormalizedReplacer` → `TrimmedBoundaryReplacer` → `ContextAwareReplacer` → `MultiOccurrenceReplacer` (`:694`).
 - `LineTrimmedReplacer` (`:248`) matches ignoring per-line leading/trailing whitespace; `BlockAnchorReplacer` (`:288`) matches a ≥3-line block by its first+last line as anchors, scoring the middle with Levenshtein similarity ≥ 0.65; `WhitespaceNormalizedReplacer` (`:427`) collapses runs of whitespace.
 - Anti-clobber: every candidate span is re-checked — uniqueness `index === lastIndex` unless `replaceAll` (`:717`), and `isDisproportionateMatch` (`:731`, called `:709`) **throws** if the matched span is far larger than `oldString` (≥ `max(oldLines+3, oldLines*2)` lines, or > `max(len+500, len*4)` chars). So a loose matcher can never silently swallow a huge region.
@@ -14,7 +14,7 @@
 - Wrapped by `editFileTool` (`:38`) and `multiEditTool` (`:59`); both first pass through `readForEdit` (`:96`) which enforces read-before-edit + hash-staleness (`fileState.isStale`, `:116`) — **aitm's edge over OpenCode, keep it untouched.**
 - Impact: the dominant weak-model failure aitm already codes around — `EMPTY_MANIFEST_REASON` (`worker.ts:242`), `editorNoChangeReason` (`worker.ts:426`), phantom-edit blocks — is frequently a *near-miss* `oldString` (indentation off, a tab vs spaces, trailing space). Today that fails the leaf → fails the whole PR group. A fallback lands it.
 
-**Contrast — Aider** (`~/workspace/aider`, `aider/coders/`): Aider avoids brittle string-match by using coarser edit *formats* — `editblock_coder.py` (SEARCH/REPLACE with its own flexible matcher `search_replace.py`) and `udiff_coder.py` (unified diff, applied with fuzzy hunk placement), plus whole-file mode. Same lesson from the other end: **never require a byte-exact anchor.** aitm keeps its exact-string tool (cheap, precise) and only *degrades gracefully* — the OpenCode approach, not a format change.
+**Contrast — Aider** (`Aider-AI/aider`, `aider/coders/`): Aider avoids brittle string-match by using coarser edit *formats* — `editblock_coder.py` (SEARCH/REPLACE with its own flexible matcher `search_replace.py`) and `udiff_coder.py` (unified diff, applied with fuzzy hunk placement), plus whole-file mode. Same lesson from the other end: **never require a byte-exact anchor.** aitm keeps its exact-string tool (cheap, precise) and only *degrades gracefully* — the OpenCode approach, not a format change.
 
 ## Files to change
 - New: `packages/ai-claude-compat/src/edit-replacers.ts` (+ `.test.ts`) — port the 3 highest-value replacers as pure generators: `lineTrimmedMatch`, `blockAnchorMatch`, `whitespaceNormalizedMatch`, plus `isDisproportionateMatch`. Named exports, no `any`. Port from `opencode/.../edit.ts:248,288,427,731` but rewrite to aitm house style (kebab file, camelCase fns, `type` shapes) — do not import OpenCode.

@@ -4,7 +4,7 @@
 
 ## The mechanism
 
-**OpenCode** (`~/workspace/opencode/packages/opencode/src/tool/task.ts`, `src/agent/subagent-permissions.ts`):
+**OpenCode** (`sst/opencode` `packages/opencode/src/tool/task.ts`, `src/agent/subagent-permissions.ts`):
 - When the `task` tool spawns a subagent it derives the child's tool permissions from the parent, then adds **explicit denies** (`task.ts:143`): the child cannot call `todowrite` or `task` itself (no recursion) unless the agent def grants them, and every `experimental.primary_tools` entry is denied to the child. So "what can a delegated child do" is a computed allow/deny set, not a hand-maintained list.
 - Depth is bounded structurally: `task` walks the `parentID` chain and refuses past `cfg.subagent_depth ?? 1` (`task.ts:104`) — no unbounded nesting even as agent graphs grow.
 

@@ -426,7 +426,7 @@ test('mergePr does not swallow a real failure when the state query itself fails'
 test('authStatus parses scopes from gh stderr', async () => {
   const stderr = [
     'github.com',
-    '  ✓ Logged in to github.com as sebyx07 (oauth_token)',
+    '  ✓ Logged in to github.com as octocat (oauth_token)',
     "  - Token scopes: 'repo', 'read:org', 'workflow'",
   ].join('\n');
   const { run, calls } = makeRun([{ stderr, exitCode: 0 }]);

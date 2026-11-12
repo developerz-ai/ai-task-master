@@ -196,15 +196,15 @@ test('prLinksBlock: a group with no persisted URL borrows a sibling repo prefix'
       id: 'g4',
       title: 'Web UI',
       pr: 4,
-      prUrl: 'https://github.com/sebyx07/test-todo-app/pull/4',
+      prUrl: 'https://github.com/octocat/test-todo-app/pull/4',
     }),
   ]);
   assert.match(
     block,
-    /#1 {2}Domain types — https:\/\/github\.com\/sebyx07\/test-todo-app\/pull\/1/,
+    /#1 {2}Domain types — https:\/\/github\.com\/octocat\/test-todo-app\/pull\/1/,
   );
-  assert.match(block, /#2 {2}API CRUD — https:\/\/github\.com\/sebyx07\/test-todo-app\/pull\/2/);
-  assert.match(block, /#4 {2}Web UI — https:\/\/github\.com\/sebyx07\/test-todo-app\/pull\/4/);
+  assert.match(block, /#2 {2}API CRUD — https:\/\/github\.com\/octocat\/test-todo-app\/pull\/2/);
+  assert.match(block, /#4 {2}Web UI — https:\/\/github\.com\/octocat\/test-todo-app\/pull\/4/);
 });
 
 test('prLinksBlock: with no sibling URL anywhere it still degrades to the bare number', () => {

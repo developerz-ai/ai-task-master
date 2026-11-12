@@ -1,9 +1,9 @@
 plan: 102-aitm-liveliness-tools-team-caching
 title: "aitm: liveliness, tool efficiency, team fanout, caching & transport"
 status: not_started
-created_by: ""            # the executor's own handle, filled on pickup
-worked_by: ""              # the executor's own handle, filled on pickup
-owner: ""                  # the executor's own handle, filled on pickup
+created_by: plan-author
+worked_by: ""
+owner: plan-owner
 percent: 0
 current_focus: ""
 slices:

@@ -38,6 +38,19 @@ import { fileURLToPath } from 'node:url';
  * caught. What is caught is the likely way back in, a command file copied from
  * a sibling repository that calls a server this config dropped.
  *
+ * **No one's machine.** A finding quoted an engineer's absolute home directory,
+ * and plan files quoted paths on one build box. A path under a home directory
+ * names a person and lays out their machine; the tree names a file by its
+ * repository path and an upstream project by its name. A `~/` path into a
+ * dotfile stays: that is where a tool keeps its config, the same on every
+ * machine. A failure names the file, never the path it found, so a red run does
+ * not print the path into a public log.
+ *
+ * **Plan trackers name roles, not people.** The trackers named who created,
+ * worked and owns each plan, and told the next executor to write their own name
+ * in. A name cannot be checked for in general, but these three fields can be
+ * pinned: `created_by: plan-author`, `owner: plan-owner`, `worked_by` empty.
+ *
  * Git is the oracle for "tracked", invoked as a real `git ls-files`
  * subprocess, so the scope is the tree's own index and not a directory walk
  * that would also read a developer's untracked scratch file. The repository is
@@ -74,6 +87,21 @@ const PREAMBLE_MARKER = "owned by this repository's maintainers";
 /** The environment template, and the tracked source that may read its names. */
 const ENV_TEMPLATE = '.env.example';
 const SOURCE = /^(?:packages\/[^/]+\/src\/|bin\/)/;
+
+/**
+ * A home directory: one under `/home` or `/Users`, or a `~/` path whose first
+ * segment is a plain directory rather than a dotfile. Not global, so `.test()`
+ * keeps no `lastIndex` between files.
+ */
+const HOME_PATH = /(?:^|[^\w.-])\/(?:home|Users)\/[\w.-]+|~\/[\w-]/m;
+
+/** A plan tracker, and the only values its people fields may hold. */
+const PLAN_TRACKER = /^docs\/plans\/.+\/status\.yml$/;
+const TRACKER_ROLES: Record<string, string> = {
+  created_by: 'plan-author',
+  worked_by: '',
+  owner: 'plan-owner',
+};
 
 /** The paths whose files carry a preamble, and so carry the marker. */
 const PREAMBLE_PATHS = [/^\.claude\/agents\//, /^\.claude\/skills\//];
@@ -164,6 +192,20 @@ function undeclaredMcpServers(text: string, declared: Set<string>): string[] {
   return [...new Set(named)].filter((server) => !declared.has(server));
 }
 
+/** The people fields in one tracker that hold anything but their role. */
+function trackerPeople(text: string): string[] {
+  const wrong: string[] = [];
+  for (const [field, role] of Object.entries(TRACKER_ROLES)) {
+    const line = new RegExp(`^${field}:(.*)$`, 'm').exec(text);
+    const value = (line?.[1] ?? '')
+      .replace(/\s#.*$/, '')
+      .trim()
+      .replace(/^(["'])(.*)\1$/, '$2');
+    if (!line || value !== role) wrong.push(field);
+  }
+  return wrong;
+}
+
 /** Whether one text names the internal setup mode, in any case. */
 function namesSetupMode(text: string): boolean {
   return text.toLowerCase().includes(SETUP_MODE.toLowerCase());
@@ -215,6 +257,47 @@ describe('the public tree', () => {
       offenders,
       [],
       `a tracked file names the internal setup mode: ${offenders.join(', ')}`,
+    );
+  });
+
+  it('names no home directory', () => {
+    const root = repoRoot();
+    const tracked = trackedFiles();
+    assert.ok(tracked.includes(SELF), 'the scan does not see this file');
+    const offenders: string[] = [];
+    let read = 0;
+    for (const path of tracked) {
+      const file = readText(root, path);
+      if (!file.read) continue;
+      read += 1;
+      if (file.text !== null && HOME_PATH.test(file.text)) offenders.push(path);
+    }
+    assert.ok(read > 0, 'the scan read no file at all');
+    assert.deepEqual(
+      offenders,
+      [],
+      `a tracked file carries a home-directory path; name the file by its repository path, the project by its name: ${offenders.join(', ')}`,
+    );
+  });
+
+  it('names roles, not people, in every plan tracker', () => {
+    const root = repoRoot();
+    const tracked = trackedFiles();
+    assert.ok(tracked.includes(SELF), 'the scan does not see this file');
+    const offenders: string[] = [];
+    let checked = 0;
+    for (const path of tracked.filter((p) => PLAN_TRACKER.test(p))) {
+      const file = readText(root, path);
+      if (!file.read || file.text === null) continue;
+      checked += 1;
+      const wrong = trackerPeople(file.text);
+      if (wrong.length > 0) offenders.push(`${path} (${wrong.join(', ')})`);
+    }
+    assert.ok(checked > 0, 'the tracker rule checked no plan tracker');
+    assert.deepEqual(
+      offenders,
+      [],
+      `a plan tracker's people fields must hold roles (${JSON.stringify(TRACKER_ROLES)}), never a name: ${offenders.join(', ')}`,
     );
   });
 
@@ -315,5 +398,22 @@ describe('the guard itself', () => {
     const text = 'allowed-tools: Read, mcp__tracker-mcp, mcp__code-graph__explore, mcp__db_x__q';
     assert.deepEqual(undeclaredMcpServers(text, declared), ['tracker-mcp', 'db_x']);
     assert.deepEqual(undeclaredMcpServers('mcp__code-graph__a_b', declared), []);
+  });
+
+  it('catches a home directory, and lets a dotfile under ~ and a repo path through', () => {
+    // Assembled from parts, so this file never carries a home-directory path itself.
+    assert.equal(HOME_PATH.test(`at \`${['', 'home', 'someone', 'CLAUDE.md'].join('/')}\``), true);
+    assert.equal(HOME_PATH.test(['', 'Users', 'someone', 'x'].join('/')), true);
+    assert.equal(HOME_PATH.test(`cloned ${['~', 'workspace', 'repo'].join('/')}`), true);
+    assert.equal(HOME_PATH.test('reads ~/.aitm.json'), false);
+    assert.equal(HOME_PATH.test('packages/home/x.ts, https://x.test/Users/y'), false);
+  });
+
+  it('catches a name in a tracker field, and lets the roles through', () => {
+    const roles = 'created_by: plan-author\nworked_by: ""  # empty\nowner: plan-owner\n';
+    assert.deepEqual(trackerPeople(roles), []);
+    assert.deepEqual(trackerPeople(roles.replace('plan-owner', 'someone')), ['owner']);
+    assert.deepEqual(trackerPeople(roles.replace('""', '"someone"')), ['worked_by']);
+    assert.deepEqual(trackerPeople('worked_by: ""\nowner: plan-owner\n'), ['created_by']);
   });
 });

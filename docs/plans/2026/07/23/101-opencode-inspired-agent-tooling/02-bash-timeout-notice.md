@@ -4,7 +4,7 @@
 
 ## The mechanism
 
-**OpenCode** (`~/workspace/opencode/packages/opencode/src/tool/shell.ts`):
+**OpenCode** (`sst/opencode` `packages/opencode/src/tool/shell.ts`):
 - The run races `handle.exitCode` vs `abort` vs a `timeout` sleep (`:540`). On the timeout branch it sets `expired = true` and force-kills (`handle.kill({ forceKillAfter: "3 seconds" })`, `:552`).
 - The result appends a **distinct, actionable** block (`:562`): `shell tool terminated command after exceeding timeout <N> ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.` — wrapped in `<shell_metadata>` (`:583`). The model can tell *killed-on-timeout* from *exited non-zero* and self-corrects.
 

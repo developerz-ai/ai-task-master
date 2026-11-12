@@ -62,15 +62,15 @@ $ARGUMENTS
 - Verifiable acceptance criteria for this slice.
 ```
 
-4. **Write a `status.yml`** in the plan dir (alongside `overview.md`) — the live tracker for this plan. New plans start `not_started` / `0%`. Get `created_by` + `owner` from `git config user.name` (the person running /planx). Leave `worked_by` empty — the executor sets it to their own `git config user.name` when they pick the plan up, so a plan written by one person can be worked by another. Shape:
+4. **Write a `status.yml`** in the plan dir (alongside `overview.md`) — the live tracker for this plan. New plans start `not_started` / `0%`. This file is public, so it names roles, never people: `created_by: plan-author`, `owner: plan-owner`, and `worked_by` stays empty. A claim on a plan is the assignee on its tracking issue, not a name in this file. The public-tree guard holds all three values. Shape:
 
 ```yaml
 plan: <1NN>-<slug>
 title: <human title from overview.md>
 status: not_started        # not_started | in_progress | blocked | complete | superseded
-created_by: <git config user.name>   # who authored the plan
-worked_by: ""              # who is executing it; empty = unclaimed; executor fills with their git user.name
-owner: <git config user.name>
+created_by: plan-author    # a role, never a person: this tree is public
+worked_by: ""              # stays empty; claim the plan by taking its tracking issue
+owner: plan-owner
 percent: 0                 # 0–100, overall completion
 current_focus: ""          # where it's at right now / next slice to pick up
 slices:                    # one row per <NN>-<aspect>.md slice

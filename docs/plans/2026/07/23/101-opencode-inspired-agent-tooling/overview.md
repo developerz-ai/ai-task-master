@@ -1,12 +1,12 @@
 # OpenCode-inspired agent tooling for aitm
 
 ## Goal
-Steal three concrete mechanics from OpenCode (`sst/opencode`, cloned `~/workspace/opencode`) and a contrast tool (Aider, `~/workspace/aider`) to harden aitm's **file edits**, **bash**, and **subagent dispatch** — additive/surgical, no rewrite, matching CLAUDE.md. Each slice is one buildable module change with a verify command.
+Steal three concrete mechanics from OpenCode (`sst/opencode`) and a contrast tool (Aider, `Aider-AI/aider`) to harden aitm's **file edits**, **bash**, and **subagent dispatch** — additive/surgical, no rewrite, matching CLAUDE.md. Each slice is one buildable module change with a verify command.
 
 ## Why these three (and not the rest)
 Research read the real source of both tools. Most OpenCode ideas aitm *already has or has planned*:
 - aitm already: two-phase Worker (manifest `submit` + bounded editor pool, `worker.ts:729`), `runPool` concurrency cap (`pool.ts`), read-before-edit + hash-staleness (`edit-tools.ts:96`, `fs-tools.ts:85`), cwd-persistent bash via epilogue (`bash-tool.ts:106`), deny/allow command rules (`command-rules.ts`), a read-only generic-dispatch seam (`explore` / `makeAgentTool`, `agent-spawn.ts`).
-- Already claimed by **plan `2026/07/18/102-aitm-liveliness-tools-team-caching`** (the earlier plan): oversized-output spill (`02`), background bash (`02`), streaming (`07`), editor-team fanout (`05`). **Do not re-propose these** — the slices below are orthogonal to plan 102 and complement it.
+- Already claimed by **plan `2026/07/18/102-aitm-liveliness-tools-team-caching`**: oversized-output spill (`02`), background bash (`02`), streaming (`07`), editor-team fanout (`05`). **Do not re-propose these** — the slices below are orthogonal to plan 102 and complement it.
 
 The three genuine, non-overlapping gaps, highest-leverage first:
 
@@ -19,7 +19,7 @@ The three genuine, non-overlapping gaps, highest-leverage first:
 ## Context
 - Stack (CLAUDE.md): Bun dev; must run unchanged on Node ≥20 / Deno ≥1.40 (no `Bun.*` in shipped code); ESM only; strict TS, no `any`, named exports, kebab-case files; `ai` package `ToolLoopAgent` + subagents-as-tools; OpenRouter only; every module ships a paired `*.test.ts`; tests pass under `bun test` AND `node --test`. No worktrees — single shared checkout. Out of scope (hard): MCP-server, webhooks, Docker.
 - Both engines live in **`packages/ai-claude-compat/src`** (the Claude-Code-style tool surface) — slices 01 & 02 change compat; slice 03 changes compat + `packages/aitm/src/subagents/worker.ts`.
-- OpenCode reference (read-only, cite only): `~/workspace/opencode/packages/opencode/src/tool/{edit,shell,task}.ts`, `src/agent/subagent-permissions.ts`. Aider contrast: `~/workspace/aider` (whole-file / unified-diff edit formats — see slice 01 §Contrast).
+- OpenCode reference (read-only, cite only): `sst/opencode` `packages/opencode/src/tool/{edit,shell,task}.ts`, `src/agent/subagent-permissions.ts`. Aider contrast: `Aider-AI/aider` (whole-file / unified-diff edit formats — see slice 01 §Contrast).
 - The failure surface these attack is aitm's own: `EMPTY_MANIFEST_REASON` (`worker.ts:242`), `editorNoChangeReason` / phantom-edit blocks (`worker.ts:426`), `appliedPhantomReason` (`worker.ts:439`) — a leaf that *narrates* an edit or emits a near-miss `oldString` fails the whole PR group and is misdiagnosed as "model too weak".
 
 ## Plan files (execute in order; all independent)

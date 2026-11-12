@@ -5,8 +5,9 @@ applies: [typescript, javascript, bun]
 
 # Verify a change in developerz-ai/ai-task-master
 
-> House skill — established by dz-runner setup mode from this repo’s own
-> detected commands. Correct it in place; setup never overwrites a skill that exists.
+> House skill — owned by this repository's maintainers, and written from this
+> repository’s own detected commands. Correct it in place; a skill that exists is
+> never overwritten.
 
 ## The one gate
 
@@ -16,9 +17,9 @@ passes it locally passes everywhere.
 | Step | Command | What it is |
 |------|---------|------------|
 | install | `bin/setup` | bun install && npm run build -w @developerz.ai/ai-claude-compat |
-| run | `bin/dev` | bun packages/aitm/scripts/debug-start.ts — on developerz.ai runs, start it with code_bash_background when you need a running stack |
+| run | `bin/dev` | bun packages/aitm/scripts/debug-start.ts — start it in the background when you need a running stack |
 | prove | `bin/check` | bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && npm run build -w @developerz.ai/ai-claude-compat && bun run test:node && npm run test:integration -w @developerz.ai/aitm |
-| stop | `bin/stop` | true — on developerz.ai runs, the platform runs this when your session ends — do not stop the stack yourself |
+| stop | `bin/stop` | true — stops the stack when your session ends — do not stop it yourself mid-task |
 
 ## Rules
 
@@ -27,17 +28,17 @@ passes it locally passes everywhere.
 
 ## Exit codes `bin/check` must use
 
-A coding box runs this gate before it commits, and it has to tell a FAILING change
-from a gate it could not run — otherwise correct work is thrown away as if it were
+Whatever runs this gate before a commit (a hook, CI, an agent) has to tell a FAILING
+change from a gate it could not run — otherwise correct work is thrown away as if it were
 red. Exit 1 cannot carry that difference, so one code is reserved:
 
-| Exit | Means | What the platform does |
-|------|-------|------------------------|
+| Exit | Means | What the caller does |
+|------|-------|----------------------|
 | 0 | the change passes | commit it |
 | 75 | a resource the gate NEEDS is unreachable (a database, a service, a credential) — it refused to grade | refuse the commit, and blame the environment, never the change |
 | any other non-zero | the gate ran and the change is red | refuse the commit, and blame the change |
 
 - Guard preconditions FIRST and `exit 75` when one is unmet. `exit 1` there tells the
-  platform your change is broken when it is your environment that is.
+  caller your change is broken when it is your environment that is.
 - Changed a dependency? Re-run `bin/setup` before `bin/check`, or you are proving a stale tree.
 - Add the test that fails first, then the fix — a green run that never went red proves nothing.

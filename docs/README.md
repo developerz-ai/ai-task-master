@@ -1,6 +1,6 @@
 # developerz-ai/ai-task-master — docs
 
-> Index — established by dz-runner setup mode. Add a line when you add a page.
+> Index — owned by this repository's maintainers. Add a line when you add a page.
 
 | Where | What lives there |
 |---|---|

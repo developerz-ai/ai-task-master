@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# one-command stop, run by developerz.ai when a session ends — established by dz-runner setup mode. One command; adjust as the repo grows.
+# one-command stop, run when a session ends — the repository's own command. One command; adjust as the repo grows.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Nothing detected to stop (no compose file at the repo root). Replace with the command

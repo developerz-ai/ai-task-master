@@ -3,7 +3,7 @@ description: Run the real-git integration suite for aitm locally and read its sk
 applies: [typescript, javascript, bun]
 ---
 
-> House skill — established by dz-runner setup mode from this repo's own evidence, then owned by its maintainers. Correct it in place; setup never overwrites a skill that exists.
+> House skill — owned by this repository's maintainers, and written from this repository's own evidence. Correct it in place; a skill that exists is never overwritten.
 
 1. Install: `bun install` (or `npm install` for the node lane), then build the compat runtime entry: `npm run build -w @developerz.ai/ai-claude-compat` — the suite imports `@developerz.ai/ai-claude-compat` by package name and its only export (`dist/index.js`) is absent from a clean checkout.
 2. Run the integration suite: `npm run test:integration -w @developerz.ai/aitm` — it drives real git worktrees/pools end-to-end against throwaway temp repos; budget ~20 min (CI's own timeout).

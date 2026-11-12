@@ -1,9 +1,9 @@
 plan: 102-aitm-liveliness-tools-team-caching
 title: "aitm: liveliness, tool efficiency, team fanout, caching & transport"
 status: not_started
-created_by: sebi
-worked_by: ""
-owner: sebi
+created_by: ""            # the executor's own handle, filled on pickup
+worked_by: ""              # the executor's own handle, filled on pickup
+owner: ""                  # the executor's own handle, filled on pickup
 percent: 0
 current_focus: ""
 slices:

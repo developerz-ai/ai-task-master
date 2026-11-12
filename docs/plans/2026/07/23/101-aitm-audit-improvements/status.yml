@@ -1,9 +1,9 @@
 plan: 101-aitm-audit-improvements
 title: aitm audit — fixes & improvements
 status: in_progress        # not_started | in_progress | blocked | complete | superseded
-created_by: sebi
-worked_by: "sebi"          # executor fills with their git user.name on pickup
-owner: sebi
+created_by: ""            # the executor's own handle, filled on pickup
+worked_by: ""              # the executor's own handle, filled on pickup
+owner: ""                  # the executor's own handle, filled on pickup
 percent: 9
 current_focus: "03-cancellation-resources — PR 6 steps 1-4 (signal on SubagentInit/ScoutAgentInit; WorkerInput.signal passed from every production caller; signal threaded through the loop polls and grace sleeps; timeout + cancelSignal at all four execa chokepoints and AbortSignal.timeout on both catalog fetches) landed, PR 7 steps 1-2 (run-scoped Disposer wired into the adapter's finally and abort reaper; planner transcript closed in a finally; per-group conversations released via WorkLoopOrchestrator.releaseGroup; createLlmFetch returns a `{ fetch, close }` handle disposed at command scope and no longer clobbers a caller's dispatcher) and PR 7 step 3 (unified CLI shutdown: main's code → process.exitCode not a hard process.exit; one finally removes the signal handlers and flushes the reporter on the normal, error and first-signal paths; the second-signal force-quit still flushes bounded via forceExit) landed; 02-config-trust-secrets steps 1-6 and 01-data-safety-state steps 1-5 landed; 10-architecture-refactors step 1 (extract leaf src/domain/) landed — the four shared-type dir cycles state↔plan, state↔subagents, tools↔subagents, config↔credentials↔mcp are dissolved (remaining giant dir-SCC is the cli↔loop composition roots, step 2's job)"
 slices:

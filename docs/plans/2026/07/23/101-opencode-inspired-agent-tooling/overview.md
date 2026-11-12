@@ -6,7 +6,7 @@ Steal three concrete mechanics from OpenCode (`sst/opencode`, cloned `~/workspac
 ## Why these three (and not the rest)
 Research read the real source of both tools. Most OpenCode ideas aitm *already has or has planned*:
 - aitm already: two-phase Worker (manifest `submit` + bounded editor pool, `worker.ts:729`), `runPool` concurrency cap (`pool.ts`), read-before-edit + hash-staleness (`edit-tools.ts:96`, `fs-tools.ts:85`), cwd-persistent bash via epilogue (`bash-tool.ts:106`), deny/allow command rules (`command-rules.ts`), a read-only generic-dispatch seam (`explore` / `makeAgentTool`, `agent-spawn.ts`).
-- Already claimed by **plan `2026/07/18/102-aitm-liveliness-tools-team-caching`** (sebi): oversized-output spill (`02`), background bash (`02`), streaming (`07`), editor-team fanout (`05`). **Do not re-propose these** — the slices below are orthogonal to plan 102 and complement it.
+- Already claimed by **plan `2026/07/18/102-aitm-liveliness-tools-team-caching`** (the earlier plan): oversized-output spill (`02`), background bash (`02`), streaming (`07`), editor-team fanout (`05`). **Do not re-propose these** — the slices below are orthogonal to plan 102 and complement it.
 
 The three genuine, non-overlapping gaps, highest-leverage first:
 

@@ -1,9 +1,9 @@
 plan: 101-aitm-audit-remediation
 title: aitm Audit Remediation — hardening for autonomous parallel-team execution
 status: not_started        # not_started | in_progress | blocked | complete | superseded
-created_by: sebi
-worked_by: ""              # executor fills with their git user.name
-owner: sebi
+created_by: ""            # the executor's own handle, filled on pickup
+worked_by: ""              # the executor's own handle, filled on pickup
+owner: ""                  # the executor's own handle, filled on pickup
 percent: 0
 current_focus: ""          # start with 01 (trust boundary) + 04 (durability); 02 gates on concurrency-policy decision
 slices:

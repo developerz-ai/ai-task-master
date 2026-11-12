@@ -4,6 +4,8 @@ Source: https://ai-sdk.dev/llms.txt (downloaded 2026-05-14T14:27Z)
 Original: 4.8 MB, ~145k lines, 522 top-level sections.
 Chunked into 18 files at top-level (`# `) heading boundaries, each ≤ 256 KB.
 
+> **Links do not resolve inside this repo, by design.** The chunk files are a verbatim snapshot of https://ai-sdk.dev/llms.txt. Their links are upstream-shaped: site-absolute paths such as `/docs/...` that resolve against https://ai-sdk.dev, not against this repository. The chunk files are intentionally not rewritten, so they stay diffable against upstream when the snapshot is refreshed. Link checkers should exclude `docs/vendor/`.
+
 ## Chunks
 
 | Chunk | Size | First section | Section count |

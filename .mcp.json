@@ -1,11 +1,6 @@
 {
   "_note": "This file is tracked, so it is public: it must never hold a credential and must never name an internal service endpoint. The servers below are public tools that need none of ours. Add our own internal servers locally instead — `claude mcp add --scope local ...` keeps them out of this file and out of the repository.",
   "mcpServers": {
-    "sentry-mcp": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@sentry/mcp-server"]
-    },
     "codegraph": {
       "type": "stdio",
       "command": "codegraph",

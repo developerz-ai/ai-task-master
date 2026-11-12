@@ -49,8 +49,8 @@
 
 ## `access` — gap
 
-- landed 0 of 3 asked
-- still missing: OPENROUTER_API_KEY, AITM_SENTRY_DSN, glitchtip
+- landed 0 of 2 asked
+- still missing: OPENROUTER_API_KEY, AITM_SENTRY_DSN
 
 ## `layout` — gap
 

@@ -65,6 +65,15 @@ const PREAMBLE_MARKER = "owned by this repository's maintainers";
 const PREAMBLE_PATHS = [/^\.claude\/agents\//, /^\.claude\/skills\//];
 
 /**
+ * The platform's own working directory, which it rewrites wholesale: the
+ * onboarding scorecard is rewritten whole on every onboarding run, so a rule
+ * covering it would fail the platform's own commits rather than a change made
+ * here. The exclusion goes when the platform stops writing the name into
+ * those files - developerz.ai#8730.
+ */
+const PLATFORM_OWNED = [/^\.dz\//];
+
+/**
  * The repository root, from git's own answer. A wrong answer is the whole
  * failure this file exists to prevent: the scan would read a tree that is not
  * ours, or a subtree of ours, and pass over it.
@@ -166,6 +175,7 @@ describe('the public tree', () => {
     const offenders: string[] = [];
     let read = 0;
     for (const path of tracked) {
+      if (PLATFORM_OWNED.some((pattern) => pattern.test(path))) continue;
       const file = readText(root, path);
       if (!file.read) continue;
       read += 1;

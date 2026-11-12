@@ -220,6 +220,11 @@ function namesSetupMode(text: string): boolean {
   return text.toLowerCase().includes(SETUP_MODE.toLowerCase());
 }
 
+/** Whether one text names the organisation's private CI provider, in any case. */
+function namesPrivateCi(text: string): boolean {
+  return text.toLowerCase().includes(PRIVATE_CI);
+}
+
 describe('the public tree', () => {
   it('names no internal service on our own domain', () => {
     const root = repoRoot();
@@ -279,7 +284,7 @@ describe('the public tree', () => {
       const file = readText(root, path);
       if (!file.read) continue;
       read += 1;
-      if (file.text?.toLowerCase().includes(PRIVATE_CI)) offenders.push(path);
+      if (file.text !== null && namesPrivateCi(file.text)) offenders.push(path);
     }
     assert.ok(read > 0, 'the scan read no file at all');
     assert.deepEqual(
@@ -414,6 +419,15 @@ describe('the guard itself', () => {
     assert.equal(namesSetupMode(`established by ${SETUP_MODE} setup mode`), true);
     assert.equal(namesSetupMode(`established by ${SETUP_MODE.toUpperCase()} setup mode`), true);
     assert.equal(namesSetupMode("owned by this repository's maintainers"), false);
+  });
+
+  it('catches the private CI provider in any case, and lets the rest through', () => {
+    assert.equal(namesPrivateCi(`routed to ${PRIVATE_CI} for private repositories`), true);
+    assert.equal(
+      namesPrivateCi(`routed to ${PRIVATE_CI.toUpperCase()} for private repositories`),
+      true,
+    );
+    assert.equal(namesPrivateCi('routed to github actions'), false);
   });
 
   it('catches an env name no source reads, and lets a read one through', () => {

@@ -171,7 +171,7 @@ Types are exported alongside each value (`ReadFileInput`, `BashOutput`,
 ## Runtime
 
 ESM only. Runs unchanged on **Node ≥ 20, Bun, and Deno ≥ 1.40**. Direct dep: `ai`
-`^7.0.159` (AI SDK v7). No Anthropic SDK — "Claude-compat" refers to the
+`^7.0.170` (AI SDK v7). No Anthropic SDK — "Claude-compat" refers to the
 *conventions*, not the provider.
 
 ## Platform: Linux only

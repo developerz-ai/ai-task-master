@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ToolSet } from 'ai';
+import { z } from 'zod';
 import {
   DEFERRED_TOOLS_CONTRACT,
   deferredToolIndexBlock,
@@ -150,6 +151,27 @@ test('guardDeferred: after activation the real executor runs and its result rend
   assert.deepEqual(out, { rows: 3 });
   const fn = guarded.toModelOutput as (o: unknown) => { type: string; value: string };
   assert.equal(fn({ toolCallId: 'c', input: {}, output: out }).value, 'rows=3');
+});
+
+test('guardDeferred: a deferred tool with a parseAsync schema has its input parsed first (issue #119)', async () => {
+  const activated = new Set<string>(['mcp__db__query']);
+  let received: unknown;
+  const base = {
+    description: 'Run a read-only SQL query against the database.',
+    inputSchema: z.object({ query: z.string() }).transform((value) => ({ ...value, parsed: true })),
+    execute: async (input: unknown) => {
+      received = input;
+      return { rows: 0 };
+    },
+  };
+  const guarded = guardDeferred('mcp__db__query', base, activated);
+  const exec = guarded.execute as (i: unknown, o: unknown) => Promise<unknown>;
+  await exec({ query: 'select 1' }, { toolCallId: 'c', messages: [] });
+  assert.deepEqual(
+    received,
+    { query: 'select 1', parsed: true },
+    'the executor received the parsed input, not the raw call arguments',
+  );
 });
 
 test('TOOL_SEARCH_TOOL_NAME is the Claude Code convention name', () => {

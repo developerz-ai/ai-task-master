@@ -43,7 +43,7 @@ function workflow(): string {
 
 /**
  * Each job's shell commands: every `run:` body — single-line or a `|` / `>` block
- * scalar — split on `&&`, `||` and `;`, attributed to the job it sits under.
+ * scalar — with comments dropped, split on `&&`, `||` and `;`, attributed to the job it sits under.
  */
 function jobCommands(text: string): Map<string, string[]> {
   const jobs = new Map<string, string[]>();
@@ -51,7 +51,8 @@ function jobCommands(text: string): Map<string, string[]> {
   let commands: string[] | undefined;
   let blockKeyColumn: number | undefined;
   const push = (body: string) => {
-    for (const part of body.split(/&&|\|\||;/)) {
+    // A comment is not a command: `bun install # --frozen-lockfile` must not read as locked.
+    for (const part of body.replace(/(?:^|\s)#.*$/, '').split(/&&|\|\||;/)) {
       if (part.trim()) commands?.push(part.trim());
     }
   };
@@ -79,7 +80,7 @@ function jobCommands(text: string): Map<string, string[]> {
     }
     const run = /^(\s*(?:-\s+)?)run:\s*(.*?)\s*$/.exec(line);
     if (!run || !commands) continue;
-    if (/^[|>][-+]?\d*$/.test(run[2] ?? '')) blockKeyColumn = run[1]?.length ?? 0;
+    if (/^[|>][-+]?\d*(?:\s+#.*)?$/.test(run[2] ?? '')) blockKeyColumn = run[1]?.length ?? 0;
     else push(run[2] ?? '');
   }
   return jobs;
@@ -111,6 +112,13 @@ describe('the workflow reader', () => {
       wf('      - run: |\n          echo hi\n          npm install\n        shell: bash'),
     );
     assert.deepEqual(r.floating, ['a: npm install']);
+  });
+
+  it('reads a block whose header carries a comment, and ignores a flag in a comment', () => {
+    const r = installs(wf('      - run: | # install deps\n          npm install'));
+    assert.deepEqual(r.floating, ['a: npm install']);
+    const s = installs(wf('      - run: bun install # --frozen-lockfile'));
+    assert.deepEqual(s.floating, ['a: bun install']);
   });
 
   it('reads an install chained after another command', () => {

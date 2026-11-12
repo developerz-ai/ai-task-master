@@ -9,7 +9,7 @@ The gate is the repo root’s: `bin/check` (see the root `CLAUDE.md`).
 
 ## Structure
 
-- `src/` — 23 single-responsibility dirs (see root CLAUDE.md module map): `cli/`, `loop/`, `subagents/`, `orchestrator/`, `state/`, `workspace/`, `github/` (+ `check-tolerance.ts` whitelist), `config/`+`credentials/`+`openrouter/` (fixed three-way provider split), `plan/`, `mcp/` (client only), `compaction/`, `agent-config/`, `logger/`, `observability/`, `tools/`, `domain/`, `fs/`, `serialization/`, `composition/`, `benchmark/`, `testing/` (test-only, imported exclusively by `*.test.ts`).
+- `src/` — 24 single-responsibility dirs (see root CLAUDE.md module map): `cli/`, `loop/`, `subagents/`, `orchestrator/`, `state/`, `workspace/`, `github/` (+ `check-tolerance.ts` whitelist), `config/`+`credentials/`+`openrouter/` (fixed three-way provider split), `ai-sdk/` (AI SDK compatibility shims — shared `parseAsync` check), `plan/`, `mcp/` (client only), `compaction/`, `agent-config/`, `logger/`, `observability/`, `tools/`, `domain/`, `fs/`, `serialization/`, `composition/`, `benchmark/`, `testing/` (test-only, imported exclusively by `*.test.ts`).
 - `test/integration/` — real-git e2e suite (`start-flow`, `ci-fix-loop`, `resume-flow`, `crash-durability`, `hostile-repo`, `e2e-smoke` …); `e2e-smoke` self-skips without secrets.
 - `docs/` — product docs (architecture, commands/, providers, config, state, runtime …) incl. vendored AI SDK reference under `docs/vendor/` (excluded from lint).
 - `scripts/` — `debug-start.ts` / `debug-merge-pr.ts` in-process debug harness, `smoke-e2e.ts`, `benchmark.ts`.

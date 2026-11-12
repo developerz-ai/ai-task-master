@@ -14,6 +14,7 @@
 
 import assert from 'node:assert/strict';
 import type { Tool } from 'ai';
+import { hasParseAsync } from '../ai-sdk/parse-async.ts';
 
 type ExecuteOptions = Parameters<NonNullable<Tool<unknown, unknown>['execute']>>[1];
 
@@ -41,6 +42,6 @@ export async function runTool<I, O>(t: Tool<I, O>, input: I): Promise<O> {
 // it exists so a tool that stops doing that fails with this sentence rather than at a missing method.
 export async function parseToolInput<I, O>(t: Tool<I, O>, value: unknown): Promise<I> {
   const schema = t.inputSchema;
-  assert.ok(schema && 'parseAsync' in schema, 'tool inputSchema is not a Zod schema');
+  assert.ok(hasParseAsync<I>(schema), 'tool inputSchema is not a Zod schema');
   return await schema.parseAsync(value);
 }

@@ -12,10 +12,10 @@ import {
 } from './compaction-step.ts';
 import { type CompactionDecision, Compactor } from './compactor.ts';
 
-// A prepareStep `steps` entry carrying `count` messages of its OWN. `ai@7.0.159` exposes
+// A prepareStep `steps` entry carrying `count` messages of its OWN. `ai@7.0.170` exposes
 // `step.response.messages` as the STEP-LOCAL delta for that one model call — the messages generated
-// during THAT call (node_modules/ai/dist/index.js:5690-5701; the SDK's cumulative aggregate is the
-// separate `steps.flatMap((step) => step.response.messages)` at :5333). So `count` is this step's own
+// during THAT call (node_modules/ai/dist/index.js:6137-6148; the SDK's cumulative aggregate is the
+// separate `steps.flatMap((step) => step.response.messages)` at :5774). So `count` is this step's own
 // contribution, never a running total. `tag` keeps the per-step messages distinguishable so a test
 // can assert WHICH step's messages landed in the kept tail.
 function step(count: number, tag = 's'): Step {
@@ -121,7 +121,7 @@ function captureLogger(events: Array<Record<string, unknown>>) {
 }
 
 test('buildCompactionStep: above threshold → [pinned brief, summary user msg, ...keepLastSteps tail], cut at a step boundary', async () => {
-  // 4 steps, each contributing its OWN 2 response messages (step-local, ai@7.0.159) = 8
+  // 4 steps, each contributing its OWN 2 response messages (step-local, ai@7.0.170) = 8
   // step-messages, plus the initial user prompt = 9 total. keepLastSteps=2 → the tail is the SUM of
   // the last 2 steps' own counts (2 + 2 = 4).
   const steps = [step(2, 'a'), step(2, 'b'), step(2, 'c'), step(2, 'd')];
@@ -154,8 +154,8 @@ test('buildCompactionStep: above threshold → [pinned brief, summary user msg, 
 });
 
 test('buildCompactionStep: the kept-steps tail is the SUM of the last K steps own response messages (step-local, not a running-total difference)', async () => {
-  // Regression proof for the step-local reading of `step.response.messages` (ai@7.0.159,
-  // dist/index.js:5690-5701): the tail length is the SUM of the last K steps' own message counts.
+  // Regression proof for the step-local reading of `step.response.messages` (ai@7.0.170,
+  // dist/index.js:6137-6148): the tail length is the SUM of the last K steps' own message counts.
   // The old cumulative reading took the difference of running totals, which undercounts the tail
   // whenever the steps' own counts differ — here 2 + 3 = 5, but the difference-of-totals reading
   // would have produced 1 (the last step's count minus the previous step's count) and cut two
@@ -351,7 +351,7 @@ test('buildCompactionStep: feeds shouldCompact the provider-reported last-call t
 });
 
 test('buildCompactionStep: the usage "since" delta is the LAST step own message count (step-local, not a difference of running totals)', async () => {
-  // Regression proof for the step-local reading (ai@7.0.159, dist/index.js:5690-5701): the delta is
+  // Regression proof for the step-local reading (ai@7.0.170, dist/index.js:6137-6148): the delta is
   // the last step's own `response.messages.length`. Under the old cumulative reading this fixture
   // (a 5-message step followed by a 2-message step) would compute 2 − 5 = −3 → no delta at all →
   // sinceTokens 0, and the provider's last-call figure would be used with nothing added for the

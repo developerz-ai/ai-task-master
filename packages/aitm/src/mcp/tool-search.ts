@@ -12,6 +12,7 @@
 import type { Tool, ToolExecutionOptions, ToolSet } from 'ai';
 import { tool } from 'ai';
 import { z } from 'zod';
+import { hasParseAsync } from '../ai-sdk/parse-async.ts';
 
 export const TOOL_SEARCH_TOOL_NAME = 'tool_search';
 const SELECT_PREFIX = 'select:';
@@ -193,7 +194,7 @@ export function guardDeferred<const T extends AnyTool>(
       if (!baseExecute) return notExecutableResult(name);
       // Narrow via the tool's own input schema if available, else pass through
       const narrowedInput =
-        inputSchema && 'parseAsync' in inputSchema ? await inputSchema.parseAsync(input) : input;
+        inputSchema && hasParseAsync(inputSchema) ? await inputSchema.parseAsync(input) : input;
       return baseExecute(narrowedInput, options);
     },
     toModelOutput: (options: { toolCallId: string; input: unknown; output: unknown }) => {

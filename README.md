@@ -179,7 +179,7 @@ passes still run to completion. It must clear the bash tool's 600 s ceiling plus
 completion; the floor is 1000 ms. On expiry the step is aborted and surfaces as a blocked/errored
 group (the SDK does not auto-retry a timeout).
 
-See [`docs/config.md`](docs/config.md) for the full schema.
+See [`docs/config.md`](packages/aitm/docs/config.md) for the full schema.
 
 ## 🔀 Providers & profiles
 
@@ -225,7 +225,7 @@ aitm config set fallbackModels.coding '["anthropic/claude-opus-4.7","openai/gpt-
 
 Every subagent call carries tool definitions (the `submit` contract), so **`requireParameters: true` is recommended** — it guarantees the request lands on an endpoint that won't silently drop them. The caveat: it narrows the provider pool and can make a thinly-served model unroutable. `providerRouting.{order, allowFallbacks, requireParameters, sort, only, ignore}` all map to the OpenRouter `provider` block; `fallbackModels.<tier>` becomes the top-level `models` fallback array for that capability. **`amazon-bedrock` is always excluded** (it rejects the structured-output parameter) — this built-in ignore can't be removed.
 
-Full walkthrough in [`docs/providers.md`](docs/providers.md); profile command reference in [`docs/commands/profile.md`](docs/commands/profile.md).
+Full walkthrough in [`docs/providers.md`](packages/aitm/docs/providers.md); profile command reference in [`docs/commands/profile.md`](packages/aitm/docs/commands/profile.md).
 
 ## 🧪 Try it on a sandbox repo
 
@@ -247,21 +247,21 @@ A single PR opens, CI runs, it merges. Total wall-clock: a few minutes.
 
 | Topic | Path |
 | --- | --- |
-| 🏗️ Architecture | [`docs/architecture.md`](docs/architecture.md) |
-| 🟢 `aitm start` | [`docs/commands/start.md`](docs/commands/start.md) |
-| 🟡 `aitm merge-pr` | [`docs/commands/merge-pr.md`](docs/commands/merge-pr.md) |
-| 🔀 `aitm profile` | [`docs/commands/profile.md`](docs/commands/profile.md) |
-| 🌐 Providers (OpenRouter / z.ai / generic) | [`docs/providers.md`](docs/providers.md) |
-| ⚙️ Config | [`docs/config.md`](docs/config.md) |
-| 📝 Agent config detection | [`docs/agent-config-detection.md`](docs/agent-config-detection.md) |
-| 🎨 Coding style | [`docs/coding-style.md`](docs/coding-style.md) |
-| 🧱 Task groups (PRs) | [`docs/task-groups.md`](docs/task-groups.md) |
-| 🤝 Subagents | [`docs/subagents.md`](docs/subagents.md) |
-| 💾 State | [`docs/state.md`](docs/state.md) |
-| 🔐 Auth | [`docs/auth.md`](docs/auth.md) |
-| 🐙 GitHub integration | [`docs/github-integration.md`](docs/github-integration.md) |
-| 🏃 Runtime | [`docs/runtime.md`](docs/runtime.md) |
-| 📖 Vercel AI SDK reference (chunked) | [`docs/vendor/ai-sdk/index.md`](docs/vendor/ai-sdk/index.md) |
+| 🏗️ Architecture | [`docs/architecture.md`](packages/aitm/docs/architecture.md) |
+| 🟢 `aitm start` | [`docs/commands/start.md`](packages/aitm/docs/commands/start.md) |
+| 🟡 `aitm merge-pr` | [`docs/commands/merge-pr.md`](packages/aitm/docs/commands/merge-pr.md) |
+| 🔀 `aitm profile` | [`docs/commands/profile.md`](packages/aitm/docs/commands/profile.md) |
+| 🌐 Providers (OpenRouter / z.ai / generic) | [`docs/providers.md`](packages/aitm/docs/providers.md) |
+| ⚙️ Config | [`docs/config.md`](packages/aitm/docs/config.md) |
+| 📝 Agent config detection | [`docs/agent-config-detection.md`](packages/aitm/docs/agent-config-detection.md) |
+| 🎨 Coding style | [`docs/coding-style.md`](packages/aitm/docs/coding-style.md) |
+| 🧱 Task groups (PRs) | [`docs/task-groups.md`](packages/aitm/docs/task-groups.md) |
+| 🤝 Subagents | [`docs/subagents.md`](packages/aitm/docs/subagents.md) |
+| 💾 State | [`docs/state.md`](packages/aitm/docs/state.md) |
+| 🔐 Auth | [`docs/auth.md`](packages/aitm/docs/auth.md) |
+| 🐙 GitHub integration | [`docs/github-integration.md`](packages/aitm/docs/github-integration.md) |
+| 🏃 Runtime | [`docs/runtime.md`](packages/aitm/docs/runtime.md) |
+| 📖 Vercel AI SDK reference (chunked) | [`docs/vendor/ai-sdk/index.md`](packages/aitm/docs/vendor/ai-sdk/index.md) |
 
 ## 🤝 Contributing
 

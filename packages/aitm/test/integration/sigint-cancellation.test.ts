@@ -1,7 +1,6 @@
 // Integration: a SIGINT mid-`aitm start` must (a) reap the MCP server it spawned — a REAL child
 // process, not an in-memory stub, so a leaked handle would show up as an actual leftover PID — and
 // (b) surface `{ kind: 'cancelled' }` (exit code 2) instead of silently completing or blocking.
-// docs/plans/2026/07/18/101-parallel-agent-bug-hunt/02-signal-cancellation-cleanup.md.
 //
 // Fidelity boundary (matches every other file in this suite, e.g. start-flow.test.ts): the LLM
 // boundary is stubbed (style digest, Planner, Worker — no real model call, no real git checkout).

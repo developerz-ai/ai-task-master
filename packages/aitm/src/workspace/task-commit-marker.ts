@@ -1,4 +1,4 @@
-// docs/plans/2026/07/18/101-parallel-agent-bug-hunt/03-review-loop-idempotency.md — duplicate
+// Guards against a duplicate
 // task-commit on resume (durability #7). A crash between the Worker's commit landing
 // (orchestrator.ts finalizeCommit) and WorkLoop persisting the task as done leaves the branch with
 // the commit but state.json still showing the task undone; a naive resume re-runs the Worker and

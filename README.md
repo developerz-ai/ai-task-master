@@ -32,12 +32,14 @@ No babysitting. No prompt-stuffing. No bespoke agent framework.
 ## ⚡ Install
 
 ```bash
-bun  install -g @developerz.ai/aitm    # recommended for local dev
-npm  install -g @developerz.ai/aitm    # works the same
-deno install -A npm:@developerz.ai/aitm
+bun  install -g @developerz.ai/aitm                  # recommended for local dev
+npm  install -g @developerz.ai/aitm                  # works the same
+deno install -g -A -n aitm npm:@developerz.ai/aitm   # Deno 2
 ```
 
 The package is scoped (`@developerz.ai/aitm`); the installed command is still `aitm`.
+Installed with bun or npm, `aitm` runs on Node, so Node ≥ 20 must be on your `PATH` even when bun
+did the install. Installed with deno, it runs on Deno ≥ 2.0.
 
 Plain ESM + a `bun build --compile` single-file binary. No runtime lock-in.
 
@@ -110,7 +112,7 @@ same lifecycle lines are also appended to `.ai-task-master/progress.md`.
 
 | Requirement | Note |
 | --- | --- |
-| 🟢 JS runtime | Bun ≥ 1.1, Node ≥ 20, or Deno ≥ 1.40. Bun preferred locally. |
+| 🟢 JS runtime | Node ≥ 20 (whether bun or npm installed `aitm`), or Deno ≥ 2.0. Bun preferred for local dev. |
 | 🟣 `gh` CLI | authenticated against the target repo's remote |
 | 📝 Agent config | `CLAUDE.md` or `AGENTS.md` at the target repo root |
 | 🔑 Credentials | `OPENROUTER_API_KEY` env. That's it. |
@@ -230,18 +232,21 @@ Full walkthrough in [`docs/providers.md`](packages/aitm/docs/providers.md); prof
 ## 🧪 Try it on a sandbox repo
 
 ```bash
-# 1. Clone a throwaway repo
-git clone https://github.com/you/scratch && cd scratch
+# 1. Create a throwaway repo (private, with a first commit) and clone it
+gh repo create aitm-scratch --private --add-readme --clone && cd aitm-scratch
 
-# 2. Drop a tiny CLAUDE.md so subagents know the style
-echo "# CLAUDE.md\n- TypeScript strict.\n- No comments unless necessary." > CLAUDE.md
+# 2. Commit a tiny CLAUDE.md so subagents know the style
+printf '# CLAUDE.md\n\n- TypeScript strict.\n- No comments unless necessary.\n' > CLAUDE.md
+git add CLAUDE.md && git commit -m "docs: add CLAUDE.md" && git push
 
 # 3. Set your key and go
 export OPENROUTER_API_KEY=sk-or-...
 aitm start "add a /healthz endpoint with a test" --max-prs 1
 ```
 
-A single PR opens, CI runs, it merges. Total wall-clock: a few minutes.
+A single PR opens and merges. Total wall-clock: a few minutes. A new repository has no CI, so `aitm`
+merges once it has confirmed there are no checks to wait for; add a workflow and it waits for green
+first. Delete the repository afterwards with `gh repo delete aitm-scratch`.
 
 ## 📚 Docs
 
@@ -268,11 +273,11 @@ A single PR opens, CI runs, it merges. Total wall-clock: a few minutes.
 PRs welcome. House style is in [`CLAUDE.md`](CLAUDE.md): SOLID, one responsibility per module, every module ships with a paired `*.test.ts`, no `any`, no default exports, conventional commits, no emoji in source.
 
 ```bash
-bun install
-bun test          # unit + integration
-bun run typecheck
-bun run lint
+bin/setup   # bun install, then build the compat package a clean checkout lacks
+bin/check   # the gate, the same steps CI runs: typecheck, lint, import cycles, unit + integration tests
 ```
+
+`bin/check` needs both Bun and Node on your `PATH` (CI uses Node 22).
 
 ## 📄 License
 

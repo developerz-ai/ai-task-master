@@ -320,14 +320,19 @@ describe('the public tree', () => {
     assert.ok(tracked.includes(SELF), 'the scan does not see this file');
     const offenders: string[] = [];
     let checked = 0;
-    for (const path of tracked.filter((p) => PLAN_TRACKER.test(p))) {
+    const trackers = tracked.filter((p) => PLAN_TRACKER.test(p));
+    for (const path of trackers) {
       const file = readText(root, path);
       if (!file.read || file.text === null) continue;
       checked += 1;
       const wrong = trackerPeople(file.text);
       if (wrong.length > 0) offenders.push(`${path} (${wrong.join(', ')})`);
     }
-    assert.ok(checked > 0, 'the tracker rule checked no plan tracker');
+    // Every tracker git lists must be read and checked. The tree may hold none (the plans were
+    // removed under #384), so the bound is "all of them", not "at least one". The test below pins
+    // the pattern to the layout docs/plans/README.md documents, so a drifted pattern cannot turn
+    // this into a scan of nothing.
+    assert.equal(checked, trackers.length, 'the tracker rule could not read every plan tracker');
     assert.deepEqual(
       offenders,
       [],
@@ -458,5 +463,17 @@ describe('the guard itself', () => {
     assert.deepEqual(trackerPeople(roles.replace('plan-owner', 'someone')), ['owner']);
     assert.deepEqual(trackerPeople(roles.replace('""', '"someone"')), ['worked_by']);
     assert.deepEqual(trackerPeople('worked_by: ""\nowner: plan-owner\n'), ['created_by']);
+  });
+
+  it('matches the tracker path the plan layout writes, and nothing else', () => {
+    assert.equal(PLAN_TRACKER.test('docs/plans/2026/11/14/101-some-plan/status.yml'), true);
+    assert.equal(PLAN_TRACKER.test('docs/plans/2026/11/14/101-some-plan/overview.md'), false);
+    assert.equal(PLAN_TRACKER.test('packages/aitm/docs/plans/x/status.yml'), false);
+    const layout = readFileSync(
+      new URL('../../../../docs/plans/README.md', import.meta.url),
+      'utf8',
+    );
+    assert.match(layout, /docs\/plans\/<YYYY>\/<MM>\/<DD>\/<1NN>-<slug>\//);
+    assert.match(layout, /status\.yml/);
   });
 });

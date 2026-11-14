@@ -7,7 +7,7 @@
 // concurrently-ready groups (PlanGraph.ready() can return several): the single in-place checkout
 // holds one branch at a time, so the git-mutating section must run for one group at a time even when
 // the driver dispatches a batch. Non-git phases (CI waits, PR polling) stay outside the lock and
-// still overlap. See src/loop/work-loop.ts and docs/plans/.../02-parallel-team-shared-checkout.md.
+// still overlap. See src/loop/work-loop.ts.
 
 export class Mutex {
   // Tail of the serialization chain. Each runExclusive appends its body after the current tail; the

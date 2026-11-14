@@ -1,7 +1,6 @@
 // End-to-end: two independently-ready PR groups driven through one WorkLoop.run() against the
-// single shared in-place checkout (worktrees removed — audit 02, DECISION 1). Exercises the three
-// concurrency-safety guarantees from docs/plans/2026/07/17/101-aitm-audit-remediation/
-// 02-parallel-team-shared-checkout.md:
+// single shared in-place checkout (worktrees removed). Exercises the three
+// concurrency-safety guarantees of that shared checkout:
 //
 //   1. Branch-before-editor-fanout + the driver's checkout mutex: each group's commits land only
 //      on its own branch — group B's branch never carries group A's files.

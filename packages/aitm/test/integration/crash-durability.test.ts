@@ -10,7 +10,7 @@
 // instance afterward — the same thing a resumed process does — and asserts it reads the last
 // completed write, never a partial one.
 //
-// docs/plans/2026/07/17/101-aitm-audit-remediation/07-tests.md success criterion 4: "mid-write
+// Success criterion: "mid-write
 // crash loses no completed rename, leaves no orphan temp; corrupt transcript line skips+warns".
 
 import assert from 'node:assert/strict';
@@ -317,7 +317,7 @@ test('crash-durability: state write and transcript append crash together; resume
 // PR-lifecycle crash boundary: kill between the PR-open side effect and the stage persist
 // ---------------------------------------------------------------------------
 //
-// docs/plans/2026/07/18/101-parallel-agent-bug-hunt/01-pr-lifecycle-idempotency.md — the crash this
+// The crash this
 // models is a `kill -9` that lands after `gh pr create` (an external side effect on GitHub, which
 // survives the crash) but before WorkLoop persists the PR number to state.json. Before the fix
 // (github-client.ts createPr / stage-handlers.ts handlePrOpen), a resume in this window called
@@ -533,7 +533,7 @@ test('crash-durability: kill between the PR-open side effect and the stage persi
 // Task-commit crash boundary: kill after the Worker's commit lands, before completeTask persists
 // ---------------------------------------------------------------------------
 //
-// docs/plans/2026/07/18/101-parallel-agent-bug-hunt/03-review-loop-idempotency.md, durability #7.
+// Durability #7.
 // The crash this models is a `kill -9` that lands after WorkLoop.runOneTask's finalizeCommit (a
 // real `git commit --amend`, on GitHub-independent local disk state that survives the crash) but
 // before completeTask persists the task as done in state.json. Before the fix, a resume in this
@@ -771,7 +771,7 @@ test('crash-durability: kill after a task commit lands but before completeTask p
 // persists
 // ---------------------------------------------------------------------------
 //
-// docs/plans/2026/07/18/101-parallel-agent-bug-hunt/03-review-loop-idempotency.md, durability #5.
+// Durability #5.
 // The crash this models is a `kill -9` that lands after the Reviewer's reply is posted (an external
 // side effect on GitHub, which survives the crash, exactly like `gh pr create` in the PR-open
 // boundary above) but before handleAddressingReviews's own PrContextStore.recordAddressedThreads
@@ -938,7 +938,7 @@ test('crash-durability: prPerTask + no-automerge is rejected before any side eff
 // Dirty-tree crash boundary: a run must never destroy work it did not create
 // ---------------------------------------------------------------------------
 //
-// docs/plans/2026/07/23/101-aitm-audit-improvements/01-data-safety-state.md step 1. Before the
+// Data safety, step 1. Before the
 // fix, the FIRST checkout acquire of a run silently ran `git reset --hard` + `git clean -fd` over
 // whatever sat in the tree — indistinguishable, from aitm's point of view, from a crashed prior
 // run's own leftovers. An operator mid-edit (or dirt a dead run left that the operator had since
@@ -1039,7 +1039,7 @@ test('crash-durability: a dirty tree at run entry is refused untouched; committi
 // Concurrent-run crash boundary: a second invocation while the lock is held must cost nothing
 // ---------------------------------------------------------------------------
 //
-// docs/plans/2026/07/23/101-aitm-audit-improvements/01-data-safety-state.md step 2. StateStore
+// Data safety, step 2. StateStore
 // mutates from a write-behind cache of the last state IT wrote, so two overlapping `aitm`
 // invocations over one `.ai-task-master/` do not merely interleave — they last-writer-wins over
 // each other's plan, group stages and PR numbers. The fix (state/run-lock.ts) makes the SECOND
@@ -1142,7 +1142,7 @@ test('crash-durability: a concurrent run while the lock is held is refused untou
 // `--no-resume` crash boundary: a mid-plan run must survive a crash in the take-over write itself
 // ---------------------------------------------------------------------------
 //
-// docs/plans/2026/07/23/101-aitm-audit-improvements/01-data-safety-state.md step 4. Before the
+// Data safety, step 4. Before the
 // fix, `merge-pr --no-resume` re-initialised state wholesale, discarding a mid-plan run's plan,
 // group stages, session count and runId for one distrusted field (`currentPr`). The fix
 // (cli/commands.ts) re-points `currentPr` in place via `StateStore.update` instead. This test

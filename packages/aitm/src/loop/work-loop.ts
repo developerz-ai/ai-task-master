@@ -221,7 +221,7 @@ export type WorkLoopDeps = {
   // run-loop-adapter.ts). Checked at each loop iteration boundary so a cancelled run reports
   // `{ kind: 'cancelled' }` (exit 2) instead of surfacing whatever abort-induced group failure
   // `runGroup`'s catch produced as `blocked` (exit 1). Optional — omitted → no cancellation check,
-  // byte-identical to pre-signal behavior. See docs/plans/.../02-signal-cancellation-cleanup.md.
+  // byte-identical to pre-signal behavior.
   signal?: AbortSignal;
   // Run-level cost/token budget check (issue #190). Consulted at each group-batch boundary BEFORE new
   // work is dispatched (never mid-commit); an exceeded result stops the run and blocks with the
@@ -383,7 +383,7 @@ export class WorkLoop {
   // Driver-owned checkout lock: the shared single in-place checkout holds one branch at a time, so
   // the git-mutating checkout→edit→commit critical section (runOneTask) must run for one group at a
   // time even when run() dispatches a batch of ready() groups. Non-git phases (CI waits, PR polling)
-  // stay outside it and still overlap. A no-op at concurrency 1. See docs/plans/.../02-*.md (DECISION 1).
+  // stay outside it and still overlap. A no-op at concurrency 1.
   private readonly checkoutMutex = new Mutex();
   // Group start times for the `group … merged in Ns` total (claudetm parity), keyed by group id —
   // set once at runGroup entry, read wherever a group reaches its merged terminal (driveStages'

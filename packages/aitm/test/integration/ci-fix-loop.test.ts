@@ -25,7 +25,7 @@
 // Test 5 — WorkLoop/autoMerge, real remote: fix lands on origin before the PR merges:
 //   Real bare `origin` remote. runCiFix pushes a real commit to it; mergePr's stub captures the
 //   remote branch's HEAD sha at the moment it fires. Asserts that sha already equals the local
-//   fix commit — the push happened before, not after, the merge (docs/plans/.../03-*.md).
+//   fix commit — the push happened before, not after, the merge.
 //
 // Test 6 — WorkLoop/autoMerge: unfixable PR never merges red, stays blocked across a resumed WorkLoop:
 //   waitForChecks always fails; runCiFix always lands a (real, useless) commit. With

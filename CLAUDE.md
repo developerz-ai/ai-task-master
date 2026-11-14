@@ -47,8 +47,8 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | ci.yml job | Steps | Why |
 | --- | --- | --- |
 | `bun` | install, lint, madge circular, typecheck, typecheck:tests | no `bun test` — oven-sh/bun#5090; `typecheck:tests` also covers `packages/aitm/test/`, so integration-file type drift fails CI |
-| `node` | npm install, `build (compat runtime)` (`npm run build -w @developerz.ai/ai-claude-compat`), lint, `typecheck --workspaces`, `test:node --workspaces` | per-workspace npm — never shells out to bun |
-| `integration` | npm install, `build (compat runtime)` (`npm run build -w @developerz.ai/ai-claude-compat`), `test:integration -w @developerz.ai/aitm` | 20-min budget; `e2e-smoke` self-skips without secrets |
+| `node` | `bun install --frozen-lockfile`, `build (compat runtime)` (`npm run build -w @developerz.ai/ai-claude-compat`), lint, `typecheck --workspaces`, `test:node --workspaces` | per-workspace npm scripts; only the install uses bun, from the tracked lockfile |
+| `integration` | `bun install --frozen-lockfile`, `build (compat runtime)` (`npm run build -w @developerz.ai/ai-claude-compat`), `test:integration -w @developerz.ai/aitm` | 20-min budget; `e2e-smoke` self-skips without secrets |
 
 `release.yml` publishes via npm OIDC trusted publishing (no NPM_TOKEN), npm pinned 11.5.2 (11.6.x regressed provenance), builds then publishes **ai-claude-compat first**, then aitm.
 

@@ -135,7 +135,7 @@ Exit codes:
   1  precondition failure or run blocked
   2  cancelled, or invalid/malformed command-line usage
 
-Docs: docs/commands/start.md, docs/commands/merge-pr.md, docs/commands/config.md, docs/commands/profile.md`;
+Docs: https://github.com/developerz-ai/ai-task-master/tree/main/packages/aitm/docs/commands`;
 }
 
 export const HELP_TEXT = renderHelp();

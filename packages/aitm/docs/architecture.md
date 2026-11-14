@@ -1,6 +1,6 @@
 # Architecture
 
-`aitm` — TypeScript rewrite of `claude-task-master`. Bun for local dev; ships portable ESM that runs on Bun, Node ≥ 20, and Deno ≥ 1.40. Autonomous loop: plan a goal into **PR-sized task groups**, work each group on its own branch, open a PR, **auto-merge** (default on), repeat until done. No final verification phase. No release phase.
+`aitm` — TypeScript rewrite of `claude-task-master`. Bun for local dev; ships portable ESM that runs on Node ≥ 20 and Deno ≥ 2.0. Autonomous loop: plan a goal into **PR-sized task groups**, work each group on its own branch, open a PR, **auto-merge** (default on), repeat until done. No final verification phase. No release phase.
 
 Two commands only: `aitm start "<goal>"` and `aitm merge-pr`. With automerge on, `start` runs everything end-to-end; `merge-pr` is the manual gate for `--no-automerge` runs.
 

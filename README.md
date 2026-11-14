@@ -41,7 +41,7 @@ The package is scoped (`@developerz.ai/aitm`); the installed command is still `a
 Installed with bun or npm, `aitm` runs on Node, so Node ≥ 20 must be on your `PATH` even when bun
 did the install. Installed with deno, it runs on Deno ≥ 2.0.
 
-Plain ESM + a `bun build --compile` single-file binary. No runtime lock-in.
+Plain ESM, published to npm. No runtime lock-in.
 
 ## 🚀 Quickstart
 

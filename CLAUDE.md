@@ -25,7 +25,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | TypeScript | `^7.0.2`, `strict: true` |
 | AI SDK | `ai` `^7.0.170`, `ToolLoopAgent` (v7; the AI SDK 5 name `experimental_Agent` survives only as an alias export of it, `ToolLoopAgent as Experimental_Agent`); MCP client `@ai-sdk/mcp` `^2.0.97` |
 | Lint/format | Biome 2.6.4 — `bun run lint` = `biome check .` |
-| Packages | `@developerz.ai/aitm` 0.0.56 + `@developerz.ai/ai-claude-compat` 0.0.56; aitm pins compat EXACTLY, versions move in lockstep |
+| Packages | `@developerz.ai/aitm` + `@developerz.ai/ai-claude-compat`, always the same version; aitm pins compat EXACTLY, versions move in lockstep (`bin/release-preflight` refuses a release otherwise) |
 
 ## Commands
 | `bin/` command | Runs |
@@ -34,6 +34,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | `bin/setup` | `bun install && npm run build -w @developerz.ai/ai-claude-compat` |
 | `bin/dev` | `bun packages/aitm/scripts/debug-start.ts` — dogfood aitm on a throwaway repo |
 | `bin/stop` | No-op (nothing detected to stop) |
+| `bin/release-preflight [<tag>]` | Run by `release.yml` before it builds: refuses packages out of lockstep, a pin that is not the version, a tag that is not `v<version>`, a commit not on `main`, or a version already on npm (see `PUBLISHING.md`) |
 
 | Workspace script (root delegates per-package) | Runs |
 | --- | --- |

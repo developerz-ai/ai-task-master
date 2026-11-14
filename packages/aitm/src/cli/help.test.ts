@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { PRESET_NAMES } from '../config/provider-presets.ts';
@@ -76,6 +77,26 @@ test('help: every declared flag token appears in the rendered help', () => {
         assert.ok(advertised.has(token), `${token} declared but not rendered`);
       }
     }
+  }
+});
+
+// The help text is read by someone who installed the package, which ships no docs directory, so a
+// bare `docs/…` path points at nothing. Every pointer is a repository URL, and the path it names must
+// still exist in this tree, so moving the docs fails here instead of leaving the help pointing at a 404.
+test('help: points at docs a reader can reach, and that still exist', () => {
+  assert.doesNotMatch(
+    HELP_TEXT,
+    /(?<![\w/.-])docs\/[\w./-]+/,
+    'help names a repo-relative docs path',
+  );
+  const prefix = 'https://github.com/developerz-ai/ai-task-master/tree/main/';
+  const urls = [...HELP_TEXT.matchAll(/https:\/\/\S+/g)].map((m) => m[0]);
+  assert.ok(urls.length > 0, 'help names no docs URL');
+  const repoRoot = new URL('../../../../', import.meta.url);
+  for (const url of urls) {
+    assert.ok(url.startsWith(prefix), `help URL is not on this repository's main tree: ${url}`);
+    const local = new URL(url.slice(prefix.length), repoRoot);
+    assert.ok(existsSync(local), `help URL names a path that does not exist in the tree: ${url}`);
   }
 });
 

@@ -1,6 +1,6 @@
 # Runtime
 
-Bun is the local dev runtime. Shipped code runs unchanged on **Bun ≥ 1.1, Node ≥ 20, or Deno ≥ 1.40**. Runtime portability is a hard constraint — treat Bun-only API leaks as bugs.
+Bun is the local dev runtime. Shipped code runs on **Node ≥ 20** or **Deno ≥ 2.0**; a recent Bun also runs it (`bun --bun aitm`), Bun 1.1 does not. Installed with bun or npm, the `aitm` command itself runs on Node. Runtime portability is a hard constraint — treat Bun-only API leaks as bugs.
 
 ## Why Bun for dev
 
@@ -9,7 +9,6 @@ Bun is the local dev runtime. Shipped code runs unchanged on **Bun ≥ 1.1, Node
 | Native TypeScript | No build step. `bun run src/cli.ts`. |
 | Fast cold start | Tight feedback loop. |
 | Built-in test runner | `bun test` works out of the box. |
-| `bun build --compile` | Single-file binary for distribution. |
 
 Bun is a convenience, not a dependency.
 
@@ -57,8 +56,8 @@ CI-fix flow, which always rebases first). Self-merge is governed separately by `
 | --- | --- |
 | Package manager (dev) | `bun install` |
 | Package manager (consumer) | any — `npm`, `pnpm`, `yarn`, `bun` |
-| Lockfile | `bun.lockb` committed for dev reproducibility |
-| Distribution | Plain ESM published to npm, plus a `bun build --compile` binary attached to GitHub releases |
+| Lockfile | `bun.lock` committed; every CI job installs with `bun install --frozen-lockfile` |
+| Distribution | Plain ESM published to npm (`@developerz.ai/aitm`). No compiled binary is built, and releases carry no assets. |
 | Module system | ESM only. `"type": "module"`. |
 
 ## TypeScript
@@ -75,8 +74,8 @@ CI-fix flow, which always rebases first). Self-merge is governed separately by `
 
 ## Testing
 
-- `bun test` locally for speed.
-- CI matrix runs the same suite under `bun test` and `node --test` (or `vitest run` with a Node target). Both must pass.
+- `bun run test` locally for speed (it sets `AITM_INSTANT_SLEEP=1`, which the timeout-based tests need).
+- CI runs the suite under `node --test` only: the `node` and `integration` jobs are authoritative, and CI deliberately runs no `bun test` (Bun's `node:test` shim mis-handles this suite across files, oven-sh/bun#5090). `bin/check` runs the same steps locally.
 - Integration tests spin up a throwaway git repo in a tempdir and use a sandboxed `gh` token scoped to a disposable fixture repo.
 - Every module has a paired `*.test.ts`. SRP + tested is the bar.
 

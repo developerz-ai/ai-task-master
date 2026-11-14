@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Release preflight: refuse a release before anything is built, not late at the registry. npm
+# versions are immutable, so a version that is already published can never ship again.
+#
+#   bin/release-preflight [<release tag>]
+#
+# Refuses when the two packages are out of lockstep, when aitm's pin on ai-claude-compat is not that
+# version, when a release tag is given and is not v<version>, when the commit is not on main, or when
+# either package is already on npm at that version. Anything but a clear "not found" from the
+# registry is a refusal too, so a registry outage cannot wave a release through.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fail() {
+  echo "::error::release preflight: $1"
+  exit 1
+}
+
+manifest() { node -p "require('./packages/$1/package.json')$2"; }
+
+compat=$(manifest ai-claude-compat .version)
+aitm=$(manifest aitm .version)
+pin=$(manifest aitm ".dependencies['@developerz.ai/ai-claude-compat']")
+
+[ "$compat" = "$aitm" ] || fail "the packages are out of lockstep: ai-claude-compat is $compat, aitm is $aitm"
+[ "$pin" = "$compat" ] || fail "aitm pins ai-claude-compat $pin, but ai-claude-compat is $compat"
+
+tag=${1:-}
+if [ -n "$tag" ] && [ "$tag" != "v$aitm" ]; then
+  fail "the release tag $tag does not match the packages' version v$aitm"
+fi
+
+git merge-base --is-ancestor HEAD origin/main 2>/dev/null || fail "the commit being released is not on main"
+
+for pkg in @developerz.ai/ai-claude-compat @developerz.ai/aitm; do
+  if out=$(npm view "$pkg@$aitm" version 2>&1); then
+    fail "$pkg@$aitm is already on npm, and npm versions are immutable: bump both package.json files first (PUBLISHING.md)"
+  fi
+  grep -q 'E404' <<<"$out" || fail "could not check whether $pkg@$aitm is on npm: $(tail -n 1 <<<"$out")"
+done
+
+echo "release preflight: v$aitm is unpublished, in lockstep, and on main"

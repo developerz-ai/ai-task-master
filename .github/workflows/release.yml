@@ -35,6 +35,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The preflight checks the commit is on main, which needs the history and origin/main.
+          fetch-depth: 0
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -49,6 +52,14 @@ jobs:
       # minimum. Revisit when a fixed latest ships.
       - name: upgrade npm
         run: npm install -g npm@11.5.2
+
+      # Refuse before anything is built: a version already on npm can never ship again, so a
+      # missed bump, packages out of lockstep, a tag that is not the version, or a commit that is
+      # not on main stops the release here instead of at the registry. See PUBLISHING.md.
+      - name: preflight
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: bin/release-preflight "$TAG"
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:

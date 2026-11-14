@@ -14,7 +14,7 @@
     },
     "packages/ai-claude-compat": {
       "name": "@developerz.ai/ai-claude-compat",
-      "version": "0.0.56",
+      "version": "0.0.57",
       "dependencies": {
         "ai": "^7.0.170",
         "execa": "^10.2.1",
@@ -23,13 +23,13 @@
     },
     "packages/aitm": {
       "name": "@developerz.ai/aitm",
-      "version": "0.0.56",
+      "version": "0.0.57",
       "bin": {
         "aitm": "./dist/cli/cli.js",
       },
       "dependencies": {
         "@ai-sdk/mcp": "^2.0.97",
-        "@developerz.ai/ai-claude-compat": "0.0.56",
+        "@developerz.ai/ai-claude-compat": "0.0.57",
         "@openrouter/ai-sdk-provider": "^3.1.0",
         "ai": "^7.0.170",
         "execa": "^10.2.1",

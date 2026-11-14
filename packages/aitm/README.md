@@ -18,10 +18,12 @@ baked in.
 ```bash
 npm  install -g @developerz.ai/aitm
 bun  install -g @developerz.ai/aitm
-deno install -A npm:@developerz.ai/aitm
+deno install -g -A -n aitm npm:@developerz.ai/aitm   # Deno 2
 ```
 
-The package is scoped; the installed command is just **`aitm`**.
+The package is scoped; the installed command is just **`aitm`**. Installed with npm or bun, it runs
+on Node ≥ 20 (so Node must be on your `PATH` even when bun did the install); installed with deno,
+on Deno ≥ 2.0.
 
 ## 🚀 Quickstart
 
@@ -97,7 +99,7 @@ aitm config list
 
 - `OPENROUTER_API_KEY` in the environment.
 - The [`gh`](https://cli.github.com) CLI, authenticated (PRs, CI status, reviews).
-- Node ≥ 20, Bun, or Deno ≥ 1.40 — ESM, no runtime lock-in.
+- Node ≥ 20 (whether npm or bun installed `aitm`), or Deno ≥ 2.0 — ESM, no runtime lock-in.
 
 ## License
 

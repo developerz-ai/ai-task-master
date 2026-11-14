@@ -1,0 +1,88 @@
+name: readme install
+
+# Runs each README's Install block AS WRITTEN, one line per job, then runs the command it installed.
+# The install lines are read out of the README, never copied into this file, so a README edit is
+# what gets tested. Runs on a README change, weekly (the registry and the runtimes move under a
+# README that did not), and by hand.
+
+on:
+  pull_request:
+    paths:
+      - README.md
+      - packages/aitm/README.md
+      - .github/workflows/readme-install.yml
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - packages/aitm/README.md
+      - .github/workflows/readme-install.yml
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: ${{ matrix.readme }} · ${{ matrix.runtime.label }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        readme: [README.md, packages/aitm/README.md]
+        # The floors the READMEs state (Node 20, Deno 2.0), plus current Deno 2.x: Deno's install
+        # flags are what changed under the README last time.
+        runtime:
+          - { label: npm on Node 20, tool: npm, node: '20' }
+          - { label: bun on Node 20, tool: bun, node: '20' }
+          - { label: deno 2.0.0, tool: deno, deno: '2.0.0' }
+          - { label: deno 2.x, tool: deno, deno: '2.x' }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # A bun-installed aitm runs on Node (its bin is `#!/usr/bin/env node`), so the bun job gets
+      # the Node floor too: the README tells the reader Node must be on PATH.
+      - if: matrix.runtime.tool != 'deno'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ matrix.runtime.node }}
+
+      - if: matrix.runtime.tool == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: latest
+
+      - if: matrix.runtime.tool == 'deno'
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: ${{ matrix.runtime.deno }}
+
+      - name: global bin directories on PATH
+        run: |
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+
+      - name: run the README's ${{ matrix.runtime.tool }} install line
+        env:
+          README: ${{ matrix.readme }}
+          TOOL: ${{ matrix.runtime.tool }}
+        run: |
+          # The Install block is the first fenced block under the "Install" heading.
+          block=$(awk '/^## .*Install/ { h = 1; next } h && /^```/ { if (b) exit; b = 1; next } b' "$README")
+          line=$(printf '%s\n' "$block" | grep -E "^${TOOL} +install " || true)
+          if [ "$(printf '%s' "$line" | grep -c .)" -ne 1 ]; then
+            echo "::error file=$README::expected exactly one '$TOOL install' line in the Install block, found: ${line:-none}"
+            exit 1
+          fi
+          echo "+ $line"
+          eval "$line"
+
+      - name: the installed command runs
+        run: aitm --version

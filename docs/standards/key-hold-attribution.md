@@ -54,10 +54,13 @@ otherwise send a reader to the wrong repo.
   loop and no long-duration wait.
 - `MAX_RETRY_AFTER_MS = 300_000` at `:677-686`, with `resolveRetryDelay` returning
   `Math.min(after, MAX_RETRY_AFTER_MS)`. A single honoring of a provider `Retry-After` is capped at
-  five minutes so a malformed or hostile header cannot stall a PR group.
+  five minutes so a malformed or hostile header cannot stall a PR group. The cap is a blanket bound,
+  not a validity test: it truncates any longer hint, including a legitimate one. For example, a
+  valid `Retry-After: 600` (10 minutes) results in a 300-second wait, not 600 seconds.
 - `parseRetryAfterMs` at `:709-715` reads `Retry-After` / `retry-after-ms` headers and a "try again
-  in Ns" hint. It returns the true provider value, so legitimate provider waits are preserved; only
-  the caller's application of the cap bounds a pathological value.
+  in Ns" hint. It returns the true provider value, so parsing is faithful; the effective wait can
+  still be shorter because the caller applies the five-minute cap above. This record documents both
+  facts and changes neither parsing nor retry behavior.
 
 There is no `key_held`, `provider_clock`, `account_breakers` reference, `DATABASE_URL`, or 24-hour
 constant in the source. The repository therefore contains no code path that could produce a
@@ -79,17 +82,25 @@ does not claim to have observed the regression or to have corrected it.
 
 ## Prevention rule (fleet-readable)
 
-**Attribute before repairing.** A symptom named by a metric belongs to the system that emits the
-metric. Before editing code for an aging hold, name the emitting command, read the state store that
-backs the metric, and confirm the suspect code can actually hold for the measured duration. If the
-suspect repo has no such code, record the evidence and the owning boundary instead of inventing a
-repair. Concretely for K1: the census command and hold tables own the reading; this repo's provider
-wait stays minute-bounded and its `Retry-After` handling stays intact.
+**Attribute before repairing.** A metric names a symptom and tells you where to look first, not
+who is at fault. Start with the emitter: name the command that emits the metric and read the state
+store backing it. Then attribute the fault to the component that owns and writes that state, which
+can be a different system entirely. Only then look for repairable code in that owner, and confirm it
+can actually hold for the measured duration. If the suspect repo neither owns the backing state nor
+has code that can hold that long, record the evidence and the owning boundary instead of inventing
+a repair. Concretely for K1: the in-cluster census command emits the reading and points to the
+`multi_ai_router` hold tables (`account_breakers`, `account_recoveries`, `quota_windows`,
+`audit_events`) on gateway `d1`, server `worker-db`; those tables and the external router that
+writes them own stale hold state, not this repo. This repo's provider wait stays minute-bounded and
+its `Retry-After` handling stays unchanged.
 
 This rule has two standing corollaries:
 
-- Preserve legitimate provider waits. Do not "fix" a hold by shortening or removing
-  `parseRetryAfterMs` or the bounded retry kernel; a real provider cooldown must be honored.
+- Do not change retry behavior to mask a hold. `parseRetryAfterMs` (`subagent.ts:709-715`) parses the
+  provider's true value, while `resolveRetryDelay` (`subagent.ts:683-686`) caps the actual wait at
+  `MAX_RETRY_AFTER_MS = 300_000`, so any hint over five minutes, even a legitimate one such as
+  `Retry-After: 600`, is truncated to 300 seconds. That is existing behavior, documented here and
+  deliberately left intact; do not shorten or remove the parser or the bounded retry kernel.
 - Do not touch credentials to mask a symptom. No key is rotated, disabled, re-enabled, or changed in
   capacity, agents, or models as part of an attribution record. Investigation is read-only with
   respect to keys.

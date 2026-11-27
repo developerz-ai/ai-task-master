@@ -243,21 +243,30 @@ async function autoMergeFlow(
 ): Promise<void> {
   const { orchestrator, github } = deps;
 
-  let fixSpent = await untilCiGreen(deps, group, pr, checkout, baseBranch, 0);
-
-  // Review: address any unresolved threads via the Reviewer. addressReviews pushes the Reviewer's
-  // code fixes to the remote, so the merge below lands them; runReviewer alone would leave them
-  // committed only locally and merge without them.
-  const threads = await github.listUnresolvedThreads(pr.number);
-  if (threads.length > 0) {
+  let fixSpent = 0;
+  // Threads the Reviewer already ran over: one it only replied to stays unresolved on GitHub, and
+  // re-feeding it every round would never terminate.
+  const addressed = new Set<string>();
+  let gateCi = true;
+  while (true) {
+    if (gateCi) fixSpent = await untilCiGreen(deps, group, pr, checkout, baseBranch, fixSpent);
+    // Review: address any unresolved threads via the Reviewer. addressReviews pushes the Reviewer's
+    // code fixes to the remote, so the merge below lands them; runReviewer alone would leave them
+    // committed only locally and merge without them. Re-read after every CI pass: a review bot
+    // posts on the new head a little after its CI.
+    const threads = (await github.listUnresolvedThreads(pr.number)).filter(
+      (t) => !addressed.has(t.id),
+    );
+    if (threads.length === 0) break;
     const review = await orchestrator.addressReviews({ pr: pr.number, threads, checkout });
     if (review.kind !== 'ok') {
       throw reviewFailedError(review);
     }
-    // A pushed fix is a new head whose CI has not run: the green above was for the old one.
-    if (review.pushed) {
-      fixSpent = await untilCiGreen(deps, group, pr, checkout, baseBranch, fixSpent);
-    }
+    for (const t of threads) addressed.add(t.id);
+    // A pushed fix is a new head whose CI has not run: the green above was for the old one, so
+    // re-gate CI. Nothing pushed → the head and its green verdict stand; the next read only checks
+    // for threads posted meanwhile.
+    gateCi = review.pushed;
   }
 
   await github.mergePr(pr.number, deps.mergeMethod, { admin: deps.adminMerge });

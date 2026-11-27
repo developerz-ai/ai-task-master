@@ -166,6 +166,7 @@ export function makeOrchestrator(
     },
     addressReviews: async ({ pr, threads }) => {
       calls.addressReviews.push({ pr, threads });
+      config.events?.push(`addressReviews:${pr}`);
       return config.addressReviewsResult ?? { kind: 'ok', pushed: false };
     },
     releaseGroup: (groupId) => {
@@ -238,12 +239,14 @@ export function makeGithub(
     },
     waitForChecks: async (pr) => {
       calls.waitForChecks.push(pr);
+      config.events?.push(`waitForChecks:${pr}`);
       const next = checks.shift();
       if (next instanceof CiFailed) throw next;
       return next ?? ciSuccess;
     },
     listUnresolvedThreads: async (pr) => {
       calls.listUnresolvedThreads.push(pr);
+      config.events?.push(`listUnresolvedThreads:${pr}`);
       return config.threads ?? [];
     },
     mergePr: async (pr, method) => {

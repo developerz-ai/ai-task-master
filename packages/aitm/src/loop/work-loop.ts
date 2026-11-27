@@ -147,7 +147,7 @@ export type CheckoutHome = {
   // under squash-merge, wrong under merge/rebase — see runOneTask). Optional: a home without it
   // (test stubs) always re-runs the Worker, byte-identical to pre-fix behavior for everything
   // outside that narrow crash window.
-  hasTaskCommit?(branch: string, taskId: string): Promise<boolean>;
+  hasTaskCommit?(branch: string, taskId: string, baseBranch: string): Promise<boolean>;
   // Retire a group branch whose PR has merged: delete it on origin and locally, moving HEAD off it
   // first when it is the one checked out. Called once per group, right after the merge — otherwise a
   // finished run leaves every group branch behind and parks the operator on the last one. Returns the
@@ -840,7 +840,7 @@ export class WorkLoop {
     // process restarts. Re-running the Worker here would produce a SECOND commit for the same task
     // (harmless under squash-merge, which collapses the group into one commit anyway; a genuine
     // duplicate under merge/rebase, which don't). Detect it and skip straight to completeTask.
-    if (await this.deps.home.hasTaskCommit?.(checkout.branch, task.id)) {
+    if (await this.deps.home.hasTaskCommit?.(checkout.branch, task.id, baseBranch)) {
       const next = await this.completeTask(group, task.id);
       return { kind: 'ok', group: next, delivery: alreadyCommittedDelivery(group, task) };
     }

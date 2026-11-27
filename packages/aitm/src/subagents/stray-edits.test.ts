@@ -1,32 +1,27 @@
 import assert from 'node:assert/strict';
+import { readFile, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import type { BashInput, BashOutput } from '@developerz.ai/ai-claude-compat';
-import { type Tool, tool } from 'ai';
-import { z } from 'zod';
+import { bashTool } from '@developerz.ai/ai-claude-compat';
+import { execa } from 'execa';
+import { DEFAULT_BASH_RULES } from '../config/config-loader.ts';
+import { makeTempRepo, type TempRepo } from '../testing/temp-repo.ts';
 import { discardStrayEdits, hasStrayEdit } from './stray-edits.ts';
 
-// A bash-tool double that records every command it runs and answers from a handler keyed on the
-// command string. Mirrors the reviewer/worker test doubles so behavior is exercised through the real
-// `Tool` surface, not a bare function.
-function makeBash(handler: (command: string) => Partial<BashOutput> = () => ({})): {
-  bash: Tool<BashInput, BashOutput>;
-  cmds: string[];
-} {
-  const cmds: string[] = [];
-  const bash = tool<BashInput, BashOutput, Record<string, unknown>>({
-    description: 'run a bash command in the checkout',
-    inputSchema: z.object({
-      command: z.string(),
-      description: z.string(),
-      timeoutMs: z.number().optional(),
-      run_in_background: z.boolean().optional(),
-    }),
-    execute: async (input) => {
-      cmds.push(input.command);
-      return { stdout: '', stderr: '', exitCode: 0, ...handler(input.command) };
-    },
-  });
-  return { bash, cmds };
+// A real repo with one committed file, so the cleanup is exercised against actual git state.
+async function seededRepo(): Promise<TempRepo> {
+  const repo = await makeTempRepo();
+  await writeFile(join(repo.path, 'a.txt'), 'orig\n');
+  await execa('git', ['add', 'a.txt'], { cwd: repo.path });
+  await execa('git', ['commit', '-m', 'init'], { cwd: repo.path });
+  return repo;
+}
+
+async function exists(path: string): Promise<boolean> {
+  return stat(path).then(
+    () => true,
+    () => false,
+  );
 }
 
 test('hasStrayEdit: state-dir entries never count as a dirty tree', () => {
@@ -43,61 +38,42 @@ test('hasStrayEdit: state-dir entries never count as a dirty tree', () => {
   assert.equal(hasStrayEdit('?? .ai-task-master/state.json\n M README.md\n'), true);
 });
 
-test('discardStrayEdits: a clean tree is a no-op beyond the status probe', async () => {
-  const { bash, cmds } = makeBash((c) => (c.includes('status --porcelain') ? { stdout: '' } : {}));
-  await discardStrayEdits(bash, '/tmp/wt');
-  assert.deepEqual(cmds, [`git -C '/tmp/wt' status --porcelain`]);
+test('discardStrayEdits: a dirty tree is reset and cleaned, sparing the state dir', async () => {
+  const repo = await seededRepo();
+  try {
+    await writeFile(join(repo.path, 'a.txt'), 'stray\n');
+    await writeFile(join(repo.path, 'junk.txt'), 'junk\n');
+    await execa('mkdir', ['-p', join(repo.path, '.ai-task-master')]);
+    await writeFile(join(repo.path, '.ai-task-master', 'state.json'), '{}\n');
+    await discardStrayEdits(repo.path);
+    assert.equal(await readFile(join(repo.path, 'a.txt'), 'utf8'), 'orig\n');
+    assert.equal(await exists(join(repo.path, 'junk.txt')), false);
+    assert.equal(await exists(join(repo.path, '.ai-task-master', 'state.json')), true);
+  } finally {
+    await repo.cleanup();
+  }
 });
 
-test('discardStrayEdits: a dirty tree is reset --hard and cleaned (sparing the state dir)', async () => {
-  const { bash, cmds } = makeBash((c) =>
-    c.includes('status --porcelain') ? { stdout: ' M src/a.ts\n?? junk.txt\n' } : {},
-  );
-  await discardStrayEdits(bash, '/tmp/wt');
-  assert.deepEqual(cmds, [
-    `git -C '/tmp/wt' status --porcelain`,
-    `git -C '/tmp/wt' reset --hard HEAD`,
-    `git -C '/tmp/wt' clean -fd -e .ai-task-master`,
-  ]);
+// Regression: the cleanup ran through the model-facing bash tool, whose DEFAULT_BASH_RULES deny
+// `git reset --hard` (exit 126, swallowed) — so the stray edit survived into the next `git add -A`
+// commit. The harness's own cleanup must work whatever the model's shell is allowed to do.
+test('discardStrayEdits: works even where the model shell denies git reset --hard', async () => {
+  const repo = await seededRepo();
+  try {
+    const modelBash = bashTool({ cwd: repo.path, rules: [...DEFAULT_BASH_RULES] });
+    const denied = await modelBash.execute?.(
+      { command: 'git reset --hard HEAD', description: 'probe' },
+      { toolCallId: 'probe', messages: [], context: undefined },
+    );
+    assert.ok(denied && !(Symbol.asyncIterator in denied) && denied.exitCode === 126);
+    await writeFile(join(repo.path, 'a.txt'), 'stray\n');
+    await discardStrayEdits(repo.path);
+    assert.equal(await readFile(join(repo.path, 'a.txt'), 'utf8'), 'orig\n');
+  } finally {
+    await repo.cleanup();
+  }
 });
 
-test('discardStrayEdits: a tree dirty only with state-dir files is left untouched', async () => {
-  const { bash, cmds } = makeBash((c) =>
-    c.includes('status --porcelain') ? { stdout: '?? .ai-task-master/state.json\n' } : {},
-  );
-  await discardStrayEdits(bash, '/tmp/wt');
-  assert.deepEqual(cmds, [`git -C '/tmp/wt' status --porcelain`]);
-});
-
-test('discardStrayEdits: a failed status probe bails without resetting (best-effort)', async () => {
-  const { bash, cmds } = makeBash((c) =>
-    c.includes('status --porcelain')
-      ? { stdout: '', stderr: 'fatal: not a git repository', exitCode: 128 }
-      : {},
-  );
-  await discardStrayEdits(bash, '/tmp/wt');
-  assert.deepEqual(cmds, [`git -C '/tmp/wt' status --porcelain`]);
-});
-
-test('discardStrayEdits: a reset/clean fault never throws (best-effort cleanup)', async () => {
-  const { bash, cmds } = makeBash((c) => {
-    if (c.includes('status --porcelain')) return { stdout: ' M src/a.ts\n' };
-    if (c.includes('reset --hard')) return { stderr: 'boom', exitCode: 1 };
-    return {};
-  });
-  // A non-zero reset must be swallowed, and the clean still attempted — the pass's real result stands.
-  await discardStrayEdits(bash, '/tmp/wt');
-  assert.deepEqual(cmds, [
-    `git -C '/tmp/wt' status --porcelain`,
-    `git -C '/tmp/wt' reset --hard HEAD`,
-    `git -C '/tmp/wt' clean -fd -e .ai-task-master`,
-  ]);
-});
-
-test('discardStrayEdits: no runnable bash execute → no-op', async () => {
-  const bash = { description: 'x', inputSchema: z.object({}) } as unknown as Tool<
-    BashInput,
-    BashOutput
-  >;
-  await discardStrayEdits(bash, '/tmp/wt'); // must not throw
+test('discardStrayEdits: not a git repo → no-op, never throws', async () => {
+  await discardStrayEdits('/nonexistent/aitm-stray-edits');
 });

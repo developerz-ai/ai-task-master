@@ -364,7 +364,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
       // canonical trigger: the reviewer can tweak a file, then declare nothing to fix. Restore a
       // clean tree so the shared in-place checkout stays deterministic — a later `checkout -B`
       // never resets uncommitted changes, so they would otherwise carry onto the next branch.
-      await discardStrayEdits(init.tools.bash, input.checkoutPath);
+      await discardStrayEdits(input.checkoutPath);
       if (planned.kind === 'blocked') return { kind: 'blocked', reason: planned.reason };
       if (planned.kind === 'error') return { kind: 'error', error: planned.error };
       return { kind: 'no-changes', reason: planned.reason };
@@ -388,7 +388,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
       );
       if (gated.kind === 'blocked') {
         // The verify gate's failed fix left its edits uncommitted — restore a clean tree.
-        await discardStrayEdits(init.tools.bash, input.checkoutPath);
+        await discardStrayEdits(input.checkoutPath);
         return { kind: 'blocked', reason: gated.reason };
       }
       if (gated.extraChanges.length > 0) changes = [...changes, ...gated.extraChanges];
@@ -412,7 +412,7 @@ export async function runWorker(agent: WorkerAgent, input: WorkerInput): Promise
   } catch (err) {
     // A throw mid-pass (e.g. a bash fault during commit) can leave a half-staged tree. Restore it so
     // the next pass starts clean rather than carrying the partial mutation onto another branch.
-    await discardStrayEdits(init.tools.bash, input.checkoutPath);
+    await discardStrayEdits(input.checkoutPath);
     return { kind: 'error', error: err instanceof Error ? err.message : String(err) };
   }
 }

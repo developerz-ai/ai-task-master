@@ -35,6 +35,10 @@ The same shape (a `mcpServers` object keyed by server name) is used everywhere.
 
 Same shape as Claude Code's `mcpServers` (https://code.claude.com/docs/en/mcp), so a config that works there works here.
 
+### Environment variables
+
+`${VAR}` and `${VAR:-default}` expand from the environment, as in Claude Code, in a stdio server's `command`, `args` and `env` values and an http/sse server's `url` and `headers` values, in every config source. Expansion happens when aitm connects, so the run snapshot and `aitm config list` show the placeholder, never the value. An unset variable with no default skips that server with a warning naming the variable. A bare `$VAR` is left as written.
+
 ## Server naming and collisions
 
 Server names are **sanitized** (non-alphanumeric characters except `-` and `_` replaced with `-`) when constructing the namespaced tool prefix `mcp__<server>__<tool>`. If multiple servers' names sanitize to the same form (e.g., `my.server`, `my server`, `my/server` all become `my-server`), the run will warn on startup:

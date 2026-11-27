@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noTemplateCurlyInString: `${VAR}` placeholders in MCP server entries are the input under test.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { MCPClient, MCPClientConfig } from '@ai-sdk/mcp';
@@ -438,6 +439,41 @@ test('http transport propagates headers through client config', async () => {
   assert.equal(transport.type, 'http');
   assert.equal(transport.url, 'https://example.com/mcp');
   assert.equal(transport.headers?.Authorization, 'Bearer xyz');
+});
+
+// Regression: `${VAR}` in a server's headers/url/env (the documented `.mcp.json` form, same as
+// Claude Code) was sent literally — `Authorization: Bearer ${API_KEY}` reached the server as-is.
+test('connectAll expands ${VAR} from env before building the transport', async () => {
+  const { createClient, recorded } = recordingFactory({ api: {} });
+  const m = new McpClientManager({
+    servers: {
+      api: {
+        type: 'http',
+        url: 'https://example.com/mcp',
+        headers: { Authorization: 'Bearer ${MCP_TEST_TOKEN}' },
+      },
+    },
+    env: { MCP_TEST_TOKEN: 'tok-abcdefgh' },
+    createClient,
+  });
+  await m.connectAll();
+  const transport = recorded[0]?.config.transport as { headers?: Record<string, string> };
+  assert.equal(transport.headers?.Authorization, 'Bearer tok-abcdefgh');
+});
+
+test('connectAll skips (and warns about) a server whose ${VAR} is unset', async () => {
+  const { createClient, recorded } = recordingFactory({ api: {} });
+  const { logger, warnings } = recordingLogger();
+  const m = new McpClientManager({
+    servers: { api: { type: 'http', url: 'https://example.com/${MISSING_VAR}' } },
+    env: {},
+    createClient,
+    logger,
+  });
+  await m.connectAll();
+  assert.equal(recorded.length, 0, 'never connected with a literal ${MISSING_VAR}');
+  assert.deepEqual(m.connected(), []);
+  assert.ok(warnings.some((w) => /MISSING_VAR/.test(JSON.stringify(w))));
 });
 
 // ---- toolSurfaceForRole: deferred-loading split (issue #119) ----

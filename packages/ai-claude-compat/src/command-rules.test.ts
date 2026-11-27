@@ -149,3 +149,14 @@ test('evaluateCommand: inside double quotes a backslash before an ordinary chara
     true,
   );
 });
+
+test('evaluateCommand: an escaped double quote stays in the word it belongs to', () => {
+  const rules: CommandRule[] = [{ pattern: 'echo say"hi', action: 'deny' }];
+  assert.equal(evaluateCommand('echo "say\\"hi"', rules).denied, true);
+});
+
+test('evaluateCommand: a continuation inside a word joins it, unquoted and double-quoted', () => {
+  const rules: CommandRule[] = [{ pattern: 'echo hello', action: 'deny' }];
+  assert.equal(evaluateCommand('echo hel\\\nlo', rules).denied, true);
+  assert.equal(evaluateCommand('echo "hel\\\nlo"', rules).denied, true);
+});

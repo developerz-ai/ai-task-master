@@ -345,7 +345,7 @@ test('legacy-state: runStart resumes from legacy state.json and drives WorkLoop 
               baseRefName: baseBranch,
             }),
             runCiFix: async () => ({ kind: 'ok' }),
-            addressReviews: async () => ({ kind: 'ok' }),
+            addressReviews: async () => ({ kind: 'ok', pushed: false }),
           };
 
           const github = {

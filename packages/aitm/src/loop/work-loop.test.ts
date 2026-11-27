@@ -1148,7 +1148,7 @@ test('openPr resolving (composition issues absorbed by composePr fallback) never
     // openPr is total and still resolves with a valid PR.
     openPr: async () => pullRequest(42),
     runCiFix: async () => ({ kind: 'ok' }),
-    addressReviews: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok', pushed: false }),
   };
   const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
   await loop.runGroup(group('mu'));
@@ -1167,7 +1167,7 @@ test('openPr rejecting with a genuine push/gh failure still blocks the group', a
       throw new Error('failed to push branch aitm/nu: remote rejected');
     },
     runCiFix: async () => ({ kind: 'ok' }),
-    addressReviews: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok', pushed: false }),
   };
   const loop = new WorkLoop(makeDeps({ orchestrator, state, autoMerge: false }));
   await loop.runGroup(group('nu'));
@@ -1184,7 +1184,7 @@ test('home.release fires even when orchestrator throws', async () => {
     finalizeCommit: async () => 'sha',
     openPr: async () => pullRequest(1),
     runCiFix: async () => ({ kind: 'ok' }),
-    addressReviews: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok', pushed: false }),
   };
   const { home, calls } = makeHome();
   const loop = new WorkLoop(makeDeps({ orchestrator, home }));
@@ -1200,7 +1200,7 @@ test('a catch-path block emits a progress line carrying the reason (not a silent
     finalizeCommit: async () => 'sha',
     openPr: async () => pullRequest(1),
     runCiFix: async () => ({ kind: 'ok' }),
-    addressReviews: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok', pushed: false }),
   };
   const progress: string[] = [];
   const loop = new WorkLoop(makeDeps({ orchestrator, progress: (m) => progress.push(m) }));

@@ -49,6 +49,10 @@ export type StageGithub = {
 };
 
 export type StageWorkResult = { kind: 'ok' } | { kind: 'blocked'; reason: string };
+// addressReviews also says whether it pushed: a pushed fix is a new PR head whose CI has not run.
+export type ReviewWorkResult =
+  | { kind: 'ok'; pushed: boolean }
+  | { kind: 'blocked'; reason: string };
 
 // A stage handler returns either the next GroupStage, or — when it blocks — the next stage paired
 // with the SPECIFIC human reason (which checks failed, whether a rebase conflicted, etc.). The
@@ -78,9 +82,9 @@ export type StageOrchestrator = {
   // waiting-ci; blocked → the fix couldn't land (still red, or a rebase conflict needing a human).
   fixCi(group: PrGroup): Promise<StageWorkResult>;
   // addressing-reviews: run the Reviewer over these (already deduped) threads — it replies/resolves
-  // via its github tool and pushes any code fixes. ok → the threads were handled; blocked → it
-  // couldn't (agent error / failed push).
-  addressReviews(group: PrGroup, threads: ReviewThread[]): Promise<StageWorkResult>;
+  // via its github tool and pushes any code fixes. ok → the threads were handled (`pushed` when a
+  // fix reached the remote); blocked → it couldn't (agent error / failed push).
+  addressReviews(group: PrGroup, threads: ReviewThread[]): Promise<ReviewWorkResult>;
 };
 
 // Narrow state surface: handlers persist the data they produce. StateStore satisfies it.
@@ -244,7 +248,8 @@ export const handleCiFailed: StageHandler = async (deps, group) => {
 };
 
 // addressing-reviews: run the Reviewer over the not-yet-addressed threads, record them as addressed,
-// and loop back to waiting-reviews. When nothing is fresh (every unresolved thread was already
+// and loop back to waiting-reviews — or to waiting-ci when a fix was pushed, since the new head's CI
+// has not run and merging off the old green would land an unchecked commit. When nothing is fresh (every unresolved thread was already
 // handled), hand straight back — waiting-reviews then sees no fresh threads and advances to merge.
 export const handleAddressingReviews: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'addressing-reviews');
@@ -256,7 +261,7 @@ export const handleAddressingReviews: StageHandler = async (deps, group) => {
     pr,
     fresh.map((t) => t.id),
   );
-  return 'waiting-reviews';
+  return result.pushed ? 'waiting-ci' : 'waiting-reviews';
 };
 
 // The post-working stages all operate on an open PR. A null pr here means the dispatcher routed a

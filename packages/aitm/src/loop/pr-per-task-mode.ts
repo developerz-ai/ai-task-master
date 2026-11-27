@@ -269,6 +269,9 @@ async function autoMergeFlow(
     gateCi = review.pushed;
   }
 
+  // The last thread read can straddle a cancel; an empty read must not carry a stopped run to merge.
+  throwIfCancelled(deps);
+
   await github.mergePr(pr.number, deps.mergeMethod, { admin: deps.adminMerge });
 }
 

@@ -330,26 +330,43 @@ test('prPerTask + autoMerge: a pushed review fix waits for CI on the new head be
 });
 
 test('prPerTask + autoMerge: threads are re-read after the post-push CI, and an addressed thread is not re-fed', async () => {
-  const thread: ReviewThread = {
-    id: 't1',
+  const reviewThread = (id: string): ReviewThread => ({
+    id,
     isResolved: false,
     path: 'a.ts',
-    comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
-  };
+    comments: [{ id: `c-${id}`, body: 'nit', author: 'rev' }],
+  });
   const events: string[] = [];
   const { orchestrator, calls } = makeOrchestrator({
     prNumber: 7,
     events,
     addressReviewsResult: { kind: 'ok', pushed: true },
   });
-  const { github } = makeGithub({ checks: [ciSuccess, ciSuccess], threads: [thread], events });
+  const { github: base } = makeGithub({ checks: [ciSuccess, ciSuccess, ciSuccess], events });
+  // t1 is posted first; t2 lands on the pushed head during its CI. t1 stays unresolved (replied).
+  const reads = [[reviewThread('t1')], [reviewThread('t1'), reviewThread('t2')]];
+  let read = 0;
+  const github: WorkLoopGithub = {
+    ...base,
+    listUnresolvedThreads: async (pr) => {
+      events.push(`listUnresolvedThreads:${pr}`);
+      return reads[Math.min(read++, reads.length - 1)] ?? [];
+    },
+  };
   const loop = new WorkLoop(makeDeps({ orchestrator, github, autoMerge: true, prPerTask: true }));
   await loop.runGroup(group('solo'));
 
-  assert.equal(calls.addressReviews.length, 1, 'the still-unresolved t1 is not addressed twice');
+  assert.deepEqual(
+    calls.addressReviews.map((c) => c.threads.map((t) => t.id)),
+    [['t1'], ['t2']],
+    'the post-push read reaches the Reviewer with only the new thread',
+  );
   assert.deepEqual(
     events.filter((e) => !e.startsWith('openPr') && !e.startsWith('selfReview')),
     [
+      'waitForChecks:7',
+      'listUnresolvedThreads:7',
+      'addressReviews:7',
       'waitForChecks:7',
       'listUnresolvedThreads:7',
       'addressReviews:7',

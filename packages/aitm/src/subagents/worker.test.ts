@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import type {
   BashInput,
@@ -10,12 +12,14 @@ import type {
 } from '@developerz.ai/ai-claude-compat';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
+import { execa } from 'execa';
 import { z } from 'zod';
 import type { PrGroup } from '../domain/pr-group.ts';
 import type { Task } from '../domain/task.ts';
 import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { workerTools } from '../testing/subagent-tools.ts';
+import { makeTempRepo, type TempRepo } from '../testing/temp-repo.ts';
 import { render } from './prompts/templates.ts';
 import {
   createWorkerAgent,
@@ -75,24 +79,19 @@ type ToolCallLog = {
 // `cleanStatusPaths` lists the paths that `git status --porcelain` reports as unchanged — i.e. the
 // editor narrated but never wrote (a phantom edit). Every other queried path reports dirty, so the
 // default (no phantom) keeps the existing happy-path tests recording changes.
-// `strayEdits` makes the bare tree-wide `git status --porcelain` (no pathspec — the post-pass
-// cleanup guard) report a dirty tree so a test can assert the reset/clean it triggers. Default
-// false keeps the clean no-changes/blocked paths skipping cleanup, byte-identical to today.
 // `phantomOncePaths` lists paths that report clean on their FIRST status query and dirty on every
 // later one — a leaf that narrated the edit, then actually wrote it when the corrective retry told
 // it what it had done.
 // `preDirtyPaths` seeds the FIRST bare `git status --porcelain` (the self-review pre-planning
 // snapshot) so those paths look inherited-dirty; the inline-edit inference must then still fan out.
 // `preSnapshotFails` makes that first bare status exit non-zero, so dirtyPaths returns undefined and
-// the inference is disabled. Both only affect the first bare call — the later post-pass cleanup guard
-// stays clean (exit 0, empty) so neither triggers a reset.
+// the inference is disabled. Both only affect the first bare call.
 function makeTools(
   opts: {
     bashExitCode?: number;
     bashStderr?: string;
     cleanStatusPaths?: string[];
     phantomOncePaths?: string[];
-    strayEdits?: boolean;
     preDirtyPaths?: string[];
     preSnapshotFails?: boolean;
   } = {},
@@ -131,13 +130,12 @@ function makeTools(
       execute: async (input) => {
         if (input.command.includes('status --porcelain')) {
           const path = /-- '(.*)'\s*$/.exec(input.command)?.[1] ?? '';
-          // Bare tree-wide status (no pathspec) — the post-pass cleanup guard, not an editor's
-          // per-file verification. Reports the tree dirty only when the test simulates stray edits;
-          // never recorded in `bashes` so the clean no-op path stays byte-identical.
+          // Bare tree-wide status (no pathspec) — the self-review pre-planning snapshot, not an
+          // editor's per-file verification. Never recorded in `bashes`.
           if (path === '') {
             bareStatusCount += 1;
             // The FIRST bare status is the self-review pre-planning snapshot; drive it from the
-            // pre-* opts. Every later bare call is the post-pass cleanup guard and stays clean.
+            // pre-* opts. Any later bare call reads clean.
             if (bareStatusCount === 1 && opts.preSnapshotFails) {
               return { stdout: '', stderr: 'fatal: not a git repository', exitCode: 128 };
             }
@@ -149,7 +147,7 @@ function makeTools(
               };
             }
             return {
-              stdout: opts.strayEdits ? ' M stray.md\n?? stray-new.ts\n' : '',
+              stdout: '',
               stderr: '',
               exitCode: 0,
             };
@@ -191,6 +189,37 @@ function baseGroup(overrides: Partial<PrGroup> = {}): PrGroup {
     reviewGraceApplied: false,
     ...overrides,
   };
+}
+
+// A real checkout left dirty by a pass: a modified tracked file, an untracked stray, and aitm's own
+// state dir (untracked). The stray-edit sweep runs real git here, never through the model's bash.
+async function dirtyRepo(): Promise<TempRepo> {
+  const repo = await makeTempRepo();
+  await writeFile(join(repo.path, 'stray.md'), 'orig\n');
+  await execa('git', ['add', 'stray.md'], { cwd: repo.path });
+  await execa('git', ['commit', '-m', 'init'], { cwd: repo.path });
+  await writeFile(join(repo.path, 'stray.md'), 'edited\n');
+  await writeFile(join(repo.path, 'stray-new.ts'), 'x\n');
+  await mkdir(join(repo.path, '.ai-task-master'), { recursive: true });
+  await writeFile(join(repo.path, '.ai-task-master', 'state.json'), '{}\n');
+  return repo;
+}
+
+async function exists(path: string): Promise<boolean> {
+  return stat(path).then(
+    () => true,
+    () => false,
+  );
+}
+
+async function assertSwept(repo: TempRepo): Promise<void> {
+  assert.equal(await readFile(join(repo.path, 'stray.md'), 'utf8'), 'orig\n', 'tracked edit reset');
+  assert.equal(await exists(join(repo.path, 'stray-new.ts')), false, 'untracked stray cleaned');
+  assert.equal(
+    await exists(join(repo.path, '.ai-task-master', 'state.json')),
+    true,
+    'the state dir survives the clean',
+  );
 }
 
 function baseInput(group: PrGroup = baseGroup()): WorkerInput {
@@ -829,65 +858,41 @@ test('runWorker: a no-changes pass with stray planning edits restores a clean tr
     draftCommitMessage: 'chore: noop',
     noChangesNeeded: 'already clean — nothing to fix',
   };
-  const { tools, calls } = makeTools({ strayEdits: true });
+  const { tools, calls } = makeTools();
   const model = makeWorkerModel(manifest);
   const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
-
-  const result = await runWorker(agent, baseInput());
-  assert.equal(result.kind, 'no-changes');
-
-  // The cleanup guard detected a dirty tree and restored it: reset tracked files to HEAD, then drop
-  // untracked ones. No add/commit (nothing was meant to ship from a no-changes declaration).
-  const cmds = calls.bashes.map((b) => b.command);
-  assert.ok(
-    cmds.some((c) => /reset --hard HEAD/.test(c)),
-    'a dirty tree is reset to HEAD',
-  );
-  assert.ok(
-    cmds.some((c) => /clean -fd/.test(c)),
-    'untracked stray files are cleaned',
-  );
-  assert.equal(
-    cmds.some((c) => /add -A|commit -m/.test(c)),
-    false,
-    'a no-changes pass never stages or commits',
-  );
+  const repo = await dirtyRepo();
+  try {
+    const result = await runWorker(agent, { ...baseInput(), checkoutPath: repo.path });
+    assert.equal(result.kind, 'no-changes');
+    // The cleanup guard detected a dirty tree and restored it. No add/commit (nothing was meant to
+    // ship from a no-changes declaration).
+    await assertSwept(repo);
+    assert.equal(
+      calls.bashes.some((b) => /add -A|commit -m/.test(b.command)),
+      false,
+      'a no-changes pass never stages or commits',
+    );
+  } finally {
+    await repo.cleanup();
+  }
 });
 
 test('runWorker: a blocked pass with stray edits restores a clean tree (no partial mutation leaks to the next branch)', async () => {
   const manifest: FileManifest = { files: [], draftCommitMessage: 'chore: noop' };
-  const { tools, calls } = makeTools({ strayEdits: true });
+  const { tools } = makeTools();
   const model = makeWorkerModel(manifest);
   const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
-
-  const result = await runWorker(agent, baseInput());
-  assert.equal(result.kind, 'blocked');
-
-  const cmds = calls.bashes.map((b) => b.command);
-  assert.ok(
-    cmds.some((c) => /reset --hard HEAD/.test(c)),
-    'blocked dirty tree is reset',
-  );
-  assert.ok(
-    cmds.some((c) => /clean -fd/.test(c)),
-    'untracked stray files are cleaned',
-  );
-});
-
-test('runWorker: the stray-edit cleanup never deletes aitm own state dir', async () => {
-  // `git clean -fd` without an exclude only spares .ai-task-master when the TARGET repo happens to
-  // gitignore it; otherwise it wipes the run's plan, style cache, generated specialists, and scratch
-  // mid-run. Same guard as InPlaceCheckout.ensureCleanTree.
-  const manifest: FileManifest = { files: [], draftCommitMessage: 'chore: noop' };
-  const { tools, calls } = makeTools({ strayEdits: true });
-  const model = makeWorkerModel(manifest);
-  const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
-
-  await runWorker(agent, baseInput());
-
-  const clean = calls.bashes.map((b) => b.command).find((c) => /clean -fd/.test(c));
-  assert.ok(clean, 'the dirty tree was cleaned');
-  assert.match(clean, /-e \.ai-task-master/, 'the state dir is excluded from the clean');
+  const repo = await dirtyRepo();
+  try {
+    const result = await runWorker(agent, { ...baseInput(), checkoutPath: repo.path });
+    assert.equal(result.kind, 'blocked');
+    // `git clean -fd` without an exclude only spares .ai-task-master when the TARGET repo happens to
+    // gitignore it; assertSwept checks the run's state dir survives (same guard as ensureCleanTree).
+    await assertSwept(repo);
+  } finally {
+    await repo.cleanup();
+  }
 });
 
 test('runWorker: a clean no-changes tree is left untouched (no-op cleanup, byte-identical git sequence)', async () => {
@@ -896,7 +901,7 @@ test('runWorker: a clean no-changes tree is left untouched (no-op cleanup, byte-
     draftCommitMessage: 'chore: noop',
     noChangesNeeded: 'already clean',
   };
-  const { tools, calls } = makeTools(); // strayEdits unset → tree-wide status reports clean
+  const { tools, calls } = makeTools();
   const model = makeWorkerModel(manifest);
   const agent = createWorkerAgent({ model, tools, systemPrompt: WORKER_SYSTEM_PREFIX });
 
@@ -1507,8 +1512,7 @@ function makeVerifyTools(
       // `git status --porcelain` check reports dirty (and stays out of the `bashes` sequence).
       if (input.command.includes('status --porcelain')) {
         const path = /-- '(.*)'\s*$/.exec(input.command)?.[1] ?? '';
-        // Bare tree-wide status (the post-pass cleanup guard): clean by default so the verify-blocked
-        // path skips reset/clean, byte-identical to today.
+        // Bare tree-wide status: clean.
         if (path === '') {
           return { stdout: '', stderr: '', exitCode: 0 };
         }

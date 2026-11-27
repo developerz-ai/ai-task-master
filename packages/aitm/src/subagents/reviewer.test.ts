@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import type {
   BashInput,
@@ -10,11 +13,13 @@ import type {
 } from '@developerz.ai/ai-claude-compat';
 import { tool } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
+import { execa } from 'execa';
 import { z } from 'zod';
 import type { ReviewThread } from '../github/schema.ts';
 import { emptyUsage } from '../testing/model-fixtures.ts';
 import { stallingModel } from '../testing/stalling-model.ts';
 import { reviewerTools } from '../testing/subagent-tools.ts';
+import { makeTempRepo } from '../testing/temp-repo.ts';
 import type { GithubToolInput, GithubToolOutput } from '../tools/github-thread-tool.ts';
 import { render } from './prompts/templates.ts';
 import {
@@ -26,11 +31,16 @@ import {
 } from './reviewer.ts';
 
 // One agent.generate per thread; the agent delivers each resolution via the submit tool-call.
-function makeReviewerModel(outputs: ThreadResolutionOutput[]): MockLanguageModelV3 {
+// `onGenerate(idx)` runs as thread idx's model call starts — a seam to act "during" a thread.
+function makeReviewerModel(
+  outputs: ThreadResolutionOutput[],
+  onGenerate?: (idx: number) => void,
+): MockLanguageModelV3 {
   let i = 0;
   return new MockLanguageModelV3({
     doGenerate: async () => {
       const idx = i++;
+      onGenerate?.(idx);
       const next = outputs[idx] ?? { kind: 'replied' };
       return {
         content: [
@@ -233,70 +243,60 @@ test('runReviewer yields one resolution per thread, mixed fixed/replied/wontfix'
     reason: 'out of scope for this PR',
   });
 
-  // T1's commit sequence (only the 'fixed' thread stages/commits), then a between-thread stray-edit
-  // sweep after each of the three threads. The empty-index probe (`diff --cached --quiet`) sits
-  // between staging and the commit; the tree is clean here, so each sweep is just a status probe.
-  assert.equal(calls.bashes.length, 8);
+  // T1's commit sequence (only the 'fixed' thread stages/commits). The empty-index probe
+  // (`diff --cached --quiet`) sits between staging and the commit. The between-thread stray-edit
+  // sweep runs git directly, never through the model's bash tool.
+  assert.equal(calls.bashes.length, 5);
   const cmds = calls.bashes.map((b) => b.command);
   assert.match(cmds[0] ?? '', /git -C '\/tmp\/wt' add -A/);
   assert.match(cmds[1] ?? '', /reset -q -- \.ai-task-master/);
   assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' diff --cached --quiet/);
   assert.match(cmds[3] ?? '', /git -C '\/tmp\/wt' commit -m 'fix: rename variable'/);
   assert.match(cmds[4] ?? '', /git -C '\/tmp\/wt' rev-parse HEAD/);
-  assert.match(cmds[5] ?? '', /git -C '\/tmp\/wt' status --porcelain/);
-  assert.match(cmds[6] ?? '', /git -C '\/tmp\/wt' status --porcelain/);
-  assert.match(cmds[7] ?? '', /git -C '\/tmp\/wt' status --porcelain/);
 });
 
 test("runReviewer: a prior thread's stray edits are swept before the next thread's fix commit (task #58)", async () => {
-  // T1 replies but leaves an uncommitted edit (leaked.ts); T2 then fixes real code. Without the
-  // between-thread sweep, T2's `git add -A` would stage leaked.ts into the fix commit. The sweep
-  // (`reset --hard` + `clean`) must run after T1 and before T2 stages.
-  const outputs: ThreadResolutionOutput[] = [
-    { kind: 'replied' },
-    { kind: 'fixed', commitMessage: 'fix: real change' },
-  ];
-  let statusCalls = 0;
-  const { tools, calls } = makeTools({
-    bashStdout: (cmd) => {
-      if (cmd.includes('status --porcelain')) {
-        statusCalls += 1;
-        // Dirty right after T1 (the leaked stray edit); clean again after T2's own commit.
-        return statusCalls === 1 ? ' M leaked.ts\n' : '';
-      }
-      return cmd.includes('rev-parse HEAD') ? 'facef00dfacef00d\n' : '';
-    },
-  });
-  const agent = createReviewerAgent({
-    model: makeReviewerModel(outputs),
-    tools,
-    systemPrompt: REVIEWER_SYSTEM_PREFIX,
-  });
-
-  const result = await runReviewer(
-    agent,
-    baseInput([thread('T1', 'why?'), thread('T2', 'fix this')]),
-  );
-
-  assert.equal(result.kind, 'ok');
-  if (result.kind === 'ok') {
-    assert.deepEqual(result.resolutions[0], { threadId: 'T1', kind: 'replied' });
-    assert.deepEqual(result.resolutions[1], {
-      threadId: 'T2',
-      kind: 'fixed',
-      commitSha: 'facef00dfacef00d',
+  // T1 replies but leaves an uncommitted edit (leaked.md); T2 then fixes real code. Without the
+  // between-thread sweep, T2's `git add -A` would stage leaked.md into the fix commit. The sweep runs
+  // real git on the checkout, so the stray must already be gone when T2 stages.
+  const repo = await makeTempRepo();
+  try {
+    await writeFile(join(repo.path, 'leaked.md'), 'orig\n');
+    await execa('git', ['add', 'leaked.md'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'init'], { cwd: repo.path });
+    const outputs: ThreadResolutionOutput[] = [
+      { kind: 'replied' },
+      { kind: 'fixed', commitMessage: 'fix: real change' },
+    ];
+    // T1's agent leaks the edit while it works; what T2's agent sees when it starts is the proof.
+    let leakedAtT2Start: string | undefined;
+    const model = makeReviewerModel(outputs, (idx) => {
+      if (idx === 0) writeFileSync(join(repo.path, 'leaked.md'), 'stray\n');
+      if (idx === 1) leakedAtT2Start = readFileSync(join(repo.path, 'leaked.md'), 'utf8');
     });
-  }
+    const { tools } = makeTools({
+      bashStdout: (cmd) => (cmd.includes('rev-parse HEAD') ? 'facef00dfacef00d\n' : ''),
+    });
+    const agent = createReviewerAgent({ model, tools, systemPrompt: REVIEWER_SYSTEM_PREFIX });
 
-  const cmds = calls.bashes.map((b) => b.command);
-  // The sweep after T1: a dirty status probe drives `reset --hard` + `clean` (state dir spared).
-  const sweep = cmds.findIndex((c) => /status --porcelain/.test(c));
-  assert.ok(sweep >= 0, 'a between-thread status probe runs');
-  assert.match(cmds[sweep + 1] ?? '', /reset --hard HEAD/);
-  assert.match(cmds[sweep + 2] ?? '', /clean -fd -e \.ai-task-master/);
-  // T2 stages its fix only AFTER the sweep, so leaked.ts can never reach the commit.
-  const addIdx = cmds.findIndex((c) => /add -A/.test(c));
-  assert.ok(addIdx > sweep + 2, 'the stray sweep precedes the next fix commit');
+    const result = await runReviewer(agent, {
+      ...baseInput([thread('T1', 'why?'), thread('T2', 'fix this')]),
+      checkoutPath: repo.path,
+    });
+
+    assert.equal(result.kind, 'ok');
+    if (result.kind === 'ok') {
+      assert.deepEqual(result.resolutions[0], { threadId: 'T1', kind: 'replied' });
+      assert.deepEqual(result.resolutions[1], {
+        threadId: 'T2',
+        kind: 'fixed',
+        commitSha: 'facef00dfacef00d',
+      });
+    }
+    assert.equal(leakedAtT2Start, 'orig\n', "T1's stray is swept before T2 starts");
+  } finally {
+    await repo.cleanup();
+  }
 });
 
 test('runReviewer: commitFix asserts the PR head branch, then commits when the tree is on it (audit 02)', async () => {
@@ -394,13 +394,11 @@ test('runReviewer: a commitFix throw at thread N keeps resolutions 1..N-1 (durab
       { threadId: 'T2', kind: 'wontfix', reason: 'stale' },
     ]);
   }
-  // T1/T2 didn't commit, but each still gets a between-thread stray-edit sweep (a clean status probe
-  // here). T3 then hits the branch check and refuses before staging — no add/commit on the wrong branch.
+  // T1/T2 didn't commit. T3 then hits the branch check and refuses before staging — no add/commit on
+  // the wrong branch.
   const cmds = calls.bashes.map((b) => b.command);
-  assert.equal(cmds.length, 3);
-  assert.match(cmds[0] ?? '', /status --porcelain/);
-  assert.match(cmds[1] ?? '', /status --porcelain/);
-  assert.match(cmds[2] ?? '', /rev-parse --abbrev-ref HEAD/);
+  assert.equal(cmds.length, 1);
+  assert.match(cmds[0] ?? '', /rev-parse --abbrev-ref HEAD/);
   assert.ok(!cmds.some((c) => /add -A|commit -m/.test(c)));
 });
 
@@ -489,14 +487,11 @@ test('runReviewer: an empty-diff "fixed" thread downgrades to wontfix and keeps 
   }
 
   // The no-op thread stages and probes but never commits: add + reset + diff, no commit / rev-parse.
-  // A between-thread stray-edit sweep (a clean status probe) then follows each of the two threads.
   const cmds = calls.bashes.map((b) => b.command);
-  assert.equal(calls.bashes.length, 5);
+  assert.equal(calls.bashes.length, 3);
   assert.match(cmds[0] ?? '', /git -C '\/tmp\/wt' add -A/);
   assert.match(cmds[1] ?? '', /reset -q -- \.ai-task-master/);
   assert.match(cmds[2] ?? '', /git -C '\/tmp\/wt' diff --cached --quiet/);
-  assert.match(cmds[3] ?? '', /status --porcelain/);
-  assert.match(cmds[4] ?? '', /status --porcelain/);
   assert.ok(!cmds.some((c) => /commit -m/.test(c)));
 });
 

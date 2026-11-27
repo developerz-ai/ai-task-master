@@ -26,14 +26,13 @@ export function expandServerEnv(server: McpServer, env: Env): McpServer {
     text.replace(PLACEHOLDER, (_match, name: string, fallback: string | undefined) => {
       // Own properties only: `${toString}` must read as unset, not as Object.prototype.toString.
       const value = Object.hasOwn(env, name) ? env[name] : undefined;
-      if (value !== undefined && value !== '') {
-        // A value pulled from the environment into a header/env/arg is credential-shaped by default;
-        // every output channel's scrubber now knows it (too-short values are ignored there).
-        registerSecretValues([value]);
-        return value;
-      }
-      if (fallback !== undefined) return fallback;
-      throw new McpEnvVarMissing(name);
+      // POSIX `:-`: the default stands in for unset OR empty. A bare `${VAR}` set to '' is just ''.
+      if (fallback !== undefined && (value === undefined || value === '')) return fallback;
+      if (value === undefined) throw new McpEnvVarMissing(name);
+      // A value pulled from the environment into a header/env/arg is credential-shaped by default;
+      // every output channel's scrubber now knows it (too-short values are ignored there).
+      registerSecretValues([value]);
+      return value;
     });
   const expandValues = (values: Record<string, string>): Record<string, string> =>
     Object.fromEntries(Object.entries(values).map(([k, v]) => [k, expand(v)]));

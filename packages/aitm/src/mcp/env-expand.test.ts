@@ -61,3 +61,10 @@ test('expandServerEnv: an inherited property name is unset, not Object.prototype
     command: 'fallback',
   });
 });
+
+test('expandServerEnv: a bare placeholder set to the empty string expands to empty, not an error', () => {
+  assert.deepEqual(expandServerEnv({ command: 'x', args: ['--flag=${EMPTY}'] }, { EMPTY: '' }), {
+    command: 'x',
+    args: ['--flag='],
+  });
+});

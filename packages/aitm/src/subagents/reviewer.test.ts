@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -31,11 +31,16 @@ import {
 } from './reviewer.ts';
 
 // One agent.generate per thread; the agent delivers each resolution via the submit tool-call.
-function makeReviewerModel(outputs: ThreadResolutionOutput[]): MockLanguageModelV3 {
+// `onGenerate(idx)` runs as thread idx's model call starts — a seam to act "during" a thread.
+function makeReviewerModel(
+  outputs: ThreadResolutionOutput[],
+  onGenerate?: (idx: number) => void,
+): MockLanguageModelV3 {
   let i = 0;
   return new MockLanguageModelV3({
     doGenerate: async () => {
       const idx = i++;
+      onGenerate?.(idx);
       const next = outputs[idx] ?? { kind: 'replied' };
       return {
         content: [
@@ -259,26 +264,20 @@ test("runReviewer: a prior thread's stray edits are swept before the next thread
     await writeFile(join(repo.path, 'leaked.md'), 'orig\n');
     await execa('git', ['add', 'leaked.md'], { cwd: repo.path });
     await execa('git', ['commit', '-m', 'init'], { cwd: repo.path });
-    // T1's leak, present when the first between-thread sweep runs.
-    await writeFile(join(repo.path, 'leaked.md'), 'stray\n');
     const outputs: ThreadResolutionOutput[] = [
       { kind: 'replied' },
       { kind: 'fixed', commitMessage: 'fix: real change' },
     ];
-    let leakedAtStage: string | undefined;
+    // T1's agent leaks the edit while it works; what T2's agent sees when it starts is the proof.
+    let leakedAtT2Start: string | undefined;
+    const model = makeReviewerModel(outputs, (idx) => {
+      if (idx === 0) writeFileSync(join(repo.path, 'leaked.md'), 'stray\n');
+      if (idx === 1) leakedAtT2Start = readFileSync(join(repo.path, 'leaked.md'), 'utf8');
+    });
     const { tools } = makeTools({
-      bashStdout: (cmd) => {
-        if (/add -A/.test(cmd) && leakedAtStage === undefined) {
-          leakedAtStage = readFileSync(join(repo.path, 'leaked.md'), 'utf8');
-        }
-        return cmd.includes('rev-parse HEAD') ? 'facef00dfacef00d\n' : '';
-      },
+      bashStdout: (cmd) => (cmd.includes('rev-parse HEAD') ? 'facef00dfacef00d\n' : ''),
     });
-    const agent = createReviewerAgent({
-      model: makeReviewerModel(outputs),
-      tools,
-      systemPrompt: REVIEWER_SYSTEM_PREFIX,
-    });
+    const agent = createReviewerAgent({ model, tools, systemPrompt: REVIEWER_SYSTEM_PREFIX });
 
     const result = await runReviewer(agent, {
       ...baseInput([thread('T1', 'why?'), thread('T2', 'fix this')]),
@@ -294,7 +293,7 @@ test("runReviewer: a prior thread's stray edits are swept before the next thread
         commitSha: 'facef00dfacef00d',
       });
     }
-    assert.equal(leakedAtStage, 'orig\n', 'the stray sweep precedes the next fix commit');
+    assert.equal(leakedAtT2Start, 'orig\n', "T1's stray is swept before T2 starts");
   } finally {
     await repo.cleanup();
   }

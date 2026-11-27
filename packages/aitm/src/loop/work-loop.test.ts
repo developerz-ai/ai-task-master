@@ -160,7 +160,10 @@ test('runGroup: a group branch equal to the base branch blocks before the checko
   assert.equal(calls.runWorker.length, 0);
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((g) => g.id === 'alpha')?.status, 'blocked');
-  assert.ok(progress.some((m) => /--branch/.test(m)), 'the reason names the --branch fix');
+  assert.ok(
+    progress.some((m) => /--branch/.test(m)),
+    'the reason names the --branch fix',
+  );
 });
 
 test('runGroup: releases the group on every terminal path — merged, blocked, and rethrown', async () => {

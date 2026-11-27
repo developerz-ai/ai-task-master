@@ -374,6 +374,13 @@ test('resume-flow: --no-automerge exits 0 with merge-pr instruction; merge-pr pi
 
 test('resume-flow: interrupt after pr-open; resume picks up at waiting-ci without re-running worker or opening duplicate PR', async () => {
   const repo = await makeTempRepo({ withClaudeMd: true });
+  // The base branch, read before the first run leaves HEAD on the group branch (symbolic-ref, since
+  // the repo has no commit yet): the resumed run's defaultBranch stub must answer with the base, as
+  // `gh repo view` would, not the group branch.
+  const { stdout: baseRaw } = await execa('git', ['symbolic-ref', '--short', 'HEAD'], {
+    cwd: repo.path,
+  });
+  const baseBranch = baseRaw.trim();
   try {
     await execa('git', ['add', 'CLAUDE.md'], { cwd: repo.path });
     await execa('git', ['commit', '-m', 'initial commit'], { cwd: repo.path });
@@ -467,12 +474,8 @@ test('resume-flow: interrupt after pr-open; resume picks up at waiting-ci withou
             addressReviews: async () => ({ kind: 'ok' }),
           };
 
-          const { stdout: rawBranch } = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-            cwd: input.cwd,
-          });
-
           const github = {
-            defaultBranch: async () => rawBranch.trim(),
+            defaultBranch: async () => baseBranch,
             waitForChecks: async (_pr: number) => {
               waitForChecksCalls++;
               return { state: 'success' as const, failedChecks: [] };

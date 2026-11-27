@@ -496,6 +496,32 @@ test('prPerTask + autoMerge + --admin: a CI poll timeout skips past CI to review
   );
 });
 
+test('prPerTask + autoMerge + --admin: a CI timeout on the head a review fix pushed blocks', async () => {
+  const thread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
+  };
+  const { orchestrator } = makeOrchestrator({
+    prNumber: 9,
+    addressReviewsResult: { kind: 'ok', pushed: true },
+  });
+  const { github, calls: ghCalls } = makeGithub({
+    checks: [ciSuccess, new CiFailed('checks did not settle')],
+    threads: [thread],
+  });
+  const { state, updates } = makeState([group('solo')]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prPerTask: true, adminMerge: true }),
+  );
+  await loop.runGroup(group('solo'));
+
+  assert.equal(ghCalls.mergePr.length, 0, 'no merge without a green verdict on the pushed head');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'solo')?.status, 'blocked');
+});
+
 test('prPerTask autoMerge: abort during the CI wait → the task PR is not merged', async () => {
   // The prPerTask flow has no stage machine to stop it: without its own post-wait check, a
   // cancelled 'pending' wait reads as "not failing" and falls straight through to the merge.

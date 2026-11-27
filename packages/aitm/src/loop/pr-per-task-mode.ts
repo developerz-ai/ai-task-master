@@ -248,8 +248,13 @@ async function autoMergeFlow(
   // re-feeding it every round would never terminate.
   const addressed = new Set<string>();
   let gateCi = true;
+  // --admin may advance a CI timeout on the head this task opened. A head the Reviewer pushed is
+  // aitm's own unchecked code: its recheck must settle green, so a timeout there blocks.
+  let adminAdvance = deps.adminMerge;
   while (true) {
-    if (gateCi) fixSpent = await untilCiGreen(deps, group, pr, checkout, baseBranch, fixSpent);
+    if (gateCi) {
+      fixSpent = await untilCiGreen(deps, group, pr, checkout, baseBranch, fixSpent, adminAdvance);
+    }
     // Review: address any unresolved threads via the Reviewer. addressReviews pushes the Reviewer's
     // code fixes to the remote, so the merge below lands them; runReviewer alone would leave them
     // committed only locally and merge without them. Re-read after every CI pass: a review bot
@@ -267,6 +272,7 @@ async function autoMergeFlow(
     // re-gate CI. Nothing pushed → the head and its green verdict stand; the next read only checks
     // for threads posted meanwhile.
     gateCi = review.pushed;
+    if (review.pushed) adminAdvance = false;
   }
 
   // The last thread read can straddle a cancel; an empty read must not carry a stopped run to merge.
@@ -284,8 +290,9 @@ async function untilCiGreen(
   checkout: Checkout,
   baseBranch: string,
   spent: number,
+  adminAdvance: boolean,
 ): Promise<number> {
-  const { orchestrator, github, signal, adminMerge } = deps;
+  const { orchestrator, github, signal } = deps;
   let fixSpent = spent;
   while (true) {
     let route: CiRoute;
@@ -295,11 +302,11 @@ async function untilCiGreen(
       // A cancelled wait comes back 'pending', which would route as not-green and fall through to a
       // fix (or past it to the merge). Stop the group instead.
       throwIfCancelled(deps);
-      route = routeCiPoll(ci.state, pr.number, adminMerge);
+      route = routeCiPoll(ci.state, pr.number, adminAdvance);
     } catch (err) {
       if (!(err instanceof CiFailed)) throw err;
       timeout = err;
-      route = routeCiPoll(null, pr.number, adminMerge);
+      route = routeCiPoll(null, pr.number, adminAdvance);
     }
     // green, or --admin force-advancing a timeout past CI → proceed to reviews/merge.
     if (route.kind === 'proceed' || route.kind === 'advance') return fixSpent;

@@ -145,6 +145,7 @@ test('ci-fix-loop: CI fails once, Worker fixes, re-poll succeeds, PR merges → 
             pr: 1,
             checkoutPath: repo.path,
             baseBranch: 'main',
+            headBranch: 'feature/x',
             github: {
               waitForChecks: async (): Promise<CiResult> => {
                 waitForChecksCalls++;
@@ -247,6 +248,7 @@ test('ci-fix-loop: maxIterations=1 exhausted with always-failing CI → exit 1',
             pr: 2,
             checkoutPath: repo.path,
             baseBranch: 'main',
+            headBranch: 'feature/x',
             github: {
               waitForChecks: async (): Promise<CiResult> => ({
                 state: 'failure' as const,
@@ -327,6 +329,7 @@ test('ci-fix-loop: MergeConflict thrown by mergePr propagates to exit 1', async 
             pr: 3,
             checkoutPath: repo.path,
             baseBranch: 'main',
+            headBranch: 'feature/x',
             github: {
               waitForChecks: async (): Promise<CiResult> => ({
                 state: 'success' as const,
@@ -405,6 +408,7 @@ test('ci-fix-loop: pre-aborted AbortSignal yields exit 2 (cancelled)', async () 
             pr: 4,
             checkoutPath: repo.path,
             baseBranch: 'main',
+            headBranch: 'feature/x',
             github: {
               waitForChecks: async (): Promise<CiResult> => ({
                 state: 'success' as const,

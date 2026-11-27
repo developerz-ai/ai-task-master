@@ -129,6 +129,7 @@ function baseInput(
     pr: 42,
     checkoutPath: '/tmp/repo',
     baseBranch: 'main',
+    headBranch: 'feature/x',
     github,
     prContext: fakePrContext(),
     mergeMethod: 'squash',
@@ -155,6 +156,51 @@ function baseInput(
     ...overrides,
   };
 }
+
+// Regression: the take-over CI fix ran with branch null, so the Worker checked out and committed on
+// a synthetic aitm/takeover-ci-<pr> branch with no upstream; the bare force-with-lease push then
+// failed and the PR head never moved. The fix must land on the PR's own head branch.
+test('runTakeOverFlow: the CI-fix Worker works on the PR head branch', async () => {
+  const gh = fakeGithub({ checks: ['failure'], threads: [[]] });
+  const branches: Array<string | null> = [];
+  const base = baseInput(gh.github);
+  await runTakeOverFlow({
+    ...base,
+    subagents: {
+      ...base.subagents,
+      runWorkerOverride: async (input) => {
+        branches.push(input.group.branch);
+        return { kind: 'blocked', reason: 'stop after one pass' } satisfies WorkerResult;
+      },
+    },
+  });
+  assert.deepEqual(branches, ['feature/x']);
+});
+
+test('runTakeOverFlow: off the PR head branch, a red PR blocks before any fix is committed', async () => {
+  const gh = fakeGithub({ checks: ['failure'], threads: [[]] });
+  let workerRan = false;
+  const base = baseInput(gh.github, { headBranch: null });
+  const result = await runTakeOverFlow({
+    ...base,
+    subagents: {
+      ...base.subagents,
+      runWorkerOverride: async () => {
+        workerRan = true;
+        return { kind: 'blocked', reason: 'unreachable' } satisfies WorkerResult;
+      },
+    },
+  });
+  assert.equal(workerRan, false);
+  assert.equal(result.kind, 'blocked');
+  if (result.kind === 'blocked') assert.match(result.reason, /gh pr checkout 42/);
+});
+
+test('runTakeOverFlow: off the PR head branch, a green PR with no threads still merges', async () => {
+  const gh = fakeGithub({ checks: ['success'], threads: [[]] });
+  const result = await runTakeOverFlow(baseInput(gh.github, { headBranch: null }));
+  assert.equal(result.kind, 'merged');
+});
 
 test('runTakeOverFlow: CI green + no threads → merges immediately', async () => {
   const gh = fakeGithub({ checks: ['success'], threads: [[]] });

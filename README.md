@@ -10,10 +10,18 @@ Give `aitm` a sentence, walk away, come back to a stack of merged pull requests.
 
 > **Inspired by** [`developerz-ai/claude-task-master`](https://github.com/developerz-ai/claude-task-master): same idea (a task-master that drives the work to merge), built here on the Vercel AI SDK + OpenRouter, provider-agnostic, with MCP client support and a much smaller surface area.
 
+<div align="center">
+
+[![AI-maintained](https://img.shields.io/badge/maintained%20by-developerz.ai-8a2be2.svg)](#ai-maintained)
+[![npm: aitm](https://img.shields.io/npm/v/@developerz.ai/aitm.svg?label=%40developerz.ai%2Faitm)](https://www.npmjs.com/package/@developerz.ai/aitm)
+[![npm: ai-claude-compat](https://img.shields.io/npm/v/@developerz.ai/ai-claude-compat.svg?label=%40developerz.ai%2Fai-claude-compat)](https://www.npmjs.com/package/@developerz.ai/ai-claude-compat)
+[![CI](https://github.com/developerz-ai/ai-task-master/actions/workflows/ci.yml/badge.svg)](https://github.com/developerz-ai/ai-task-master/actions/workflows/ci.yml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](./packages/aitm/tsconfig.json)
 [![Node](https://img.shields.io/badge/Node-≥20-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Deno](https://img.shields.io/badge/Deno-≥2.0-000000?logo=deno&logoColor=white)](https://deno.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
+</div>
 
 ---
 
@@ -267,6 +275,22 @@ first. Delete the repository afterwards with `gh repo delete aitm-scratch`.
 | 🐙 GitHub integration | [`docs/github-integration.md`](packages/aitm/docs/github-integration.md) |
 | 🏃 Runtime | [`docs/runtime.md`](packages/aitm/docs/runtime.md) |
 | 📖 Vercel AI SDK reference (chunked) | [`docs/vendor/ai-sdk/index.md`](packages/aitm/docs/vendor/ai-sdk/index.md) |
+
+## AI-maintained
+
+**aitm is maintained by AI**: by [developerz.ai](https://developerz.ai), the way a human maintainer looks after an open-source project. The bot's policy is committed in [`.dz/maintainer/maintainer.yml`](.dz/maintainer/maintainer.yml):
+
+| Who opens it | What happens |
+|---|---|
+| you, an issue | triaged; asked for steps, expected, actual and version when they are missing; closed if that request goes unanswered for 14 days |
+| you, a pull request | reviewed (CodeRabbit and the developerz.ai reviewer), driven to green, merged once its required checks and review pass |
+| Dependabot | driven to green, merged once its required checks and review pass |
+| a request in the policy's non-goals (a mailbox, aitm as an MCP server, inbound HTTP beyond loopback OAuth redirects, containers, an Anthropic SDK, a legacy path kept alive) | declined |
+| an outside change to CI, release or publish automation (`.github/`, `PUBLISHING.md`) | declined: members maintain the pipeline that publishes to npm |
+
+An issue with no activity for 30 days gets a comment, then is closed. A pull request waiting on its author closes after 21 days.
+
+Releases follow the work, not a calendar. A weekday checkup asks whether a shipping change has merged and nobody has released it. When one has, the bot files a release request; the version-bump PR merges like any other once its checks and review pass, and publishing the GitHub Release runs `release.yml`, which publishes both packages to npm ([PUBLISHING.md](PUBLISHING.md)). The bot never publishes by hand.
 
 ## 🤝 Contributing
 

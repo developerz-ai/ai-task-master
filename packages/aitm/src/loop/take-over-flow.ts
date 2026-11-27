@@ -152,6 +152,11 @@ export type TakeOverFlowInput = {
   pr: number;
   checkoutPath: string;
   baseBranch: string;
+  // The PR's head branch when the checkout is on it, else null. The CI-fix Worker and Reviewer
+  // commit in the checkout and push with a bare --force-with-lease, so that work needs the head
+  // branch (its upstream is the PR); off it, the flow blocks before any commit. A green PR with no
+  // threads still merges — that needs no checkout.
+  headBranch: string | null;
   github: TakeOverGithub;
   subagents: TakeOverSubagents;
   // Store for downloaded CI logs / comments (issue #48). The shared CI-fix session writes the full
@@ -286,7 +291,8 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
     //    WorkLoop ci-failed stage. It downloads and pushes internally, so loop straight back to
     //    re-poll CI; the Reviewer addresses threads on a later green pass.
     if (ciStatus === 'failure') {
-      const fixed = await runCiFixSession(input, runCmd, ciFixHandle);
+      if (input.headBranch === null) return offHead(input, iteration);
+      const fixed = await runCiFixSession(input, runCmd, ciFixHandle, input.headBranch);
       // Anything but a delivered fix ends the run: runFixSession already blocks a 'no-changes' or
       // errored Worker on its own reason (a contradiction while CI is red) and never force-pushes
       // zero commits — so a red PR can't burn iterations re-polling the same failing checks.
@@ -309,6 +315,7 @@ export async function runTakeOverFlow(input: TakeOverFlowInput): Promise<TakeOve
     let reviewerBlock: string | null = null;
 
     if (threads.length > 0) {
+      if (input.headBranch === null) return offHead(input, iteration);
       const reviewed = await runReviewerThreads(input, threads);
       if (reviewed.kind === 'blocked') {
         return { kind: 'blocked', reason: reviewed.reason, iterations: iteration };
@@ -509,6 +516,7 @@ function runCiFixSession(
   input: TakeOverFlowInput,
   runCmd: RunCmd,
   priorHandle: SubagentHandle | undefined,
+  headBranch: string,
 ): Promise<FixSessionResult> {
   const { subagents } = input;
   const group: PrGroup = {
@@ -517,7 +525,7 @@ function runCiFixSession(
     // buildFixTask supplies the scoped fix task; the group only carries branch/PR context.
     tasks: [],
     dependsOn: [],
-    branch: null,
+    branch: headBranch,
     pr: input.pr,
     status: 'in-progress',
     stage: 'ci-failed',
@@ -550,4 +558,12 @@ function runCiFixSession(
     ...(priorHandle ? { priorHandle } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
   });
+}
+
+function offHead(input: TakeOverFlowInput, iterations: number): TakeOverResult {
+  return {
+    kind: 'blocked',
+    reason: `PR #${input.pr} needs a fix committed in this checkout, which is not on the PR's head branch. Check it out first: gh pr checkout ${input.pr}`,
+    iterations,
+  };
 }

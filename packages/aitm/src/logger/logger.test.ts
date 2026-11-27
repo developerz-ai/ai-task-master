@@ -295,6 +295,29 @@ test('Logger falls back to safe record on serialization failure', () => {
   assert.match(String(record.serializationError), /boom/);
 });
 
+// Regression: the serialization fallback wrote the caller's msg and the thrown error's message raw,
+// so a credential the normal path scrubs reached stderr and the log file unredacted.
+test('Logger fallback scrubs secrets from the original msg and the serialization error', () => {
+  const err = captureStream(process.stderr);
+  const bad: Record<string, unknown> = {
+    get exploder(): unknown {
+      throw new Error('boom Bearer abcdefgh12345678');
+    },
+  };
+  try {
+    const log = new Logger('info', 'run-fail');
+    log.info('GET https://user:hunter2pass@example.com/x failed', bad);
+  } finally {
+    err.restore();
+  }
+  const [record] = parseLines(err.lines);
+  assert.ok(record);
+  assert.equal(record.msg, 'logger serialization failed');
+  assert.doesNotMatch(String(record.originalMsg), /hunter2pass/);
+  assert.doesNotMatch(String(record.serializationError), /abcdefgh12345678/);
+  assert.match(String(record.serializationError), /boom/);
+});
+
 test('Logger does not collide level/msg/runId when fields supply same keys', () => {
   const err = captureStream(process.stderr);
   try {

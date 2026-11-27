@@ -112,8 +112,8 @@ export class Logger implements LoggerLike {
         msg: 'logger serialization failed',
         ts,
         runId: this.runId,
-        originalMsg: msg,
-        serializationError: err instanceof Error ? err.message : String(err),
+        originalMsg: scrubSecrets(msg),
+        serializationError: scrubSecrets(err instanceof Error ? err.message : String(err)),
       };
       return `${safeStringify(fallback)}\n`;
     }

@@ -56,6 +56,8 @@ The name is validated as a git ref (no whitespace, leading `-`, `..`, control/sp
 
 Names aitm composes are also deduped against `origin` at plan time: one `git ls-remote --heads` lists what already exists, and a colliding name takes a numeric suffix (`aitm/g1-add-todo-crud-2`). That matters when two people run aitm on the same repo toward the same goal — they get the same plan, hence the same names, and force-push is allowed by default. An unreadable remote degrades to the plain names, and a resumed run keeps the branch already in `state.json`. An explicit single-group `--branch` is never suffixed.
 
+A group branch equal to the repository's default branch (`--branch main`) is refused: that group blocks before the checkout is touched, since aitm never commits on the base.
+
 ### Auto-merge
 
 Auto-merge is **on by default** — `aitm` merges every PR it opens once CI passes, via a `gh`

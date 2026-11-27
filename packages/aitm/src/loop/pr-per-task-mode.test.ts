@@ -302,7 +302,7 @@ test('prPerTask + autoMerge: a pushed review fix waits for CI on the new head be
     comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
   };
   const events: string[] = [];
-  const { orchestrator } = makeOrchestrator({
+  const { orchestrator, calls } = makeOrchestrator({
     prNumber: 7,
     events,
     addressReviewsResult: { kind: 'ok', pushed: true },

@@ -1271,7 +1271,8 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           reason: result.kind === 'blocked' ? result.reason : result.error,
         };
       }
-      if (result.resolutions.some((r) => r.kind === 'fixed')) {
+      const fixed = result.resolutions.some((r) => r.kind === 'fixed');
+      if (fixed) {
         if (!input.resolved.allowForcePush) {
           return {
             kind: 'blocked',
@@ -1295,7 +1296,7 @@ export function defaultMakeOrchestrator(ctx: OrchestratorBridgeCtx): WorkLoopOrc
           };
         }
       }
-      return { kind: 'ok' };
+      return { kind: 'ok', pushed: fixed };
     },
     // Drop the group's carried conversations once the WorkLoop is done with it. Both maps hold whole
     // ModelMessage[] histories — the largest per-group allocation the run makes — and a finished group

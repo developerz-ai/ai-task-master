@@ -154,7 +154,7 @@ function makeOrchestrator(
     finalizeCommit: async () => 'sha',
     openPr: async () => pr(config.prNumber ?? 1),
     runCiFix: async () => ({ kind: 'ok' }),
-    addressReviews: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok', pushed: false }),
   };
 }
 
@@ -395,7 +395,7 @@ test('resume: an interrupted waiting-ci group is rescheduled through the real ad
       return pr(42);
     },
     runCiFix: async () => ({ kind: 'ok' }),
-    addressReviews: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok', pushed: false }),
   };
   const github: WorkLoopGithub = {
     defaultBranch: async () => 'main',

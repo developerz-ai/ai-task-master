@@ -19,7 +19,7 @@ import type { RunStep } from '../observability/step-progress.ts';
 import { perTaskBranch } from '../workspace/branch-name.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
 import { type CiRoute, chargeCiFixAttempt, routeCiPoll } from './ci-outcome-policy.ts';
-import type { StageWorkResult } from './stage-handlers.ts';
+import type { ReviewWorkResult, StageWorkResult } from './stage-handlers.ts';
 import type {
   CheckoutHome,
   GroupOutcome,
@@ -37,7 +37,7 @@ export function ciFixFailedError(fix: Extract<StageWorkResult, { kind: 'blocked'
   return new Error(`worker CI fix failed: ${fix.reason}`, { cause: fix });
 }
 
-export function reviewFailedError(review: Extract<StageWorkResult, { kind: 'blocked' }>): Error {
+export function reviewFailedError(review: Extract<ReviewWorkResult, { kind: 'blocked' }>): Error {
   return new Error(`reviewer failed: ${review.reason}`, { cause: review });
 }
 
@@ -241,9 +241,59 @@ async function autoMergeFlow(
   checkout: Checkout,
   baseBranch: string,
 ): Promise<void> {
-  const { orchestrator, github, signal, adminMerge } = deps;
+  const { orchestrator, github } = deps;
 
   let fixSpent = 0;
+  // Threads the Reviewer already ran over: one it only replied to stays unresolved on GitHub, and
+  // re-feeding it every round would never terminate.
+  const addressed = new Set<string>();
+  let gateCi = true;
+  // --admin may advance a CI timeout on the head this task opened. A head the Reviewer pushed is
+  // aitm's own unchecked code: its recheck must settle green, so a timeout there blocks.
+  let adminAdvance = deps.adminMerge;
+  while (true) {
+    if (gateCi) {
+      fixSpent = await untilCiGreen(deps, group, pr, checkout, baseBranch, fixSpent, adminAdvance);
+    }
+    // Review: address any unresolved threads via the Reviewer. addressReviews pushes the Reviewer's
+    // code fixes to the remote, so the merge below lands them; runReviewer alone would leave them
+    // committed only locally and merge without them. Re-read after every CI pass: a review bot
+    // posts on the new head a little after its CI.
+    const threads = (await github.listUnresolvedThreads(pr.number)).filter(
+      (t) => !addressed.has(t.id),
+    );
+    if (threads.length === 0) break;
+    const review = await orchestrator.addressReviews({ pr: pr.number, threads, checkout });
+    if (review.kind !== 'ok') {
+      throw reviewFailedError(review);
+    }
+    for (const t of threads) addressed.add(t.id);
+    // A pushed fix is a new head whose CI has not run: the green above was for the old one, so
+    // re-gate CI. Nothing pushed → the head and its green verdict stand; the next read only checks
+    // for threads posted meanwhile.
+    gateCi = review.pushed;
+    if (review.pushed) adminAdvance = false;
+  }
+
+  // The last thread read can straddle a cancel; an empty read must not carry a stopped run to merge.
+  throwIfCancelled(deps);
+
+  await github.mergePr(pr.number, deps.mergeMethod, { admin: deps.adminMerge });
+}
+
+// Wait → route → maybe fix → re-wait until CI is green (or --admin advances a timeout). Returns the
+// fix budget spent so far, so a recheck after a review push shares the task's one budget.
+async function untilCiGreen(
+  deps: PrPerTaskDeps,
+  group: PrGroup,
+  pr: PullRequest,
+  checkout: Checkout,
+  baseBranch: string,
+  spent: number,
+  adminAdvance: boolean,
+): Promise<number> {
+  const { orchestrator, github, signal } = deps;
+  let fixSpent = spent;
   while (true) {
     let route: CiRoute;
     let timeout: CiFailed | undefined;
@@ -252,14 +302,14 @@ async function autoMergeFlow(
       // A cancelled wait comes back 'pending', which would route as not-green and fall through to a
       // fix (or past it to the merge). Stop the group instead.
       throwIfCancelled(deps);
-      route = routeCiPoll(ci.state, pr.number, adminMerge);
+      route = routeCiPoll(ci.state, pr.number, adminAdvance);
     } catch (err) {
       if (!(err instanceof CiFailed)) throw err;
       timeout = err;
-      route = routeCiPoll(null, pr.number, adminMerge);
+      route = routeCiPoll(null, pr.number, adminAdvance);
     }
     // green, or --admin force-advancing a timeout past CI → proceed to reviews/merge.
-    if (route.kind === 'proceed' || route.kind === 'advance') break;
+    if (route.kind === 'proceed' || route.kind === 'advance') return fixSpent;
     // Timeout without --admin: block on the original CiFailed (its message names the poll window).
     if (route.kind === 'block') throw timeout ?? new CiFailed(route.reason);
     // route.kind === 'fix': charge the budget BEFORE spending an LLM call / a push, so an unfixable
@@ -270,19 +320,6 @@ async function autoMergeFlow(
     const fix = await orchestrator.runCiFix({ group, pr: pr.number, checkout, baseBranch });
     if (fix.kind !== 'ok') throw ciFixFailedError(fix);
   }
-
-  // Review: address any unresolved threads via the Reviewer. addressReviews pushes the Reviewer's
-  // code fixes to the remote, so the merge below lands them; runReviewer alone would leave them
-  // committed only locally and merge without them.
-  const threads = await github.listUnresolvedThreads(pr.number);
-  if (threads.length > 0) {
-    const review = await orchestrator.addressReviews({ pr: pr.number, threads, checkout });
-    if (review.kind !== 'ok') {
-      throw reviewFailedError(review);
-    }
-  }
-
-  await github.mergePr(pr.number, deps.mergeMethod, { admin: deps.adminMerge });
 }
 
 function throwIfCancelled(deps: PrPerTaskDeps): void {

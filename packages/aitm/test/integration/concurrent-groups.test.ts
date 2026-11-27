@@ -228,7 +228,7 @@ test('concurrent-groups: two ready groups share one checkout with no branch/tree
           // it away rather than carrying it onto group B's branch (audit 02).
           await writeFile(join(checkout.path, 'scratch.txt'), 'stray-from-group-a\n');
         }
-        return { kind: 'ok' };
+        return { kind: 'ok', pushed: true };
       },
     };
 

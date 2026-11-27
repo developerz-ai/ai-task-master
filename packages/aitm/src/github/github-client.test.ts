@@ -343,6 +343,32 @@ test('createPr adopts an existing PR for the head instead of creating a duplicat
   assert.ok(!calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create'));
 });
 
+// Regression: `gh pr view <branch>` also answers with a MERGED or CLOSED PR for the head. Branch
+// names repeat across runs (aitm/g1 again), so a later run adopted the earlier, merged PR and its
+// new commits were never proposed — the "merge" was a no-op on a PR that had already landed.
+test('createPr does not adopt a merged or closed PR for the head — it opens a new one', async () => {
+  for (const state of ['MERGED', 'CLOSED'] as const) {
+    const old = {
+      number: 7,
+      state,
+      url: 'https://github.com/org/repo/pull/7',
+      headRefName: 'aitm/g1',
+      baseRefName: 'main',
+    };
+    const fresh = { ...old, number: 43, state: 'OPEN', url: 'https://github.com/org/repo/pull/43' };
+    const { run, calls } = makeRun([
+      { stdout: JSON.stringify(old) },
+      { stdout: '' },
+      { stdout: 'https://github.com/org/repo/pull/43' },
+      { stdout: JSON.stringify(fresh) },
+    ]);
+    const g = new GitHubClient('/tmp/repo', run);
+    const result = await g.createPr({ title: 't', body: 'b', base: 'main', head: 'aitm/g1' });
+    assert.equal(result.number, 43, `a ${state} PR is not adopted`);
+    assert.ok(calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create'));
+  }
+});
+
 test('mergePr passes pr number and method flag', async () => {
   const { run, calls } = makeRun([{ stdout: 'merged' }]);
   const g = new GitHubClient('/tmp/repo', run);
@@ -387,6 +413,28 @@ test('mergePr throws MergeConflict on conflict stderr signal', async () => {
   ]);
   const g = new GitHubClient('/tmp/repo', run);
   await assert.rejects(() => g.mergePr(9, 'squash'), MergeConflict);
+});
+
+// Regression: gh words a branch-protection refusal "is not mergeable: the base branch policy
+// prohibits the merge", which matched the conflict pattern — the run then reported a merge conflict
+// that does not exist instead of the policy block (whose fix is review approval or --admin).
+test('mergePr: a base-branch policy refusal is not reported as a merge conflict', async () => {
+  const { run } = makeRun([
+    {
+      exitCode: 1,
+      stderr:
+        'X Pull request developerz-ai/x#9 is not mergeable: the base branch policy prohibits the merge.',
+    },
+    { exitCode: 0, stdout: '{"state":"OPEN"}' },
+  ]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(
+    () => g.mergePr(9, 'squash'),
+    (err: unknown) =>
+      !(err instanceof MergeConflict) &&
+      err instanceof Error &&
+      /policy prohibits/.test(err.message),
+  );
 });
 
 test('mergePr surfaces non-conflict failures generically', async () => {

@@ -161,7 +161,7 @@ function makeRunLoop(
         baseRefName: baseBranch,
       }),
       runCiFix: async () => ({ kind: 'ok' }),
-      addressReviews: async () => ({ kind: 'ok' }),
+      addressReviews: async () => ({ kind: 'ok', pushed: false }),
     };
 
     const github = {
@@ -464,7 +464,7 @@ test('resume-flow: interrupt after pr-open; resume picks up at waiting-ci withou
               };
             },
             runCiFix: async () => ({ kind: 'ok' }),
-            addressReviews: async () => ({ kind: 'ok' }),
+            addressReviews: async () => ({ kind: 'ok', pushed: false }),
           };
 
           const { stdout: rawBranch } = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {

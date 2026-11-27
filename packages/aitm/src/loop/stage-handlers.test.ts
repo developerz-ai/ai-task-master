@@ -112,7 +112,7 @@ function makeOrchestrator(over: Partial<StageOrchestrator> = {}): StageOrchestra
     work: async () => ({ kind: 'ok' }),
     openPr: async () => ({ number: 42, url: 'https://github.com/o/r/pull/42' }),
     fixCi: async () => ({ kind: 'ok' }),
-    addressReviews: async () => ({ kind: 'ok' }),
+    addressReviews: async () => ({ kind: 'ok', pushed: false }),
     ...over,
   };
 }
@@ -615,7 +615,7 @@ test('handleAddressingReviews: runs Reviewer over fresh threads, records them â†
     orchestrator: makeOrchestrator({
       addressReviews: async (_g, threads) => {
         seen.push(threads.map((t) => t.id));
-        return { kind: 'ok' };
+        return { kind: 'ok', pushed: false };
       },
     }),
     prContext: addressed.store,
@@ -628,6 +628,21 @@ test('handleAddressingReviews: runs Reviewer over fresh threads, records them â†
   assert.deepEqual(addressed.ids(), ['T1', 'T2'], 'addressed threads recorded');
 });
 
+// Regression: a Reviewer push makes a new head whose CI has not run, but the handler routed back to
+// waiting-reviews, which (no fresh threads left) advanced straight to ready-to-merge â€” merging a PR
+// whose CI on the pushed commit was still pending or red.
+test('handleAddressingReviews: a pushed review fix â†’ waiting-ci, so CI re-runs before any merge', async () => {
+  const deps = makeDeps({
+    github: makeGithub({ listUnresolvedThreads: async () => [thread('T1')] }),
+    orchestrator: makeOrchestrator({ addressReviews: async () => ({ kind: 'ok', pushed: true }) }),
+    prContext: makeAddressed().store,
+  });
+  assert.equal(
+    await handleAddressingReviews(deps, group({ stage: 'addressing-reviews', pr: 5 })),
+    'waiting-ci',
+  );
+});
+
 test('handleAddressingReviews: skips already-addressed threads', async () => {
   const seen: string[][] = [];
   const addressed = makeAddressed(['T1']);
@@ -636,7 +651,7 @@ test('handleAddressingReviews: skips already-addressed threads', async () => {
     orchestrator: makeOrchestrator({
       addressReviews: async (_g, threads) => {
         seen.push(threads.map((t) => t.id));
-        return { kind: 'ok' };
+        return { kind: 'ok', pushed: false };
       },
     }),
     prContext: addressed.store,
@@ -661,7 +676,7 @@ test('handleAddressingReviews: skips threads already carrying our reply, address
     orchestrator: makeOrchestrator({
       addressReviews: async (_g, threads) => {
         seen.push(threads.map((t) => t.id));
-        return { kind: 'ok' };
+        return { kind: 'ok', pushed: false };
       },
     }),
     prContext: addressed.store,
@@ -682,7 +697,7 @@ test('handleAddressingReviews: nothing fresh â†’ waiting-reviews without running
     orchestrator: makeOrchestrator({
       addressReviews: async () => {
         ran += 1;
-        return { kind: 'ok' };
+        return { kind: 'ok', pushed: false };
       },
     }),
     prContext: addressed.store,

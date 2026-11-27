@@ -288,6 +288,36 @@ test('prPerTask + autoMerge: unresolved threads route through addressReviews (pu
   );
 });
 
+// Regression: autoMergeFlow merged right after addressReviews pushed a fix, without polling CI on
+// the new head, so a red or still-running CI on the Reviewer's commit was merged past.
+test('prPerTask + autoMerge: a pushed review fix waits for CI on the new head before merging', async () => {
+  const thread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
+  };
+  const { orchestrator } = makeOrchestrator({
+    prNumber: 7,
+    addressReviewsResult: { kind: 'ok', pushed: true },
+    ciFixResults: [{ kind: 'blocked', reason: 'still red after fix' }],
+  });
+  const { github, calls: ghCalls } = makeGithub({
+    checks: [ciSuccess, ciFailure],
+    threads: [thread],
+  });
+  const { state, updates } = makeState([group('solo')]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prPerTask: true }),
+  );
+  await loop.runGroup(group('solo'));
+
+  assert.equal(ghCalls.waitForChecks.length, 2, 'CI re-polled on the pushed head');
+  assert.equal(ghCalls.mergePr.length, 0, 'no merge while CI on the pushed head is red');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'solo')?.status, 'blocked');
+});
+
 test('prPerTask + autoMerge: an unaddressable review thread blocks the group without merging', async () => {
   const thread: ReviewThread = {
     id: 't1',

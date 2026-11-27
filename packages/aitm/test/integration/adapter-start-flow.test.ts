@@ -119,7 +119,7 @@ function integrationSeams(mockModel: MockLanguageModelV3, defaultBranch: string)
             baseRefName: baseBranch,
           }),
           runCiFix: async () => ({ kind: 'ok' }),
-          addressReviews: async () => ({ kind: 'ok' }),
+          addressReviews: async () => ({ kind: 'ok', pushed: false }),
         };
       },
     });

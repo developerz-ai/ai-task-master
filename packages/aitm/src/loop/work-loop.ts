@@ -39,6 +39,7 @@ import {
   handleWaitingCi,
   handleWaitingReviews,
   handleWorking,
+  type ReviewWorkResult,
   type StageDeps,
   type StageGithub,
   type StageHandler,
@@ -107,8 +108,9 @@ export type WorkLoopOrchestrator = {
   // onto origin/<base> and force-with-lease push. ok → CI re-runs; blocked → couldn't land the fix.
   runCiFix(input: CiFixInvocation): Promise<StageWorkResult>;
   // addressing-reviews stage + autoMergeFlow: run the Reviewer over the given threads and push its
-  // code fixes to the remote. ok → threads handled (any fix pushed); blocked → reviewer/push error.
-  addressReviews(input: ReviewerInvocation): Promise<StageWorkResult>;
+  // code fixes to the remote. ok → threads handled (`pushed` when a fix reached the remote);
+  // blocked → reviewer/push error.
+  addressReviews(input: ReviewerInvocation): Promise<ReviewWorkResult>;
   // The run is finished with this group — merged, blocked, or handed over to the merge-pr flow — and
   // will never schedule it again (ready() only picks 'pending' groups). Whatever the orchestrator
   // cached for it can go: the real bridge holds a full Worker conversation and a CI-fix handle per

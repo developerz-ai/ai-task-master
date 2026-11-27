@@ -163,7 +163,7 @@ function makeRunLoop(
         baseRefName: baseBranch,
       }),
       runCiFix: async () => ({ kind: 'ok' }),
-      addressReviews: async () => ({ kind: 'ok' }),
+      addressReviews: async () => ({ kind: 'ok', pushed: false }),
     };
 
     const github = {
@@ -360,7 +360,7 @@ test('start-flow: 2-task group writes [x] per completed task in plan.md', async 
               baseRefName: baseBranch,
             }),
             runCiFix: async () => ({ kind: 'ok' }),
-            addressReviews: async () => ({ kind: 'ok' }),
+            addressReviews: async () => ({ kind: 'ok', pushed: false }),
           };
 
           const github = {

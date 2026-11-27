@@ -377,6 +377,31 @@ test('prPerTask + autoMerge: threads are re-read after the post-push CI, and an 
   );
 });
 
+test('prPerTask + autoMerge: a reply-only review round re-reads threads but does not re-poll CI', async () => {
+  const thread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [{ id: 'c1', body: 'why?', author: 'rev' }],
+  };
+  const events: string[] = [];
+  const { orchestrator } = makeOrchestrator({ prNumber: 7, events });
+  const { github } = makeGithub({ checks: [ciSuccess], threads: [thread], events });
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, autoMerge: true, prPerTask: true }));
+  await loop.runGroup(group('solo'));
+
+  assert.deepEqual(
+    events.filter((e) => !e.startsWith('openPr') && !e.startsWith('selfReview')),
+    [
+      'waitForChecks:7',
+      'listUnresolvedThreads:7',
+      'addressReviews:7',
+      'listUnresolvedThreads:7',
+      'merge:7',
+    ],
+  );
+});
+
 test('prPerTask + autoMerge: an unaddressable review thread blocks the group without merging', async () => {
   const thread: ReviewThread = {
     id: 't1',
@@ -503,13 +528,15 @@ test('prPerTask + autoMerge + --admin: a CI timeout on the head a review fix pus
     path: 'a.ts',
     comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
   };
-  const { orchestrator } = makeOrchestrator({
+  const { orchestrator, calls } = makeOrchestrator({
     prNumber: 9,
     addressReviewsResult: { kind: 'ok', pushed: true },
   });
+  const events: string[] = [];
   const { github, calls: ghCalls } = makeGithub({
     checks: [ciSuccess, new CiFailed('checks did not settle')],
     threads: [thread],
+    events,
   });
   const { state, updates } = makeState([group('solo')]);
   const loop = new WorkLoop(
@@ -517,6 +544,12 @@ test('prPerTask + autoMerge + --admin: a CI timeout on the head a review fix pus
   );
   await loop.runGroup(group('solo'));
 
+  assert.deepEqual(
+    events.filter((e) => e.startsWith('waitForChecks')),
+    ['waitForChecks:9', 'waitForChecks:9'],
+    'the block comes from the post-push poll, after its scripted timeout',
+  );
+  assert.equal(calls.addressReviews.length, 1, 'the Reviewer pushed before that poll');
   assert.equal(ghCalls.mergePr.length, 0, 'no merge without a green verdict on the pushed head');
   const last = updates[updates.length - 1] as RunState;
   assert.equal(last.prGroups.find((p) => p.id === 'solo')?.status, 'blocked');

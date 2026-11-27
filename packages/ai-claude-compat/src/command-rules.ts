@@ -27,14 +27,22 @@ export function evaluateCommand(command: string, rules: readonly CommandRule[]):
 }
 
 // Split a compound command into subcommands on `;`, `&&`, `||`, `|`, `&`, and newlines, respecting
-// single/double quotes (an operator inside quotes is literal). Quote characters are preserved so the
-// tokenizer can handle them.
+// single/double quotes (an operator inside quotes is literal) and POSIX backslash escapes: outside
+// quotes `\x` is a literal x, inside double quotes `\"` does not end the quote, inside single quotes
+// a backslash is literal. Without that, the `'\''` an apostrophe is quoted as (`'don'\''t'`) would
+// desync the quote state and split a quoted multi-line message into fake subcommands. Quote and
+// escape characters are preserved so the tokenizer can handle them.
 function splitCompound(command: string): string[] {
   const parts: string[] = [];
   let cur = '';
   let quote: string | null = null;
   for (let i = 0; i < command.length; i++) {
     const ch = command[i] ?? '';
+    if (ch === '\\' && quote !== "'") {
+      cur += command.slice(i, i + 2);
+      i++;
+      continue;
+    }
     if (quote) {
       cur += ch;
       if (ch === quote) quote = null;
@@ -64,14 +72,23 @@ function splitCompound(command: string): string[] {
 }
 
 // Split one subcommand into tokens on whitespace, treating a single/double-quoted span as one token
-// (quotes stripped). Best-effort: nested quoting edge cases are not shell-exact.
+// (quotes stripped) and a backslash outside single quotes as escaping the next character (backslash
+// stripped). Best-effort: nested quoting edge cases are not shell-exact.
 function tokenize(subcommand: string): string[] {
   const tokens: string[] = [];
   let cur = '';
   let has = false;
   let quote: string | null = null;
+  let escaped = false;
   for (const ch of subcommand) {
-    if (quote) {
+    if (escaped) {
+      cur += ch;
+      has = true;
+      escaped = false;
+    } else if (ch === '\\' && quote !== "'") {
+      escaped = true;
+      has = true;
+    } else if (quote) {
       if (ch === quote) quote = null;
       else cur += ch;
       has = true;

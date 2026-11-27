@@ -109,3 +109,27 @@ test('evaluateCommand: command substitution is matched literally, not expanded (
   // `$(…)` is not a compound operator and is not expanded — a documented evasion limit.
   assert.equal(evaluateCommand('echo $(git push --force)', DEFAULTS).denied, false);
 });
+
+// Regression: a POSIX-quoted apostrophe (`'don'\''t'`, what shQuote emits) desynced the quote
+// tracking, so the rest of a quoted commit message was read as unquoted shell — and a message line
+// starting `gh pr merge` was split off as its own subcommand and denied (exit 126).
+test('evaluateCommand: a quoted apostrophe escape keeps a multi-line message quoted', () => {
+  const msg = "fix: don't double-merge\n\ngh pr merge is run by the harness, not here";
+  const quoted = `'${msg.replace(/'/g, "'\\''")}'`;
+  assert.deepEqual(evaluateCommand(`git commit -m ${quoted}`, DEFAULTS), { denied: false });
+});
+
+test('evaluateCommand: a backslash-escaped operator outside quotes is literal', () => {
+  assert.deepEqual(evaluateCommand('echo a \\; gh pr merge', DEFAULTS), { denied: false });
+  assert.equal(evaluateCommand('echo a ; gh pr merge', DEFAULTS).denied, true);
+});
+
+test('evaluateCommand: an escaped quote inside double quotes does not end the quote', () => {
+  assert.deepEqual(evaluateCommand('echo "a \\" ; gh pr merge"', DEFAULTS), { denied: false });
+});
+
+test('evaluateCommand: a backslash inside a command word does not evade a deny rule', () => {
+  // The shell runs `git` for `g\it`; the matcher must see the same word.
+  assert.equal(evaluateCommand('g\\it push --force', DEFAULTS).denied, true);
+  assert.equal(evaluateCommand("gh pr 'merge'", DEFAULTS).denied, true);
+});

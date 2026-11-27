@@ -142,6 +142,39 @@ test('runGroup sequences: acquire → worker → finalizeCommit → openPr → s
   assert.ok(updates.length >= 2, 'state.update called at least for in-progress + awaiting-pr');
 });
 
+// Regression: `aitm start --branch main` (the repo's default branch) with a one-group plan used
+// `main` verbatim as the group branch, so the Worker committed on the base and the CI-fix path
+// force-pushed it. A group branch equal to the base is refused before anything touches the checkout.
+test('runGroup: a group branch equal to the base branch blocks before the checkout is touched', async () => {
+  // A non-`main` default, so the guard is proven against the repo's real base, not a literal.
+  const onBase = { ...group('alpha'), branch: 'trunk' };
+  const { github } = makeGithub({ defaultBranch: 'trunk' });
+  const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
+  const { home, calls: homeCalls } = makeHome();
+  const { state, updates } = makeState([onBase]);
+  const progress: string[] = [];
+  const loop = new WorkLoop(
+    makeDeps({
+      orchestrator,
+      github,
+      home,
+      state,
+      autoMerge: true,
+      progress: (m) => progress.push(m),
+    }),
+  );
+  await loop.runGroup(onBase);
+
+  assert.deepEqual(homeCalls.acquire, [], 'the base is never checked out as a group branch');
+  assert.equal(calls.runWorker.length, 0);
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((g) => g.id === 'alpha')?.status, 'blocked');
+  assert.ok(
+    progress.some((m) => /--branch/.test(m)),
+    'the reason names the --branch fix',
+  );
+});
+
 test('runGroup: releases the group on every terminal path — merged, blocked, and rethrown', async () => {
   // The orchestrator caches a full Worker conversation (and a CI-fix handle) per group; a group the
   // loop is done with is never rescheduled, so releaseGroup is what stops those piling up for the

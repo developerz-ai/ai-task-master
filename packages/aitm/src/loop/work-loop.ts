@@ -471,6 +471,14 @@ export class WorkLoop {
     let acquired = false;
     try {
       const baseBranch = await this.deps.github.defaultBranch();
+      // A group branch named after the base (`aitm start --branch main` on a one-group plan) would
+      // have the Worker commit on the base and the CI-fix path force-push it. Refuse before the
+      // checkout is touched.
+      if (branch === baseBranch) {
+        throw new Error(
+          `group branch '${branch}' is the base branch: aitm never commits on the base. Pass a different --branch.`,
+        );
+      }
       // Resume at the persisted stage; a fresh/pending group starts at 'working'. prPerTask
       // tracks completion per task (task.done), not via the per-group stage, so it omits it.
       const startStage = resumeStage(group);

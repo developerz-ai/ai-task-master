@@ -411,7 +411,7 @@ test('hasTaskCommit: false when the branch has no commit carrying the task trail
   try {
     await execa('git', ['checkout', '-b', 'aitm/g1'], { cwd: repo.path });
     await execa('git', ['commit', '--allow-empty', '-m', 'unrelated work'], { cwd: repo.path });
-    assert.equal(await hasTaskCommit(repo.path, 'aitm/g1', 't1'), false);
+    assert.equal(await hasTaskCommit(repo.path, 'aitm/g1', 't1', 'main'), false);
   } finally {
     await repo.cleanup();
   }
@@ -420,7 +420,7 @@ test('hasTaskCommit: false when the branch has no commit carrying the task trail
 test('hasTaskCommit: false when the branch does not exist at all', async () => {
   const repo = await seedRepo();
   try {
-    assert.equal(await hasTaskCommit(repo.path, 'aitm/never-acquired', 't1'), false);
+    assert.equal(await hasTaskCommit(repo.path, 'aitm/never-acquired', 't1', 'main'), false);
   } finally {
     await repo.cleanup();
   }
@@ -432,14 +432,63 @@ test('hasTaskCommit: true once a commit stamped with the task trailer lands on t
     await execa('git', ['checkout', '-b', 'aitm/g1'], { cwd: repo.path });
     const message = `feat: add hello\n\n${taskCommitTrailer('t1')}`;
     await execa('git', ['commit', '--allow-empty', '-m', message], { cwd: repo.path });
-    assert.equal(await hasTaskCommit(repo.path, 'aitm/g1', 't1'), true);
+    assert.equal(await hasTaskCommit(repo.path, 'aitm/g1', 't1', 'main'), true);
     assert.equal(
-      await hasTaskCommit(repo.path, 'aitm/g1', 't2'),
+      await hasTaskCommit(repo.path, 'aitm/g1', 't2', 'main'),
       false,
       'a different task id on the same branch must not match',
     );
   } finally {
     await repo.cleanup();
+  }
+});
+
+// Regression: the grep read ALL of `git log <branch>`, base history included. Task ids restart at
+// g1-1 in every plan, and a squash-merge carries the trailer onto main — so a later run's fresh
+// aitm/g1 branch "already had" g1-1's commit and skipped the task without running the Worker.
+test('hasTaskCommit: a trailer already on the base (a prior run, merged) does not count', async () => {
+  const repo = await seedRepo();
+  try {
+    await execa(
+      'git',
+      ['commit', '--allow-empty', '-m', `feat: old run\n\n${taskCommitTrailer('g1-1')}`],
+      {
+        cwd: repo.path,
+      },
+    );
+    await execa('git', ['checkout', '-b', 'aitm/g1'], { cwd: repo.path });
+    assert.equal(await hasTaskCommit(repo.path, 'aitm/g1', 'g1-1', 'main'), false);
+    await execa(
+      'git',
+      ['commit', '--allow-empty', '-m', `feat: this run\n\n${taskCommitTrailer('g1-1')}`],
+      {
+        cwd: repo.path,
+      },
+    );
+    assert.equal(await hasTaskCommit(repo.path, 'aitm/g1', 'g1-1', 'main'), true);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('hasTaskCommit: a prior trailer only on origin/<base> (the merge landed remotely) does not count', async () => {
+  // The real shape: the squash-merge lands on origin/main by GitHub; local main never moves.
+  const { repo, advanceOrigin, cleanup } = await seedRepoWithOrigin();
+  try {
+    await advanceOrigin(`feat: old run\n\n${taskCommitTrailer('g1-1')}`);
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+    assert.equal(await home.hasTaskCommit('aitm/g1', 'g1-1', 'main'), false);
+    await execa(
+      'git',
+      ['commit', '--allow-empty', '-m', `feat: this run\n\n${taskCommitTrailer('g1-1')}`],
+      {
+        cwd: repo.path,
+      },
+    );
+    assert.equal(await home.hasTaskCommit('aitm/g1', 'g1-1', 'main'), true);
+  } finally {
+    await cleanup();
   }
 });
 
@@ -451,12 +500,12 @@ test('hasTaskCommit: a t1 trailer does not match a t10 task id (full-line, not s
     const message = `feat: add tenth\n\n${taskCommitTrailer('t10')}`;
     await execa('git', ['commit', '--allow-empty', '-m', message], { cwd: repo.path });
     assert.equal(
-      await hasTaskCommit(repo.path, 'aitm/g1', 't1'),
+      await hasTaskCommit(repo.path, 'aitm/g1', 't1', 'main'),
       false,
       't1 must not match the t10 trailer line',
     );
     assert.equal(
-      await hasTaskCommit(repo.path, 'aitm/g1', 't10'),
+      await hasTaskCommit(repo.path, 'aitm/g1', 't10', 'main'),
       true,
       't10 matches its own complete trailer line',
     );
@@ -472,8 +521,8 @@ test('InPlaceCheckout.hasTaskCommit: reachable as a CheckoutHome method, same re
     await home.acquire('g1', 'aitm/g1', 'main');
     const message = `feat: add hello\n\n${taskCommitTrailer('t1')}`;
     await execa('git', ['commit', '--allow-empty', '-m', message], { cwd: repo.path });
-    assert.equal(await home.hasTaskCommit('aitm/g1', 't1'), true);
-    assert.equal(await home.hasTaskCommit('aitm/g1', 't2'), false);
+    assert.equal(await home.hasTaskCommit('aitm/g1', 't1', 'main'), true);
+    assert.equal(await home.hasTaskCommit('aitm/g1', 't2', 'main'), false);
   } finally {
     await repo.cleanup();
   }

@@ -283,14 +283,14 @@ first. Delete the repository afterwards with `gh repo delete aitm-scratch`.
 | Who opens it | What happens |
 |---|---|
 | you, an issue | triaged; asked for steps, expected, actual and version when they are missing; closed if that request goes unanswered for 14 days |
-| you, a pull request | reviewed (CodeRabbit and the developerz.ai reviewer), driven to green, merged |
-| Dependabot | driven to green and merged |
+| you, a pull request | reviewed (CodeRabbit and the developerz.ai reviewer), driven to green, merged once its required checks and review pass |
+| Dependabot | driven to green, merged once its required checks and review pass |
 | a request in the policy's non-goals (a mailbox, aitm as an MCP server, inbound HTTP beyond loopback OAuth redirects, containers, an Anthropic SDK, a legacy path kept alive) | declined |
 | an outside change to CI, release or publish automation (`.github/`, `PUBLISHING.md`) | declined: members maintain the pipeline that publishes to npm |
 
 An issue with no activity for 30 days gets a comment, then is closed. A pull request waiting on its author closes after 21 days.
 
-Releases follow the work, not a calendar. A weekday checkup asks whether a shipping change has merged and nobody has released it. When one has, the bot files a release request; the version-bump PR merges on green, and publishing the GitHub Release runs `release.yml`, which publishes both packages to npm ([PUBLISHING.md](PUBLISHING.md)). The bot never publishes by hand.
+Releases follow the work, not a calendar. A weekday checkup asks whether a shipping change has merged and nobody has released it. When one has, the bot files a release request; the version-bump PR merges like any other once its checks and review pass, and publishing the GitHub Release runs `release.yml`, which publishes both packages to npm ([PUBLISHING.md](PUBLISHING.md)). The bot never publishes by hand.
 
 ## 🤝 Contributing
 

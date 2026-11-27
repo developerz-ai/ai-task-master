@@ -245,6 +245,37 @@ test('redactProfile: masks a profile key, leaves a key-less profile untouched', 
   assert.deepEqual(redactProfile(noKey), noKey);
 });
 
+// Regression: `aitm config list` masked the provider key but printed every MCP server's headers
+// (`Authorization: Bearer …`) and stdio env (`GITHUB_TOKEN=…`) in cleartext.
+test('redactConfigKeys: masks MCP server header and env values', () => {
+  const file: ConfigFile = {
+    mcpServers: {
+      remote: {
+        type: 'http',
+        url: 'https://mcp.example.com/v1',
+        headers: { Authorization: 'Bearer ghp_abcdefghijklmnop1234' },
+      },
+      local: { command: 'gh-mcp', env: { GITHUB_TOKEN: 'ghp_zyxwvutsrqponmlk9876' } },
+    },
+  };
+  const out = JSON.stringify(redactConfigKeys(file));
+  assert.doesNotMatch(out, /abcdefghijklmnop/);
+  assert.doesNotMatch(out, /zyxwvutsrqponmlk/);
+  assert.match(
+    out,
+    /https:\/\/mcp\.example\.com\/v1/,
+    'the URL is not a secret and stays readable',
+  );
+  assert.match(out, /"Authorization"/, 'header names stay visible');
+  assert.match(out, /gh-mcp/);
+  assert.ok(file.mcpServers?.remote && 'headers' in file.mcpServers.remote);
+  assert.equal(
+    (file.mcpServers.remote as { headers: Record<string, string> }).headers.Authorization,
+    'Bearer ghp_abcdefghijklmnop1234',
+    'the input file is not mutated',
+  );
+});
+
 test('redactConfigKeys: masks the top-level key and every nested profile key', () => {
   const file: ConfigFile = {
     openrouterApiKey: 'sk-or-topkey1234',

@@ -219,9 +219,9 @@ function checkMark(bucket: string): string {
   return '·';
 }
 
-// waiting-reviews: not-yet-addressed unresolved threads → address them; none → merge. Subtracting
-// the addressed set (not just checking listUnresolvedThreads) is what terminates the loop: a thread
-// the Reviewer replied to but left unresolved would otherwise route back here forever.
+// waiting-reviews: address fresh unresolved threads, or advance to ready-to-merge if none remain.
+// freshThreads skips recorded thread IDs and threads with a reply from the authenticated account,
+// so a crash after replying but before recording the ID does not send that thread back to review.
 export const handleWaitingReviews: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'waiting-reviews');
   const fresh = await freshThreads(deps, pr);

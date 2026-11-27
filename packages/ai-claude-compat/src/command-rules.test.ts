@@ -133,3 +133,19 @@ test('evaluateCommand: a backslash inside a command word does not evade a deny r
   assert.equal(evaluateCommand('g\\it push --force', DEFAULTS).denied, true);
   assert.equal(evaluateCommand("gh pr 'merge'", DEFAULTS).denied, true);
 });
+
+test('evaluateCommand: a backslash-newline continuation joins words, it does not split commands', () => {
+  const rules: CommandRule[] = [{ pattern: 'echo hello', action: 'deny' }];
+  assert.equal(evaluateCommand('echo \\\nhello', rules).denied, true);
+  assert.equal(evaluateCommand('gh pr \\\nmerge', DEFAULTS).denied, true);
+});
+
+test('evaluateCommand: inside double quotes a backslash before an ordinary character is literal', () => {
+  const rules: CommandRule[] = [{ pattern: 'echo ab', action: 'deny' }];
+  assert.equal(evaluateCommand('echo "a\\b"', rules).denied, false, 'the word is a\\b, not ab');
+  assert.equal(evaluateCommand('echo a\\b', rules).denied, true, 'unquoted, \\b is b');
+  assert.equal(
+    evaluateCommand('echo "a\\$"', [{ pattern: 'echo a$', action: 'deny' }]).denied,
+    true,
+  );
+});

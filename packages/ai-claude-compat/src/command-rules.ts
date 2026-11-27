@@ -29,9 +29,10 @@ export function evaluateCommand(command: string, rules: readonly CommandRule[]):
 // Split a compound command into subcommands on `;`, `&&`, `||`, `|`, `&`, and newlines, respecting
 // single/double quotes (an operator inside quotes is literal) and POSIX backslash escapes: outside
 // quotes `\x` is a literal x, inside double quotes `\"` does not end the quote, inside single quotes
-// a backslash is literal. Without that, the `'\''` an apostrophe is quoted as (`'don'\''t'`) would
-// desync the quote state and split a quoted multi-line message into fake subcommands. Quote and
-// escape characters are preserved so the tokenizer can handle them.
+// a backslash is literal, and an unquoted or double-quoted backslash-newline is a line continuation
+// (removed, not a command break). Without that, the `'\''` an apostrophe is quoted as
+// (`'don'\''t'`) would desync the quote state and split a quoted multi-line message into fake
+// subcommands. Quote and other escape characters are preserved so the tokenizer can handle them.
 function splitCompound(command: string): string[] {
   const parts: string[] = [];
   let cur = '';
@@ -39,7 +40,7 @@ function splitCompound(command: string): string[] {
   for (let i = 0; i < command.length; i++) {
     const ch = command[i] ?? '';
     if (ch === '\\' && quote !== "'") {
-      cur += command.slice(i, i + 2);
+      if (command[i + 1] !== '\n') cur += command.slice(i, i + 2);
       i++;
       continue;
     }
@@ -72,22 +73,21 @@ function splitCompound(command: string): string[] {
 }
 
 // Split one subcommand into tokens on whitespace, treating a single/double-quoted span as one token
-// (quotes stripped) and a backslash outside single quotes as escaping the next character (backslash
-// stripped). Best-effort: nested quoting edge cases are not shell-exact.
+// (quotes stripped). Backslashes follow POSIX: unquoted, `\x` is a literal x; inside double quotes it
+// escapes only `$`, `` ` ``, `"` and `\` (before anything else it stays a literal backslash); inside
+// single quotes it is literal. Best-effort: nested quoting edge cases are not shell-exact.
 function tokenize(subcommand: string): string[] {
   const tokens: string[] = [];
   let cur = '';
   let has = false;
   let quote: string | null = null;
-  let escaped = false;
-  for (const ch of subcommand) {
-    if (escaped) {
-      cur += ch;
+  for (let i = 0; i < subcommand.length; i++) {
+    const ch = subcommand[i] ?? '';
+    if (ch === '\\' && quote !== "'" && i + 1 < subcommand.length) {
+      const next = subcommand[i + 1] ?? '';
+      cur += quote === '"' && !DOUBLE_QUOTE_ESCAPABLE.has(next) ? `\\${next}` : next;
       has = true;
-      escaped = false;
-    } else if (ch === '\\' && quote !== "'") {
-      escaped = true;
-      has = true;
+      i++;
     } else if (quote) {
       if (ch === quote) quote = null;
       else cur += ch;
@@ -109,6 +109,8 @@ function tokenize(subcommand: string): string[] {
   if (has) tokens.push(cur);
   return tokens;
 }
+
+const DOUBLE_QUOTE_ESCAPABLE = new Set(['$', '`', '"', '\\']);
 
 // Drop leading wrappers that don't change which real command runs, so a deny rule anchored on the
 // real command still fires: `NAME=value` env-assignments (`GIT_TRACE=1 git push --force`) and the

@@ -201,9 +201,6 @@ export const handleWaitingCi: StageHandler = async (deps, group) => {
   }
 };
 
-// waiting-reviews: not-yet-addressed unresolved threads → address them; none → merge. Subtracting
-// the addressed set (not just checking listUnresolvedThreads) is what terminates the loop: a thread
-// the Reviewer replied to but left unresolved would otherwise route back here forever.
 // A one-line rendering of the settled checks: `bun (test+lint) ✓, integration ✓, CodeRabbit ✗`.
 // '' when there were no checks (nothing worth a line). A ✓ for the pass/skipping buckets, ✗ for
 // fail/cancel, · for anything else gh reports. Exported for unit testing.
@@ -218,6 +215,9 @@ function checkMark(bucket: string): string {
   return '·';
 }
 
+// waiting-reviews: not-yet-addressed unresolved threads → address them; none → merge. Subtracting
+// the addressed set (not just checking listUnresolvedThreads) is what terminates the loop: a thread
+// the Reviewer replied to but left unresolved would otherwise route back here forever.
 export const handleWaitingReviews: StageHandler = async (deps, group) => {
   const pr = requirePr(group, 'waiting-reviews');
   const fresh = await freshThreads(deps, pr);

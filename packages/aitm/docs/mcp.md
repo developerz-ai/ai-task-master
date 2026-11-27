@@ -68,11 +68,9 @@ Per-role allowlists scope which servers reach which subagent. Useful for sandbox
 ```jsonc
 {
   "mcpServers": { /* ... */ },
-  "mcp": {
-    "roleAllowlist": {
-      "worker": ["filesystem", "github"],
-      "reviewer": ["github"]
-    }
+  "mcpRoleAllowlist": {
+    "worker": ["filesystem", "github"],
+    "reviewer": ["github"]
   }
 }
 ```

@@ -37,7 +37,11 @@ type Reply = Partial<RunCmdResult>;
 // Dispatches on the gh/git args shape rather than call order, so the fixed sequence
 // (defaultBranch → [loop skipped] → waitForChecks → listUnresolvedThreads → mergePr) stays
 // readable without hardcoding positions.
-function fakeRunCmd(scripted: { checksBucket: 'pass' | 'fail'; mergeExitCode?: number }): {
+function fakeRunCmd(scripted: {
+  checksBucket: 'pass' | 'fail';
+  mergeExitCode?: number;
+  currentBranch?: string;
+}): {
   run: RunCmd;
   calls: string[][];
 } {
@@ -52,6 +56,20 @@ function fakeRunCmd(scripted: { checksBucket: 'pass' | 'fail'; mergeExitCode?: n
         args[3] === 'defaultBranchRef'
       ) {
         return { stdout: JSON.stringify({ defaultBranchRef: { name: 'main' } }) };
+      }
+      if (file === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+        return {
+          stdout: JSON.stringify({
+            number: 42,
+            state: 'OPEN',
+            url: 'https://github.com/o/r/pull/42',
+            headRefName: 'feature/x',
+            baseRefName: 'develop',
+          }),
+        };
+      }
+      if (file === 'git' && args[0] === 'rev-parse' && args[1] === '--abbrev-ref') {
+        return { stdout: `${scripted.currentBranch ?? 'feature/x'}\n` };
       }
       if (file === 'gh' && args[0] === 'pr' && args[1] === 'checks') {
         return {
@@ -155,6 +173,34 @@ test('mergeFlowAdapter: CI green + no threads → merged, mapped to success', as
     kind: 'success',
     outcomes: [{ groupId: 'takeover-42', status: 'merged', pr: 42 }],
   });
+});
+
+// Regression: merge-pr rebased CI fixes onto the repo default branch (not the PR's base), ran in
+// whatever branch the cwd was on, and handed the fix session no head branch to commit on.
+test('mergeFlowAdapter: the take-over runs on the PR head, rebasing onto the PR base', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  let seen: Pick<TakeOverFlowInput, 'baseBranch' | 'headBranch'> | undefined;
+  await mergeFlowAdapter(baseInput({ github }), {
+    runTakeOver: async (input) => {
+      seen = { baseBranch: input.baseBranch, headBranch: input.headBranch };
+      return { kind: 'merged', pr: input.pr, iterations: 0 };
+    },
+  });
+  assert.deepEqual(seen, { baseBranch: 'develop', headBranch: 'feature/x' });
+});
+
+test('mergeFlowAdapter: a cwd off the PR head branch → the take-over gets no head branch', async () => {
+  const { run } = fakeRunCmd({ checksBucket: 'pass', currentBranch: 'main' });
+  const github = new GitHubClient('/tmp/repo', run, noopSleep);
+  let headBranch: string | null | undefined;
+  await mergeFlowAdapter(baseInput({ github }), {
+    runTakeOver: async (input) => {
+      headBranch = input.headBranch;
+      return { kind: 'merged', pr: input.pr, iterations: 0 };
+    },
+  });
+  assert.equal(headBranch, null);
 });
 
 test('mergeFlowAdapter: CI red after exhausting iterations → blocked, mapped with reason', async () => {

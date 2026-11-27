@@ -41,7 +41,18 @@ export async function mergeFlowAdapter(
 ): Promise<WorkLoopResult> {
   const runTakeOver = seams.runTakeOver ?? runTakeOverFlow;
   const checkoutPath = input.cwd;
-  const baseBranch = await input.github.defaultBranch();
+  // A rebase goes onto the PR's base, not the repo default branch, which a PR into another branch
+  // never targets. headBranch is null when the cwd is not on the PR head (see TakeOverFlowInput).
+  const head = await resolvePrHead(input);
+  if (head.kind === 'not-found') {
+    const reason = `PR #${input.pr} was not found`;
+    return {
+      kind: 'blocked',
+      reason,
+      outcomes: [{ groupId: `takeover-${input.pr}`, status: 'blocked', reason }],
+    };
+  }
+  const { baseBranch, headBranch } = head;
   const styleContents = input.styleDigest ?? input.agentConfig.contents;
   // Downloads full failed-CI logs + review comments under .ai-task-master/debugging/pr/<pr>/ so
   // the CI-fix Worker reads them off disk instead of guessing (issue #48).
@@ -142,6 +153,7 @@ export async function mergeFlowAdapter(
       pr: input.pr,
       checkoutPath,
       baseBranch,
+      headBranch,
       github: input.github,
       prContext,
       mergeMethod: input.runState.options.mergeMethod,
@@ -222,4 +234,17 @@ export async function mergeFlowAdapter(
     // a drain started while another is in flight queues behind it.
     await disposeQuietly(disposer);
   }
+}
+
+async function resolvePrHead(
+  input: RunMergeFlowInput,
+): Promise<{ kind: 'ok'; baseBranch: string; headBranch: string | null } | { kind: 'not-found' }> {
+  const pr = await input.github.getPrForBranch(String(input.pr));
+  if (pr === null) return { kind: 'not-found' };
+  const current = await input.github.currentBranch();
+  return {
+    kind: 'ok',
+    baseBranch: pr.baseRefName,
+    headBranch: current === pr.headRefName ? pr.headRefName : null,
+  };
 }

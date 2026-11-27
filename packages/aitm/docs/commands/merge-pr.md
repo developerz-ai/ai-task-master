@@ -17,6 +17,7 @@ aitm merge-pr
 - `.ai-task-master/state.json` exists with `status: awaiting-pr` (or `--pr` provided explicitly).
 - `gh` CLI authenticated.
 - `OPENROUTER_API_KEY` set.
+- To fix CI or address review comments, the current checkout is on the PR's head branch (`gh pr checkout N`): fixes are committed here and force-pushed to that branch's upstream, rebased onto the PR's base branch. Off the head branch, a green PR with no unresolved threads still merges; anything that needs a commit blocks with that instruction.
 
 ## Flow
 

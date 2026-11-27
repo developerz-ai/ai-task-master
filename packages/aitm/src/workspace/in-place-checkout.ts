@@ -52,17 +52,34 @@ export async function branchExists(repoRoot: string, branch: string): Promise<bo
   }
 }
 
+// The ref a group branch is cut from: origin's base when there is one (freshBase), else the local
+// base. Neither (a pure-local repo without the base) → undefined, and the whole branch is searched.
+async function baseRef(repoRoot: string, baseBranch: string): Promise<string | undefined> {
+  for (const ref of [`refs/remotes/origin/${baseBranch}`, `refs/heads/${baseBranch}`]) {
+    try {
+      await runGit(['rev-parse', '--verify', '--quiet', ref], { cwd: repoRoot });
+      return ref;
+    } catch (err) {
+      if (!(err instanceof ExecaError && err.exitCode === 1)) throw err;
+    }
+  }
+  return undefined;
+}
+
 // True when a commit on `branch` already carries this task's trailer (see task-commit-marker.ts) —
 // a resumed run whose crash landed the Worker's commit (finalizeCommit) but died before WorkLoop
-// persisted the task as done. Scoped to `branch`'s own history via `git log <branch>` so the grep
-// can only match a commit aitm itself made for this task, never one on an unrelated ref. A missing
-// branch (never acquired, or a fresh group) trivially has no such commit.
+// persisted the task as done. Scoped to the commits `branch` adds over its base (`<base>..<branch>`):
+// task ids restart at g1-1 in every plan and a squash-merge carries the trailer onto the base, so the
+// base's history holds earlier runs' trailers that are not this branch's work. A missing branch
+// (never acquired, or a fresh group) trivially has no such commit.
 export async function hasTaskCommit(
   repoRoot: string,
   branch: string,
   taskId: string,
+  baseBranch: string,
 ): Promise<boolean> {
   if (!(await branchExists(repoRoot, branch))) return false;
+  const base = await baseRef(repoRoot, baseBranch);
   const trailer = taskCommitTrailer(taskId);
   // `--grep` with `--fixed-strings` is a SUBSTRING match, so grepping for `Aitm-Task-Id: t1` also
   // matches a `Aitm-Task-Id: t10` trailer and a resumed run would skip the wrong task. Use the grep
@@ -70,7 +87,13 @@ export async function hasTaskCommit(
   // as a COMPLETE line so `t1` never matches `t10` (see the t1/t10 regression test). Bodies are
   // NUL-delimited so a multi-line message can't blur the commit boundary.
   const { stdout } = await runGit(
-    ['log', branch, '--fixed-strings', `--grep=${trailer}`, '--format=%B%x00'],
+    [
+      'log',
+      base ? `${base}..${branch}` : branch,
+      '--fixed-strings',
+      `--grep=${trailer}`,
+      '--format=%B%x00',
+    ],
     { cwd: repoRoot },
   );
   return stdout
@@ -186,8 +209,8 @@ export class InPlaceCheckout {
   }
 
   // CheckoutHome.hasTaskCommit — see the free function above for the detection logic.
-  async hasTaskCommit(branch: string, taskId: string): Promise<boolean> {
-    return hasTaskCommit(this.repoRoot, branch, taskId);
+  async hasTaskCommit(branch: string, taskId: string, baseBranch: string): Promise<boolean> {
+    return hasTaskCommit(this.repoRoot, branch, taskId, baseBranch);
   }
 
   // Retire a group's branch the moment its PR merges: drop it on origin and locally, moving HEAD to

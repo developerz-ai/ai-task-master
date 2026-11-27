@@ -343,6 +343,32 @@ test('createPr adopts an existing PR for the head instead of creating a duplicat
   assert.ok(!calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create'));
 });
 
+// Regression: `gh pr view <branch>` also answers with a MERGED or CLOSED PR for the head. Branch
+// names repeat across runs (aitm/g1 again), so a later run adopted the earlier, merged PR and its
+// new commits were never proposed — the "merge" was a no-op on a PR that had already landed.
+test('createPr does not adopt a merged or closed PR for the head — it opens a new one', async () => {
+  for (const state of ['MERGED', 'CLOSED'] as const) {
+    const old = {
+      number: 7,
+      state,
+      url: 'https://github.com/org/repo/pull/7',
+      headRefName: 'aitm/g1',
+      baseRefName: 'main',
+    };
+    const fresh = { ...old, number: 43, state: 'OPEN', url: 'https://github.com/org/repo/pull/43' };
+    const { run, calls } = makeRun([
+      { stdout: JSON.stringify(old) },
+      { stdout: '' },
+      { stdout: 'https://github.com/org/repo/pull/43' },
+      { stdout: JSON.stringify(fresh) },
+    ]);
+    const g = new GitHubClient('/tmp/repo', run);
+    const result = await g.createPr({ title: 't', body: 'b', base: 'main', head: 'aitm/g1' });
+    assert.equal(result.number, 43, `a ${state} PR is not adopted`);
+    assert.ok(calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create'));
+  }
+});
+
 test('mergePr passes pr number and method flag', async () => {
   const { run, calls } = makeRun([{ stdout: 'merged' }]);
   const g = new GitHubClient('/tmp/repo', run);

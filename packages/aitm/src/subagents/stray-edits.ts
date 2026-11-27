@@ -5,10 +5,8 @@
 // never auto-resets uncommitted changes — a later `checkout -B` carries them onto whatever branch
 // comes next — so a stray edit surfaces post-merge as an uncommitted file unless it is dropped here.
 
-import { randomUUID } from 'node:crypto';
-import type { BashInput, BashOutput } from '@developerz.ai/ai-claude-compat';
-import type { Tool } from 'ai';
 import { STATE_DIR } from '../workspace/dirty-tree.ts';
+import { runGit } from '../workspace/git-exec.ts';
 
 // When the tree is dirty, reset tracked files to HEAD and drop untracked ones. aitm's own state dir
 // must survive that: `git clean` without `-x` spares it only when the TARGET repo happens to
@@ -17,31 +15,27 @@ import { STATE_DIR } from '../workspace/dirty-tree.ts';
 // InPlaceCheckout.ensureCleanTree). For the same reason the dirty check ignores state-dir entries: in
 // a repo that doesn't ignore it, the untracked state dir alone would read as "dirty" and hard-reset
 // the tree on every non-committing pass. A clean tree is a no-op (one cheap status check).
+//
+// This is the harness's own cleanup, so it runs git directly — never through the model-facing bash
+// tool, whose deny rules (DEFAULT_BASH_RULES) refuse `git reset --hard` and would leave the stray edit
+// for the next `git add -A` commit to ship.
+//
 // Best-effort: a cleanup fault never masks the caller's real result. Safe because a successful commit
 // already captured any real work; whatever remains is, by definition, not meant to ship.
-export async function discardStrayEdits(
-  bash: Tool<BashInput, BashOutput>,
-  checkoutPath: string,
-): Promise<void> {
-  const exec = bash?.execute;
-  if (typeof exec !== 'function') return; // best-effort: no cleanup without a runnable bash tool
-  const wt = shQuote(checkoutPath);
-  const out = await exec(
-    {
-      command: `git -C ${wt} status --porcelain`,
-      description: 'check for stray edits left by a non-committing subagent pass',
-    },
-    { toolCallId: `stray-edits-status-${randomUUID()}`, messages: [], context: undefined },
-  );
-  if (isAsyncIterable(out)) return;
-  if (out.exitCode !== 0) return;
-  if (!hasStrayEdit(out.stdout)) return;
-  for (const command of [
-    `git -C ${wt} reset --hard HEAD`,
-    `git -C ${wt} clean -fd -e ${STATE_DIR}`,
+export async function discardStrayEdits(checkoutPath: string): Promise<void> {
+  let porcelain: string;
+  try {
+    porcelain = (await runGit(['status', '--porcelain'], { cwd: checkoutPath })).stdout;
+  } catch {
+    return;
+  }
+  if (!hasStrayEdit(porcelain)) return;
+  for (const args of [
+    ['reset', '--hard', 'HEAD'],
+    ['clean', '-fd', '-e', STATE_DIR],
   ]) {
     try {
-      await runBash(exec, command);
+      await runGit(args, { cwd: checkoutPath });
     } catch {
       // best-effort: never mask the caller's real result with a cleanup failure
     }
@@ -55,29 +49,4 @@ export function hasStrayEdit(porcelain: string): boolean {
   return porcelain
     .split('\n')
     .some((line) => line.trim() !== '' && !line.slice(3).startsWith(STATE_DIR));
-}
-
-async function runBash(
-  exec: NonNullable<Tool<BashInput, BashOutput>['execute']>,
-  command: string,
-): Promise<void> {
-  const out = await exec(
-    { command, description: 'stray-edit cleanup git step' },
-    { toolCallId: `stray-edits-bash-${randomUUID()}`, messages: [], context: undefined },
-  );
-  if (isAsyncIterable(out)) {
-    throw new Error('bash tool returned an async iterable; expected a single result');
-  }
-  if (out.exitCode !== 0) {
-    throw new Error(`bash failed (${out.exitCode}): ${command}\n${out.stderr}`);
-  }
-}
-
-function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
-  return v !== null && typeof v === 'object' && Symbol.asyncIterator in (v as object);
-}
-
-// POSIX shell-quote: wrap in single quotes, escape embedded single quotes.
-function shQuote(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
 }

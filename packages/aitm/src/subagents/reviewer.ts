@@ -160,7 +160,7 @@ export async function runReviewer(
       // `git add -A` fix commit would sweep those strays in (commitFix stages the whole tree, not a
       // path list). A committed 'fixed' thread already left a clean tree, so this is a cheap status
       // no-op there. Also leaves the tree clean for the caller's post-pass rebase (take-over-flow).
-      await discardStrayEdits(init.tools.bash, input.checkoutPath);
+      await discardStrayEdits(input.checkoutPath);
     }
     return { kind: 'ok', resolutions };
   } catch (err) {

@@ -146,15 +146,24 @@ test('runGroup sequences: acquire → worker → finalizeCommit → openPr → s
 // `main` verbatim as the group branch, so the Worker committed on the base and the CI-fix path
 // force-pushed it. A group branch equal to the base is refused before anything touches the checkout.
 test('runGroup: a group branch equal to the base branch blocks before the checkout is touched', async () => {
-  const onMain = { ...group('alpha'), branch: 'main' };
+  // A non-`main` default, so the guard is proven against the repo's real base, not a literal.
+  const onBase = { ...group('alpha'), branch: 'trunk' };
+  const { github } = makeGithub({ defaultBranch: 'trunk' });
   const { orchestrator, calls } = makeOrchestrator({ prNumber: 7 });
   const { home, calls: homeCalls } = makeHome();
-  const { state, updates } = makeState([onMain]);
+  const { state, updates } = makeState([onBase]);
   const progress: string[] = [];
   const loop = new WorkLoop(
-    makeDeps({ orchestrator, home, state, autoMerge: true, progress: (m) => progress.push(m) }),
+    makeDeps({
+      orchestrator,
+      github,
+      home,
+      state,
+      autoMerge: true,
+      progress: (m) => progress.push(m),
+    }),
   );
-  await loop.runGroup(onMain);
+  await loop.runGroup(onBase);
 
   assert.deepEqual(homeCalls.acquire, [], 'the base is never checked out as a group branch');
   assert.equal(calls.runWorker.length, 0);

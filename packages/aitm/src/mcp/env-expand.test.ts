@@ -1,6 +1,8 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: `${VAR}` placeholders are the input under test, not template literals.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { clearRegisteredSecrets } from '../logger/secret-registry.ts';
+import { scrubSecrets } from '../logger/secret-scrubber.ts';
 import { expandServerEnv, McpEnvVarMissing } from './env-expand.ts';
 
 const env = { API_KEY: 'k-1234567890', HOST: 'mcp.example.com' };
@@ -67,4 +69,19 @@ test('expandServerEnv: a bare placeholder set to the empty string expands to emp
     command: 'x',
     args: ['--flag='],
   });
+});
+
+test('expandServerEnv: a substituted value is registered with the output scrubber', () => {
+  clearRegisteredSecrets();
+  try {
+    const secret = 'opaque-value-9f8e7d6c';
+    assert.equal(scrubSecrets(`token ${secret}`), `token ${secret}`, 'not known before expansion');
+    expandServerEnv(
+      { type: 'http', url: 'https://x/', headers: { 'X-Key': '${S}' } },
+      { S: secret },
+    );
+    assert.equal(scrubSecrets(`token ${secret}`), 'token [REDACTED]');
+  } finally {
+    clearRegisteredSecrets();
+  }
 });

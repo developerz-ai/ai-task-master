@@ -471,6 +471,27 @@ test('hasTaskCommit: a trailer already on the base (a prior run, merged) does no
   }
 });
 
+test('hasTaskCommit: a prior trailer only on origin/<base> (the merge landed remotely) does not count', async () => {
+  // The real shape: the squash-merge lands on origin/main by GitHub; local main never moves.
+  const { repo, advanceOrigin, cleanup } = await seedRepoWithOrigin();
+  try {
+    await advanceOrigin(`feat: old run\n\n${taskCommitTrailer('g1-1')}`);
+    const home = new InPlaceCheckout(repo.path);
+    await home.acquire('g1', 'aitm/g1', 'main');
+    assert.equal(await home.hasTaskCommit('aitm/g1', 'g1-1', 'main'), false);
+    await execa(
+      'git',
+      ['commit', '--allow-empty', '-m', `feat: this run\n\n${taskCommitTrailer('g1-1')}`],
+      {
+        cwd: repo.path,
+      },
+    );
+    assert.equal(await home.hasTaskCommit('aitm/g1', 'g1-1', 'main'), true);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('hasTaskCommit: a t1 trailer does not match a t10 task id (full-line, not substring)', async () => {
   const repo = await seedRepo();
   try {

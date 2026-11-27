@@ -10,6 +10,7 @@
 // broken MCP server should not block the whole run. Every stdio server's child pid is handed to
 // StdioProcessRegistry, which outlives close() as the guarantee that none of them zombie.
 
+import process from 'node:process';
 import {
   type Experimental_ManagedMCPClient,
   experimental_createMCPClient,
@@ -22,6 +23,7 @@ import { DEFAULT_MCP_DEFER_TOOLS_OVER } from '../config/defaults.ts';
 import type { ResolvedConfig } from '../config/schema.ts';
 import type { Role } from '../domain/role.ts';
 import type { LoggerLike } from '../logger/logger.ts';
+import { expandServerEnv } from './env-expand.ts';
 import type { McpRoleAllowlist, McpRoleAllowlistValue, McpServer, McpServers } from './schema.ts';
 import { StdioProcessRegistry } from './stdio-process-registry.ts';
 
@@ -70,6 +72,8 @@ export type McpClientInit = {
   closeTimeoutMs?: number;
   // Injection seam for tests — defaults to the AI SDK factory.
   createClient?: CreateMcpClient;
+  // Source for `${VAR}` expansion in server entries (env-expand.ts). Default process.env.
+  env?: Readonly<Record<string, string | undefined>>;
   // Child-process bookkeeping for stdio servers. Injected by tests; production builds its own.
   processes?: StdioProcessRegistry;
   logger?: LoggerLike;
@@ -198,7 +202,7 @@ export class McpClientManager {
     let config: MCPClientConfig | undefined;
     try {
       const transport = transportKind(server);
-      config = buildClientConfig(name, server);
+      config = buildClientConfig(name, expandServerEnv(server, this.init.env ?? process.env));
       // Capture a non-optional handle for the closure: `config` is a `let` the finally reads, so TS
       // cannot narrow it to non-undefined where the closure closes over it.
       const cfg = config;

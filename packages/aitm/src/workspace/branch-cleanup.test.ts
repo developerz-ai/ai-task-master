@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -236,4 +236,89 @@ test('cleanupSummary: says what happened, and says nothing when nothing did', ()
     }),
     /back on main — deleted 2 merged branch\(es\): aitm\/G1, aitm\/G2/,
   );
+});
+
+// Regression: after a squash-merge landed on origin, cleanup switched HEAD to the LOCAL base and
+// left it at its pre-run commit. The goal assessor and the next wave's Planner read that tree, so
+// they saw none of the merged work and re-planned it.
+test('cleanupMergedBranches: the base it switches to is fast-forwarded to origin', async () => {
+  const { repo, remote, cleanup } = await seedRepo();
+  try {
+    await execa('git', ['checkout', '-b', 'aitm/G1'], { cwd: repo.path });
+    await execa('git', ['commit', '--allow-empty', '-m', 'work'], { cwd: repo.path });
+    await execa('git', ['push', 'origin', 'aitm/G1'], { cwd: repo.path });
+    // The PR's squash-merge, landed on origin/main by GitHub — from another clone, so this
+    // checkout's own origin/main stays stale and only a real fetch can see it.
+    const other = await mkdtemp(join(tmpdir(), 'aitm-other-'));
+    try {
+      await execa('git', ['clone', '-q', remote, other]);
+      await execa(
+        'git',
+        [
+          '-c',
+          'user.name=gh',
+          '-c',
+          'user.email=gh@example.com',
+          'commit',
+          '--allow-empty',
+          '-m',
+          'squash: G1 (#1)',
+        ],
+        { cwd: other },
+      );
+      await execa('git', ['push', '-q', 'origin', 'main'], { cwd: other });
+    } finally {
+      await rm(other, { recursive: true, force: true });
+    }
+    const { stdout: merged } = await execa('git', ['rev-parse', 'main'], { cwd: remote });
+
+    const result = await cleanupMergedBranches({
+      cwd: repo.path,
+      baseBranch: 'main',
+      mergedBranches: ['aitm/G1'],
+    });
+
+    assert.equal(result.switchedTo, 'main');
+    const { stdout: local } = await execa('git', ['rev-parse', 'HEAD'], { cwd: repo.path });
+    assert.equal(local.trim(), merged.trim(), 'local base carries the merged work');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('cleanupMergedBranches: an ignored local file the base starts tracking is never overwritten', async () => {
+  const { repo, remote, cleanup } = await seedRepo();
+  try {
+    await writeFile(join(repo.path, '.gitignore'), 'notes.txt\n');
+    await execa('git', ['add', '.gitignore'], { cwd: repo.path });
+    await execa('git', ['commit', '-m', 'ignore notes'], { cwd: repo.path });
+    await execa('git', ['push', '-q', 'origin', 'main'], { cwd: repo.path });
+    await execa('git', ['checkout', '-b', 'aitm/G1'], { cwd: repo.path });
+    // The operator's own ignored file, in the checkout only.
+    await writeFile(join(repo.path, 'notes.txt'), 'mine\n');
+    const other = await mkdtemp(join(tmpdir(), 'aitm-other-'));
+    try {
+      await execa('git', ['clone', '-q', remote, other]);
+      await writeFile(join(other, 'notes.txt'), 'theirs\n');
+      await execa('git', ['add', '-f', 'notes.txt'], { cwd: other });
+      await execa(
+        'git',
+        ['-c', 'user.name=gh', '-c', 'user.email=gh@example.com', 'commit', '-m', 'track notes'],
+        { cwd: other },
+      );
+      await execa('git', ['push', '-q', 'origin', 'main'], { cwd: other });
+    } finally {
+      await rm(other, { recursive: true, force: true });
+    }
+
+    await cleanupMergedBranches({
+      cwd: repo.path,
+      baseBranch: 'main',
+      mergedBranches: ['aitm/G1'],
+    });
+
+    assert.equal(await readFile(join(repo.path, 'notes.txt'), 'utf8'), 'mine\n');
+  } finally {
+    await cleanup();
+  }
 });

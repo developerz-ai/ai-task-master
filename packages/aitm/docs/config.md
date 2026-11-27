@@ -26,7 +26,7 @@ The project file is read by `ConfigLoader` *before* `StateStore` initializes the
    [Environment variable overrides](#environment-variable-overrides)).
 5. CLI flags.
 
-The merged result is what every other module sees. A frozen snapshot is written to `.ai-task-master/config.snapshot.json` at run start so a resumed run reproduces the same behavior even if the source files have changed.
+The merged result is what every other module sees. A redacted snapshot is written to `.ai-task-master/config.snapshot.json` at run start as a record of what the run resolved. It is for inspection only: nothing reads it back, and a resumed run resolves its config afresh from the current files, env and flags.
 
 ## Environment variable overrides
 
@@ -41,7 +41,7 @@ falls through straight to the default (`--pr-per-task` is its only higher-preced
 
 | Env var | Key | Notes |
 | --- | --- | --- |
-| `AITM_MAX_PRS` | `maxPrs` | Positive integer. |
+| `AITM_MAX_PRS` | `maxPrs` | Non-negative integer; `0` means unbounded (`null`), matching `--max-prs 0`. |
 | `AITM_MAX_SESSIONS` | `maxSessions` | Non-negative integer; `0` means unlimited (`null`), matching `--max-sessions 0`. |
 | `AITM_MAX_CI_FIX_ATTEMPTS` | `maxCiFixAttempts` | Positive integer. |
 | `AITM_CONCURRENCY` | `concurrency` | Positive integer. |
@@ -141,13 +141,13 @@ code-execution surfaces). Keys absent from a file fall through per the
 
 | Key | Type | Default | Scope | Purpose |
 | --- | --- | --- | --- | --- |
-| `formatCommand` | string | unset | project + global | Formatter run before `git add`. See [formatCommand](#formatcommand). |
-| `verifyCommand` | string | unset | project + global | Test/lint gate run before commit. See [verifyCommand](#verifycommand). |
+| `formatCommand` | string | unset | global only (ignored with a warning from a project config) | Formatter run before `git add`. See [formatCommand](#formatcommand). |
+| `verifyCommand` | string | unset | global only (ignored with a warning from a project config) | Test/lint gate run before commit. See [verifyCommand](#verifycommand). |
 | `selfReview` | boolean | `true` | project + global, env `AITM_SELF_REVIEW` | Pre-PR adversarial self-review + verify + fix pass. See [selfReview](#selfreview). |
 | `skills` | boolean | `false` | project + global | Mount the target repo's `.claude/skills` for subagents. See [skills](#skills). |
 | `webSearch` | boolean \| object | unset (CI-fix only) | project + global | OpenRouter `web_search` on Worker calls (tri-state) + optional domain filters. See [webSearch](#websearch). |
 | `generateSpecialists` | boolean | `true` | project + global | Generate a specialist team when the repo ships no `.claude/agents`. See [generateSpecialists](#generatespecialists). |
-| `prBodySections` | string[] | Summary / Changes / Testing | project + global | PR body headings. See [prBodySections](#prbodysections). |
+| `prBodySections` | string[] | Summary / Changes / Testing / Evidence | project + global | PR body headings. See [prBodySections](#prbodysections). |
 
 ### Git and merge
 
@@ -157,7 +157,7 @@ code-execution surfaces). Keys absent from a file fall through per the
 | `mergeMethod` | `squash \| merge \| rebase` | `squash` | project + global, env `AITM_MERGE_METHOD` | Merge strategy for `gh pr merge`. |
 | `allowForcePush` | boolean | `true` | project + global | Permit `--force-with-lease`. See [allowForcePush](#allowforcepush). |
 | `resolveConflicts` | boolean | `true` | project + global | Hand a rebase/merge conflict to an AI subagent before blocking. See [resolveConflicts](#resolveconflicts). |
-| `stylePath` | string or `null` | detected | project + global, CLI `--style` | Coding-style file override. See [coding-style.md](./coding-style.md). |
+| `stylePath` | string or `null` | detected | global + CLI `--style` (ignored with a warning from a project config) | Coding-style file override. See [coding-style.md](./coding-style.md). |
 
 ### Governance and tools
 

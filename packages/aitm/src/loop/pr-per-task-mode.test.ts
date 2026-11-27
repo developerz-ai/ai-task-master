@@ -528,11 +528,12 @@ test('prPerTask + autoMerge + --admin: a CI timeout on the head a review fix pus
     path: 'a.ts',
     comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
   };
+  const events: string[] = [];
   const { orchestrator, calls } = makeOrchestrator({
     prNumber: 9,
+    events,
     addressReviewsResult: { kind: 'ok', pushed: true },
   });
-  const events: string[] = [];
   const { github, calls: ghCalls } = makeGithub({
     checks: [ciSuccess, new CiFailed('checks did not settle')],
     threads: [thread],
@@ -545,8 +546,8 @@ test('prPerTask + autoMerge + --admin: a CI timeout on the head a review fix pus
   await loop.runGroup(group('solo'));
 
   assert.deepEqual(
-    events.filter((e) => e.startsWith('waitForChecks')),
-    ['waitForChecks:9', 'waitForChecks:9'],
+    events.filter((e) => e.startsWith('waitForChecks') || e.startsWith('addressReviews')),
+    ['waitForChecks:9', 'addressReviews:9', 'waitForChecks:9'],
     'the block comes from the post-push poll, after its scripted timeout',
   );
   assert.equal(calls.addressReviews.length, 1, 'the Reviewer pushed before that poll');

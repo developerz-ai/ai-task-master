@@ -56,13 +56,15 @@ async function currentBranch(cwd: string): Promise<string | undefined> {
 // The merge landed on origin (gh squash-merges remotely), so the local base is still at its pre-run
 // commit. Whatever reads the checkout next — the goal assessor, the next wave's Planner, the operator
 // — must see the merged work. Best-effort: no origin, or a local base with commits of its own (not a
-// fast-forward), leaves the base where it was. The fetched tip is read from FETCH_HEAD, which a
-// clone whose fetch refspec omits the base still sets, and the merge refuses to overwrite an ignored
-// local file the base started tracking — an operator's untracked file is never clobbered by cleanup.
+// fast-forward), leaves the base where it was. The fetch names its destination, so a clone whose
+// refspec omits the base still updates origin/<base>, and a concurrent fetch (an IDE's) can only
+// write the same branch's tip there — never another branch's, as it could with FETCH_HEAD. The merge
+// refuses to overwrite an ignored local file the base started tracking.
 async function fastForwardToOrigin(cwd: string, baseBranch: string): Promise<void> {
+  const tracking = `refs/remotes/origin/${baseBranch}`;
   try {
-    await runGit(['fetch', 'origin', `refs/heads/${baseBranch}`], { cwd });
-    await runGit(['merge', '--ff-only', '--no-overwrite-ignore', 'FETCH_HEAD'], { cwd });
+    await runGit(['fetch', 'origin', `+refs/heads/${baseBranch}:${tracking}`], { cwd });
+    await runGit(['merge', '--ff-only', '--no-overwrite-ignore', tracking], { cwd });
   } catch {
     // Nothing to do: see above.
   }

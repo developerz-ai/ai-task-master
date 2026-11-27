@@ -4,6 +4,7 @@
 
 import type { ConfigFile, Profile } from '../config/schema.ts';
 import type { PrGroup } from '../domain/pr-group.ts';
+import type { McpServer } from '../mcp/schema.ts';
 import type { RoleUsage, UsageTotals } from '../observability/usage-tracker.ts';
 import { maskSecret } from './mask-secret.ts';
 
@@ -128,11 +129,20 @@ export function redactProfile(profile: Profile): Profile {
     : profile;
 }
 
-// Redact a whole config file for `config list`: the top-level key and every profile's key.
+// Redact a whole config file for `config list`: the top-level key, every profile's key, and every
+// MCP server's header and env values (`Authorization: Bearer …`, `GITHUB_TOKEN=…`). Names stay
+// visible so the operator can see what is configured; only the values are masked.
 export function redactConfigKeys(file: ConfigFile): ConfigFile {
   const out: ConfigFile = file.openrouterApiKey
     ? { ...file, openrouterApiKey: maskSecret(file.openrouterApiKey) }
     : { ...file };
+  if (out.mcpServers) {
+    const servers: Record<string, McpServer> = {};
+    for (const [name, server] of Object.entries(out.mcpServers)) {
+      servers[name] = redactMcpServer(server);
+    }
+    out.mcpServers = servers;
+  }
   if (out.profiles) {
     const profiles: Record<string, Profile> = {};
     for (const [name, profile] of Object.entries(out.profiles)) {
@@ -141,4 +151,15 @@ export function redactConfigKeys(file: ConfigFile): ConfigFile {
     out.profiles = profiles;
   }
   return out;
+}
+
+function redactMcpServer(server: McpServer): McpServer {
+  if ('url' in server) {
+    return server.headers ? { ...server, headers: maskValues(server.headers) } : server;
+  }
+  return server.env ? { ...server, env: maskValues(server.env) } : server;
+}
+
+function maskValues(values: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(values).map(([k, v]) => [k, maskSecret(v)]));
 }

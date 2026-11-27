@@ -53,6 +53,19 @@ async function currentBranch(cwd: string): Promise<string | undefined> {
   }
 }
 
+// The merge landed on origin (gh squash-merges remotely), so the local base is still at its pre-run
+// commit. Whatever reads the checkout next — the goal assessor, the next wave's Planner, the operator
+// — must see the merged work. Best-effort: no origin, or a local base with commits of its own (not a
+// fast-forward), leaves the base where it was.
+async function fastForwardToOrigin(cwd: string, baseBranch: string): Promise<void> {
+  try {
+    await runGit(['fetch', 'origin', baseBranch], { cwd });
+    await runGit(['merge', '--ff-only', `origin/${baseBranch}`], { cwd });
+  } catch {
+    // Nothing to do: see above.
+  }
+}
+
 // Best-effort throughout: this runs after the work is done and every PR is merged, so a git failure
 // here must report itself and change nothing else about the run's outcome.
 export async function cleanupMergedBranches(input: CleanupInput): Promise<BranchCleanup> {
@@ -71,6 +84,7 @@ export async function cleanupMergedBranches(input: CleanupInput): Promise<Branch
     } catch {
       return { ...result, kept: [...mergedBranches] };
     }
+    await fastForwardToOrigin(cwd, baseBranch);
   }
   for (const branch of mergedBranches) {
     if (input.deleteRemote !== false) {

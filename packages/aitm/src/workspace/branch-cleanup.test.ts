@@ -237,3 +237,30 @@ test('cleanupSummary: says what happened, and says nothing when nothing did', ()
     /back on main — deleted 2 merged branch\(es\): aitm\/G1, aitm\/G2/,
   );
 });
+
+// Regression: after a squash-merge landed on origin, cleanup switched HEAD to the LOCAL base and
+// left it at its pre-run commit. The goal assessor and the next wave's Planner read that tree, so
+// they saw none of the merged work and re-planned it.
+test('cleanupMergedBranches: the base it switches to is fast-forwarded to origin', async () => {
+  const { repo, remote, cleanup } = await seedRepo();
+  try {
+    await execa('git', ['checkout', '-b', 'aitm/G1'], { cwd: repo.path });
+    await execa('git', ['commit', '--allow-empty', '-m', 'work'], { cwd: repo.path });
+    await execa('git', ['push', 'origin', 'aitm/G1'], { cwd: repo.path });
+    // The PR's squash-merge, landed on origin/main by GitHub, never by this checkout.
+    await execa('git', ['push', 'origin', 'aitm/G1:main'], { cwd: repo.path });
+    const { stdout: merged } = await execa('git', ['rev-parse', 'main'], { cwd: remote });
+
+    const result = await cleanupMergedBranches({
+      cwd: repo.path,
+      baseBranch: 'main',
+      mergedBranches: ['aitm/G1'],
+    });
+
+    assert.equal(result.switchedTo, 'main');
+    const { stdout: local } = await execa('git', ['rev-parse', 'HEAD'], { cwd: repo.path });
+    assert.equal(local.trim(), merged.trim(), 'local base carries the merged work');
+  } finally {
+    await cleanup();
+  }
+});

@@ -258,7 +258,12 @@ test('redactConfigKeys: masks MCP server header and env values', () => {
       local: { command: 'gh-mcp', env: { GITHUB_TOKEN: 'ghp_zyxwvutsrqponmlk9876' } },
     },
   };
-  const out = JSON.stringify(redactConfigKeys(file));
+  const redacted = redactConfigKeys(file);
+  const out = JSON.stringify(redacted);
+  const local = redacted.mcpServers?.local;
+  assert.ok(local && 'env' in local && local.env, 'the env map is kept, not dropped');
+  assert.deepEqual(Object.keys(local.env), ['GITHUB_TOKEN']);
+  assert.match(local.env.GITHUB_TOKEN ?? '', /^ghp_zy…9876$/, 'masked, not cleartext');
   assert.doesNotMatch(out, /abcdefghijklmnop/);
   assert.doesNotMatch(out, /zyxwvutsrqponmlk/);
   assert.match(

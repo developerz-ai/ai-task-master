@@ -812,7 +812,7 @@ function makeFakeReviewRemote(botLogin: string): {
         for (const t of threads) {
           thread.comments.push({ id: `reply-${t.id}`, author: botLogin, body: 'fixed' });
         }
-        return { kind: 'ok' };
+        return { kind: 'ok', pushed: false };
       },
     },
     addressReviewsCalls: () => addressReviewsCalls,

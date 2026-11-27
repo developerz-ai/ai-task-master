@@ -272,8 +272,11 @@ export class GitHubClient {
     // one. A kill between `gh pr create` and persisting the PR number otherwise resumes into a
     // re-create that `gh` rejects ("a pull request for branch … already exists"), blocking the
     // group. This is the same lookup as the post-create refetch below, moved ahead of the create.
+    // Only an OPEN PR is ours to adopt: `gh pr view <branch>` also answers with a merged or closed
+    // one, and branch names repeat across runs (aitm/g1 again) — adopting that would treat a PR that
+    // already landed as this run's, so the new commits would never be proposed.
     const existing = await this.getPrForBranch(input.head);
-    if (existing) return existing;
+    if (existing?.state === 'OPEN') return existing;
 
     const labels = input.labels ?? [DEFAULT_PR_LABEL];
     const args: string[] = [
@@ -534,7 +537,9 @@ export class GitHubClient {
     // the conflict branch so an already-merged PR is never misreported as a conflict.
     if (await this.isMerged(pr)) return;
     const combined = `${r.stderr}\n${r.stdout}`;
-    if (/merge conflict|not mergeable/i.test(combined)) {
+    // "is not mergeable: the base branch policy prohibits the merge" is a protection refusal (review
+    // or required checks), not a conflict: it surfaces as a plain gh failure carrying gh's own words.
+    if (/merge conflict|not mergeable/i.test(combined) && !/policy prohibits/i.test(combined)) {
       throw new MergeConflict(`Merge conflict on PR #${pr}: ${r.stderr.trim() || r.stdout.trim()}`);
     }
     throw new GhCommandFailed('gh pr merge', r);

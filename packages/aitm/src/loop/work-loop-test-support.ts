@@ -14,7 +14,7 @@ import { CURRENT_SCHEMA_VERSION, type RunState } from '../state/schema.ts';
 import type { WorkerResult } from '../subagents/worker.ts';
 import type { Checkout } from '../workspace/in-place-checkout.ts';
 import type { SelfReviewResult } from './self-review.ts';
-import type { StageWorkResult } from './stage-handlers.ts';
+import type { ReviewWorkResult, StageWorkResult } from './stage-handlers.ts';
 import type {
   CheckoutHome,
   SelfReviewInvocation,
@@ -118,7 +118,7 @@ export function makeOrchestrator(
   config: {
     workerResults?: WorkerResult[];
     ciFixResults?: StageWorkResult[];
-    addressReviewsResult?: StageWorkResult;
+    addressReviewsResult?: ReviewWorkResult;
     prNumber?: number;
     headRefName?: string;
     // Attach the optional selfReview port method (default: omitted, so maybeSelfReview no-ops and the
@@ -166,7 +166,8 @@ export function makeOrchestrator(
     },
     addressReviews: async ({ pr, threads }) => {
       calls.addressReviews.push({ pr, threads });
-      return config.addressReviewsResult ?? { kind: 'ok' };
+      config.events?.push(`addressReviews:${pr}`);
+      return config.addressReviewsResult ?? { kind: 'ok', pushed: false };
     },
     releaseGroup: (groupId) => {
       calls.releaseGroup.push(groupId);
@@ -238,12 +239,14 @@ export function makeGithub(
     },
     waitForChecks: async (pr) => {
       calls.waitForChecks.push(pr);
+      config.events?.push(`waitForChecks:${pr}`);
       const next = checks.shift();
       if (next instanceof CiFailed) throw next;
       return next ?? ciSuccess;
     },
     listUnresolvedThreads: async (pr) => {
       calls.listUnresolvedThreads.push(pr);
+      config.events?.push(`listUnresolvedThreads:${pr}`);
       return config.threads ?? [];
     },
     mergePr: async (pr, method) => {

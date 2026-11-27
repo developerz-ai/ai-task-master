@@ -24,7 +24,7 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | Modules | ESM only, `"type": "module"`; named exports only |
 | TypeScript | `^7.0.2`, `strict: true` |
 | AI SDK | `ai` `^7.0.170`, `ToolLoopAgent` (v7; the AI SDK 5 name `experimental_Agent` survives only as an alias export of it, `ToolLoopAgent as Experimental_Agent`); MCP client `@ai-sdk/mcp` `^2.0.97` |
-| Lint/format | Biome 2.6.4 — `bun run lint` = `biome check .` |
+| Lint/format | Biome 2.6.6 — `bun run lint` = `biome check .` |
 | Packages | `@developerz.ai/aitm` + `@developerz.ai/ai-claude-compat`, always the same version; aitm pins compat EXACTLY, versions move in lockstep (`bin/release-preflight` refuses a release otherwise) |
 
 ## Commands

@@ -623,7 +623,7 @@ test('ci-fix-loop (WorkLoop/autoMerge): CI fix reaches the real remote before th
         await execa('git', ['push', 'origin', checkout.branch], { cwd: checkout.path });
         return { kind: 'ok' };
       },
-      addressReviews: async () => ({ kind: 'ok' }),
+      addressReviews: async () => ({ kind: 'ok', pushed: false }),
     };
 
     const github: WorkLoopGithub = {
@@ -756,7 +756,7 @@ test('ci-fix-loop (WorkLoop/autoMerge): an unfixable red PR never merges and sta
         });
         return { kind: 'ok' }; // a commit lands, but it never actually fixes the flake below
       },
-      addressReviews: async () => ({ kind: 'ok' }),
+      addressReviews: async () => ({ kind: 'ok', pushed: false }),
     };
 
     const github: WorkLoopGithub = {

@@ -168,14 +168,18 @@ test('prPerTask + autoMerge: each task branches off the merged base; its PR carr
   );
   // Ordering: task b's base refresh happens AFTER task a's PR merges, so b branches off a's merged
   // result rather than a's branch tip.
-  assert.deepEqual(events, [
-    'reset:aitm/multi-a',
-    'openPr:aitm/multi-a',
-    'merge:7',
-    'reset:aitm/multi-b',
-    'openPr:aitm/multi-b',
-    'merge:7',
-  ]);
+  const gating = /^(waitForChecks|listUnresolvedThreads):/;
+  assert.deepEqual(
+    events.filter((e) => !gating.test(e)),
+    [
+      'reset:aitm/multi-a',
+      'openPr:aitm/multi-a',
+      'merge:7',
+      'reset:aitm/multi-b',
+      'openPr:aitm/multi-b',
+      'merge:7',
+    ],
+  );
 });
 
 test('prPerTask + autoMerge fallback: a home without resetToBase keeps the single group branch', async () => {
@@ -285,6 +289,116 @@ test('prPerTask + autoMerge: unresolved threads route through addressReviews (pu
     ghCalls.mergePr.map((c) => c.pr),
     [7],
     'PR merged after the reviewer fix is pushed',
+  );
+});
+
+// Regression: autoMergeFlow merged right after addressReviews pushed a fix, without polling CI on
+// the new head, so a red or still-running CI on the Reviewer's commit was merged past.
+test('prPerTask + autoMerge: a pushed review fix waits for CI on the new head before merging', async () => {
+  const thread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
+  };
+  const events: string[] = [];
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 7,
+    events,
+    addressReviewsResult: { kind: 'ok', pushed: true },
+    ciFixResults: [{ kind: 'blocked', reason: 'still red after fix' }],
+  });
+  const { github, calls: ghCalls } = makeGithub({
+    checks: [ciSuccess, ciFailure],
+    threads: [thread],
+    events,
+  });
+  const { state, updates } = makeState([group('solo')]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prPerTask: true }),
+  );
+  await loop.runGroup(group('solo'));
+
+  assert.deepEqual(
+    events.filter((e) => e.startsWith('waitForChecks') || e.startsWith('addressReviews')),
+    ['waitForChecks:7', 'addressReviews:7', 'waitForChecks:7'],
+    'CI re-polled on the head the review fix pushed',
+  );
+  assert.equal(ghCalls.mergePr.length, 0, 'no merge while CI on the pushed head is red');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'solo')?.status, 'blocked');
+});
+
+test('prPerTask + autoMerge: threads are re-read after the post-push CI, and an addressed thread is not re-fed', async () => {
+  const reviewThread = (id: string): ReviewThread => ({
+    id,
+    isResolved: false,
+    path: 'a.ts',
+    comments: [{ id: `c-${id}`, body: 'nit', author: 'rev' }],
+  });
+  const events: string[] = [];
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 7,
+    events,
+    addressReviewsResult: { kind: 'ok', pushed: true },
+  });
+  const { github: base } = makeGithub({ checks: [ciSuccess, ciSuccess, ciSuccess], events });
+  // t1 is posted first; t2 lands on the pushed head during its CI. t1 stays unresolved (replied).
+  const reads = [[reviewThread('t1')], [reviewThread('t1'), reviewThread('t2')]];
+  let read = 0;
+  const github: WorkLoopGithub = {
+    ...base,
+    listUnresolvedThreads: async (pr) => {
+      events.push(`listUnresolvedThreads:${pr}`);
+      return reads[Math.min(read++, reads.length - 1)] ?? [];
+    },
+  };
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, autoMerge: true, prPerTask: true }));
+  await loop.runGroup(group('solo'));
+
+  assert.deepEqual(
+    calls.addressReviews.map((c) => c.threads.map((t) => t.id)),
+    [['t1'], ['t2']],
+    'the post-push read reaches the Reviewer with only the new thread',
+  );
+  assert.deepEqual(
+    events.filter((e) => !e.startsWith('openPr') && !e.startsWith('selfReview')),
+    [
+      'waitForChecks:7',
+      'listUnresolvedThreads:7',
+      'addressReviews:7',
+      'waitForChecks:7',
+      'listUnresolvedThreads:7',
+      'addressReviews:7',
+      'waitForChecks:7',
+      'listUnresolvedThreads:7',
+      'merge:7',
+    ],
+  );
+});
+
+test('prPerTask + autoMerge: a reply-only review round re-reads threads but does not re-poll CI', async () => {
+  const thread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [{ id: 'c1', body: 'why?', author: 'rev' }],
+  };
+  const events: string[] = [];
+  const { orchestrator } = makeOrchestrator({ prNumber: 7, events });
+  const { github } = makeGithub({ checks: [ciSuccess], threads: [thread], events });
+  const loop = new WorkLoop(makeDeps({ orchestrator, github, autoMerge: true, prPerTask: true }));
+  await loop.runGroup(group('solo'));
+
+  assert.deepEqual(
+    events.filter((e) => !e.startsWith('openPr') && !e.startsWith('selfReview')),
+    [
+      'waitForChecks:7',
+      'listUnresolvedThreads:7',
+      'addressReviews:7',
+      'listUnresolvedThreads:7',
+      'merge:7',
+    ],
   );
 });
 
@@ -405,6 +519,41 @@ test('prPerTask + autoMerge + --admin: a CI poll timeout skips past CI to review
     [9],
     '--admin force-advances the timeout to review and merges',
   );
+});
+
+test('prPerTask + autoMerge + --admin: a CI timeout on the head a review fix pushed blocks', async () => {
+  const thread: ReviewThread = {
+    id: 't1',
+    isResolved: false,
+    path: 'a.ts',
+    comments: [{ id: 'c1', body: 'nit', author: 'rev' }],
+  };
+  const events: string[] = [];
+  const { orchestrator, calls } = makeOrchestrator({
+    prNumber: 9,
+    events,
+    addressReviewsResult: { kind: 'ok', pushed: true },
+  });
+  const { github, calls: ghCalls } = makeGithub({
+    checks: [ciSuccess, new CiFailed('checks did not settle')],
+    threads: [thread],
+    events,
+  });
+  const { state, updates } = makeState([group('solo')]);
+  const loop = new WorkLoop(
+    makeDeps({ orchestrator, github, state, autoMerge: true, prPerTask: true, adminMerge: true }),
+  );
+  await loop.runGroup(group('solo'));
+
+  assert.deepEqual(
+    events.filter((e) => e.startsWith('waitForChecks') || e.startsWith('addressReviews')),
+    ['waitForChecks:9', 'addressReviews:9', 'waitForChecks:9'],
+    'the block comes from the post-push poll, after its scripted timeout',
+  );
+  assert.equal(calls.addressReviews.length, 1, 'the Reviewer pushed before that poll');
+  assert.equal(ghCalls.mergePr.length, 0, 'no merge without a green verdict on the pushed head');
+  const last = updates[updates.length - 1] as RunState;
+  assert.equal(last.prGroups.find((p) => p.id === 'solo')?.status, 'blocked');
 });
 
 test('prPerTask autoMerge: abort during the CI wait → the task PR is not merged', async () => {

@@ -39,6 +39,7 @@ import {
   handleWaitingCi,
   handleWaitingReviews,
   handleWorking,
+  type ReviewWorkResult,
   type StageDeps,
   type StageGithub,
   type StageHandler,
@@ -107,8 +108,9 @@ export type WorkLoopOrchestrator = {
   // onto origin/<base> and force-with-lease push. ok → CI re-runs; blocked → couldn't land the fix.
   runCiFix(input: CiFixInvocation): Promise<StageWorkResult>;
   // addressing-reviews stage + autoMergeFlow: run the Reviewer over the given threads and push its
-  // code fixes to the remote. ok → threads handled (any fix pushed); blocked → reviewer/push error.
-  addressReviews(input: ReviewerInvocation): Promise<StageWorkResult>;
+  // code fixes to the remote. ok → threads handled (`pushed` when a fix reached the remote);
+  // blocked → reviewer/push error.
+  addressReviews(input: ReviewerInvocation): Promise<ReviewWorkResult>;
   // The run is finished with this group — merged, blocked, or handed over to the merge-pr flow — and
   // will never schedule it again (ready() only picks 'pending' groups). Whatever the orchestrator
   // cached for it can go: the real bridge holds a full Worker conversation and a CI-fix handle per
@@ -469,6 +471,14 @@ export class WorkLoop {
     let acquired = false;
     try {
       const baseBranch = await this.deps.github.defaultBranch();
+      // A group branch named after the base (`aitm start --branch main` on a one-group plan) would
+      // have the Worker commit on the base and the CI-fix path force-push it. Refuse before the
+      // checkout is touched.
+      if (branch === baseBranch) {
+        throw new Error(
+          `group branch '${branch}' is the base branch: aitm never commits on the base. Pass a different --branch.`,
+        );
+      }
       // Resume at the persisted stage; a fresh/pending group starts at 'working'. prPerTask
       // tracks completion per task (task.done), not via the per-group stage, so it omits it.
       const startStage = resumeStage(group);

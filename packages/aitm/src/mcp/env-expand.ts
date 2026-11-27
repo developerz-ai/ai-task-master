@@ -24,7 +24,8 @@ const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
 export function expandServerEnv(server: McpServer, env: Env): McpServer {
   const expand = (text: string): string =>
     text.replace(PLACEHOLDER, (_match, name: string, fallback: string | undefined) => {
-      const value = env[name];
+      // Own properties only: `${toString}` must read as unset, not as Object.prototype.toString.
+      const value = Object.hasOwn(env, name) ? env[name] : undefined;
       if (value !== undefined && value !== '') {
         // A value pulled from the environment into a header/env/arg is credential-shaped by default;
         // every output channel's scrubber now knows it (too-short values are ignored there).

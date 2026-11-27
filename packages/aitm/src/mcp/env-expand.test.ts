@@ -55,3 +55,9 @@ test('expandServerEnv: text without ${…} is untouched, including a bare $VAR',
   const server = { command: 'sh', args: ['-c', 'echo $HOME'] };
   assert.deepEqual(expandServerEnv(server, env), server);
 });
+
+test('expandServerEnv: an inherited property name is unset, not Object.prototype', () => {
+  assert.deepEqual(expandServerEnv({ command: '${toString:-fallback}' }, {}), {
+    command: 'fallback',
+  });
+});

@@ -389,6 +389,28 @@ test('mergePr throws MergeConflict on conflict stderr signal', async () => {
   await assert.rejects(() => g.mergePr(9, 'squash'), MergeConflict);
 });
 
+// Regression: gh words a branch-protection refusal "is not mergeable: the base branch policy
+// prohibits the merge", which matched the conflict pattern — the run then reported a merge conflict
+// that does not exist instead of the policy block (whose fix is review approval or --admin).
+test('mergePr: a base-branch policy refusal is not reported as a merge conflict', async () => {
+  const { run } = makeRun([
+    {
+      exitCode: 1,
+      stderr:
+        'X Pull request developerz-ai/x#9 is not mergeable: the base branch policy prohibits the merge.',
+    },
+    { exitCode: 0, stdout: '{"state":"OPEN"}' },
+  ]);
+  const g = new GitHubClient('/tmp/repo', run);
+  await assert.rejects(
+    () => g.mergePr(9, 'squash'),
+    (err: unknown) =>
+      !(err instanceof MergeConflict) &&
+      err instanceof Error &&
+      /policy prohibits/.test(err.message),
+  );
+});
+
 test('mergePr surfaces non-conflict failures generically', async () => {
   const { run } = makeRun([
     { exitCode: 1, stderr: 'HTTP 403: forbidden' },

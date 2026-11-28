@@ -19,7 +19,7 @@ The pathspec names what reaches users. Prose, tests, CI and docs ship nothing.
 | empty | nothing |
 | the stamped version is already ahead of `$last` | nothing: a release is in flight, watch `release.yml` |
 | the oldest shipping commit is under 24 h old | nothing: its author may still release it |
-| `main`'s latest `ci.yml` push run is not `success` | nothing: `health` owns a red `main` |
+| `main`'s latest `ci.yml` push run is not `success` | nothing: the platform's red-main ask owns a red `main` |
 | a breaking change in the window | no release ask. If no open issue titled `Major release pending` exists, file one for a maintainer, with no release steps |
 | otherwise | one ask, **Release `<next>`**, listing the commits |
 
@@ -31,7 +31,7 @@ The pathspec names what reaches users. Prose, tests, CI and docs ship nothing.
 - `shipping-window-empty` — empty: nothing.
 - `version-ahead-of-last-tag` — the stamped version is already ahead of `$last`: nothing, a release is in flight, watch `release.yml`.
 - `oldest-shipping-commit-under-24h` — the oldest shipping commit is under 24 h old: nothing, its author may still release it.
-- `main-ci-run-not-success` — `main`'s latest `ci.yml` push run is not `success`: nothing, `health` owns a red `main`.
+- `main-ci-run-not-success` — `main`'s latest `ci.yml` push run is not `success`: nothing, the platform's red-main ask owns a red `main`.
 - `breaking-change-in-window` — a breaking change in the window: no release ask. If no open issue titled `Major release pending` exists, file one for a maintainer, with no release steps.
 - `release-due` — otherwise: one ask, **Release `<next>`**, listing the commits.
 

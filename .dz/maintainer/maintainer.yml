@@ -57,15 +57,12 @@ escalate:
 
 schedules:
   - name: release-due
-    days: [mon, tue, wed, thu, fri]
+    days: [mon]
     hours_utc: [6]
     brief_file: .dz/schedules/release-due.md
-  - name: health
-    days: [mon, tue, wed, thu, fri, sat, sun]
-    hours_utc: [7]
-    brief_file: .dz/schedules/health.md
   - name: improve
     days: [mon]
+    weeks_of_month: [1, 3] # the first and third Monday of the month
     hours_utc: [8]
     brief_file: .dz/schedules/improve.md
 
@@ -82,3 +79,11 @@ branches:
 # improvement idea. `full` lets it file ideas too; `off` stops the survey.
 scout:
   survey: broken_only
+
+# devops: advisories for what npm users install (decision of record 2026-11-28; replaces a daily
+# security schedule). care.docs_drift off: 47 tasks -> 8 docs-only merges, 33 failed over 30 days.
+devops:
+  watch: advisories
+
+care:
+  docs_drift: "off"

@@ -1,10 +1,8 @@
-# Brief: monthly improvement
+# Brief: improvement
 
-Fired every Monday by `schedules: improve`. **Act only on the first Monday of the month:**
-`[ "$(date -u +%-d)" -le 7 ]`. On any other Monday stop here, file nothing, open nothing.
+Fired on the first and third Monday of each month by `schedules: improve` (`weeks_of_month: [1, 3]`).
 
-Once a month, leave aitm measurably better. `CLAUDE.md` binds every change, and `non_goals` in the policy file are off limits. A red `main`,
-a missing publish and a stuck Dependabot PR belong to `health`.
+Twice a month, leave aitm measurably better. `CLAUDE.md` binds every change, and `non_goals` in the policy file are off limits. A red `main` is filed by the platform's red-main ask; a missing publish and a stuck Dependabot PR belong to `release-due`.
 
 ## Signals
 
@@ -28,7 +26,6 @@ Check no open PR or issue already covers it. If nothing is worth changing, do no
 
 ## Rows
 
-- `first-monday-only`: Act only on the first Monday of the month; on any other Monday stop here, file nothing, open nothing.
 - `gate-on-main`: The gate on fresh `main` (`bun run lint && bun run typecheck && bun run typecheck:tests && bun run test:node`) is green; anything it found broken or flaky is picked first — the root cause, never a retry or a skip.
 - `dependency-majors`: Dependency majors exist per `bun outdated`; a `bun.lock` resync is its own PR, never inside a release.
 - `open-bugs`: Open bugs exist per `gh issue list --state open --label bug --json number,title,url`; each is picked starting from a test that fails on `main`.

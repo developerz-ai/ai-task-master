@@ -28,6 +28,8 @@ Instructions for Claude when editing `aitm` source. Not for end users.
 | Packages | `@developerz.ai/aitm` + `@developerz.ai/ai-claude-compat`, always the same version; aitm pins compat EXACTLY, versions move in lockstep (`bin/release-preflight` refuses a release otherwise) |
 
 ## Commands
+
+Bun is pinned in `.bun-version`; `ci.yml` and `release.yml` read it, so a local `bin/check` and CI run the same Bun.
 | `bin/` command | Runs |
 | --- | --- |
 | `bin/check` | The gate: `bun run typecheck && bun run typecheck:tests && bun run lint && bunx madge@8.0.0 --circular packages/*/src && npm run build -w @developerz.ai/ai-claude-compat && bun run test:node && npm run test:integration -w @developerz.ai/aitm` (the madge step is the import-cycle check; the compat build produces the compat package's only export, `dist/index.js`, which a clean checkout lacks) |
